@@ -118,8 +118,9 @@ Ignored directories are recorded once and pruned without enumerating their
 descendants. Ordinary rules use Git-style last-match semantics: a negative rule
 can reopen traversal only by effectively re-including the directory itself.
 A descendant negative rule cannot cross a parent directory that remains
-ignored. Protected `.git`, `.hg`, and `.svn` roots are always pruned and cannot
-be re-included.
+ignored. Common caches, including `.uv-cache/`, are excluded by default, while
+`uv.lock` remains scannable. Protected `.git`, `.hg`, and `.svn` roots are
+always pruned and cannot be re-included.
 
 `discovered_count` counts file-like entries actually reached during traversal.
 `ignored_count` counts reached files or directory roots excluded by ordinary

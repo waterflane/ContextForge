@@ -89,7 +89,8 @@ def test_nested_unicode_files_are_portable_and_deterministic(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "directory", [".venv", "node_modules", "__pycache__", "build", "dist"]
+    "directory",
+    [".venv", ".uv-cache", "node_modules", "__pycache__", "build", "dist"],
 )
 def test_ordinary_default_exclusions_are_reported(
     tmp_path: Path, directory: str, monkeypatch: pytest.MonkeyPatch
@@ -208,6 +209,29 @@ def test_ordinary_default_can_be_reincluded_by_project_rules(tmp_path: Path) -> 
     snapshot = scan_repository(tmp_path)
 
     assert ".venv/keep.py" in _paths(snapshot.files)
+
+
+def test_uv_cache_can_be_reincluded_but_uv_lock_is_never_ignored_by_default(
+    tmp_path: Path,
+) -> None:
+    uv_cache_file = tmp_path / ".uv-cache" / "keep.txt"
+    uv_cache_file.parent.mkdir()
+    uv_cache_file.write_text("keep", encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("version = 1", encoding="utf-8")
+    (tmp_path / ".contextforgeignore").write_text(
+        "!.uv-cache/\n!.uv-cache/keep.txt\n",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.files) == [
+        ".contextforgeignore",
+        ".uv-cache/keep.txt",
+        "uv.lock",
+    ]
+    assert snapshot.ignored_files == ()
+    assert snapshot.summary.discovered_count == 3
 
 
 def test_reincluded_directory_allows_later_descendant_negation(

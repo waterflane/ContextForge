@@ -197,6 +197,41 @@ def test_table_without_show_excluded_remains_concise(tmp_path: Path) -> None:
     assert len(result.stdout.splitlines()) <= 15
 
 
+def test_uv_cache_is_pruned_from_cli_outputs_while_uv_lock_is_included(
+    tmp_path: Path,
+) -> None:
+    uv_cache = tmp_path / ".uv-cache"
+    uv_cache.mkdir()
+    for index in range(25):
+        (uv_cache / f"artifact-{index}.txt").write_text("generated", encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("version = 1", encoding="utf-8")
+
+    table = _invoke_scan(tmp_path)
+    concise_json = _invoke_scan(tmp_path, "--format", "json")
+    detailed_json = _invoke_scan(tmp_path, "--format", "json", "--show-excluded")
+
+    assert table.exit_code == concise_json.exit_code == detailed_json.exit_code == 0
+    assert "Discovered files: 1" in table.stdout
+    assert "Included files: 1" in table.stdout
+    assert "Ignored files: 1" in table.stdout
+    assert ".uv-cache" not in table.stdout
+
+    concise_snapshot = json.loads(concise_json.stdout)["snapshot"]
+    detailed_snapshot = json.loads(detailed_json.stdout)["snapshot"]
+    assert [item["path"] for item in concise_snapshot["files"]] == ["uv.lock"]
+    assert concise_snapshot["ignored_files"] == []
+    assert detailed_snapshot["ignored_files"] == [
+        {
+            "path": ".uv-cache",
+            "source": "default",
+            "pattern": ".uv-cache/",
+            "is_directory": True,
+        }
+    ]
+    assert "artifact-" not in detailed_json.stdout
+    assert detailed_snapshot["summary"] == concise_snapshot["summary"]
+
+
 def test_fail_on_error_succeeds_when_there_are_no_failures(tmp_path: Path) -> None:
     (tmp_path / "file.txt").write_text("readable", encoding="utf-8")
 

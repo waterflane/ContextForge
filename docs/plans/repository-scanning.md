@@ -141,8 +141,9 @@ ignored, so the scanner prunes it without considering the descendant rule.
 
 The default policy targets generated/cache artifacts without broad source-file
 patterns: `__pycache__/`, `*.py[cod]`, `.pytest_cache/`, `.mypy_cache/`,
-`.ruff_cache/`, `.coverage`, `htmlcov/`, `.tox/`, `.nox/`, `.venv/`, `venv/`,
-`env/`, `node_modules/`, `build/`, `dist/`, and `*.egg-info/`.
+`.ruff_cache/`, `.uv-cache/`, `.coverage`, `htmlcov/`, `.tox/`, `.nox/`,
+`.venv/`, `venv/`, `env/`, `node_modules/`, `build/`, `dist/`, and
+`*.egg-info/`. The project dependency lock file `uv.lock` remains included.
 
 JSON uses a stable versioned envelope and preserves the existing domain model
 field names:

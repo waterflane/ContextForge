@@ -24,6 +24,7 @@ def test_missing_project_ignore_files_are_normal(tmp_path: Path) -> None:
         (".pytest_cache", True),
         (".mypy_cache", True),
         (".ruff_cache", True),
+        (".uv-cache", True),
         (".coverage", False),
         ("htmlcov", True),
         (".tox", True),

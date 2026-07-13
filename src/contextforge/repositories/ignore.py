@@ -32,6 +32,7 @@ DEFAULT_IGNORE_PATTERNS = (
     ".pytest_cache/",
     ".mypy_cache/",
     ".ruff_cache/",
+    ".uv-cache/",
     ".tox/",
     ".nox/",
     "node_modules/",
