@@ -107,7 +107,7 @@ def scan(
 
     report = ScanReport(options=options, snapshot=snapshot)
     if output_format is ScanFormat.json:
-        representation = render_scan_json(report)
+        representation = render_scan_json(report, show_excluded=show_excluded)
     else:
         representation = render_scan_table(
             snapshot,

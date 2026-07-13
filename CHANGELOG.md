@@ -16,6 +16,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added a versioned JSON report envelope containing the scan options and the
   existing `ProjectSnapshot` model.
 
+### Fixed
+
+- Prune directories ignored by default, `.gitignore`, or
+  `.contextforgeignore` rules instead of traversing and serializing every
+  descendant.
+- Make detailed JSON exclusions conditional on `--show-excluded`, while
+  retaining unreadable entries for diagnostics.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added

@@ -14,6 +14,40 @@ def test_missing_project_ignore_files_are_normal(tmp_path: Path) -> None:
     assert rules.is_ignored("package.pyc") is True
 
 
+@pytest.mark.parametrize(
+    ("path", "is_directory"),
+    [
+        ("__pycache__", True),
+        ("module.pyc", False),
+        ("module.pyo", False),
+        ("module.pyd", False),
+        (".pytest_cache", True),
+        (".mypy_cache", True),
+        (".ruff_cache", True),
+        (".coverage", False),
+        ("htmlcov", True),
+        (".tox", True),
+        (".nox", True),
+        (".venv", True),
+        ("venv", True),
+        ("env", True),
+        ("node_modules", True),
+        ("build", True),
+        ("dist", True),
+        ("package.egg-info", True),
+    ],
+)
+def test_default_rules_cover_targeted_generated_artifacts(
+    tmp_path: Path, path: str, is_directory: bool
+) -> None:
+    rules = load_ignore_rules(tmp_path)
+
+    match = rules.match(path, is_directory=is_directory)
+
+    assert match is not None
+    assert match.source == "default"
+
+
 def test_gitignore_supports_comments_blanks_directories_and_wildcards(
     tmp_path: Path,
 ) -> None:

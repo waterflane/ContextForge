@@ -48,6 +48,7 @@ class IgnoredFile(BaseModel):
     path: str
     source: Literal["protected", "default", "gitignore", "contextforgeignore"]
     pattern: str | None = None
+    is_directory: bool = False
 
     model_config = ConfigDict(frozen=True)
 
@@ -79,10 +80,11 @@ class SkippedFile(BaseModel):
 class ScanSummary(BaseModel):
     """Aggregate counts for one repository snapshot.
 
-    ``discovered_count`` counts file-like entries reached by traversal; contents
-    below protected or unreadable directories cannot be discovered. Ordinary
-    ignored regular files are counted by ``ignored_count``, while pruned VCS
-    metadata roots are counted separately by ``protected_count``.
+    ``discovered_count`` counts file-like entries actually reached by traversal.
+    ``ignored_count`` counts reached files or directory roots excluded by ordinary
+    rules, while ``protected_count`` counts reached protected VCS roots or entries.
+    ``skipped_count`` counts explicit ignored and skipped records. Contents below
+    pruned or unreadable directories are never discovered or estimated.
     """
 
     file_count: NonNegativeInt

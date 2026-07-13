@@ -102,8 +102,9 @@ Available scan options:
 - `--max-file-size INTEGER` sets the maximum included file size in bytes and
   must be greater than zero.
 - `--show-excluded` lists excluded paths and reasons in table output. JSON
-  output always includes the existing `ignored_files` and `skipped_files`
-  model fields.
+  output includes detailed `ignored_files` and `skipped_files` only when this
+  option is enabled. Without it, those lists are empty except that unreadable
+  entries remain in `skipped_files` for diagnostics.
 - `--fail-on-error` exits with code 3 if the completed scan contains unreadable
   entries. Ignored, protected, binary, oversized, symlink, and unsupported
   entries do not trigger this exit code.
@@ -112,6 +113,19 @@ Exit code 0 means the scan completed successfully, 1 reports a scan or output
 operation failure, 2 reports invalid command input, and 3 is reserved for a
 completed `--fail-on-error` scan with unreadable entries. Output files are
 rendered before writing and published atomically after the scan completes.
+
+Ignored directories are recorded once and pruned without enumerating their
+descendants. Ordinary rules use Git-style last-match semantics: a negative rule
+can reopen traversal only by effectively re-including the directory itself.
+A descendant negative rule cannot cross a parent directory that remains
+ignored. Protected `.git`, `.hg`, and `.svn` roots are always pruned and cannot
+be re-included.
+
+`discovered_count` counts file-like entries actually reached during traversal.
+`ignored_count` counts reached files or directory roots excluded by ordinary
+rules, `protected_count` counts reached protected VCS roots or entries, and
+`skipped_count` counts explicit exclusion/failure records. Descendants of
+pruned directories are not estimated or counted.
 
 The local API can be run during development with:
 

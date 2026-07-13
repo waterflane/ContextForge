@@ -10,6 +10,7 @@ import pytest
 import contextforge.repositories.scanner as scanner_module
 from contextforge.repositories import ScanOptions, scan_repository
 from contextforge.repositories.files import is_binary_file as binary_detector
+from contextforge.repositories.files import sha256_file as hash_file
 
 
 class _PathItem(Protocol):
@@ -91,19 +92,44 @@ def test_nested_unicode_files_are_portable_and_deterministic(tmp_path: Path) -> 
     "directory", [".venv", "node_modules", "__pycache__", "build", "dist"]
 )
 def test_ordinary_default_exclusions_are_reported(
-    tmp_path: Path, directory: str
+    tmp_path: Path, directory: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ignored_path = tmp_path / directory / "nested" / "artifact.txt"
-    ignored_path.parent.mkdir(parents=True)
-    ignored_path.write_text("ignored", encoding="utf-8")
-    (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+    ignored_root = tmp_path / directory
+    for index in range(40):
+        ignored_path = ignored_root / "nested" / f"artifact-{index}.txt"
+        ignored_path.parent.mkdir(parents=True, exist_ok=True)
+        ignored_path.write_text("ignored", encoding="utf-8")
+    keep = tmp_path / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+
+    original_iterdir = Path.iterdir
+
+    def reject_ignored_traversal(path: Path) -> Iterator[Path]:
+        if path == ignored_root:
+            raise AssertionError(f"ignored directory was traversed: {path}")
+        return original_iterdir(path)
+
+    def reject_ignored_inspection(path: Path) -> bool:
+        assert ignored_root not in path.parents
+        return binary_detector(path)
+
+    def reject_ignored_hashing(path: Path) -> str:
+        assert ignored_root not in path.parents
+        return hash_file(path)
+
+    monkeypatch.setattr(Path, "iterdir", reject_ignored_traversal)
+    monkeypatch.setattr(scanner_module, "is_binary_file", reject_ignored_inspection)
+    monkeypatch.setattr(scanner_module, "sha256_file", reject_ignored_hashing)
 
     snapshot = scan_repository(tmp_path)
 
     assert _paths(snapshot.files) == ["keep.txt"]
-    assert _paths(snapshot.ignored_files) == [f"{directory}/nested/artifact.txt"]
+    assert _paths(snapshot.ignored_files) == [directory]
     assert snapshot.ignored_files[0].source == "default"
+    assert snapshot.ignored_files[0].is_directory is True
+    assert snapshot.summary.discovered_count == 1
     assert snapshot.summary.ignored_count == 1
+    assert snapshot.summary.skipped_count == 1
 
 
 @pytest.mark.parametrize("directory", [".git", ".hg", ".svn"])
@@ -122,6 +148,7 @@ def test_protected_vcs_directories_are_never_entered(
     assert f"{directory}/config" not in _paths(snapshot.files)
     protected = [item for item in snapshot.ignored_files if item.source == "protected"]
     assert _paths(tuple(protected)) == [directory]
+    assert protected[0].is_directory is True
     assert snapshot.summary.protected_count == 1
 
 
@@ -134,6 +161,7 @@ def test_protected_vcs_metadata_file_is_excluded_case_safely(tmp_path: Path) -> 
     assert ".GIT" not in _paths(snapshot.files)
     protected = [item for item in snapshot.ignored_files if item.source == "protected"]
     assert _paths(tuple(protected)) == [".GIT"]
+    assert protected[0].is_directory is False
     assert snapshot.summary.protected_count == 1
 
 
@@ -180,6 +208,66 @@ def test_ordinary_default_can_be_reincluded_by_project_rules(tmp_path: Path) -> 
     snapshot = scan_repository(tmp_path)
 
     assert ".venv/keep.py" in _paths(snapshot.files)
+
+
+def test_reincluded_directory_allows_later_descendant_negation(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "discard.txt").write_text("discard", encoding="utf-8")
+    (cache / "important.txt").write_text("important", encoding="utf-8")
+    (tmp_path / ".contextforgeignore").write_text(
+        "cache/\n!cache/\ncache/*\n!cache/important.txt\n",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.files) == [
+        ".contextforgeignore",
+        "cache/important.txt",
+    ]
+    assert _paths(snapshot.ignored_files) == ["cache/discard.txt"]
+    assert snapshot.ignored_files[0].is_directory is False
+
+
+def test_descendant_negation_cannot_cross_an_ignored_parent(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "important.txt").write_text("important", encoding="utf-8")
+    (tmp_path / ".contextforgeignore").write_text(
+        "cache/\n!cache/important.txt\n",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.files) == [".contextforgeignore"]
+    assert _paths(snapshot.ignored_files) == ["cache"]
+    assert snapshot.ignored_files[0].is_directory is True
+    assert snapshot.summary.discovered_count == 1
+
+
+def test_standalone_bytecode_file_is_excluded_without_being_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bytecode = tmp_path / "module.pyc"
+    bytecode.write_bytes(b"not real bytecode")
+    (tmp_path / "keep.py").write_text("pass", encoding="utf-8")
+
+    def reject_bytecode_inspection(path: Path) -> bool:
+        assert path != bytecode
+        return binary_detector(path)
+
+    monkeypatch.setattr(scanner_module, "is_binary_file", reject_bytecode_inspection)
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.files) == ["keep.py"]
+    assert _paths(snapshot.ignored_files) == ["module.pyc"]
+    assert snapshot.ignored_files[0].is_directory is False
+    assert snapshot.summary.discovered_count == 2
 
 
 def test_ignore_control_files_are_included_unless_explicitly_ignored(
@@ -397,7 +485,7 @@ def test_summary_counters_language_distribution_and_bytes(
     snapshot = scan_repository(tmp_path, ScanOptions(max_file_size_bytes=4))
     summary = snapshot.summary
 
-    assert summary.discovered_count == 6
+    assert summary.discovered_count == 5
     assert summary.file_count == 2
     assert summary.ignored_count == 1
     assert summary.protected_count == 1
@@ -409,15 +497,8 @@ def test_summary_counters_language_distribution_and_bytes(
     assert summary.skipped_count == 5
     assert summary.total_size_bytes == 4
     assert summary.languages == {"Python": 1}
-    assert summary.discovered_count == (
-        summary.file_count
-        + summary.ignored_count
-        + summary.binary_count
-        + summary.oversized_count
-        + summary.failed_count
-        + summary.symlink_count
-        + summary.unsupported_count
-    )
+    assert _paths(snapshot.ignored_files) == [".git", "build"]
+    assert all(item.is_directory for item in snapshot.ignored_files)
 
 
 def test_scan_does_not_modify_files_or_generate_artifacts(tmp_path: Path) -> None:

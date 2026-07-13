@@ -27,15 +27,20 @@ PROTECTED_IGNORE_PATTERNS = (
 DEFAULT_IGNORE_PATTERNS = (
     ".venv/",
     "venv/",
+    "env/",
     "__pycache__/",
     ".pytest_cache/",
     ".mypy_cache/",
     ".ruff_cache/",
+    ".tox/",
+    ".nox/",
     "node_modules/",
     "build/",
     "dist/",
+    "htmlcov/",
     "*.egg-info/",
     "*.py[cod]",
+    ".coverage",
 )
 
 

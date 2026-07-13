@@ -27,10 +27,15 @@ class OutputWriteError(OSError):
     """Raised when a rendered scan report cannot be safely published."""
 
 
-def render_scan_json(report: ScanReport) -> str:
-    """Serialize a scan report as deterministic, unformatted JSON."""
+def render_scan_json(report: ScanReport, *, show_excluded: bool = False) -> str:
+    """Serialize a deterministic JSON report with optional exclusion details.
 
-    return f"{report.model_dump_json(indent=2)}\n"
+    Summary-only output retains unreadable entries for diagnostics but removes
+    ignored paths and non-failure skipped entries. The summary remains unchanged.
+    """
+
+    visible_report = report if show_excluded else _without_exclusion_details(report)
+    return f"{visible_report.model_dump_json(indent=2)}\n"
 
 
 def render_scan_table(snapshot: ProjectSnapshot, *, show_excluded: bool = False) -> str:
@@ -63,7 +68,10 @@ def render_scan_table(snapshot: ProjectSnapshot, *, show_excluded: bool = False)
     if show_excluded:
         lines.append("Excluded entries:")
         excluded = [
-            (item.path, _ignored_reason(item.source, item.pattern))
+            (
+                item.path,
+                _ignored_reason(item.source, item.pattern, item.is_directory),
+            )
             for item in snapshot.ignored_files
         ]
         excluded.extend(
@@ -127,8 +135,20 @@ def write_output_atomic(destination: Path, content: str) -> Path:
     return resolved_destination
 
 
-def _ignored_reason(source: str, pattern: str | None) -> str:
+def _without_exclusion_details(report: ScanReport) -> ScanReport:
+    failures = tuple(
+        item for item in report.snapshot.skipped_files if item.reason == "unreadable"
+    )
+    visible_snapshot = report.snapshot.model_copy(
+        update={"ignored_files": (), "skipped_files": failures}
+    )
+    return report.model_copy(update={"snapshot": visible_snapshot})
+
+
+def _ignored_reason(source: str, pattern: str | None, is_directory: bool) -> str:
     reason = "protected" if source == "protected" else f"ignored ({source})"
+    if is_directory:
+        reason = f"{reason} directory"
     if pattern is not None:
         return f"{reason}; pattern: {pattern}"
     return reason

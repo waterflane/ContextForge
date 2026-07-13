@@ -126,13 +126,14 @@ def _scan_directory(
                 )
             )
         elif stat.S_ISDIR(mode):
-            protected_match = rules.match(relative_path, is_directory=True)
-            if protected_match is not None and protected_match.source == "protected":
+            ignore_match = rules.match(relative_path, is_directory=True)
+            if ignore_match is not None:
                 state.ignored_files.append(
                     IgnoredFile(
                         path=relative_path,
-                        source=protected_match.source,
-                        pattern=protected_match.pattern,
+                        source=ignore_match.source,
+                        pattern=ignore_match.pattern,
+                        is_directory=True,
                     )
                 )
             else:

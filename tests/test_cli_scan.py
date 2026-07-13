@@ -140,7 +140,7 @@ def test_exclusions_summary_and_show_excluded_reasons(tmp_path: Path) -> None:
         "debug.log",
         "reason: ignored (gitignore); pattern: *.log",
         ".git",
-        "reason: protected; pattern: .git/",
+        "reason: protected directory; pattern: .git/",
         "binary.dat",
         "reason: binary",
         "oversized.txt",
@@ -149,17 +149,52 @@ def test_exclusions_summary_and_show_excluded_reasons(tmp_path: Path) -> None:
         assert expected in result.stdout
 
 
-def test_json_always_contains_excluded_entries(tmp_path: Path) -> None:
-    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
-    (tmp_path / "ignored.txt").write_text("ignored", encoding="utf-8")
+def test_json_exclusion_details_follow_show_excluded(tmp_path: Path) -> None:
+    virtual_environment = tmp_path / ".venv"
+    virtual_environment.mkdir()
+    (virtual_environment / "ignored.txt").write_text("ignored", encoding="utf-8")
     (tmp_path / "binary.dat").write_bytes(b"\x00")
 
-    result = _invoke_scan(tmp_path, "--format", "json", "--show-excluded")
+    concise = _invoke_scan(tmp_path, "--format", "json")
+    detailed = _invoke_scan(tmp_path, "--format", "json", "--show-excluded")
+
+    assert concise.exit_code == detailed.exit_code == 0
+    concise_snapshot = json.loads(concise.stdout)["snapshot"]
+    detailed_snapshot = json.loads(detailed.stdout)["snapshot"]
+    assert concise_snapshot["ignored_files"] == []
+    assert concise_snapshot["skipped_files"] == []
+    assert concise_snapshot["summary"]["ignored_count"] == 1
+    assert concise_snapshot["summary"]["binary_count"] == 1
+    assert detailed_snapshot["ignored_files"] == [
+        {
+            "path": ".venv",
+            "source": "default",
+            "pattern": ".venv/",
+            "is_directory": True,
+        }
+    ]
+    assert [item["path"] for item in detailed_snapshot["skipped_files"]] == [
+        "binary.dat"
+    ]
+    assert "ignored.txt" not in detailed.stdout
+
+
+def test_table_without_show_excluded_remains_concise(tmp_path: Path) -> None:
+    virtual_environment = tmp_path / ".venv"
+    virtual_environment.mkdir()
+    for index in range(100):
+        (virtual_environment / f"ignored-{index}.txt").write_text(
+            "ignored", encoding="utf-8"
+        )
+
+    result = _invoke_scan(tmp_path)
 
     assert result.exit_code == 0
-    snapshot = json.loads(result.stdout)["snapshot"]
-    assert [item["path"] for item in snapshot["ignored_files"]] == ["ignored.txt"]
-    assert [item["path"] for item in snapshot["skipped_files"]] == ["binary.dat"]
+    assert "Ignored files: 1" in result.stdout
+    assert "Excluded entries:" not in result.stdout
+    assert ".venv" not in result.stdout
+    assert "ignored-" not in result.stdout
+    assert len(result.stdout.splitlines()) <= 15
 
 
 def test_fail_on_error_succeeds_when_there_are_no_failures(tmp_path: Path) -> None:
@@ -190,6 +225,28 @@ def test_fail_on_error_returns_three_for_portably_simulated_failure(
     assert "Failed/unreadable files: 1" in result.stdout
     assert "reason: unreadable; PermissionError" in result.stdout
     assert "Traceback" not in result.output
+
+
+def test_json_without_exclusions_retains_unreadable_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unreadable = tmp_path / "unreadable.txt"
+    unreadable.write_text("unreadable", encoding="utf-8")
+
+    def fail_file(path: Path) -> bool:
+        if path == unreadable:
+            raise PermissionError("denied for JSON diagnostic test")
+        return binary_detector(path)
+
+    monkeypatch.setattr(scanner_module, "is_binary_file", fail_file)
+
+    result = _invoke_scan(tmp_path, "--format", "json")
+
+    assert result.exit_code == 0
+    snapshot = json.loads(result.stdout)["snapshot"]
+    assert snapshot["ignored_files"] == []
+    assert [item["path"] for item in snapshot["skipped_files"]] == ["unreadable.txt"]
+    assert snapshot["skipped_files"][0]["reason"] == "unreadable"
 
 
 @pytest.mark.parametrize("maximum", ["0", "-1"])

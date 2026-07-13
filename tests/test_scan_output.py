@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -40,19 +41,29 @@ def _excluded_snapshot(root: Path) -> ProjectSnapshot:
     )
 
 
-def test_scan_report_json_uses_existing_model_field_names(tmp_path: Path) -> None:
+def test_scan_report_json_filters_exclusions_but_retains_failures(
+    tmp_path: Path,
+) -> None:
     snapshot = _excluded_snapshot(tmp_path)
     report = ScanReport(options=ScanOptions(max_file_size_bytes=42), snapshot=snapshot)
 
-    rendered = render_scan_json(report)
+    concise = render_scan_json(report)
+    detailed = render_scan_json(report, show_excluded=True)
 
-    assert rendered.endswith("\n")
-    assert '"schema_version": 1' in rendered
-    assert '"max_file_size_bytes": 42' in rendered
-    assert '"ignored_files"' in rendered
-    assert '"skipped_files"' in rendered
-    assert '"summary"' in rendered
-    assert "\x1b[" not in rendered
+    assert concise.endswith("\n")
+    concise_snapshot = json.loads(concise)["snapshot"]
+    detailed_snapshot = json.loads(detailed)["snapshot"]
+    assert concise_snapshot["ignored_files"] == []
+    assert [item["path"] for item in concise_snapshot["skipped_files"]] == ["failed"]
+    assert [item["path"] for item in detailed_snapshot["ignored_files"]] == ["ignored"]
+    assert [item["path"] for item in detailed_snapshot["skipped_files"]] == [
+        "binary",
+        "failed",
+    ]
+    assert concise_snapshot["summary"] == detailed_snapshot["summary"]
+    assert '"schema_version": 1' in concise
+    assert '"max_file_size_bytes": 42' in concise
+    assert "\x1b[" not in concise
 
 
 def test_table_excluded_section_handles_absent_patterns_and_details(

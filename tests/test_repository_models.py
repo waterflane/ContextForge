@@ -48,10 +48,14 @@ def test_project_file_normalizes_path_and_validates_metadata() -> None:
 
 def test_ignored_file_normalizes_path() -> None:
     ignored = IgnoredFile(
-        path=r"build\artifact.bin", source="default", pattern="build/"
+        path=r"build\artifact.bin",
+        source="default",
+        pattern="build/",
+        is_directory=True,
     )
 
     assert ignored.path == "build/artifact.bin"
+    assert ignored.is_directory is True
 
 
 def test_skipped_file_normalizes_path_and_validates_reason() -> None:

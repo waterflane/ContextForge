@@ -125,6 +125,25 @@ Implemented options:
 - `--show-excluded`, which lists paths and reasons in table output.
 - `--fail-on-error`, which exits non-zero only for unreadable entries.
 
+Directory traversal applies the final effective ignore match to each reached
+directory before descent. A matched directory is recorded once with
+`is_directory: true` and pruned. Its descendants are not enumerated, opened,
+classified, hashed, language-detected, or counted. This applies to built-in,
+`.gitignore`, and `.contextforgeignore` rules. Protected VCS roots are matched
+separately, remain non-negatable, and are always pruned.
+
+Ordinary rules retain Git-style last-match semantics. A later negative pattern
+allows traversal only when it effectively re-includes the directory itself.
+For example, this permits `cache/`, `!cache/`, `cache/*`, and
+`!cache/important.txt`: `cache/` is traversed and `important.txt` is included.
+By contrast, `cache/` followed only by `!cache/important.txt` leaves `cache/`
+ignored, so the scanner prunes it without considering the descendant rule.
+
+The default policy targets generated/cache artifacts without broad source-file
+patterns: `__pycache__/`, `*.py[cod]`, `.pytest_cache/`, `.mypy_cache/`,
+`.ruff_cache/`, `.coverage`, `htmlcov/`, `.tox/`, `.nox/`, `.venv/`, `venv/`,
+`env/`, `node_modules/`, `build/`, `dist/`, and `*.egg-info/`.
+
 JSON uses a stable versioned envelope and preserves the existing domain model
 field names:
 
@@ -145,6 +164,19 @@ field names:
   }
 }
 ```
+
+Without `--show-excluded`, `ignored_files` is empty and `skipped_files` retains
+only entries whose reason is `unreadable`; summary counters still describe the
+complete scan result. With `--show-excluded`, both lists contain all explicit
+records. Pruned directories appear once and include `is_directory: true`.
+
+Counter meanings are:
+
+- `discovered_count`: file-like entries actually reached during traversal;
+- `ignored_count`: reached files or directory roots excluded by ordinary rules;
+- `protected_count`: reached protected VCS roots or entries;
+- `skipped_count`: explicit ignored and skipped records, never estimated
+  descendants.
 
 Output parents must already exist. Existing destinations are refused; there is
 no force or overwrite option. Content is fully rendered before a temporary
