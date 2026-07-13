@@ -55,8 +55,21 @@ def render_scan_table(snapshot: ProjectSnapshot, *, show_excluded: bool = False)
         f"Symlinks: {summary.symlink_count}",
         f"Unsupported entries: {summary.unsupported_count}",
         f"Total included size: {summary.total_size_bytes} bytes",
-        "Languages:",
+        "File inventory:",
     ]
+    if snapshot.files:
+        lines.append("  Path | Bytes | Language | SHA-256")
+        lines.extend(
+            (
+                f"  {item.path} | {item.size_bytes} | "
+                f"{item.language or '-'} | {item.sha256}"
+            )
+            for item in snapshot.files
+        )
+    else:
+        lines.append("  (none)")
+
+    lines.append("Languages:")
     if summary.languages:
         lines.extend(
             f"  {language}: {count}"

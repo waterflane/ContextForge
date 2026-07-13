@@ -9,8 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Added deterministic recursive repository traversal with portable relative
+  paths, SHA-256 hashes, basic language detection, and scan summary statistics.
+- Added default exclusions, protected VCS metadata handling, repository-root
+  `.gitignore` and `.contextforgeignore` support, binary-like detection,
+  maximum-size enforcement, and non-followed symlink/junction reporting.
 - Added `contextforge scan [PATH]` as a thin CLI adapter over the repository
-  scanner, with deterministic table and JSON output.
+  scanner, with deterministic file-inventory table and JSON output.
 - Added maximum-file-size, excluded-entry display, unreadable-entry failure,
   and safe output-file options.
 - Added a versioned JSON report envelope containing the scan options and the
@@ -23,6 +28,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   descendant.
 - Make detailed JSON exclusions conditional on `--show-excluded`, while
   retaining unreadable entries for diagnostics.
+- Prevent Windows directory junction traversal and reject files whose identity
+  changes while being opened.
+- Keep file hashing bounded when a file grows during scanning, and derive size,
+  binary classification, and SHA-256 from one consistent file read.
 
 ## [0.1.0] - 2026-07-13
 

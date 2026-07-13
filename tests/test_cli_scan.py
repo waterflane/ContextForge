@@ -9,7 +9,8 @@ from typer.testing import CliRunner
 import contextforge.cli.main as cli_module
 import contextforge.repositories.scanner as scanner_module
 from contextforge.cli.main import app
-from contextforge.repositories.files import is_binary_file as binary_detector
+from contextforge.repositories.files import FileInspection
+from contextforge.repositories.files import inspect_file as file_inspector
 
 runner = CliRunner()
 
@@ -70,6 +71,8 @@ def test_default_path_scans_the_current_working_directory(
     assert f"Project root: {tmp_path.resolve()}" in result.stdout
     assert "Included files: 1" in result.stdout
     assert "  Python: 1" in result.stdout
+    size_bytes = (tmp_path / "current.py").stat().st_size
+    assert f"current.py | {size_bytes} | Python |" in result.stdout
 
 
 def test_json_output_is_parseable_explicit_and_deterministic_with_unicode(
@@ -194,7 +197,7 @@ def test_table_without_show_excluded_remains_concise(tmp_path: Path) -> None:
     assert "Excluded entries:" not in result.stdout
     assert ".venv" not in result.stdout
     assert "ignored-" not in result.stdout
-    assert len(result.stdout.splitlines()) <= 15
+    assert len(result.stdout.splitlines()) <= 16
 
 
 def test_uv_cache_is_pruned_from_cli_outputs_while_uv_lock_is_included(
@@ -247,12 +250,12 @@ def test_fail_on_error_returns_three_for_portably_simulated_failure(
     unreadable = tmp_path / "unreadable.txt"
     unreadable.write_text("unreadable", encoding="utf-8")
 
-    def fail_file(path: Path) -> bool:
+    def fail_file(path: Path, *, max_size_bytes: int) -> FileInspection:
         if path == unreadable:
             raise PermissionError("denied for CLI test")
-        return binary_detector(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", fail_file)
+    monkeypatch.setattr(scanner_module, "inspect_file", fail_file)
 
     result = _invoke_scan(tmp_path, "--fail-on-error", "--show-excluded")
 
@@ -268,12 +271,12 @@ def test_json_without_exclusions_retains_unreadable_diagnostics(
     unreadable = tmp_path / "unreadable.txt"
     unreadable.write_text("unreadable", encoding="utf-8")
 
-    def fail_file(path: Path) -> bool:
+    def fail_file(path: Path, *, max_size_bytes: int) -> FileInspection:
         if path == unreadable:
             raise PermissionError("denied for JSON diagnostic test")
-        return binary_detector(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", fail_file)
+    monkeypatch.setattr(scanner_module, "inspect_file", fail_file)
 
     result = _invoke_scan(tmp_path, "--format", "json")
 

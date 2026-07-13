@@ -3,14 +3,14 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol
+from typing import Never, Protocol
 
 import pytest
 
 import contextforge.repositories.scanner as scanner_module
 from contextforge.repositories import ScanOptions, scan_repository
-from contextforge.repositories.files import is_binary_file as binary_detector
-from contextforge.repositories.files import sha256_file as hash_file
+from contextforge.repositories.files import FileInspection
+from contextforge.repositories.files import inspect_file as file_inspector
 
 
 class _PathItem(Protocol):
@@ -110,17 +110,12 @@ def test_ordinary_default_exclusions_are_reported(
             raise AssertionError(f"ignored directory was traversed: {path}")
         return original_iterdir(path)
 
-    def reject_ignored_inspection(path: Path) -> bool:
+    def reject_ignored_inspection(path: Path, *, max_size_bytes: int) -> FileInspection:
         assert ignored_root not in path.parents
-        return binary_detector(path)
-
-    def reject_ignored_hashing(path: Path) -> str:
-        assert ignored_root not in path.parents
-        return hash_file(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
     monkeypatch.setattr(Path, "iterdir", reject_ignored_traversal)
-    monkeypatch.setattr(scanner_module, "is_binary_file", reject_ignored_inspection)
-    monkeypatch.setattr(scanner_module, "sha256_file", reject_ignored_hashing)
+    monkeypatch.setattr(scanner_module, "inspect_file", reject_ignored_inspection)
 
     snapshot = scan_repository(tmp_path)
 
@@ -280,11 +275,13 @@ def test_standalone_bytecode_file_is_excluded_without_being_opened(
     bytecode.write_bytes(b"not real bytecode")
     (tmp_path / "keep.py").write_text("pass", encoding="utf-8")
 
-    def reject_bytecode_inspection(path: Path) -> bool:
+    def reject_bytecode_inspection(
+        path: Path, *, max_size_bytes: int
+    ) -> FileInspection:
         assert path != bytecode
-        return binary_detector(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", reject_bytecode_inspection)
+    monkeypatch.setattr(scanner_module, "inspect_file", reject_bytecode_inspection)
 
     snapshot = scan_repository(tmp_path)
 
@@ -405,6 +402,54 @@ def test_directory_symlink_cycle_is_never_followed(tmp_path: Path) -> None:
     assert snapshot.skipped_files[0].reason == "symlink"
 
 
+def test_directory_junction_is_never_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    junction = tmp_path / "junction"
+    junction.mkdir()
+    (junction / "outside.txt").write_text("outside", encoding="utf-8")
+    original_is_junction = Path.is_junction
+    original_iterdir = Path.iterdir
+
+    def report_junction(path: Path) -> bool:
+        return path == junction or original_is_junction(path)
+
+    def reject_junction_traversal(path: Path) -> Iterator[Path]:
+        if path == junction:
+            raise AssertionError("directory junction was traversed")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "is_junction", report_junction)
+    monkeypatch.setattr(Path, "iterdir", reject_junction_traversal)
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.skipped_files) == ["junction"]
+    assert snapshot.skipped_files[0].reason == "symlink"
+    assert snapshot.summary.symlink_count == 1
+
+
+def test_protected_junction_is_classified_as_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata = tmp_path / ".git"
+    metadata.mkdir()
+    (metadata / "config").write_text("protected", encoding="utf-8")
+    original_is_junction = Path.is_junction
+
+    def report_junction(path: Path) -> bool:
+        return path == metadata or original_is_junction(path)
+
+    monkeypatch.setattr(Path, "is_junction", report_junction)
+
+    snapshot = scan_repository(tmp_path)
+
+    assert _paths(snapshot.ignored_files) == [".git"]
+    assert snapshot.ignored_files[0].source == "protected"
+    assert snapshot.ignored_files[0].is_directory is True
+    assert snapshot.skipped_files == ()
+
+
 def test_symlink_classification_branch_is_portably_covered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,12 +481,12 @@ def test_individual_read_failure_is_reported_and_scan_continues(
     unreadable.write_text("unreadable", encoding="utf-8")
     (tmp_path / "readable.txt").write_text("readable", encoding="utf-8")
 
-    def fail_one_file(path: Path) -> bool:
+    def fail_one_file(path: Path, *, max_size_bytes: int) -> FileInspection:
         if path == unreadable:
             raise PermissionError("denied for test")
-        return binary_detector(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", fail_one_file)
+    monkeypatch.setattr(scanner_module, "inspect_file", fail_one_file)
 
     snapshot = scan_repository(tmp_path)
 
@@ -474,10 +519,10 @@ def test_unexpected_file_error_is_not_swallowed(
 ) -> None:
     (tmp_path / "file.txt").write_text("text", encoding="utf-8")
 
-    def unexpected_error(path: Path) -> bool:
+    def unexpected_error(path: Path, *, max_size_bytes: int) -> Never:
         raise RuntimeError(f"unexpected: {path.name}")
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", unexpected_error)
+    monkeypatch.setattr(scanner_module, "inspect_file", unexpected_error)
 
     with pytest.raises(RuntimeError, match="unexpected: file.txt"):
         scan_repository(tmp_path)
@@ -499,12 +544,12 @@ def test_summary_counters_language_distribution_and_bytes(
     metadata.mkdir()
     (metadata / "config").write_text("protected", encoding="utf-8")
 
-    def fail_one_file(path: Path) -> bool:
+    def fail_one_file(path: Path, *, max_size_bytes: int) -> FileInspection:
         if path == failed:
             raise PermissionError("denied for test")
-        return binary_detector(path)
+        return file_inspector(path, max_size_bytes=max_size_bytes)
 
-    monkeypatch.setattr(scanner_module, "is_binary_file", fail_one_file)
+    monkeypatch.setattr(scanner_module, "inspect_file", fail_one_file)
 
     snapshot = scan_repository(tmp_path, ScanOptions(max_file_size_bytes=4))
     summary = snapshot.summary
@@ -542,16 +587,16 @@ def test_scan_does_not_modify_files_or_generate_artifacts(tmp_path: Path) -> Non
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
 
 
-def test_hash_failure_after_binary_check_is_reported(
+def test_inspection_failure_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "file.txt"
     path.write_text("text", encoding="utf-8")
 
-    def fail_hash(candidate: Path) -> str:
-        raise OSError(f"hash read failed: {candidate.name}")
+    def fail_inspection(candidate: Path, *, max_size_bytes: int) -> Never:
+        raise OSError(f"inspection read failed: {candidate.name}")
 
-    monkeypatch.setattr(scanner_module, "sha256_file", fail_hash)
+    monkeypatch.setattr(scanner_module, "inspect_file", fail_inspection)
 
     snapshot = scan_repository(tmp_path)
 

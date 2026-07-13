@@ -84,7 +84,7 @@ def scan(
         bool,
         typer.Option(
             "--show-excluded",
-            help="List excluded paths and reasons in table output.",
+            help="Include excluded paths and reasons in table or JSON output.",
         ),
     ] = False,
     fail_on_error: Annotated[

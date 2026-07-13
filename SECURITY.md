@@ -22,6 +22,8 @@ Include:
 
 ## Scope
 
-ContextForge v0.1.0 does not execute model calls, index repositories, or run
-untrusted code. Security-sensitive behavior will be documented as those features
-are introduced.
+ContextForge does not execute repository content, make model calls, or build a
+repository index. The unreleased v0.2 scanner reads local files only to classify
+and hash them; it does not include file contents in output. Symbolic links and
+Windows directory junctions are not followed. Security-sensitive behavior will
+be documented as further features are introduced.

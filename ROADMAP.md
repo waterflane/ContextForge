@@ -9,11 +9,11 @@ This roadmap describes broad milestones only. It does not promise dates.
 - Add CLI and local API skeletons.
 - Add configuration, logging, documentation, tests, and CI.
 
-## v0.2: Repository scanning and file inventory
+## v0.2: Repository scanning and file inventory (milestone complete)
 
-- Discover repository files.
-- Respect ignore rules.
-- Produce a reviewable project file inventory.
+- [x] Discover repository files.
+- [x] Respect ignore rules.
+- [x] Produce a reviewable project file inventory.
 
 ## v0.3: Context selection and export
 

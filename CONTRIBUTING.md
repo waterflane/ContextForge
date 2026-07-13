@@ -2,8 +2,9 @@
 
 Thank you for your interest in ContextForge.
 
-ContextForge v0.1.0 is intentionally small. Contributions should preserve the
-project's current goal: a clear foundation without speculative business logic.
+ContextForge remains intentionally small after its v0.2 repository-scanning
+milestone. Contributions should preserve the project's current goal: a clear
+foundation without speculative business logic.
 
 ## Development workflow
 

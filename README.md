@@ -1,17 +1,18 @@
 # ContextForge
 
-Build, manage, and optimize context for AI models and agents.
+Create a deterministic local repository inventory as a foundation for future
+context-management workflows.
 
-ContextForge is a tool for managing project context and creating optimized
-prompts and context packages for AI models and agents. It is intended to become
-an independent context-management layer between a software repository and
-external AI tools.
+ContextForge is currently an early-stage repository inventory tool and
+architectural foundation. It is intended to become an independent
+context-management layer between a software repository and external AI tools.
 
 ## Status
 
-ContextForge v0.1.0 is an architectural foundation with deterministic local
-repository scanning. It does not yet perform semantic context retrieval,
-prompt generation, model calls, or indexing.
+The completed, unreleased v0.2 milestone adds deterministic local repository
+scanning to the v0.1.0 architectural foundation. ContextForge does not yet
+perform semantic context retrieval, prompt generation, model calls, or
+repository indexing.
 
 ## Long-term vision
 
@@ -84,7 +85,8 @@ contextforge doctor
 
 Scan a repository from the terminal. `PATH` defaults to the current working
 directory, table output is the default, and the default maximum included file
-size is 1,000,000 bytes.
+size is 1,000,000 bytes. Table output contains the included file inventory and
+summary; JSON uses a stable versioned envelope.
 
 ```bash
 contextforge scan .
@@ -121,6 +123,13 @@ A descendant negative rule cannot cross a parent directory that remains
 ignored. Common caches, including `.uv-cache/`, are excluded by default, while
 `uv.lock` remains scannable. Protected `.git`, `.hg`, and `.svn` roots are
 always pruned and cannot be re-included.
+
+The scanner reads ignore rules from the repository-root `.gitignore` and
+`.contextforgeignore`; nested ignore files are currently ordinary scanned files,
+not additional rule sources. Text detection accepts UTF-8 (including ASCII) and
+treats an initial sample containing invalid UTF-8, NUL bytes, or many control
+bytes as binary-like. Symbolic links and Windows directory junctions are
+reported but never followed.
 
 `discovered_count` counts file-like entries actually reached during traversal.
 `ignored_count` counts reached files or directory roots excluded by ordinary

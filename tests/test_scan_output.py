@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from contextforge.cli.scan_output import (
 )
 from contextforge.repositories import (
     IgnoredFile,
+    ProjectFile,
     ProjectSnapshot,
     ScanOptions,
     ScanSummary,
@@ -93,6 +95,33 @@ def test_table_excluded_section_reports_when_there_are_no_exclusions(
     assert "Excluded entries:\n  (none)" in rendered
 
 
+def test_table_contains_deterministic_file_inventory(tmp_path: Path) -> None:
+    snapshot = ProjectSnapshot(
+        root=tmp_path,
+        files=(
+            ProjectFile(
+                path="src/app.py",
+                size_bytes=4,
+                language="Python",
+                sha256="0" * 64,
+                is_text=True,
+            ),
+        ),
+        summary=ScanSummary(
+            file_count=1,
+            ignored_count=0,
+            total_size_bytes=4,
+            languages={"Python": 1},
+            discovered_count=1,
+        ),
+    )
+
+    rendered = render_scan_table(snapshot)
+
+    assert "File inventory:\n  Path | Bytes | Language | SHA-256" in rendered
+    assert f"  src/app.py | 4 | Python | {'0' * 64}" in rendered
+
+
 def test_atomic_writer_returns_resolved_destination_and_exact_content(
     tmp_path: Path,
 ) -> None:
@@ -121,4 +150,21 @@ def test_atomic_writer_refuses_a_destination_created_during_publish(
         write_output_atomic(output, "ours\n")
 
     assert output.read_text(encoding="utf-8") == "racer"
+    assert list(tmp_path.glob(".output.txt.*.tmp")) == []
+
+
+def test_atomic_writer_reports_temporary_file_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output.txt"
+
+    def fail_temporary_file(*args: object, **kwargs: object) -> None:
+        raise PermissionError("temporary files denied")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", fail_temporary_file)
+
+    with pytest.raises(OutputWriteError, match="unable to write output file"):
+        write_output_atomic(output, "content\n")
+
+    assert not output.exists()
     assert list(tmp_path.glob(".output.txt.*.tmp")) == []

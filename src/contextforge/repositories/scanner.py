@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from contextforge.repositories.files import (
-    is_binary_file,
+    FileTooLargeError,
+    inspect_file,
     normalize_relative_path,
-    sha256_file,
 )
 from contextforge.repositories.ignore import IgnoreRules, load_ignore_rules
 from contextforge.repositories.language import detect_language
@@ -42,8 +42,8 @@ def scan_repository(
     """Scan a repository root and return an immutable inventory snapshot.
 
     Ignore control files are ordinary files: they are included unless an active
-    rule explicitly excludes them. Symbolic links are always inventoried as
-    skipped entries and are never followed.
+    rule explicitly excludes them. Symbolic links and directory junctions are
+    always inventoried as skipped entries and are never followed.
     """
 
     resolved_root = _validate_root(root)
@@ -54,7 +54,7 @@ def scan_repository(
         include_contextforgeignore=active_options.respect_contextforgeignore,
     )
     state = _ScanState()
-    _scan_directory(resolved_root, resolved_root, rules, active_options, state)
+    _scan_directories(resolved_root, rules, active_options, state)
 
     files = tuple(sorted(state.files, key=lambda item: item.path))
     ignored_files = tuple(sorted(state.ignored_files, key=lambda item: item.path))
@@ -80,76 +80,99 @@ def _validate_root(root: str | Path) -> Path:
     return root_path.resolve(strict=True)
 
 
-def _scan_directory(
+def _scan_directories(
     root: Path,
-    directory: Path,
     rules: IgnoreRules,
     options: ScanOptions,
     state: _ScanState,
 ) -> None:
-    try:
-        entries = tuple(directory.iterdir())
-    except OSError as exc:
-        if directory == root:
-            raise
-        state.skipped_files.append(
-            SkippedFile(
-                path=_relative_path(root, directory),
-                reason="unreadable",
-                detail=_error_detail(exc),
-            )
-        )
-        return
-
-    for path in sorted(entries, key=lambda entry: entry.name):
-        relative_path = _relative_path(root, path)
+    pending_directories = [root]
+    while pending_directories:
+        directory = pending_directories.pop()
         try:
-            mode = path.stat(follow_symlinks=False).st_mode
+            entries = tuple(directory.iterdir())
         except OSError as exc:
-            state.discovered_count += 1
+            if directory == root:
+                raise
             state.skipped_files.append(
                 SkippedFile(
-                    path=relative_path,
+                    path=_relative_path(root, directory),
                     reason="unreadable",
                     detail=_error_detail(exc),
                 )
             )
             continue
 
-        if stat.S_ISLNK(mode):
-            state.discovered_count += 1
-            state.skipped_files.append(
-                SkippedFile(
-                    path=relative_path,
-                    reason="symlink",
-                    detail="symbolic links are not followed",
+        child_directories: list[Path] = []
+        for path in sorted(entries, key=lambda entry: entry.name):
+            relative_path = _relative_path(root, path)
+            try:
+                mode = path.stat(follow_symlinks=False).st_mode
+                is_junction = path.is_junction()
+            except OSError as exc:
+                state.discovered_count += 1
+                state.skipped_files.append(
+                    SkippedFile(
+                        path=relative_path,
+                        reason="unreadable",
+                        detail=_error_detail(exc),
+                    )
                 )
-            )
-        elif stat.S_ISDIR(mode):
-            ignore_match = rules.match(relative_path, is_directory=True)
-            if ignore_match is not None:
+                continue
+
+            protected_match = rules.match(relative_path)
+            if protected_match is not None and protected_match.source == "protected":
+                if not stat.S_ISDIR(mode) and not is_junction:
+                    state.discovered_count += 1
                 state.ignored_files.append(
                     IgnoredFile(
                         path=relative_path,
-                        source=ignore_match.source,
-                        pattern=ignore_match.pattern,
-                        is_directory=True,
+                        source=protected_match.source,
+                        pattern=protected_match.pattern,
+                        is_directory=stat.S_ISDIR(mode) or is_junction,
                     )
                 )
-            else:
-                _scan_directory(root, path, rules, options, state)
-        elif stat.S_ISREG(mode):
-            state.discovered_count += 1
-            _scan_file(path, relative_path, rules, options, state)
-        else:
-            state.discovered_count += 1
-            state.skipped_files.append(
-                SkippedFile(
-                    path=relative_path,
-                    reason="unsupported",
-                    detail="entry is not a regular file, directory, or symbolic link",
+            elif stat.S_ISLNK(mode) or is_junction:
+                state.discovered_count += 1
+                state.skipped_files.append(
+                    SkippedFile(
+                        path=relative_path,
+                        reason="symlink",
+                        detail=(
+                            "symbolic links and directory junctions are not followed"
+                        ),
+                    )
                 )
-            )
+            elif stat.S_ISDIR(mode):
+                ignore_match = rules.match(relative_path, is_directory=True)
+                if ignore_match is not None:
+                    state.ignored_files.append(
+                        IgnoredFile(
+                            path=relative_path,
+                            source=ignore_match.source,
+                            pattern=ignore_match.pattern,
+                            is_directory=True,
+                        )
+                    )
+                else:
+                    child_directories.append(path)
+            elif stat.S_ISREG(mode):
+                state.discovered_count += 1
+                _scan_file(path, relative_path, rules, options, state)
+            else:
+                state.discovered_count += 1
+                state.skipped_files.append(
+                    SkippedFile(
+                        path=relative_path,
+                        reason="unsupported",
+                        detail=(
+                            "entry is not a regular file, directory, symbolic link, "
+                            "or junction"
+                        ),
+                    )
+                )
+
+        pending_directories.extend(reversed(child_directories))
 
 
 def _scan_file(
@@ -171,23 +194,22 @@ def _scan_file(
         return
 
     try:
-        size_bytes = path.stat().st_size
-        if size_bytes > options.max_file_size_bytes:
-            state.skipped_files.append(
-                SkippedFile(
-                    path=relative_path,
-                    reason="too_large",
-                    detail=(
-                        f"file size {size_bytes} exceeds limit "
-                        f"{options.max_file_size_bytes}"
-                    ),
-                )
-            )
-            return
-        if is_binary_file(path):
+        inspection = inspect_file(
+            path,
+            max_size_bytes=options.max_file_size_bytes,
+        )
+        if inspection.is_binary:
             state.skipped_files.append(SkippedFile(path=relative_path, reason="binary"))
             return
-        sha256 = sha256_file(path)
+    except FileTooLargeError as exc:
+        state.skipped_files.append(
+            SkippedFile(
+                path=relative_path,
+                reason="too_large",
+                detail=str(exc),
+            )
+        )
+        return
     except OSError as exc:
         state.skipped_files.append(
             SkippedFile(
@@ -201,9 +223,9 @@ def _scan_file(
     state.files.append(
         ProjectFile(
             path=relative_path,
-            size_bytes=size_bytes,
+            size_bytes=inspection.size_bytes,
             language=detect_language(relative_path),
-            sha256=sha256,
+            sha256=inspection.sha256,
             is_text=True,
         )
     )

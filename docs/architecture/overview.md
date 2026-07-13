@@ -43,8 +43,9 @@ The CLI, local API, and future IDE integrations should act as thin entry points.
 They translate user or tool requests into calls against the application/core
 layer, then return results in their own format.
 
-The current v0.1.0 CLI and API only prove that the package is installed and
-wired correctly.
+The v0.1.0 CLI and API prove that the package is installed and wired correctly.
+The completed, unreleased v0.2 scanner is contained in the `repositories`
+boundary, while its table/JSON presentation remains in the thin CLI boundary.
 
 ## Excluded from v0.1.0
 
@@ -59,3 +60,6 @@ The initial release deliberately excludes:
 - persistent storage;
 - IDE extensions;
 - plugin systems or complex dependency injection.
+
+Repository scanning was excluded from v0.1.0 and is implemented by the
+subsequent v0.2 milestone. Indexing and retrieval remain unimplemented.
