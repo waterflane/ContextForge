@@ -7,7 +7,9 @@ from contextforge.repositories.models import (
     ProjectSnapshot,
     ScanOptions,
     ScanSummary,
+    SkippedFile,
 )
+from contextforge.repositories.scanner import scan_repository
 
 __all__ = [
     "IgnoredFile",
@@ -16,4 +18,6 @@ __all__ = [
     "RepositoryAnalyzer",
     "ScanOptions",
     "ScanSummary",
+    "SkippedFile",
+    "scan_repository",
 ]

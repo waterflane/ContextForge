@@ -14,7 +14,7 @@ NonNegativeInt = Annotated[int, Field(ge=0)]
 
 
 class ScanOptions(BaseModel):
-    """Options that influence a future repository scan."""
+    """Options that influence a repository scan."""
 
     max_file_size_bytes: PositiveInt = 1_000_000
     respect_gitignore: bool = True
@@ -46,7 +46,7 @@ class IgnoredFile(BaseModel):
     """A repository-relative path excluded by an ignore-rule source."""
 
     path: str
-    source: Literal["default", "gitignore", "contextforgeignore"]
+    source: Literal["protected", "default", "gitignore", "contextforgeignore"]
     pattern: str | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -59,23 +59,55 @@ class IgnoredFile(BaseModel):
         return normalize_relative_path(path)
 
 
+class SkippedFile(BaseModel):
+    """A non-ignored repository entry excluded from the useful inventory."""
+
+    path: str
+    reason: Literal["binary", "too_large", "unreadable", "symlink", "unsupported"]
+    detail: str | None = None
+
+    model_config = ConfigDict(frozen=True)
+
+    @field_validator("path")
+    @classmethod
+    def normalize_path(cls, path: str) -> str:
+        """Store paths in the snapshot's deterministic portable form."""
+
+        return normalize_relative_path(path)
+
+
 class ScanSummary(BaseModel):
-    """Aggregate counts for one repository snapshot."""
+    """Aggregate counts for one repository snapshot.
+
+    ``discovered_count`` counts file-like entries reached by traversal; contents
+    below protected or unreadable directories cannot be discovered. Ordinary
+    ignored regular files are counted by ``ignored_count``, while pruned VCS
+    metadata roots are counted separately by ``protected_count``.
+    """
 
     file_count: NonNegativeInt
     ignored_count: NonNegativeInt
     total_size_bytes: NonNegativeInt
     languages: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    discovered_count: NonNegativeInt = 0
+    protected_count: NonNegativeInt = 0
+    binary_count: NonNegativeInt = 0
+    oversized_count: NonNegativeInt = 0
+    failed_count: NonNegativeInt = 0
+    symlink_count: NonNegativeInt = 0
+    unsupported_count: NonNegativeInt = 0
+    skipped_count: NonNegativeInt = 0
 
     model_config = ConfigDict(frozen=True)
 
 
 class ProjectSnapshot(BaseModel):
-    """Immutable top-level result shape for a future repository scan."""
+    """Immutable top-level result shape for a repository scan."""
 
     root: Path
     files: tuple[ProjectFile, ...] = ()
     ignored_files: tuple[IgnoredFile, ...] = ()
+    skipped_files: tuple[SkippedFile, ...] = ()
     summary: ScanSummary
 
     model_config = ConfigDict(frozen=True)

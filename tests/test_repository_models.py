@@ -9,6 +9,7 @@ from contextforge.repositories import (
     ProjectSnapshot,
     ScanOptions,
     ScanSummary,
+    SkippedFile,
 )
 
 SHA256 = "a" * 64
@@ -53,6 +54,16 @@ def test_ignored_file_normalizes_path() -> None:
     assert ignored.path == "build/artifact.bin"
 
 
+def test_skipped_file_normalizes_path_and_validates_reason() -> None:
+    skipped = SkippedFile(
+        path=r"assets\large.bin", reason="too_large", detail="over limit"
+    )
+
+    assert skipped.path == "assets/large.bin"
+    with pytest.raises(ValidationError):
+        SkippedFile(path="file.txt", reason="unknown")  # type: ignore[arg-type]
+
+
 def test_scan_summary_validates_non_negative_counts() -> None:
     with pytest.raises(ValidationError):
         ScanSummary(
@@ -87,6 +98,7 @@ def test_project_snapshot_uses_immutable_sequences_and_models(tmp_path: Path) ->
 
     assert snapshot.files == (project_file,)
     assert snapshot.ignored_files == (ignored,)
+    assert snapshot.skipped_files == ()
     with pytest.raises(ValidationError):
         snapshot.root = tmp_path / "other"
     with pytest.raises(ValidationError):

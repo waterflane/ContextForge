@@ -53,6 +53,62 @@ def test_project_rules_can_negate_default_exclusions(tmp_path: Path) -> None:
     assert rules.is_ignored(".venv/keep.py") is False
 
 
+@pytest.mark.parametrize("metadata_directory", [".git", ".hg", ".svn"])
+def test_project_rules_cannot_negate_protected_vcs_metadata(
+    tmp_path: Path, metadata_directory: str
+) -> None:
+    (tmp_path / ".contextforgeignore").write_text(
+        f"!{metadata_directory}/\n!{metadata_directory}/config\n", encoding="utf-8"
+    )
+
+    rules = load_ignore_rules(tmp_path)
+
+    match = rules.match(metadata_directory, is_directory=True)
+    file_match = rules.match(metadata_directory)
+    nested_match = rules.match(f"{metadata_directory}/config")
+    assert match is not None
+    assert match.source == "protected"
+    assert file_match is not None
+    assert file_match.source == "protected"
+    assert nested_match is not None
+    assert nested_match.source == "protected"
+
+
+@pytest.mark.parametrize("metadata_path", [".GIT/config", "nested/.Hg/store", ".SvN"])
+def test_protected_vcs_matching_is_case_safe(
+    tmp_path: Path, metadata_path: str
+) -> None:
+    rules = load_ignore_rules(tmp_path)
+
+    match = rules.match(metadata_path)
+
+    assert match is not None
+    assert match.source == "protected"
+
+
+def test_ignore_match_reports_authoritative_source_and_pattern(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    (tmp_path / ".contextforgeignore").write_text(
+        "!keep.log\nprivate.txt\n", encoding="utf-8"
+    )
+
+    rules = load_ignore_rules(tmp_path)
+
+    default_match = rules.match("build/output.txt")
+    git_match = rules.match("debug.log")
+    context_match = rules.match("private.txt")
+    assert default_match is not None
+    assert (default_match.source, default_match.pattern) == ("default", "build/")
+    assert git_match is not None
+    assert (git_match.source, git_match.pattern) == ("gitignore", "*.log")
+    assert context_match is not None
+    assert (context_match.source, context_match.pattern) == (
+        "contextforgeignore",
+        "private.txt",
+    )
+    assert rules.match("keep.log") is None
+
+
 def test_ignore_files_can_be_disabled_independently(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("git-only.txt\n", encoding="utf-8")
     (tmp_path / ".contextforgeignore").write_text(
