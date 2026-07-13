@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "contextforge"
+version = "0.1.0"
+description = "Build, manage, and optimize context for AI models and agents."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+  { name = "ContextForge contributors" }
+]
+keywords = ["ai", "context", "prompt-engineering", "developer-tools"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
+dependencies = [
+  "fastapi>=0.116.0,<1.0.0",
+  "pydantic>=2.11.0,<3.0.0",
+  "pydantic-settings>=2.10.0,<3.0.0",
+  "typer>=0.16.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28.0,<1.0.0",
+  "mypy>=1.16.0,<2.0.0",
+  "pytest>=8.4.0,<9.0.0",
+  "ruff>=0.12.0,<1.0.0",
+  "uvicorn>=0.35.0,<1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/waterflane/contextforge"
+Repository = "https://github.com/waterflane/contextforge"
+Issues = "https://github.com/waterflane/contextforge/issues"
+
+[project.scripts]
+contextforge = "contextforge.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contextforge"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+pretty = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
