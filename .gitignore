@@ -7,6 +7,7 @@ __pycache__/
 *$py.class
 
 .pytest_cache/
+.pytest-tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
