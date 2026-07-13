@@ -9,9 +9,9 @@ external AI tools.
 
 ## Status
 
-ContextForge v0.1.0 is an architectural foundation. It does not yet perform
-useful repository analysis, context retrieval, prompt generation, model calls,
-or indexing.
+ContextForge v0.1.0 is an architectural foundation with deterministic local
+repository scanning. It does not yet perform semantic context retrieval,
+prompt generation, model calls, or indexing.
 
 ## Long-term vision
 
@@ -73,12 +73,45 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-## Placeholder commands
+## CLI
 
 ```bash
 contextforge version
 contextforge doctor
 ```
+
+### Repository scanning
+
+Scan a repository from the terminal. `PATH` defaults to the current working
+directory, table output is the default, and the default maximum included file
+size is 1,000,000 bytes.
+
+```bash
+contextforge scan .
+contextforge scan . --format json
+contextforge scan . --output scan.json --format json
+contextforge scan . --show-excluded
+contextforge scan . --fail-on-error
+```
+
+Available scan options:
+
+- `--format table|json` selects human-readable or stable structured output.
+- `--output PATH` writes the selected output to a new file. Parent directories
+  must already exist, and existing destinations are never overwritten.
+- `--max-file-size INTEGER` sets the maximum included file size in bytes and
+  must be greater than zero.
+- `--show-excluded` lists excluded paths and reasons in table output. JSON
+  output always includes the existing `ignored_files` and `skipped_files`
+  model fields.
+- `--fail-on-error` exits with code 3 if the completed scan contains unreadable
+  entries. Ignored, protected, binary, oversized, symlink, and unsupported
+  entries do not trigger this exit code.
+
+Exit code 0 means the scan completed successfully, 1 reports a scan or output
+operation failure, 2 reports invalid command input, and 3 is reserved for a
+completed `--fail-on-error` scan with unreadable entries. Output files are
+rendered before writing and published atomically after the scan completes.
 
 The local API can be run during development with:
 

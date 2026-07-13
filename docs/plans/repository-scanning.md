@@ -106,20 +106,62 @@ Avoid `python-magic`; binary detection can be implemented with a small byte samp
 
 **6. Public CLI Behavior**
 
-Add:
+Implemented contract:
 
 ```bash
-contextforge scan [ROOT] --format text|json --max-file-size BYTES
+contextforge scan [PATH] [OPTIONS]
 ```
 
-Suggested behavior:
+`PATH` defaults to the current working directory. The CLI calls the public
+`scan_repository(path, ScanOptions(...))` API and does not duplicate traversal,
+hashing, binary detection, language detection, or ignore behavior.
 
-- `ROOT` defaults to current directory.
-- `--format text` is default and prints a readable summary plus file inventory.
-- `--format json` prints `RepositoryScan.model_dump(mode="json")`.
-- `--max-file-size` overrides `CONTEXTFORGE_SCAN_MAX_FILE_SIZE_BYTES`.
-- Invalid root, non-directory root, invalid size, and scan failures should produce a non-zero exit code with a clear message.
-- CLI remains a thin adapter around `scan_repository(root, options)`.
+Implemented options:
+
+- `--format table|json`, defaulting to `table`.
+- `--output PATH`, which writes to a new destination only.
+- `--max-file-size INTEGER`, defaulting to the `ScanOptions` model default of
+  1,000,000 bytes and rejecting non-positive values.
+- `--show-excluded`, which lists paths and reasons in table output.
+- `--fail-on-error`, which exits non-zero only for unreadable entries.
+
+JSON uses a stable versioned envelope and preserves the existing domain model
+field names:
+
+```json
+{
+  "schema_version": 1,
+  "options": {
+    "max_file_size_bytes": 1000000,
+    "respect_gitignore": true,
+    "respect_contextforgeignore": true
+  },
+  "snapshot": {
+    "root": "<resolved project root>",
+    "files": [],
+    "ignored_files": [],
+    "skipped_files": [],
+    "summary": {}
+  }
+}
+```
+
+Output parents must already exist. Existing destinations are refused; there is
+no force or overwrite option. Content is fully rendered before a temporary
+sibling is written and atomically published, and the output file is created
+only after scanning completes.
+
+Exit-code policy:
+
+- `0`: completed successfully, including ordinary exclusions.
+- `1`: scanner or output operational failure.
+- `2`: invalid command input, including an invalid root or file-size limit.
+- `3`: completed with unreadable entries while `--fail-on-error` was enabled.
+
+This differs from the original proposal by using the task-approved name
+`table` instead of `text`, serializing the implemented `ProjectSnapshot` rather
+than the earlier proposed `RepositoryScan`, and using the domain model default
+instead of an unimplemented configuration setting.
 
 **7. Detailed Test Matrix**
 
