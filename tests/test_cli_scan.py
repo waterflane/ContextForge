@@ -1,10 +1,10 @@
 import json
 import os
 from pathlib import Path
-from typing import Any
 
+import click
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 import contextforge.cli.main as cli_module
 import contextforge.repositories.scanner as scanner_module
@@ -13,14 +13,28 @@ from contextforge.repositories.files import FileInspection
 from contextforge.repositories.files import inspect_file as file_inspector
 
 runner = CliRunner()
+TERMINAL_WIDTH = 120
 
 
-def _invoke_scan(root: Path, *arguments: str) -> Any:
-    return runner.invoke(app, ["scan", str(root), *arguments])
+def _invoke_scan(root: Path, *arguments: str) -> Result:
+    return runner.invoke(
+        app,
+        ["scan", str(root), *arguments],
+        terminal_width=TERMINAL_WIDTH,
+    )
+
+
+def _plain_output(result: Result) -> str:
+    return click.unstyle(result.output)
 
 
 def test_scan_help_documents_the_public_contract() -> None:
-    result = runner.invoke(app, ["scan", "--help"])
+    result = runner.invoke(
+        app,
+        ["scan", "--help"],
+        terminal_width=TERMINAL_WIDTH,
+    )
+    output = _plain_output(result)
 
     assert result.exit_code == 0
     for value in (
@@ -31,16 +45,17 @@ def test_scan_help_documents_the_public_contract() -> None:
         "--show-excluded",
         "--fail-on-error",
     ):
-        assert value in result.stdout
+        assert value in output
 
 
 def test_empty_repository_has_complete_human_readable_summary(
     tmp_path: Path,
 ) -> None:
     result = _invoke_scan(tmp_path)
+    output = _plain_output(result)
 
     assert result.exit_code == 0
-    assert f"Project root: {tmp_path.resolve()}" in result.stdout
+    assert f"Project root: {tmp_path.resolve()}" in output
     expected_counts = {
         "Discovered files": 0,
         "Included files": 0,
@@ -53,10 +68,10 @@ def test_empty_repository_has_complete_human_readable_summary(
         "Total included size": "0 bytes",
     }
     for label, value in expected_counts.items():
-        assert f"{label}: {value}" in result.stdout
-    assert "Languages:\n  (none)" in result.stdout
-    assert "schema_version" not in result.stdout
-    assert not result.stdout.lstrip().startswith("{")
+        assert f"{label}: {value}" in output
+    assert "Languages:\n  (none)" in output
+    assert "schema_version" not in output
+    assert not output.lstrip().startswith("{")
 
 
 def test_default_path_scans_the_current_working_directory(
@@ -65,14 +80,15 @@ def test_default_path_scans_the_current_working_directory(
     (tmp_path / "current.py").write_text("value = 1\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
-    result = runner.invoke(app, ["scan"])
+    result = runner.invoke(app, ["scan"], terminal_width=TERMINAL_WIDTH)
+    output = _plain_output(result)
 
     assert result.exit_code == 0
-    assert f"Project root: {tmp_path.resolve()}" in result.stdout
-    assert "Included files: 1" in result.stdout
-    assert "  Python: 1" in result.stdout
+    assert f"Project root: {tmp_path.resolve()}" in output
+    assert "Included files: 1" in output
+    assert "  Python: 1" in output
     size_bytes = (tmp_path / "current.py").stat().st_size
-    assert f"current.py | {size_bytes} | Python |" in result.stdout
+    assert f"current.py | {size_bytes} | Python |" in output
 
 
 def test_json_output_is_parseable_explicit_and_deterministic_with_unicode(
@@ -130,6 +146,7 @@ def test_exclusions_summary_and_show_excluded_reasons(tmp_path: Path) -> None:
         "16",
         "--show-excluded",
     )
+    output = _plain_output(result)
 
     assert result.exit_code == 0
     for expected in (
@@ -149,7 +166,7 @@ def test_exclusions_summary_and_show_excluded_reasons(tmp_path: Path) -> None:
         "oversized.txt",
         "reason: too_large; file size 17 exceeds limit 16",
     ):
-        assert expected in result.stdout
+        assert expected in output
 
 
 def test_json_exclusion_details_follow_show_excluded(tmp_path: Path) -> None:
@@ -191,13 +208,14 @@ def test_table_without_show_excluded_remains_concise(tmp_path: Path) -> None:
         )
 
     result = _invoke_scan(tmp_path)
+    output = _plain_output(result)
 
     assert result.exit_code == 0
-    assert "Ignored files: 1" in result.stdout
-    assert "Excluded entries:" not in result.stdout
-    assert ".venv" not in result.stdout
-    assert "ignored-" not in result.stdout
-    assert len(result.stdout.splitlines()) <= 16
+    assert "Ignored files: 1" in output
+    assert "Excluded entries:" not in output
+    assert ".venv" not in output
+    assert "ignored-" not in output
+    assert len(output.splitlines()) <= 16
 
 
 def test_uv_cache_is_pruned_from_cli_outputs_while_uv_lock_is_included(
@@ -212,12 +230,13 @@ def test_uv_cache_is_pruned_from_cli_outputs_while_uv_lock_is_included(
     table = _invoke_scan(tmp_path)
     concise_json = _invoke_scan(tmp_path, "--format", "json")
     detailed_json = _invoke_scan(tmp_path, "--format", "json", "--show-excluded")
+    table_output = _plain_output(table)
 
     assert table.exit_code == concise_json.exit_code == detailed_json.exit_code == 0
-    assert "Discovered files: 1" in table.stdout
-    assert "Included files: 1" in table.stdout
-    assert "Ignored files: 1" in table.stdout
-    assert ".uv-cache" not in table.stdout
+    assert "Discovered files: 1" in table_output
+    assert "Included files: 1" in table_output
+    assert "Ignored files: 1" in table_output
+    assert ".uv-cache" not in table_output
 
     concise_snapshot = json.loads(concise_json.stdout)["snapshot"]
     detailed_snapshot = json.loads(detailed_json.stdout)["snapshot"]
@@ -239,9 +258,10 @@ def test_fail_on_error_succeeds_when_there_are_no_failures(tmp_path: Path) -> No
     (tmp_path / "file.txt").write_text("readable", encoding="utf-8")
 
     result = _invoke_scan(tmp_path, "--fail-on-error")
+    output = _plain_output(result)
 
     assert result.exit_code == 0
-    assert "Failed/unreadable files: 0" in result.stdout
+    assert "Failed/unreadable files: 0" in output
 
 
 def test_fail_on_error_returns_three_for_portably_simulated_failure(
@@ -258,11 +278,12 @@ def test_fail_on_error_returns_three_for_portably_simulated_failure(
     monkeypatch.setattr(scanner_module, "inspect_file", fail_file)
 
     result = _invoke_scan(tmp_path, "--fail-on-error", "--show-excluded")
+    output = _plain_output(result)
 
     assert result.exit_code == 3
-    assert "Failed/unreadable files: 1" in result.stdout
-    assert "reason: unreadable; PermissionError" in result.stdout
-    assert "Traceback" not in result.output
+    assert "Failed/unreadable files: 1" in output
+    assert "reason: unreadable; PermissionError" in output
+    assert "Traceback" not in output
 
 
 def test_json_without_exclusions_retains_unreadable_diagnostics(
@@ -292,18 +313,20 @@ def test_non_positive_maximum_file_size_is_rejected(
     tmp_path: Path, maximum: str
 ) -> None:
     result = _invoke_scan(tmp_path, "--max-file-size", maximum)
+    output = _plain_output(result)
 
     assert result.exit_code == 2
-    assert "--max-file-size" in result.output
-    assert "Traceback" not in result.output
+    assert "--max-file-size" in output
+    assert "Traceback" not in output
 
 
 def test_invalid_format_is_rejected_by_typer(tmp_path: Path) -> None:
     result = _invoke_scan(tmp_path, "--format", "yaml")
+    output = _plain_output(result)
 
     assert result.exit_code == 2
-    assert "yaml" in result.output
-    assert "Traceback" not in result.output
+    assert "yaml" in output
+    assert "Traceback" not in output
 
 
 @pytest.mark.parametrize("root_kind", ["missing", "file"])
@@ -313,21 +336,23 @@ def test_invalid_roots_are_clear_cli_errors(tmp_path: Path, root_kind: str) -> N
         root.write_text("not a repository", encoding="utf-8")
 
     result = _invoke_scan(root)
+    output = _plain_output(result)
 
     assert result.exit_code == 2
     expected = "not a directory" if root_kind == "file" else "does not exist"
-    assert expected in result.output
-    assert "Traceback" not in result.output
+    assert expected in output
+    assert "Traceback" not in output
 
 
 def test_invalid_ignore_file_is_a_normal_scanner_error(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_bytes(b"\xff")
 
     result = _invoke_scan(tmp_path)
+    output = _plain_output(result)
 
     assert result.exit_code == 1
-    assert "unable to read ignore file" in result.output
-    assert "Traceback" not in result.output
+    assert "unable to read ignore file" in output
+    assert "Traceback" not in output
 
 
 def test_output_file_is_created_after_scan_and_reported(tmp_path: Path) -> None:
@@ -341,9 +366,10 @@ def test_output_file_is_created_after_scan_and_reported(tmp_path: Path) -> None:
         "--output",
         str(output),
     )
+    plain_output = _plain_output(result)
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == f"Output written to {output.resolve()}"
+    assert plain_output.strip() == f"Output written to {output.resolve()}"
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert [item["path"] for item in payload["snapshot"]["files"]] == ["source.py"]
 
@@ -353,11 +379,12 @@ def test_existing_output_file_is_never_overwritten(tmp_path: Path) -> None:
     output.write_text("original", encoding="utf-8")
 
     result = _invoke_scan(tmp_path, "--output", str(output))
+    plain_output = _plain_output(result)
 
     assert result.exit_code == 1
-    assert "already exists" in result.output
+    assert "already exists" in plain_output
     assert output.read_text(encoding="utf-8") == "original"
-    assert "Traceback" not in result.output
+    assert "Traceback" not in plain_output
 
 
 def test_output_parent_directories_are_not_created(tmp_path: Path) -> None:
@@ -365,9 +392,10 @@ def test_output_parent_directories_are_not_created(tmp_path: Path) -> None:
     output = missing_parent / "scan.json"
 
     result = _invoke_scan(tmp_path, "--output", str(output))
+    plain_output = _plain_output(result)
 
     assert result.exit_code == 1
-    assert "parent directory does not exist" in result.output
+    assert "parent directory does not exist" in plain_output
     assert not missing_parent.exists()
     assert not output.exists()
 
@@ -377,9 +405,10 @@ def test_output_parent_must_be_a_directory(tmp_path: Path) -> None:
     parent_file.write_text("file", encoding="utf-8")
 
     result = _invoke_scan(tmp_path, "--output", str(parent_file / "scan.json"))
+    output = _plain_output(result)
 
     assert result.exit_code == 1
-    assert "parent is not a directory" in result.output
+    assert "parent is not a directory" in output
 
 
 def test_output_write_failure_is_clear_and_leaves_no_partial_file(
@@ -393,10 +422,11 @@ def test_output_write_failure_is_clear_and_leaves_no_partial_file(
     monkeypatch.setattr(os, "link", fail_publish)
 
     result = _invoke_scan(tmp_path, "--output", str(output), "--format", "json")
+    plain_output = _plain_output(result)
 
     assert result.exit_code == 1
-    assert "unable to write output file" in result.output
-    assert "Traceback" not in result.output
+    assert "unable to write output file" in plain_output
+    assert "Traceback" not in plain_output
     assert not output.exists()
     assert list(tmp_path.glob(".scan.json.*.tmp")) == []
 
@@ -410,20 +440,24 @@ def test_unexpected_internal_error_is_not_reported_as_success(
     monkeypatch.setattr(cli_module, "scan_repository", fail_scan)
 
     result = _invoke_scan(tmp_path)
+    output = _plain_output(result)
 
     assert result.exit_code == 1
     assert isinstance(result.exception, RuntimeError)
-    assert "repository scan" not in result.stdout
+    assert "repository scan" not in output
 
 
 def test_root_help_version_and_doctor_remain_available() -> None:
-    help_result = runner.invoke(app, ["--help"])
+    help_result = runner.invoke(app, ["--help"], terminal_width=TERMINAL_WIDTH)
     version_result = runner.invoke(app, ["version"])
     doctor_result = runner.invoke(app, ["doctor"])
+    help_output = _plain_output(help_result)
+    version_output = _plain_output(version_result)
+    doctor_output = _plain_output(doctor_result)
 
     assert help_result.exit_code == 0
-    assert "scan" in help_result.stdout
+    assert "scan" in help_output
     assert version_result.exit_code == 0
-    assert "ContextForge 0.1.0" in version_result.stdout
+    assert "ContextForge 0.1.0" in version_output
     assert doctor_result.exit_code == 0
-    assert "ContextForge is installed." in doctor_result.stdout
+    assert "ContextForge is installed." in doctor_output
