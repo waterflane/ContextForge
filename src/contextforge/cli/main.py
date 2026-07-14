@@ -15,6 +15,13 @@ from contextforge.cli.scan_output import (
     write_output_atomic,
 )
 from contextforge.config import get_settings
+from contextforge.context import (
+    ProjectTreeError,
+    build_project_tree,
+    render_project_tree,
+    render_project_tree_json,
+    render_project_tree_markdown,
+)
 from contextforge.logging import configure_logging
 from contextforge.repositories import ScanOptions, scan_repository
 from contextforge.repositories.ignore import IgnoreRulesError
@@ -26,6 +33,14 @@ class ScanFormat(StrEnum):
     """Supported repository scan output representations."""
 
     table = "table"
+    json = "json"
+
+
+class TreeFormat(StrEnum):
+    """Supported project-tree output representations."""
+
+    text = "text"
+    markdown = "markdown"
     json = "json"
 
 
@@ -125,6 +140,67 @@ def scan(
 
     if fail_on_error and snapshot.summary.failed_count > 0:
         raise typer.Exit(code=3)
+
+
+@app.command()
+def tree(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Repository root to scan."),
+    ] = Path("."),
+    depth: Annotated[
+        int | None,
+        typer.Option(
+            "--depth",
+            min=0,
+            help="Maximum edges below the implicit root; omit for unlimited.",
+        ),
+    ] = None,
+    output_format: Annotated[
+        TreeFormat,
+        typer.Option(
+            "--format",
+            help="Output representation.",
+            case_sensitive=False,
+        ),
+    ] = TreeFormat.text,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", help="Write output atomically to a file."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Atomically replace an existing output file."),
+    ] = False,
+) -> None:
+    """Render a deterministic project tree from a repository snapshot."""
+
+    try:
+        snapshot = scan_repository(path)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        _exit_with_error(str(exc), code=2)
+    except (IgnoreRulesError, OSError) as exc:
+        _exit_with_error(str(exc), code=1)
+
+    try:
+        project_tree = build_project_tree(snapshot)
+        if output_format is TreeFormat.json:
+            representation = render_project_tree_json(project_tree, max_depth=depth)
+        elif output_format is TreeFormat.markdown:
+            representation = render_project_tree_markdown(project_tree, max_depth=depth)
+        else:
+            representation = render_project_tree(project_tree, max_depth=depth)
+    except ProjectTreeError as exc:
+        _exit_with_error(str(exc), code=1)
+
+    if output is None:
+        typer.echo(representation, nl=False)
+    else:
+        try:
+            written_path = write_output_atomic(output, representation, force=force)
+        except OutputWriteError as exc:
+            _exit_with_error(str(exc), code=1)
+        typer.echo(f"Output written to {written_path}")
 
 
 def _exit_with_error(message: str, *, code: int) -> Never:

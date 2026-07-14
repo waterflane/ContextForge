@@ -100,8 +100,15 @@ def render_scan_table(snapshot: ProjectSnapshot, *, show_excluded: bool = False)
     return "\n".join(lines) + "\n"
 
 
-def write_output_atomic(destination: Path, content: str) -> Path:
-    """Publish ``content`` atomically without creating parents or overwriting."""
+def write_output_atomic(
+    destination: Path, content: str, *, force: bool = False
+) -> Path:
+    """Publish ``content`` atomically without creating parent directories.
+
+    Existing destinations are refused by default. When ``force`` is true, a
+    regular file is replaced atomically after the complete content has been
+    flushed to a sibling temporary file.
+    """
 
     requested = destination.expanduser()
     try:
@@ -114,8 +121,13 @@ def write_output_atomic(destination: Path, content: str) -> Path:
         raise OutputWriteError(f"output parent is not a directory: {parent}")
 
     resolved_destination = parent / requested.name
-    if os.path.lexists(resolved_destination):
+    destination_exists = os.path.lexists(resolved_destination)
+    if destination_exists and not force:
         raise OutputWriteError(f"output file already exists: {resolved_destination}")
+    if destination_exists and resolved_destination.is_dir():
+        raise OutputWriteError(
+            f"output destination is a directory: {resolved_destination}"
+        )
 
     temporary_path: Path | None = None
     try:
@@ -133,9 +145,13 @@ def write_output_atomic(destination: Path, content: str) -> Path:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
-        # A hard-link publish is atomic and fails if the destination appeared
-        # after the preflight check, preserving the no-overwrite contract.
-        os.link(temporary_path, resolved_destination)
+        if force:
+            os.replace(temporary_path, resolved_destination)
+            temporary_path = None
+        else:
+            # A hard-link publish is atomic and fails if the destination appeared
+            # after the preflight check, preserving the no-overwrite contract.
+            os.link(temporary_path, resolved_destination)
     except OSError as exc:
         raise OutputWriteError(
             f"unable to write output file {resolved_destination}: {exc}"
