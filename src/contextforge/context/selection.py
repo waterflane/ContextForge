@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Literal
 
 from pathspec.patterns.gitwildmatch import (
@@ -26,6 +27,8 @@ IncludeSelectorKind = Literal["exact_path", "directory", "glob"]
 SelectorMatchKind = Literal["exact_path", "directory", "glob", "exclusion"]
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+_LINE_RANGE_REQUEST = re.compile(r"^(.+):([0-9]+)-([0-9]+)$")
+MAX_LINE_NUMBER = 2_147_483_647
 
 
 class SelectionError(ValueError):
@@ -67,6 +70,55 @@ class DuplicateSnapshotPathError(SelectionError):
         super().__init__(f"duplicate snapshot path: {path}")
 
 
+class InvalidLineRangeError(SelectionError):
+    """Raised when a line range or range request is malformed."""
+
+    def __init__(self, value: object, reason: str) -> None:
+        self.value = value
+        self.reason = reason
+        super().__init__(f"invalid line range {value!r}: {reason}")
+
+
+class LineRangeTargetError(InvalidLineRangeError):
+    """Raised when a range does not target a selected snapshot file."""
+
+    def __init__(self, path: object, reason: str) -> None:
+        self.path = path
+        super().__init__(path, reason)
+
+
+@dataclass(frozen=True, slots=True)
+class LineRange:
+    """One one-based line range with inclusive start and end bounds."""
+
+    start: int
+    end: int
+
+    def __post_init__(self) -> None:
+        if type(self.start) is not int or type(self.end) is not int:
+            raise InvalidLineRangeError(self, "bounds must be decimal integers")
+        if self.start < 1:
+            raise InvalidLineRangeError(self, "start must be at least 1")
+        if self.end < self.start:
+            raise InvalidLineRangeError(self, "end must not be before start")
+        if self.end > MAX_LINE_NUMBER:
+            raise InvalidLineRangeError(
+                self, f"bounds must not exceed {MAX_LINE_NUMBER}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class LineRangeRequest:
+    """A line range associated with an exact portable snapshot path."""
+
+    path: str
+    range: LineRange
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not isinstance(self.range, LineRange):
+            raise InvalidLineRangeError(self, "request requires a path and LineRange")
+
+
 class SelectionSelector(BaseModel):
     """One explicitly typed include selector."""
 
@@ -83,6 +135,7 @@ class ContextSelection(BaseModel):
     directories: tuple[str, ...] = ()
     globs: tuple[str, ...] = ()
     exclusions: tuple[str, ...] = ()
+    line_ranges: tuple[LineRangeRequest, ...] = ()
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -105,6 +158,7 @@ class SelectionResult(BaseModel):
     include_matches: tuple[SelectorMatch, ...] = ()
     exclusion_matches: tuple[SelectorMatch, ...] = ()
     excluded_files: tuple[ProjectFile, ...] = ()
+    line_ranges: tuple[LineRangeRequest, ...] = ()
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -133,7 +187,45 @@ def resolve_selection(
         ),
         *(SelectionSelector(kind="glob", value=value) for value in selection.globs),
     )
-    return select_files(snapshot, includes, selection.exclusions)
+    result = select_files(snapshot, includes, selection.exclusions)
+    ranges = _resolve_line_ranges(snapshot, result.files, selection.line_ranges)
+    return result.model_copy(update={"line_ranges": ranges})
+
+
+def parse_line_range_request(value: object) -> LineRangeRequest:
+    """Parse ``PATH:START-END`` using the final valid numeric suffix."""
+
+    if not isinstance(value, str) or "\x00" in value:
+        raise InvalidLineRangeError(value, "expected PATH:START-END")
+    match = _LINE_RANGE_REQUEST.fullmatch(value)
+    if match is None:
+        raise InvalidLineRangeError(value, "expected PATH:START-END")
+    path, raw_start, raw_end = match.groups()
+    try:
+        line_range = LineRange(start=int(raw_start), end=int(raw_end))
+    except ValueError as exc:  # pragma: no cover - guarded by the decimal regex
+        raise InvalidLineRangeError(value, "bounds must be decimal integers") from exc
+    return LineRangeRequest(path=path, range=line_range)
+
+
+def canonicalize_line_ranges(ranges: Iterable[LineRange]) -> tuple[LineRange, ...]:
+    """Sort and merge duplicate, overlapping, nested, and adjacent ranges."""
+
+    ordered: list[LineRange] = []
+    for line_range in ranges:
+        if not isinstance(line_range, LineRange):
+            raise InvalidLineRangeError(line_range, "expected a LineRange")
+        ordered.append(line_range)
+    ordered.sort(key=lambda item: (item.start, item.end))
+
+    merged: list[LineRange] = []
+    for line_range in ordered:
+        if not merged or line_range.start > merged[-1].end + 1:
+            merged.append(line_range)
+            continue
+        previous = merged[-1]
+        merged[-1] = LineRange(previous.start, max(previous.end, line_range.end))
+    return tuple(merged)
 
 
 def select_files(
@@ -205,6 +297,37 @@ def _snapshot_index(snapshot: ProjectSnapshot) -> dict[str, ProjectFile]:
             raise DuplicateSnapshotPathError(path)
         files_by_path[path] = file
     return files_by_path
+
+
+def _resolve_line_ranges(
+    snapshot: ProjectSnapshot,
+    selected_files: tuple[ProjectFile, ...],
+    requests: Iterable[LineRangeRequest],
+) -> tuple[LineRangeRequest, ...]:
+    snapshot_paths = {file.path for file in snapshot.files}
+    selected_paths = {file.path for file in selected_files}
+    ranges_by_path: dict[str, list[LineRange]] = {}
+
+    for request in requests:
+        if not isinstance(request, LineRangeRequest):
+            raise InvalidLineRangeError(request, "expected a LineRangeRequest")
+        try:
+            path = _normalize_path_selector(
+                "exact_path", request.path, allow_root=False
+            )
+        except InvalidSelectorError as exc:
+            raise InvalidLineRangeError(request.path, "path is not portable") from exc
+        if path not in snapshot_paths:
+            raise LineRangeTargetError(path, "target is absent from the snapshot")
+        if path not in selected_paths:
+            raise LineRangeTargetError(path, "target is not selected after exclusions")
+        ranges_by_path.setdefault(path, []).append(request.range)
+
+    return tuple(
+        LineRangeRequest(path=path, range=line_range)
+        for path in sorted(ranges_by_path)
+        for line_range in canonicalize_line_ranges(ranges_by_path[path])
+    )
 
 
 def _validate_snapshot_path(path: str) -> str:

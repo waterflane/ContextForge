@@ -4,13 +4,20 @@ import pytest
 from pydantic import ValidationError
 
 from contextforge.context import (
+    MAX_LINE_NUMBER,
     ContextSelection,
     DuplicateSnapshotPathError,
+    InvalidLineRangeError,
     InvalidSelectorError,
+    LineRange,
+    LineRangeRequest,
+    LineRangeTargetError,
     NoFilesSelectedError,
     SelectionError,
     SelectionSelector,
     SelectorNoMatchError,
+    canonicalize_line_ranges,
+    parse_line_range_request,
     resolve_selection,
     select_files,
 )
@@ -497,3 +504,139 @@ def test_selection_models_are_frozen_and_forbid_unknown_fields(tmp_path: Path) -
         result.files = ()
     with pytest.raises(ValidationError):
         SelectionSelector(kind="glob", value="*.py", unknown=True)  # type: ignore[call-arg]
+
+
+def test_line_range_is_one_based_inclusive_and_frozen() -> None:
+    line_range = LineRange(start=10, end=50)
+
+    assert line_range.start == 10
+    assert line_range.end == 50
+    with pytest.raises(AttributeError):
+        line_range.start = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(0, 1), (-1, 1), (2, 1), (1, MAX_LINE_NUMBER + 1), (True, 1), (1, 1.5)],
+)
+def test_invalid_line_range_bounds_raise_typed_error(
+    start: object, end: object
+) -> None:
+    with pytest.raises(InvalidLineRangeError):
+        LineRange(start=start, end=end)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "file.py:1",
+        "file.py:1-",
+        "file.py:-2",
+        "file.py:20-end",
+        "file.py:0-1",
+        "file.py:2-1",
+        "file.py:+1-2",
+        "file.py:1.0-2",
+        f"file.py:1-{MAX_LINE_NUMBER + 1}",
+        "\x00file.py:1-2",
+        None,
+    ],
+)
+def test_line_range_parser_rejects_open_ended_and_malformed_values(
+    value: object,
+) -> None:
+    with pytest.raises(InvalidLineRangeError):
+        parse_line_range_request(value)
+
+
+def test_line_range_parser_uses_final_numeric_colon_suffix() -> None:
+    request = parse_line_range_request("data:legacy.txt:3-9")
+
+    assert request == LineRangeRequest(
+        path="data:legacy.txt", range=LineRange(start=3, end=9)
+    )
+
+
+def test_duplicate_overlapping_nested_and_adjacent_ranges_are_canonical() -> None:
+    ranges = (
+        LineRange(10, 12),
+        LineRange(1, 3),
+        LineRange(3, 5),
+        LineRange(2, 4),
+        LineRange(6, 8),
+        LineRange(10, 12),
+    )
+
+    assert canonicalize_line_ranges(ranges) == (
+        LineRange(1, 8),
+        LineRange(10, 12),
+    )
+    with pytest.raises(InvalidLineRangeError):
+        canonicalize_line_ranges((object(),))  # type: ignore[arg-type]
+
+
+def test_resolved_ranges_are_normalized_merged_and_path_sorted(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, "z.py", "src/app.py")
+    selection = ContextSelection(
+        directories=(".",),
+        line_ranges=(
+            LineRangeRequest("z.py", LineRange(4, 5)),
+            LineRangeRequest(r"src\app.py", LineRange(2, 3)),
+            LineRangeRequest("src/app.py", LineRange(1, 1)),
+        ),
+    )
+
+    result = resolve_selection(snapshot, selection)
+
+    assert result.line_ranges == (
+        LineRangeRequest("src/app.py", LineRange(1, 3)),
+        LineRangeRequest("z.py", LineRange(4, 5)),
+    )
+
+
+def test_range_target_must_exist_and_remain_selected(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, "app.py", "excluded.py")
+
+    with pytest.raises(LineRangeTargetError, match="absent"):
+        resolve_selection(
+            snapshot,
+            ContextSelection(
+                line_ranges=(LineRangeRequest("missing.py", LineRange(1, 1)),)
+            ),
+        )
+    with pytest.raises(LineRangeTargetError, match="not selected"):
+        resolve_selection(
+            snapshot,
+            ContextSelection(
+                exclusions=("excluded.py",),
+                line_ranges=(LineRangeRequest("excluded.py", LineRange(1, 1)),),
+            ),
+        )
+
+
+def test_range_target_path_uses_strict_portable_validation(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, "safe.py")
+
+    with pytest.raises(InvalidLineRangeError, match="portable"):
+        resolve_selection(
+            snapshot,
+            ContextSelection(
+                line_ranges=(LineRangeRequest("safe/../safe.py", LineRange(1, 1)),)
+            ),
+        )
+
+
+def test_line_range_request_runtime_types_fail_closed(tmp_path: Path) -> None:
+    with pytest.raises(InvalidLineRangeError, match="requires a path"):
+        LineRangeRequest(path=1, range=LineRange(1, 1))  # type: ignore[arg-type]
+
+    snapshot = _snapshot(tmp_path, "safe.py")
+    forged = ContextSelection.model_construct(
+        exact_paths=(),
+        directories=(),
+        globs=(),
+        exclusions=(),
+        line_ranges=(object(),),
+    )
+    with pytest.raises(InvalidLineRangeError, match="LineRangeRequest"):
+        resolve_selection(snapshot, forged)

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from contextforge.filesystem import (
+    FileTooLargeError as FileTooLargeError,
+)
+from contextforge.filesystem import read_file_stably
 
 BINARY_SAMPLE_SIZE = 8 * 1024
 HASH_CHUNK_SIZE = 64 * 1024
@@ -23,15 +26,6 @@ class FileInspection:
     size_bytes: int
     is_binary: bool
     sha256: str
-
-
-class FileTooLargeError(ValueError):
-    """Raised when a file exceeds its inspection byte limit."""
-
-    def __init__(self, size_bytes: int, max_size_bytes: int) -> None:
-        self.size_bytes = size_bytes
-        self.max_size_bytes = max_size_bytes
-        super().__init__(f"file size {size_bytes} exceeds limit {max_size_bytes}")
 
 
 def normalize_relative_path(path: str | Path) -> str:
@@ -148,47 +142,16 @@ def inspect_file(
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero")
 
-    before_open = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(before_open.st_mode):
-        raise OSError(f"entry is no longer a regular file: {path}")
-
-    digest = hashlib.sha256()
-    total_size = 0
-    with path.open("rb") as file:
-        opened = os.fstat(file.fileno())
-        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(
-            before_open, opened
-        ):
-            raise OSError(f"file changed while being opened: {path}")
-        if opened.st_size > max_size_bytes:
-            raise FileTooLargeError(opened.st_size, max_size_bytes)
-
-        first_chunk = file.read(min(sample_size, max_size_bytes + 1))
-        total_size = len(first_chunk)
-        if total_size > max_size_bytes:
-            current_size = max(total_size, os.fstat(file.fileno()).st_size)
-            raise FileTooLargeError(current_size, max_size_bytes)
-        digest.update(first_chunk)
-        if _sample_is_binary(first_chunk):
-            return FileInspection(
-                size_bytes=opened.st_size,
-                is_binary=True,
-                sha256=digest.hexdigest(),
-            )
-
-        while True:
-            read_size = min(chunk_size, max_size_bytes - total_size + 1)
-            chunk = file.read(read_size)
-            if not chunk:
-                break
-            total_size += len(chunk)
-            if total_size > max_size_bytes:
-                current_size = max(total_size, os.fstat(file.fileno()).st_size)
-                raise FileTooLargeError(current_size, max_size_bytes)
-            digest.update(chunk)
-
+    result = read_file_stably(
+        path,
+        max_size_bytes=max_size_bytes,
+        chunk_size=chunk_size,
+        initial_chunk_size=sample_size,
+        stop_after_initial=_sample_is_binary,
+        capture_content=False,
+    )
     return FileInspection(
-        size_bytes=total_size,
-        is_binary=False,
-        sha256=digest.hexdigest(),
+        size_bytes=result.size_bytes,
+        is_binary=not result.complete,
+        sha256=result.sha256,
     )
