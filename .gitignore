@@ -1,6 +1,8 @@
 .venv/
 .vscode/
 .agents/
+.uv-cache/
+.python/
 
 __pycache__/
 *.py[cod]
