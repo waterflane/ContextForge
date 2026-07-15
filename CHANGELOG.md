@@ -35,6 +35,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Disable Click's native Windows argument expansion in the shared console and
+  module entry wrapper so quoted GitWildMatch selectors reach ContextForge as
+  one unchanged argument.
+- Correct context CLI examples to distinguish exact files, directories, and
+  glob patterns, and make unmatched exact-file errors explain the appropriate
+  selector options.
+
 - Prune directories ignored by default, `.gitignore`, or
   `.contextforgeignore` rules instead of traversing and serializing every
   descendant.

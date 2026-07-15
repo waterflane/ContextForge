@@ -53,6 +53,12 @@ app = typer.Typer(
 app.add_typer(context_app, name="context")
 
 
+def run() -> None:
+    """Run the CLI without Click rewriting native Windows arguments."""
+
+    app(windows_expand_args=False)
+
+
 @app.command()
 def version() -> None:
     """Show the installed ContextForge version."""

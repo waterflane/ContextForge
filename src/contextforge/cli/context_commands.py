@@ -21,6 +21,7 @@ from contextforge.context import (
     ContextSelection,
     ProjectTreeError,
     SelectionError,
+    SelectorNoMatchError,
     build_context_package,
     inspect_context_package_json,
     parse_line_range_request,
@@ -60,14 +61,17 @@ def create_context(
         typer.Option(
             "--include",
             "--file",
-            help="Include one exact repository-relative file; repeatable.",
+            help=(
+                "Include one exact relative file; use --directory or --glob for "
+                "other selector kinds; repeatable."
+            ),
         ),
     ] = None,
     directories: Annotated[
         list[str] | None,
         typer.Option(
             "--directory",
-            help="Include one directory recursively; repeatable.",
+            help="Include one relative directory recursively; repeatable.",
         ),
     ] = None,
     globs: Annotated[
@@ -161,6 +165,8 @@ def create_context(
         package = build_context_package(path, options)
     except (FileNotFoundError, NotADirectoryError) as exc:
         _exit_with_error(str(exc), code=2)
+    except SelectorNoMatchError as exc:
+        _exit_with_error(_selector_no_match_message(exc), code=2)
     except (SelectionError, ContextBuildLimitError) as exc:
         _exit_with_error(str(exc), code=2)
     except (
@@ -221,3 +227,12 @@ def inspect_context(
 def _exit_with_error(message: str, *, code: int) -> Never:
     typer.echo(f"Error: {message}", err=True)
     raise typer.Exit(code=code)
+
+
+def _selector_no_match_message(error: SelectorNoMatchError) -> str:
+    if error.selector.kind == "exact_path":
+        return (
+            f"Exact file {error.selector.value!r} was not found in the repository "
+            "snapshot.\nUse --directory for directories or --glob for patterns."
+        )
+    return str(error)

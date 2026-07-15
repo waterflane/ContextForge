@@ -46,7 +46,7 @@ Repository = "https://github.com/waterflane/contextforge"
 Issues = "https://github.com/waterflane/contextforge/issues"
 
 [project.scripts]
-contextforge = "contextforge.cli.main:app"
+contextforge = "contextforge.cli.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/contextforge"]

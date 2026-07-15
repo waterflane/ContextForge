@@ -441,11 +441,13 @@ are not filesystem paths.
 
 ### Exact paths
 
-- `--file PATH` matches exactly one `ProjectFile.path`.
+- `--include PATH` (alias `--file PATH`) matches exactly one
+  `ProjectFile.path`.
 - Matching is case-sensitive on every OS.
 - A path absent from `ProjectSnapshot.files` is an error; it is not opened to
   decide whether it exists.
-- A directory path supplied to `--file` is an unmatched-selector error.
+- A directory path supplied to `--include` or `--file` is an
+  unmatched-selector error.
 
 ### Directories
 
@@ -550,14 +552,14 @@ self-contained and records the verified raw source hash.
 
 ### CLI syntax
 
-`--lines PATH:START-END` is repeatable. The parser splits at the final colon
+`--include-lines PATH:START-END` (alias `--lines`) is repeatable. The parser
+splits at the final colon
 whose suffix matches two decimal integers separated by `-`, so a legal POSIX
 filename containing an earlier colon remains addressable. Examples:
 
 ```text
---lines src/app.py:1-40
---lines docs/design.md:12-12
---lines data:legacy.txt:3-9
+--include-lines pyproject.toml:1-20
+--include-lines README.md:1-5
 ```
 
 Rules:
@@ -861,6 +863,10 @@ contextforge context create [PATH]
 - `--include` is the exact-path selector and retains `--file` as an alias;
   directory and glob selectors stay explicit because the core does not guess a
   selector's kind. `--include-lines` retains `--lines` as an alias.
+- Executable entry points call the shared typed `run()` wrapper, which invokes
+  Typer with `windows_expand_args=False`. This prevents Click from expanding
+  GitWildMatch values into working-directory paths on Windows; ContextForge's
+  selector processing remains unchanged.
 - With no include options, all selectable snapshot files are initially
   selected. Users can use exclusions alone.
 - `--include-tree` is enabled by default and can be disabled without changing

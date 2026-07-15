@@ -189,18 +189,140 @@ def test_no_include_uses_approved_all_files_default_and_task_default(
     assert [item["path"] for item in payload["files"]] == ["a.txt", "b.txt"]
 
 
-def test_unmatched_selector_and_empty_task_are_usage_errors(tmp_path: Path) -> None:
+@pytest.mark.parametrize("selector", ["missing.py", "src", "*.py"])
+def test_unmatched_exact_file_has_actionable_error_without_reinterpretation(
+    tmp_path: Path, selector: str
+) -> None:
+    repository = tmp_path / "repository"
+    _write_repository(repository, {"src/app.py": "pass\n"})
+
+    result = _invoke_create(repository, "--include", selector)
+
+    assert result.exit_code == 2
+    assert (
+        f"Exact file {selector!r} was not found in the repository snapshot"
+        in _plain(result.stderr)
+    )
+    assert "Use --directory for directories or --glob for patterns" in _plain(
+        result.stderr
+    )
+    assert result.stdout == ""
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("option", "selector_type"),
+    [("--directory", "directory"), ("--glob", "glob")],
+)
+def test_other_unmatched_include_kinds_keep_typed_selector_diagnostics(
+    tmp_path: Path, option: str, selector_type: str
+) -> None:
     repository = tmp_path / "repository"
     _write_repository(repository, {"app.py": "pass\n"})
 
-    unmatched = _invoke_create(repository, "--include", "missing.py")
+    result = _invoke_create(repository, option, "missing")
+
+    assert result.exit_code == 2
+    assert f"{selector_type} selector matched no snapshot file" in _plain(result.stderr)
+    assert "Exact file" not in result.stderr
+    assert result.stdout == ""
+    assert "Traceback" not in result.output
+
+
+def test_empty_task_is_a_usage_error(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _write_repository(repository, {"app.py": "pass\n"})
+
     empty_task = _invoke_create(repository, "--task", "   ")
 
-    assert unmatched.exit_code == empty_task.exit_code == 2
-    assert "matched no snapshot file" in _plain(unmatched.stderr)
+    assert empty_task.exit_code == 2
     assert "task description must not be empty" in _plain(empty_task.stderr)
-    assert unmatched.stdout == empty_task.stdout == ""
-    assert "Traceback" not in unmatched.output + empty_task.output
+    assert empty_task.stdout == ""
+    assert "Traceback" not in empty_task.output
+
+
+def test_option_equals_exclusion_syntax_remains_supported(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _write_repository(
+        repository,
+        {"src/__init__.py": "", "src/app.py": "pass\n"},
+    )
+
+    payload = _json_package(
+        _invoke_create(
+            repository,
+            "--directory",
+            "src",
+            "--exclude=**/__init__.py",
+            "--format",
+            "json",
+        )
+    )
+
+    assert [item["path"] for item in payload["files"]] == ["src/app.py"]
+
+
+def test_documented_selector_command_shapes_execute_against_a_repository(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    _write_repository(
+        repository,
+        {
+            "pyproject.toml": "[project]\nname = 'example'\n",
+            "src/contextforge/context/__init__.py": "",
+            "src/contextforge/context/package.py": "value = 1\n",
+            "tests/test_context.py": "def test_example():\n    pass\n",
+        },
+    )
+
+    combined = _json_package(
+        _invoke_create(
+            repository,
+            "--task",
+            "Fix context serialization",
+            "--directory",
+            "src/contextforge/context",
+            "--include",
+            "pyproject.toml",
+            "--exclude",
+            "**/__init__.py",
+            "--format",
+            "json",
+        )
+    )
+    globbed = _json_package(
+        _invoke_create(
+            repository,
+            "--glob",
+            "src/contextforge/context/**/*.py",
+            "--exclude",
+            "**/__init__.py",
+            "--format",
+            "json",
+        )
+    )
+    ranged = _json_package(
+        _invoke_create(
+            repository,
+            "--include",
+            "pyproject.toml",
+            "--include-lines",
+            "pyproject.toml:1-2",
+            "--format",
+            "json",
+        )
+    )
+
+    assert [item["path"] for item in combined["files"]] == [
+        "pyproject.toml",
+        "src/contextforge/context/package.py",
+    ]
+    assert [item["path"] for item in globbed["files"]] == [
+        "src/contextforge/context/package.py"
+    ]
+    assert ranged["files"][0]["blocks"][0]["start_line"] == 1
+    assert ranged["files"][0]["blocks"][0]["end_line"] == 2
 
 
 @pytest.mark.parametrize(

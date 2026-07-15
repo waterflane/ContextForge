@@ -90,18 +90,44 @@ directory selectors, and GitWildMatch patterns remain explicit so their
 meaning is portable and deterministic.
 
 ```bash
-contextforge context create . --include src/contextforge/config.py
+contextforge context create . --include pyproject.toml
 contextforge context create . --directory src/contextforge/context --exclude "**/__init__.py"
-contextforge context create . --glob "*.py" --include-lines src/contextforge/config.py:1-40
+contextforge context create . --glob "src/contextforge/context/**/*.py"
+contextforge context create . --include pyproject.toml --include-lines pyproject.toml:1-20
 contextforge context create . --task "Review configuration" --format markdown
 contextforge context create . --format json --output context.json
 contextforge context inspect context.json
 ```
 
+PowerShell accepts the normal separated option/value form. ContextForge
+disables Click's Windows glob expansion so selector patterns reach the
+GitWildMatch selector unchanged:
+
+```powershell
+contextforge context create . `
+  --task 'Fix context serialization' `
+  --directory 'src/contextforge/context' `
+  --include 'pyproject.toml' `
+  --exclude '**/__init__.py' `
+  --format markdown `
+  --output 'context.md' `
+  --force
+
+contextforge context create . `
+  --task 'Review context modules' `
+  --glob 'src/contextforge/context/**/*.py' `
+  --exclude '**/__init__.py' `
+  --format json
+```
+
 Creation options:
 
+All selector options are repeatable. Include selectors are unioned before all
+exclusions are applied.
+
 - `--task TEXT` sets the package task; the default is `Context package`.
-- `--include PATH` (also `--file`) includes one exact portable relative path.
+- `--include PATH` (also `--file`) includes one exact portable relative file;
+  it does not infer directories or patterns.
 - `--directory PATH` recursively includes snapshot files below a directory.
 - `--glob PATTERN` includes snapshot files using GitWildMatch syntax.
 - `--exclude PATTERN` removes matches after all includes are unioned.
