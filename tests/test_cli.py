@@ -9,7 +9,7 @@ def test_version_command() -> None:
     result = runner.invoke(app, ["version"])
 
     assert result.exit_code == 0
-    assert "ContextForge 0.1.0" in result.stdout
+    assert "ContextForge 0.3.0" in result.stdout
 
 
 def test_doctor_command() -> None:

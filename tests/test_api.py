@@ -18,4 +18,4 @@ def test_version_endpoint() -> None:
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {"name": "ContextForge", "version": "0.1.0"}
+    assert response.json() == {"name": "ContextForge", "version": "0.3.0"}

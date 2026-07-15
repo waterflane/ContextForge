@@ -458,6 +458,6 @@ def test_root_help_version_and_doctor_remain_available() -> None:
     assert help_result.exit_code == 0
     assert "scan" in help_output
     assert version_result.exit_code == 0
-    assert "ContextForge 0.1.0" in version_output
+    assert "ContextForge 0.3.0" in version_output
     assert doctor_result.exit_code == 0
     assert "ContextForge is installed." in doctor_output
