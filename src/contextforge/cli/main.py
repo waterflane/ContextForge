@@ -1,5 +1,6 @@
 """ContextForge command-line interface."""
 
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Never
@@ -47,7 +48,7 @@ class TreeFormat(StrEnum):
 
 app = typer.Typer(
     name="contextforge",
-    help="Manage project context for AI models and agents.",
+    help="Build deterministic context packages from local repositories.",
     no_args_is_help=True,
 )
 app.add_typer(context_app, name="context")
@@ -56,7 +57,17 @@ app.add_typer(context_app, name="context")
 def run() -> None:
     """Run the CLI without Click rewriting native Windows arguments."""
 
+    _configure_utf8_stdio()
     app(windows_expand_args=False)
+
+
+def _configure_utf8_stdio() -> None:
+    """Keep machine-readable and Markdown output Unicode-safe on every console."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="strict")
 
 
 @app.command()

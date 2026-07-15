@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "contextforge"
 version = "0.1.0"
-description = "Build, manage, and optimize context for AI models and agents."
+description = "Build deterministic context packages from local repositories."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

@@ -14,10 +14,11 @@ its own. It prepares context for tools that do.
 
 ## Main architectural boundaries
 
-The project is planned as a modular monolith with these boundaries:
+The project is organized as a modular monolith with these boundaries:
 
 - `core`: shared domain concepts and application-level contracts;
-- `context`: future context package construction;
+- `context`: project trees, explicit selection, verified source reads, context
+  package construction, rendering, and offline JSON inspection;
 - `prompts`: future prompt package construction;
 - `repositories`: repository and language analysis adapters;
 - `storage`: storage adapters;
@@ -43,9 +44,10 @@ The CLI, local API, and future IDE integrations should act as thin entry points.
 They translate user or tool requests into calls against the application/core
 layer, then return results in their own format.
 
-The v0.1.0 CLI and API prove that the package is installed and wired correctly.
-The completed, unreleased v0.2 scanner is contained in the `repositories`
-boundary, while its table/JSON presentation remains in the thin CLI boundary.
+The repository scanner is contained in the `repositories` boundary. The
+completed, unreleased v0.3 context-package application logic is contained in
+the `context` boundary. Typer commands and table/JSON scan presentation remain
+in the thin CLI boundary.
 
 ## Excluded from v0.1.0
 

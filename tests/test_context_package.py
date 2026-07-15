@@ -576,7 +576,7 @@ def test_package_paths_reject_every_nonportable_shape(path: str) -> None:
         )
 
 
-def test_language_metadata_requires_canonical_nonempty_keys() -> None:
+def test_language_metadata_requires_canonical_safe_keys_and_consistent_counts() -> None:
     with pytest.raises(ValidationError, match="canonical key order"):
         ContextProject(
             selectable_file_count=2,
@@ -590,6 +590,20 @@ def test_language_metadata_requires_canonical_nonempty_keys() -> None:
             selectable_directory_count=0,
             selectable_source_bytes=0,
             languages={"": 1},
+        )
+    with pytest.raises(ValidationError, match="control characters"):
+        ContextProject(
+            selectable_file_count=1,
+            selectable_directory_count=0,
+            selectable_source_bytes=0,
+            languages={"Python\nInjected": 1},
+        )
+    with pytest.raises(ValidationError, match="exceed selectable_file_count"):
+        ContextProject(
+            selectable_file_count=1,
+            selectable_directory_count=0,
+            selectable_source_bytes=0,
+            languages={"Python": 2},
         )
 
 

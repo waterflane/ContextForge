@@ -134,6 +134,18 @@ def test_atomic_writer_returns_resolved_destination_and_exact_content(
     assert list(tmp_path.glob(".output.txt.*.tmp")) == []
 
 
+def test_atomic_writer_force_never_replaces_a_directory(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(OutputWriteError) as error:
+        write_output_atomic(output, "content\n", force=True)
+
+    assert str(error.value) == f"output destination is a directory: {output.resolve()}"
+    assert output.is_dir()
+    assert list(tmp_path.glob(".output.*.tmp")) == []
+
+
 def test_atomic_writer_refuses_a_destination_created_during_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

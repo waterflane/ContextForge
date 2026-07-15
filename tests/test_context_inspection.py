@@ -219,6 +219,99 @@ def test_block_hash_and_statistics_tampering_are_rejected(tmp_path: Path) -> Non
         load_context_package_json(_json(bad_statistics))
 
 
+def test_impossible_project_metadata_is_rejected_without_a_tree(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(_build(tmp_path, {"src/data": "text"}))
+    payload["tree"] = None
+
+    impossible_file_count = copy.deepcopy(payload)
+    impossible_file_count["project"]["selectable_file_count"] = 0  # type: ignore[index]
+
+    impossible_directory_count = copy.deepcopy(payload)
+    impossible_directory_count["project"]["selectable_directory_count"] = 0  # type: ignore[index]
+
+    impossible_source_bytes = copy.deepcopy(payload)
+    impossible_source_bytes["project"]["selectable_source_bytes"] = 3  # type: ignore[index]
+
+    impossible_languages = _payload(_build(tmp_path, {"src/app.py": "text"}))
+    impossible_languages["tree"] = None
+    impossible_languages["project"]["languages"] = {}  # type: ignore[index]
+
+    cases = (
+        (
+            impossible_file_count,
+            "invalid context package at package: Value error, selected files "
+            "exceed selectable_file_count",
+        ),
+        (
+            impossible_directory_count,
+            "invalid context package at package: Value error, selected path "
+            "directories exceed selectable_directory_count",
+        ),
+        (
+            impossible_source_bytes,
+            "invalid context package at package: Value error, selected source bytes "
+            "exceed selectable_source_bytes",
+        ),
+        (
+            impossible_languages,
+            "invalid context package at package: Value error, selected language "
+            "counts exceed project languages",
+        ),
+    )
+
+    for hostile_payload, expected_message in cases:
+        with pytest.raises(PackageValidationError) as error:
+            load_context_package_json(_json(hostile_payload))
+        assert str(error.value) == expected_message
+
+
+def test_impossible_file_bytes_and_hostile_language_labels_are_rejected(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(_build(tmp_path, {"file.txt": "text"}))
+
+    impossible_bytes = copy.deepcopy(payload)
+    impossible_bytes["files"][0]["source_size_bytes"] = 3  # type: ignore[index]
+
+    hostile_language = copy.deepcopy(payload)
+    hostile_language["files"][0]["language"] = "Text\nInjected: value"  # type: ignore[index]
+
+    cases = (
+        (
+            impossible_bytes,
+            "invalid context package at files.0: Value error, included content "
+            "cannot exceed source_size_bytes",
+        ),
+        (
+            hostile_language,
+            "invalid context package at files.0.language: Value error, language "
+            "labels must not contain ASCII control characters",
+        ),
+    )
+
+    for hostile_payload, expected_message in cases:
+        with pytest.raises(PackageValidationError) as error:
+            load_context_package_json(_json(hostile_payload))
+        assert str(error.value) == expected_message
+
+
+def test_project_language_counts_cannot_exceed_selectable_files(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(_build(tmp_path, {"file.txt": "text"}))
+    payload["project"]["languages"] = {"Text": 2}  # type: ignore[index]
+
+    with pytest.raises(PackageValidationError) as error:
+        load_context_package_json(_json(payload))
+
+    assert str(error.value) == (
+        "invalid context package at project: Value error, language counts exceed "
+        "selectable_file_count"
+    )
+
+
 def test_strict_schema_rejects_float_counts_and_unknown_nested_fields(
     tmp_path: Path,
 ) -> None:
@@ -365,6 +458,10 @@ def test_inspection_model_is_frozen_and_forbids_unknown_fields() -> None:
         included_character_count=0,
         included_line_count=0,
         languages={},
+    )
+
+    assert render_context_inspection(inspection).endswith(
+        "Languages: none\nSelected paths:\n  (none)\n"
     )
 
     with pytest.raises(ValidationError):

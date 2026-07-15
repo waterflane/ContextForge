@@ -87,6 +87,15 @@ class ContextFile(BaseModel):
 
         return validate_portable_package_path(path)
 
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, language: str | None) -> str | None:
+        """Reject labels that cannot be displayed as one safe metadata value."""
+
+        if language is not None:
+            _validate_language_label(language)
+        return language
+
     @model_validator(mode="after")
     def validate_blocks(self) -> ContextFile:
         """Reject duplicate, noncanonical, or contradictory block shapes."""
@@ -120,6 +129,8 @@ class ContextFile(BaseModel):
             block.size_bytes for block in self.blocks
         ):
             raise ValueError("included_content_bytes does not match blocks")
+        if self.included_content_bytes > self.source_size_bytes:
+            raise ValueError("included content cannot exceed source_size_bytes")
         return self
 
 
@@ -147,6 +158,14 @@ class ContextProject(BaseModel):
 
         _validate_language_counts(languages)
         return languages
+
+    @model_validator(mode="after")
+    def validate_language_total(self) -> ContextProject:
+        """Language counts describe a subset of the selectable file inventory."""
+
+        if sum(self.languages.values()) > self.selectable_file_count:
+            raise ValueError("language counts exceed selectable_file_count")
+        return self
 
 
 class ContextStatistics(BaseModel):
@@ -244,6 +263,35 @@ class ContextPackage(BaseModel):
         if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
             raise ValueError("files must have unique paths in canonical order")
 
+        selected_file_count = len(self.files)
+        if selected_file_count > self.project.selectable_file_count:
+            raise ValueError("selected files exceed selectable_file_count")
+
+        selected_source_bytes = sum(file.source_size_bytes for file in self.files)
+        if selected_source_bytes > self.project.selectable_source_bytes:
+            raise ValueError("selected source bytes exceed selectable_source_bytes")
+
+        selected_directories: set[str] = set()
+        for path in paths:
+            parts = path.split("/")
+            selected_directories.update(
+                "/".join(parts[:index]) for index in range(1, len(parts))
+            )
+        selected_directory_count = len(selected_directories)
+        if selected_directory_count > self.project.selectable_directory_count:
+            raise ValueError(
+                "selected path directories exceed selectable_directory_count"
+            )
+
+        selected_languages = Counter(
+            file.language for file in self.files if file.language is not None
+        )
+        if any(
+            count > self.project.languages.get(language, 0)
+            for language, count in selected_languages.items()
+        ):
+            raise ValueError("selected language counts exceed project languages")
+
         if self.tree is not None:
             tree_paths = {
                 entry.path for entry in self.tree.entries if entry.kind == "file"
@@ -323,5 +371,12 @@ def validate_portable_package_path(path: str) -> str:
 def _validate_language_counts(languages: dict[str, int]) -> None:
     if tuple(languages) != tuple(sorted(languages)):
         raise ValueError("language counts must use canonical key order")
-    if any(not language for language in languages):
-        raise ValueError("language count keys must not be empty")
+    for language in languages:
+        _validate_language_label(language)
+
+
+def _validate_language_label(language: str) -> None:
+    if not language:
+        raise ValueError("language labels must not be empty")
+    if any(ord(character) < 32 or ord(character) == 127 for character in language):
+        raise ValueError("language labels must not contain ASCII control characters")

@@ -2,12 +2,12 @@
 
 This roadmap describes broad milestones only. It does not promise dates.
 
-## v0.1: Project foundation
+## v0.1: Project foundation (milestone complete)
 
-- Establish repository structure.
-- Provide a minimal Python package.
-- Add CLI and local API skeletons.
-- Add configuration, logging, documentation, tests, and CI.
+- [x] Establish repository structure.
+- [x] Provide a minimal Python package.
+- [x] Add CLI and local API skeletons.
+- [x] Add configuration, logging, documentation, tests, and CI.
 
 ## v0.2: Repository scanning and file inventory (milestone complete)
 

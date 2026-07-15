@@ -3,9 +3,10 @@
 Create deterministic, portable, reviewable context packages from local
 repositories.
 
-ContextForge is currently an early-stage local context-packaging tool and
-architectural foundation. It is intended to remain an independent
-context-management layer between a software repository and external AI tools.
+ContextForge is an early-stage local context-packaging tool. It scans a local
+repository, applies explicit selectors, verifies selected source files, and
+renders deterministic Markdown or JSON packages for review or use by other
+tools.
 
 ## Status
 
@@ -15,22 +16,9 @@ the repository-scanning foundation. ContextForge does not perform automatic
 relevance selection, prompt optimization, model calls, embeddings, or
 repository indexing.
 
-## Long-term vision
-
-ContextForge aims to help developers:
-
-- analyze software repositories;
-- identify information relevant to a development task;
-- organize project knowledge;
-- build compact, reviewable context packages;
-- generate prompts adapted to different AI models and agents.
-
-ContextForge is not an AI coding assistant. It should prepare and manage
-context for other tools.
-
 ## Non-goals
 
-The initial release deliberately excludes:
+The current implementation deliberately excludes:
 
 - repository indexing or retrieval;
 - embeddings or vector databases;
@@ -40,9 +28,9 @@ The initial release deliberately excludes:
 - IDE extensions;
 - background services or persistent storage.
 
-## Planned architecture
+## Architecture
 
-ContextForge is planned as a straightforward modular monolith:
+ContextForge is a straightforward modular monolith:
 
 - core domain and application logic;
 - repository and language analysis adapters;
@@ -50,7 +38,7 @@ ContextForge is planned as a straightforward modular monolith:
 - model-provider adapters;
 - CLI interface;
 - local HTTP API;
-- future IDE extensions.
+- placeholder boundaries for future integrations.
 
 The core package must remain independent from FastAPI, Typer, model providers,
 storage implementations, and editor integrations.
@@ -142,8 +130,9 @@ exclusions are applied.
   not model-specific token budgets.
 
 Without `--output`, package content is written to stdout. JSON stdout contains
-no status text and remains directly parseable. Package files contain portable
-relative paths, never the scanned repository's absolute path.
+no status text, is emitted as UTF-8, and remains directly parseable. Package
+files contain portable relative paths, never the scanned repository's absolute
+path.
 
 `context inspect` accepts JSON packages only. It performs bounded, strict
 schema and semantic validation without accessing the original repository, then
@@ -231,15 +220,7 @@ mypy
 pytest
 ```
 
-## Roadmap summary
-
-- v0.1: project foundation;
-- v0.2: repository scanning and file inventory;
-- v0.3: context selection and export (implemented, unreleased);
-- v0.4: local model integration;
-- later: IDE integration and advanced project memory.
-
-See [ROADMAP.md](ROADMAP.md) for the initial roadmap.
+See [ROADMAP.md](ROADMAP.md) for milestone status and future work.
 
 ## Contributing
 

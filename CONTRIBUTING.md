@@ -2,9 +2,9 @@
 
 Thank you for your interest in ContextForge.
 
-ContextForge remains intentionally small after its v0.2 repository-scanning
-milestone. Contributions should preserve the project's current goal: a clear
-foundation without speculative business logic.
+ContextForge remains intentionally small after its completed v0.3 context
+packages milestone. Contributions should preserve its explicit, deterministic
+local packaging behavior without speculative business logic.
 
 ## Development workflow
 

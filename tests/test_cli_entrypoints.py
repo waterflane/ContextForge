@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
@@ -70,6 +71,23 @@ def test_run_disables_click_windows_argument_expansion(
     assert calls == [False]
 
 
+def test_run_supports_embedded_text_streams_without_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def record_run(*, windows_expand_args: bool) -> None:
+        calls.append(windows_expand_args)
+
+    monkeypatch.setattr(sys, "stdout", StringIO())
+    monkeypatch.setattr(sys, "stderr", StringIO())
+    monkeypatch.setattr(cli_module, "app", record_run)
+
+    cli_module.run()
+
+    assert calls == [False]
+
+
 def test_console_script_and_module_share_the_run_wrapper() -> None:
     project_root = Path(__file__).resolve().parents[1]
     configuration = tomllib.loads(
@@ -80,6 +98,35 @@ def test_console_script_and_module_share_the_run_wrapper() -> None:
         "contextforge.cli.main:run"
     )
     assert module_entry.run is cli_module.run
+
+
+@pytest.mark.parametrize("entrypoint", ["console", "module"])
+def test_entrypoints_emit_utf8_when_the_inherited_stream_encoding_is_legacy(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    (tmp_path / "unicode.py").write_text('message = "Привет, 世界"\n', encoding="utf-8")
+    command = (
+        _console_command()
+        if entrypoint == "console"
+        else [sys.executable, "-m", "contextforge"]
+    )
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONIOENCODING"] = "cp1251:strict"
+
+    result = subprocess.run(
+        [*command, "context", "create", ".", "--format", "json"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    payload = cast(dict[str, Any], json.loads(result.stdout))
+    assert payload["files"][0]["blocks"][0]["text"] == ('message = "Привет, 世界"\n')
 
 
 @pytest.mark.skipif(

@@ -35,6 +35,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Configure the shared console and module entry points for UTF-8 stdout and
+  stderr so valid Unicode packages do not fail on legacy Windows code pages.
+- Reject context packages whose selected files, source bytes, directory
+  prefixes, or language counts exceed their claimed selectable project
+  metadata, including packages that omit the optional tree.
+- Reject control characters in package language labels so offline inspection
+  cannot emit attacker-controlled terminal control lines.
+- Update security and architecture documentation for verified source reads,
+  portable paths, atomic publication, and concurrent-modification assumptions.
+
 - Disable Click's native Windows argument expansion in the shared console and
   module entry wrapper so quoted GitWildMatch selectors reach ContextForge as
   one unchanged argument.
