@@ -1,6 +1,27 @@
 """Context selection, reading, package, and project-tree domain boundary."""
 
-from contextforge.context.package import ContextPackage
+from contextforge.context.builder import (
+    ContextBuilder,
+    ContextBuildError,
+    ContextBuildLimitError,
+    ContextBuildOptions,
+    ContextContentByteLimitError,
+    ContextFileCountLimitError,
+    ContextSourceByteLimitError,
+    build_context_package,
+)
+from contextforge.context.package import (
+    CONTEXT_PACKAGE_SCHEMA_VERSION,
+    DEFAULT_CONTEXT_TASK,
+    ContextBlock,
+    ContextFile,
+    ContextItem,
+    ContextPackage,
+    ContextProject,
+    ContextStatistics,
+    calculate_context_statistics,
+    canonical_line_count,
+)
 from contextforge.context.reader import (
     ContextLimitError,
     ContextReaderError,
@@ -52,11 +73,25 @@ from contextforge.context.tree import (
 )
 
 __all__ = [
+    "CONTEXT_PACKAGE_SCHEMA_VERSION",
+    "DEFAULT_CONTEXT_TASK",
     "MAX_LINE_NUMBER",
+    "ContextBlock",
+    "ContextBuildError",
+    "ContextBuildLimitError",
+    "ContextBuildOptions",
+    "ContextBuilder",
+    "ContextContentByteLimitError",
+    "ContextFile",
+    "ContextFileCountLimitError",
+    "ContextItem",
     "ContextLimitError",
     "ContextPackage",
+    "ContextProject",
     "ContextReaderError",
     "ContextSelection",
+    "ContextSourceByteLimitError",
+    "ContextStatistics",
     "DuplicateSnapshotPathError",
     "FileChangedError",
     "InvalidLineRangeError",
@@ -87,7 +122,10 @@ __all__ = [
     "SelectorNoMatchError",
     "TextDecodingError",
     "build_project_tree",
+    "build_context_package",
+    "calculate_context_statistics",
     "canonicalize_line_ranges",
+    "canonical_line_count",
     "parse_line_range_request",
     "read_selected_text_file",
     "read_selected_text_files",

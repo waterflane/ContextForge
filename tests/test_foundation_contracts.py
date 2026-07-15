@@ -3,17 +3,18 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from contextforge.context import ContextPackage
+from contextforge.context import build_context_package
 from contextforge.prompts import PromptPackage
 from contextforge.repositories.analysis import RepositoryAnalyzer
 from contextforge.storage.backend import StorageBackend
 
 
-def test_foundation_package_models_are_frozen() -> None:
-    context_package = ContextPackage(title="Repository", items=("README.md",))
+def test_foundation_package_models_are_frozen(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Repository\n", encoding="utf-8")
+    context_package = build_context_package(tmp_path)
     prompt_package = PromptPackage(title="Review", body="Review the repository.")
 
-    assert context_package.items == ("README.md",)
+    assert tuple(item.path for item in context_package.items) == ("README.md",)
     assert prompt_package.body == "Review the repository."
     with pytest.raises(ValidationError):
         context_package.title = "Changed"
