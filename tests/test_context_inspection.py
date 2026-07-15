@@ -264,6 +264,7 @@ def test_inspection_summary_and_display_are_deterministic(tmp_path: Path) -> Non
     assert rendered == (
         "Schema version: 1\n"
         "Title: Inspect Привет\n"
+        "Task: Inspect Привет\n"
         "Selectable files: 2\n"
         "Selectable directories: 1\n"
         "Selected files: 2\n"
@@ -272,6 +273,9 @@ def test_inspection_summary_and_display_are_deterministic(tmp_path: Path) -> Non
         "Included characters: 11\n"
         "Included lines: 2\n"
         "Languages: Markdown: 1, Python: 1\n"
+        "Selected paths:\n"
+        "  README.md (all lines)\n"
+        "  src/app.py (all lines)\n"
     )
 
 

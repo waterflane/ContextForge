@@ -7,6 +7,7 @@ from typing import Annotated, Never
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.cli.context_commands import context_app
 from contextforge.cli.scan_output import (
     OutputWriteError,
     ScanReport,
@@ -49,6 +50,7 @@ app = typer.Typer(
     help="Manage project context for AI models and agents.",
     no_args_is_help=True,
 )
+app.add_typer(context_app, name="context")
 
 
 @app.command()

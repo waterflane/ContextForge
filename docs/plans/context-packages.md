@@ -1,7 +1,8 @@
 # ContextForge v0.3.0 — Context Packages
 
-Status: implementation plan only. This document does not authorize production
-implementation.
+Status: approved plan, implemented through the CLI adapter stage. Section 18
+records the final public CLI spellings where implementation differs from the
+original proposal.
 
 ## 1. Current repository assessment
 
@@ -841,22 +842,30 @@ contextforge tree [PATH] [--depth INTEGER]
 
 ```text
 contextforge context create [PATH]
-  [--file PATH]...
+  [--include PATH]...
   [--directory PATH]...
   [--glob PATTERN]...
   [--exclude PATTERN]...
-  [--lines PATH:START-END]...
-  [--title TEXT]
+  [--include-lines PATH:START-END]...
+  [--task TEXT]
+  [--include-tree | --no-include-tree]
   [--format markdown|json]
   [--output PATH]
+  [--force]
   [--max-files INTEGER]
-  [--max-total-size INTEGER]
+  [--max-context-bytes INTEGER]
 ```
 
-- `PATH` defaults to `.`, format defaults to `markdown`, title defaults to the
+- `PATH` defaults to `.`, format defaults to `markdown`, task defaults to the
   constant `Context package`, and builder limits use section 16 defaults.
+- `--include` is the exact-path selector and retains `--file` as an alias;
+  directory and glob selectors stay explicit because the core does not guess a
+  selector's kind. `--include-lines` retains `--lines` as an alias.
 - With no include options, all selectable snapshot files are initially
   selected. Users can use exclusions alone.
+- `--include-tree` is enabled by default and can be disabled without changing
+  file selection. `--max-context-bytes` maps to the builder's included
+  canonical-content byte limit.
 - The output extension does not infer or override format.
 - Without `--output`, the exact rendered package goes to stdout.
 - With `--output`, stdout reports the resolved destination only after atomic
@@ -897,8 +906,8 @@ an unreadable existing file is operational 1.
 ### Output overwrite and atomicity
 
 - Parent directories must already exist and are never created implicitly.
-- Existing files, directories, symlinks, and other destination entries are
-  refused. v0.3 has no `--force` option.
+- Existing destinations are refused by default. `--force` atomically replaces
+  an existing non-directory entry; directories remain invalid destinations.
 - Fully render and enforce render limits before opening a temporary file.
 - Reuse the existing sibling-temp, UTF-8, LF, flush, `fsync`, hard-link publish,
   racing-destination refusal, and cleanup policy.

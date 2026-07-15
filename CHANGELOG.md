@@ -9,6 +9,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Added `contextforge context create [PATH]` as a thin adapter over the public
+  context builder and Markdown/JSON renderers, with exact, directory, glob,
+  exclusion, line-range, optional-tree, task, and byte/file-limit options.
+- Added atomic package output with explicit `--force` replacement and clean,
+  parseable JSON stdout when no output path is supplied.
+- Added `contextforge context inspect PACKAGE` for bounded offline JSON schema
+  and semantic validation, including task, statistics, selected paths, and
+  included line-range display without the original repository.
+- Added deterministic project-tree rendering, snapshot-only manual selection,
+  verified UTF-8 source reads, canonical context packages, and pure Markdown
+  and JSON renderers.
+
 - Added deterministic recursive repository traversal with portable relative
   paths, SHA-256 hashes, basic language detection, and scan summary statistics.
 - Added default exclusions, protected VCS metadata handling, repository-root

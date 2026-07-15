@@ -14,6 +14,7 @@ from contextforge.context.package import (
     ContextPackage,
 )
 from contextforge.context.renderers import MAX_JSON_PACKAGE_BYTES
+from contextforge.context.selection import LineRange
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -47,6 +48,15 @@ class UnsupportedSchemaVersionError(PackageValidationError):
         )
 
 
+class ContextInspectionItem(BaseModel):
+    """One selected portable path and its optional included line ranges."""
+
+    path: str
+    line_ranges: tuple[LineRange, ...] = ()
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ContextInspection(BaseModel):
     """Concise deterministic information calculated from a valid package."""
 
@@ -60,6 +70,7 @@ class ContextInspection(BaseModel):
     included_character_count: int
     included_line_count: int
     languages: dict[str, int]
+    items: tuple[ContextInspectionItem, ...] = ()
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -133,6 +144,17 @@ def inspect_context_package(package: ContextPackage) -> ContextInspection:
         included_character_count=statistics.included_character_count,
         included_line_count=statistics.included_line_count,
         languages=dict(statistics.languages),
+        items=tuple(
+            ContextInspectionItem(
+                path=context_file.path,
+                line_ranges=tuple(
+                    LineRange(start=block.start_line, end=block.end_line)
+                    for block in context_file.blocks
+                    if block.start_line is not None and block.end_line is not None
+                ),
+            )
+            for context_file in validated.files
+        ),
     )
 
 
@@ -159,20 +181,41 @@ def render_context_inspection(inspection: ContextInspection) -> str:
         if inspection.languages
         else "none"
     )
-    return "\n".join(
-        (
-            f"Schema version: {inspection.schema_version}",
-            f"Title: {inspection.title}",
-            f"Selectable files: {inspection.selectable_file_count}",
-            f"Selectable directories: {inspection.selectable_directory_count}",
-            f"Selected files: {inspection.selected_file_count}",
-            f"Ranged files: {inspection.ranged_file_count}",
-            f"Included content bytes: {inspection.included_content_bytes}",
-            f"Included characters: {inspection.included_character_count}",
-            f"Included lines: {inspection.included_line_count}",
-            f"Languages: {languages}",
-            "",
+    lines = [
+        f"Schema version: {inspection.schema_version}",
+        f"Title: {inspection.title}",
+        f"Task: {inspection.title}",
+        f"Selectable files: {inspection.selectable_file_count}",
+        f"Selectable directories: {inspection.selectable_directory_count}",
+        f"Selected files: {inspection.selected_file_count}",
+        f"Ranged files: {inspection.ranged_file_count}",
+        f"Included content bytes: {inspection.included_content_bytes}",
+        f"Included characters: {inspection.included_character_count}",
+        f"Included lines: {inspection.included_line_count}",
+        f"Languages: {languages}",
+        "Selected paths:",
+    ]
+    if not inspection.items:
+        lines.append("  (none)")
+    for item in inspection.items:
+        included = (
+            ", ".join(
+                f"{line_range.start}-{line_range.end}"
+                for line_range in item.line_ranges
+            )
+            if item.line_ranges
+            else "all lines"
         )
+        lines.append(f"  {_visible_path(item.path)} ({included})")
+    return "\n".join((*lines, ""))
+
+
+def _visible_path(path: str) -> str:
+    return "".join(
+        character
+        if ord(character) >= 32 and ord(character) != 127
+        else f"\\u{ord(character):04x}"
+        for character in path
     )
 
 

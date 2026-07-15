@@ -1,17 +1,18 @@
 # ContextForge
 
-Create a deterministic local repository inventory as a foundation for future
-context-management workflows.
+Create deterministic, portable, reviewable context packages from local
+repositories.
 
-ContextForge is currently an early-stage repository inventory tool and
-architectural foundation. It is intended to become an independent
+ContextForge is currently an early-stage local context-packaging tool and
+architectural foundation. It is intended to remain an independent
 context-management layer between a software repository and external AI tools.
 
 ## Status
 
-The completed, unreleased v0.2 milestone adds deterministic local repository
-scanning to the v0.1.0 architectural foundation. ContextForge does not yet
-perform semantic context retrieval, prompt generation, model calls, or
+The unreleased v0.3 milestone adds manual context selection, verified source
+reading, portable Markdown and JSON packages, and offline JSON inspection to
+the repository-scanning foundation. ContextForge does not perform automatic
+relevance selection, prompt optimization, model calls, embeddings, or
 repository indexing.
 
 ## Long-term vision
@@ -80,6 +81,53 @@ python -m pip install -e ".[dev]"
 contextforge version
 contextforge doctor
 ```
+
+### Context packages
+
+Create a package from a repository. With no include option, all selectable
+snapshot files are included; exclusions may be used alone. Exact selectors,
+directory selectors, and GitWildMatch patterns remain explicit so their
+meaning is portable and deterministic.
+
+```bash
+contextforge context create . --include src/contextforge/config.py
+contextforge context create . --directory src/contextforge/context --exclude "**/__init__.py"
+contextforge context create . --glob "*.py" --include-lines src/contextforge/config.py:1-40
+contextforge context create . --task "Review configuration" --format markdown
+contextforge context create . --format json --output context.json
+contextforge context inspect context.json
+```
+
+Creation options:
+
+- `--task TEXT` sets the package task; the default is `Context package`.
+- `--include PATH` (also `--file`) includes one exact portable relative path.
+- `--directory PATH` recursively includes snapshot files below a directory.
+- `--glob PATTERN` includes snapshot files using GitWildMatch syntax.
+- `--exclude PATTERN` removes matches after all includes are unioned.
+- `--include-lines PATH:START-END` (also `--lines`) includes one-based,
+  inclusive source ranges and may be repeated.
+- `--include-tree` / `--no-include-tree` controls portable tree metadata.
+- `--format markdown|json` selects output; Markdown is the default.
+- `--output PATH` publishes the fully rendered package atomically. Existing
+  destinations require `--force`, and parent directories must already exist.
+- `--max-files INTEGER` limits selected files; `--max-context-bytes INTEGER`
+  limits included canonical UTF-8 content bytes. These are byte safeguards,
+  not model-specific token budgets.
+
+Without `--output`, package content is written to stdout. JSON stdout contains
+no status text and remains directly parseable. Package files contain portable
+relative paths, never the scanned repository's absolute path.
+
+`context inspect` accepts JSON packages only. It performs bounded, strict
+schema and semantic validation without accessing the original repository, then
+prints the task, schema version, counts, statistics, selected paths, and line
+ranges. Malformed or unsupported packages are rejected without a traceback.
+
+Context command exit code 0 means success, 1 means an operational, read,
+decode, render, output, or package-validation failure, and 2 means invalid
+command input, repository root, selector, range, task, or limit. Code 3 remains
+reserved for `scan --fail-on-error`.
 
 ### Repository scanning
 
@@ -161,7 +209,7 @@ pytest
 
 - v0.1: project foundation;
 - v0.2: repository scanning and file inventory;
-- v0.3: context selection and export;
+- v0.3: context selection and export (implemented, unreleased);
 - v0.4: local model integration;
 - later: IDE integration and advanced project memory.
 

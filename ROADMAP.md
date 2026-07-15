@@ -15,11 +15,12 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Respect ignore rules.
 - [x] Produce a reviewable project file inventory.
 
-## v0.3: Context selection and export
+## v0.3: Context selection and export (milestone complete)
 
-- Select files and metadata for a development task.
-- Build compact context packages.
-- Export context in simple reviewable formats.
+- [x] Select files and metadata manually for a development task.
+- [x] Build bounded, portable context packages with verified source content.
+- [x] Export deterministic Markdown and schema-versioned JSON.
+- [x] Inspect and validate JSON packages without the original repository.
 
 ## v0.4: Local model integration
 

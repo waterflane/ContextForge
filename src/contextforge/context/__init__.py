@@ -13,6 +13,7 @@ from contextforge.context.builder import (
 from contextforge.context.inspection import (
     ContextInspection,
     ContextInspectionError,
+    ContextInspectionItem,
     PackageReadError,
     PackageValidationError,
     UnsupportedSchemaVersionError,
@@ -106,6 +107,7 @@ __all__ = [
     "ContextItem",
     "ContextInspection",
     "ContextInspectionError",
+    "ContextInspectionItem",
     "ContextLimitError",
     "ContextPackage",
     "ContextProject",
