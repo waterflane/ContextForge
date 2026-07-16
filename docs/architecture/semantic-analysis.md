@@ -52,8 +52,11 @@ budget.
 For a large file, ContextForge covers the complete canonical source with
 deterministic bounded chunks, separately analyzes verified functions, methods,
 and classes, and synthesizes the file view from validated chunk and symbol
-analyses. Exceeding a chunk or request bound is an explicit failed analysis;
-source is never silently truncated and reported as successful.
+analyses. Those prior model interpretations remain in an explicitly untrusted
+context envelope during synthesis; they are not relabeled as CodeMap facts.
+Synthesized evidence must match evidence already accepted from a bounded chunk
+or symbol response. Exceeding a chunk or request bound is an explicit failed
+analysis; source is never silently truncated and reported as successful.
 
 ## Records and evidence
 
@@ -63,6 +66,8 @@ accepted claim includes its text, confidence and rationale, available verified
 source ranges and fact IDs, prompt version, provider ID, model ID, and source
 SHA-256. Unknown symbols, facts, stale hashes, invalid ranges, unknown fields,
 malformed JSON, non-finite confidence, and oversized responses are rejected.
+Symbol evidence must also fall within that symbol's verified declaration range,
+including when a small-file response analyzes all symbols in one request.
 
 A completed interpretation is checkpointed atomically in staging only after
 the entire response validates. Publication copies structural facts unchanged,

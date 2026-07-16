@@ -111,24 +111,28 @@ requirement in tests.
 
 ## Trust boundary
 
-`ModelRequest` keeps five inputs separate:
+`ModelRequest` keeps six inputs separate:
 
 1. system instructions;
 2. the analysis task;
 3. trusted, deterministic CodeMap facts;
 4. untrusted source records with portable path, SHA-256, UTF-8 byte length, and
-collision-safe deterministic delimiters; and
-5. the expected output schema.
+   collision-safe deterministic delimiters;
+5. optional validated prior model output, still framed as untrusted context with
+   its own label, SHA-256, UTF-8 byte length, and collision-safe delimiter; and
+6. the expected output schema.
 
-Each source is capped at 1,000,000 transmitted UTF-8 bytes, at most 100 sources
-and 4,000,000 source bytes may enter one request, and trusted CodeMap JSON is
-capped at 4,000,000 bytes.
+Each source is capped at 1,000,000 transmitted UTF-8 bytes. At most 100 source
+records, 100 prior-context records, and 4,000,000 combined untrusted bytes may
+enter one request; trusted CodeMap JSON is separately capped at 4,000,000 bytes.
 
 Only system instructions occupy the provider system message. Source appears
-inside the user message as inert delimited data and is followed by an explicit
-reminder that repository text is never instruction. The provider layer offers
-no filesystem, network, Git, shell, execution, mutation, discovery, or MCP
-tools and does not interpret repository instructions as actions.
+inside the user message as inert delimited data. Prior model output used for
+bounded synthesis has a distinct untrusted envelope and is never labeled as a
+CodeMap fact. Both are followed by an explicit reminder that untrusted data is
+never instruction. The provider layer offers no filesystem, network, Git,
+shell, execution, mutation, discovery, or MCP tools and does not interpret
+repository instructions as actions.
 
 ## Ollama adapter
 

@@ -148,8 +148,15 @@ def _valid_response(request: ModelRequest, _: int) -> str:
             "schema_version": 1,
             "symbol": _symbol_payload(symbol, _first_range(request)),
         }
-    elif request.purpose in {"file-chunk-semantics", "file-synthesis"}:
+    elif request.purpose == "file-chunk-semantics":
         payload = {"schema_version": 1, "file": _file_payload(request)}
+    elif request.purpose == "file-synthesis":
+        synthesized_file = _file_payload(request)
+        payload = {"schema_version": 1, "file": synthesized_file}
+        assert len(request.untrusted_contexts) == 1
+        prior = json.loads(request.untrusted_contexts[0].text)
+        prior_evidence = prior["chunk_analyses"][0]["primary_purpose"]["evidence"]
+        synthesized_file["primary_purpose"]["evidence"] = prior_evidence
     else:
         raw_symbols = request.trusted_code_map_facts.get("symbols", [])
         assert isinstance(raw_symbols, list)
@@ -229,7 +236,7 @@ def q(a):
     assert analysis.primary_purpose.provider_id == "fake"
     assert analysis.primary_purpose.model_id == "semantic-v1"
     assert analysis.primary_purpose.source_sha256 == analysis.source_sha256
-    assert analysis.primary_purpose.analyzer_prompt_version == "1"
+    assert analysis.primary_purpose.analyzer_prompt_version == "2"
     assert analysis.primary_purpose.evidence[0].path == "src/модуль.py"
     assert analysis.primary_purpose.confidence.value == 0.9
     assert {item.kind for item in analysis.symbols} == {"class", "method", "function"}
@@ -274,7 +281,13 @@ def test_prompt_injection_stays_untrusted_and_cannot_select_paths(
 
 @pytest.mark.parametrize(
     "failure",
-    ["malformed", "invalid_evidence", "invalid_column", "unknown_symbol"],
+    [
+        "malformed",
+        "invalid_evidence",
+        "invalid_column",
+        "unknown_fact",
+        "unknown_symbol",
+    ],
 )
 def test_invalid_model_outputs_are_failed_never_complete(
     tmp_path: Path, failure: str, monkeypatch: pytest.MonkeyPatch
@@ -329,6 +342,10 @@ def test_invalid_model_outputs_are_failed_never_complete(
             payload["file"]["primary_purpose"]["evidence"][0]["source_range"][
                 "end_column"
             ] = 999
+        elif failure == "unknown_fact":
+            payload["file"]["primary_purpose"]["evidence"][0]["fact_ids"] = [
+                "symbol:unknown"
+            ]
         else:
             payload["symbols"][0]["symbol_id"] = "symbol:unknown"
         return json.dumps(payload)
@@ -358,6 +375,31 @@ def test_malformed_response_retries_then_recovers(tmp_path: Path) -> None:
 
     assert result.manifest.files[0].semantic_status == "complete"
     assert valid_provider.call_count == 2
+
+
+def test_combined_response_rejects_symbol_evidence_outside_symbol(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {"app.py": "def first():\n    return 1\n\ndef second():\n    return 2\n"},
+    )
+
+    def misplaced(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        symbols = request.trusted_code_map_facts["symbols"]
+        assert isinstance(symbols, list)
+        payload["symbols"][0]["behavioral_purpose"]["evidence"][0]["source_range"] = (
+            symbols[1]["declaration_range"]
+        )
+        return json.dumps(payload)
+
+    result = _build_semantics(snapshot, _provider(responder=misplaced))
+
+    assert result.failed_paths == ("app.py",)
+    diagnostic = result.outcomes[0].diagnostic
+    assert diagnostic is not None
+    assert "outside the supplied source chunk" in diagnostic.message
 
 
 def _valid_response_for_script(path: str) -> str:
@@ -418,24 +460,35 @@ def test_semantic_persistence_is_deterministic_across_repository_roots(
 
 def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) -> None:
     snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
-    _build_semantics(snapshot, _provider(), run_id="semantic-first")
+    first = _build_semantics(snapshot, _provider(), run_id="semantic-first")
 
     prompt_provider = _provider()
     prompt = _build_semantics(
         snapshot,
         prompt_provider,
         run_id="semantic-prompt",
-        options=SemanticAnalysisOptions(prompt_version="2"),
+        options=SemanticAnalysisOptions(prompt_version="3"),
     )
     model_provider = _provider(model="semantic-v2")
     model = _build_semantics(snapshot, model_provider, run_id="semantic-model")
+    option_provider = _provider()
+    option = _build_semantics(
+        snapshot,
+        option_provider,
+        run_id="semantic-option",
+        options=SemanticAnalysisOptions(max_output_tokens=2_048),
+    )
 
     assert prompt_provider.call_count == 1
-    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "2"
+    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "3"
     assert model_provider.call_count == 1
     identity = model.analyses[0].semantic_analyzer.model_identity
     assert identity is not None
     assert identity.model_id == "semantic-v2"
+    assert option_provider.call_count == 1
+    assert option.analyses[0].analysis_options_digest != (
+        first.analyses[0].analysis_options_digest
+    )
 
 
 def test_changed_new_deleted_and_renamed_files_update_incrementally(
@@ -641,8 +694,47 @@ def test_large_file_uses_complete_chunks_symbols_and_file_synthesis(
     ]
     assert "".join(file_chunks) == source
     assert all(len(item.encode("utf-8")) <= 300 for item in file_chunks)
+    synthesis = requests[-1]
+    assert "chunk_analyses" not in synthesis.trusted_code_map_facts
+    assert synthesis.untrusted_sources == ()
+    assert len(synthesis.untrusted_contexts) == 1
+    system, user = synthesis.messages()
+    assert synthesis.untrusted_contexts[0].text not in system.content
+    assert synthesis.untrusted_contexts[0].text in user.content
+    assert "<UNTRUSTED_MODEL_CONTEXT_" in user.content
     assert result.request_count == len(requests)
     assert result.analyses[0].symbols[0].behavioral_purpose is not None
+
+
+def test_large_file_synthesis_cannot_invent_new_evidence(tmp_path: Path) -> None:
+    source = "".join(f"value_{index} = {index}\n" for index in range(80))
+    snapshot = _snapshot_with_facts(tmp_path, {"large.py": source})
+
+    def invented(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        if request.purpose == "file-synthesis":
+            payload["file"]["primary_purpose"]["evidence"][0]["source_range"] = {
+                "start_line": 1,
+                "start_column": 0,
+                "end_line": 1,
+                "end_column": 1,
+            }
+        return json.dumps(payload)
+
+    result = _build_semantics(
+        snapshot,
+        _provider(responder=invented),
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=200,
+            max_request_bytes=200_000,
+            max_chunks_per_file=20,
+        ),
+    )
+
+    assert result.failed_paths == ("large.py",)
+    diagnostic = result.outcomes[0].diagnostic
+    assert diagnostic is not None
+    assert "invented evidence" in diagnostic.message
 
 
 def test_large_file_limit_is_explicit_failure_not_truncation(tmp_path: Path) -> None:
