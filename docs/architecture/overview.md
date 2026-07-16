@@ -19,6 +19,8 @@ The project is organized as a modular monolith with these boundaries:
 - `core`: shared domain concepts and application-level contracts;
 - `context`: project trees, explicit selection, verified source reads, context
   package construction, rendering, and offline JSON inspection;
+- `intelligence`: deterministic index schemas, invalidation, immutable local
+  generations, atomic record publication, and single-writer locking;
 - `prompts`: future prompt package construction;
 - `repositories`: repository and language analysis adapters;
 - `storage`: storage adapters;
@@ -48,6 +50,11 @@ The repository scanner is contained in the `repositories` boundary. The
 completed, unreleased v0.3 context-package application logic is contained in
 the `context` boundary. Typer commands and table/JSON scan presentation remain
 in the thin CLI boundary.
+
+The first repository-intelligence implementation is storage-only. Its local
+contract is documented in
+[Repository intelligence storage](repository-intelligence-storage.md). It does
+not yet extract CodeMaps, call a model, discover context, or expose MCP.
 
 ## Excluded from v0.1.0
 

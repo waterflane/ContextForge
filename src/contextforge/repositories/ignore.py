@@ -22,6 +22,9 @@ PROTECTED_IGNORE_PATTERNS = (
     ".git/",
     ".hg/",
     ".svn/",
+    ".contextforge/index/",
+    ".contextforge/contexts/",
+    ".contextforge/runs/",
 )
 
 DEFAULT_IGNORE_PATTERNS = (
@@ -152,10 +155,17 @@ def _match_rule(
 def _match_protected(
     rules: tuple[IgnoreMatch, ...], candidate: str
 ) -> IgnoreMatch | None:
-    path_parts = candidate.rstrip("/").split("/")
+    normalized_candidate = candidate.rstrip("/").casefold()
+    path_parts = normalized_candidate.split("/")
     for rule in rules:
         protected_name = rule.pattern.rstrip("/").casefold()
-        if any(part.casefold() == protected_name for part in path_parts):
+        if "/" in protected_name:
+            if (
+                normalized_candidate == protected_name
+                or normalized_candidate.startswith(f"{protected_name}/")
+            ):
+                return rule
+        elif protected_name in path_parts:
             return rule
     return None
 

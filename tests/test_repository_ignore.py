@@ -109,6 +109,32 @@ def test_project_rules_cannot_negate_protected_vcs_metadata(
     assert nested_match.source == "protected"
 
 
+@pytest.mark.parametrize(
+    "generated_root",
+    [
+        ".contextforge/index",
+        ".contextforge/contexts",
+        ".contextforge/runs",
+    ],
+)
+def test_project_rules_cannot_negate_contextforge_generated_roots(
+    tmp_path: Path, generated_root: str
+) -> None:
+    (tmp_path / ".contextforgeignore").write_text(
+        f"!{generated_root}/\n!{generated_root}/artifact.json\n",
+        encoding="utf-8",
+    )
+
+    rules = load_ignore_rules(tmp_path)
+
+    directory_match = rules.match(generated_root, is_directory=True)
+    nested_match = rules.match(f"{generated_root}/artifact.json")
+    assert directory_match is not None
+    assert directory_match.source == "protected"
+    assert nested_match is not None
+    assert nested_match.source == "protected"
+
+
 @pytest.mark.parametrize("metadata_path", [".GIT/config", "nested/.Hg/store", ".SvN"])
 def test_protected_vcs_matching_is_case_safe(
     tmp_path: Path, metadata_path: str
