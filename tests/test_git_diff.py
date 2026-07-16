@@ -90,6 +90,11 @@ def test_deleted_summary_and_path_filter_are_canonical(tmp_path: Path) -> None:
 def test_non_git_and_missing_executable_are_explicitly_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(
+    "GIT_CEILING_DIRECTORIES",
+    str(tmp_path.parent.resolve()),
+    )
+
     (tmp_path / "app.py").write_text("pass\n", encoding="utf-8")
     snapshot = scan_repository(tmp_path)
 

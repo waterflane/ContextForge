@@ -585,7 +585,15 @@ def test_missing_required_test_and_other_completeness_warnings_are_explicit(
     assert "required-test-omitted" in compile_prompt(handoff).prompt.body
 
 
-def test_no_git_repository_remains_supported(tmp_path: Path) -> None:
+def test_no_git_repository_remains_supported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "GIT_CEILING_DIRECTORIES",
+        str(tmp_path.parent.resolve()),
+    )
+
     from contextforge.git import GitDiffRequest
 
     snapshot = _snapshot(tmp_path, {"app.py": "pass\n"})
