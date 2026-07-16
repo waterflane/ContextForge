@@ -1,9 +1,38 @@
-"""Deterministic repository-intelligence storage foundation.
+"""Deterministic verified repository-intelligence facts and persistence."""
 
-This package currently provides schemas, invalidation, immutable persistence,
-and locking only. It does not extract CodeMaps or call a model.
-"""
-
+from contextforge.intelligence.codemap import (
+    CODEMAP_SCHEMA_VERSION,
+    RESOLVER_VERSION,
+    CallReference,
+    DecoratorRecord,
+    ExportRecord,
+    FileCodeMap,
+    ImportRecord,
+    ParameterRecord,
+    ParserDiagnostic,
+    RelationshipRecord,
+    RelationshipTarget,
+    SourceRange,
+    SymbolKind,
+    SymbolRecord,
+    deserialize_code_map,
+    serialize_code_map,
+    stable_fact_id,
+)
+from contextforge.intelligence.extractors import (
+    SUPPORTED_CODEMAP_LANGUAGES,
+    extract_code_map,
+    extract_code_maps,
+)
+from contextforge.intelligence.fallback import (
+    FALLBACK_ANALYZER,
+    extract_fallback_code_map,
+)
+from contextforge.intelligence.indexer import (
+    StructuralIndexBuildResult,
+    build_structural_index,
+    load_file_code_map,
+)
 from contextforge.intelligence.manifest import (
     IndexComparisonError,
     build_index_manifest,
@@ -33,6 +62,12 @@ from contextforge.intelligence.models import (
     calculate_index_statistics,
     validate_portable_relative_path,
 )
+from contextforge.intelligence.python import (
+    DEFAULT_CODEMAP_SOURCE_LIMIT,
+    PYTHON_ANALYZER,
+    extract_python_code_map,
+)
+from contextforge.intelligence.relationships import resolve_relationships
 from contextforge.intelligence.store import (
     DEFAULT_CONFIG,
     IndexLayout,
@@ -62,11 +97,20 @@ from contextforge.intelligence.store import (
 
 __all__ = [
     "DEFAULT_CONFIG",
+    "DEFAULT_CODEMAP_SOURCE_LIMIT",
+    "CODEMAP_SCHEMA_VERSION",
+    "RESOLVER_VERSION",
     "INDEX_SCHEMA_VERSION",
     "MANIFEST_SCHEMA_VERSION",
     "RECORD_SCHEMA_VERSION",
     "ActiveIndexPointer",
     "AnalyzerIdentity",
+    "CallReference",
+    "DecoratorRecord",
+    "ExportRecord",
+    "FALLBACK_ANALYZER",
+    "FileCodeMap",
+    "ImportRecord",
     "IndexBuildState",
     "IndexComparisonError",
     "IndexLayout",
@@ -86,11 +130,22 @@ __all__ = [
     "IndexWriteLock",
     "IndexedFileState",
     "ModelIdentity",
+    "PYTHON_ANALYZER",
+    "ParameterRecord",
+    "ParserDiagnostic",
+    "RelationshipRecord",
+    "RelationshipTarget",
     "SchemaVersionMetadata",
+    "SourceRange",
+    "StructuralIndexBuildResult",
+    "SUPPORTED_CODEMAP_LANGUAGES",
+    "SymbolKind",
+    "SymbolRecord",
     "UnsupportedIndexSchemaError",
     "acquire_index_lock",
     "begin_index_build",
     "build_index_manifest",
+    "build_structural_index",
     "calculate_generation_id",
     "calculate_index_statistics",
     "calculate_source_snapshot_digest",
@@ -98,6 +153,11 @@ __all__ = [
     "clean_generated_index",
     "cleanup_stale_temporary_files",
     "compare_index_status",
+    "deserialize_code_map",
+    "extract_code_map",
+    "extract_code_maps",
+    "extract_fallback_code_map",
+    "extract_python_code_map",
     "identify_added_files",
     "identify_changed_files",
     "identify_deleted_files",
@@ -106,7 +166,11 @@ __all__ = [
     "initialize_index",
     "inspect_index_status",
     "load_index_record",
+    "load_file_code_map",
     "load_manifest",
+    "resolve_relationships",
+    "serialize_code_map",
+    "stable_fact_id",
     "validate_portable_relative_path",
     "write_index_record",
     "write_manifest",

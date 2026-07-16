@@ -2,15 +2,17 @@
 
 ## Implemented boundary
 
-ContextForge has a deterministic local storage foundation for future repository
-intelligence. It provides strict manifest models, incremental invalidation,
-atomic staged records, immutable generations, an atomic active pointer,
-bounded single-writer locking, recovery, cleanup, and scanner protection.
+ContextForge has a deterministic local storage and structural-fact foundation
+for repository intelligence. It provides strict CodeMap and manifest models,
+Python AST extraction, unsupported-language fallback records, conservative
+relationship resolution, incremental invalidation, atomic staged records,
+immutable generations, an atomic active pointer, bounded single-writer locking,
+recovery, cleanup, and scanner protection.
 
-This boundary does not extract CodeMaps, define fact-record payloads, call a
-model, discover context, add CLI commands, or expose MCP. The placeholder
-`architecture.json` and `features.json` values in a new staging area are JSON
-`null`; they do not claim that model analysis ran.
+This boundary does not call a model, infer business behavior, discover context,
+add CLI index commands, or expose MCP. The placeholder `architecture.json` and
+`features.json` values in a new staging area are JSON `null`; they do not claim
+that model analysis ran.
 
 ## Ownership and layout
 
@@ -48,6 +50,12 @@ roots. It does not ignore `.contextforge/` as a whole, so
 
 `contextforge.intelligence` exports:
 
+- CodeMaps: `extract_code_map`, `extract_code_maps`,
+  `extract_python_code_map`, `extract_fallback_code_map`,
+  `resolve_relationships`, `serialize_code_map`, and
+  `deserialize_code_map`;
+- structural persistence: `build_structural_index` and
+  `load_file_code_map`;
 - initialization and lifecycle: `initialize_index`, `begin_index_build`,
   `load_manifest`, `write_manifest`, `inspect_index_status`, and
   `clean_generated_index`;
@@ -91,6 +99,35 @@ Generation IDs are SHA-256 digests of the complete canonical manifest content
 except the self-referential `generation_id` field. File-record content is bound
 through each record's SHA-256. API keys, bearer tokens, headers, and credential
 objects are not fields in any persisted schema and unknown fields are rejected.
+
+## CodeMap schema version 1
+
+`FileCodeMap` is a closed, frozen, model-free record containing the portable
+path, raw-source SHA-256 and byte size, language, analyzer identity, parse
+status, canonical line count, module docstring, imports, explicit and
+conventional exports, uppercase top-level constant names, symbols,
+relationships, and parser diagnostics. Nested Python symbols are ordered by
+source position. Their qualified names append every lexical parent, for example
+`pkg.module.Class.method.nested`; duplicate same-name declarations retain the
+same qualified name and receive distinct deterministic ordinal-based IDs.
+
+Python signatures and annotations are exact canonical source slices. Calls are
+observed syntax facts. A call is `internal` only for an unambiguous local
+lexical name or resolved import alias; dynamic and ambiguous targets remain
+`unresolved`. Absolute imports absent from the snapshot are `external`, which
+means only “outside this snapshot,” not that the module exists or can be
+imported. Test links use an unambiguous internal import or path/name convention
+and store that detection basis; they do not claim runtime coverage.
+
+Ranges use one-based lines and zero-based half-open columns. Python records
+preserve the standard AST's UTF-8 byte-column convention, including for Unicode
+identifiers. Nested definitions are emitted immediately after their lexical
+parent in source-position order.
+
+Unsupported languages receive only verified file identity, line count,
+fallback analyzer identity, empty fact collections, and a deterministic
+diagnostic. ContextForge never imports or executes repository modules during
+extraction.
 
 ## Invalidation
 
@@ -144,9 +181,14 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 ## Current limitations
 
-- There is no index orchestration command or structural extractor yet.
-- File-record JSON payload schemas, symbols, relationships, architecture maps,
-  and feature maps belong to later approved components.
+- There is no CLI index orchestration command yet; the structural builder is a
+  Python domain API.
+- Python is the only structural language extractor. Other selectable text files
+  deliberately receive file-level fallback records.
+- Python name and call resolution is conservative and incomplete for dynamic
+  dispatch, rebinding, wildcard imports, and ambiguous module layouts.
+- Architecture maps, feature maps, and all semantic interpretation records
+  belong to later approved components.
 - Staging can be resumed by reopening the same run ID, but phase journals and
   semantic task checkpoints are not implemented yet.
 - Generation retention policy is not automatic; explicit cleanup resets only
