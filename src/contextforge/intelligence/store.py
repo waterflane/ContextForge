@@ -79,6 +79,7 @@ index_generations = 2
 _STAGED_ROOT_RECORDS = {
     "symbols.jsonl": b"",
     "relationships.jsonl": b"",
+    "overview.json": b"null\n",
     "architecture.json": b"null\n",
     "features.json": b"null\n",
 }

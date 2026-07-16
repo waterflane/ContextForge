@@ -57,9 +57,10 @@ immutable storage, documented in
 [model-provider foundation](model-providers.md) adds bounded structured calls,
 a deterministic fake, and a local Ollama adapter. Incremental model-assisted
 [file and symbol semantic analysis](semantic-analysis.md) stores interpretations
-separately from source facts. ContextForge does not yet perform global
-architecture/feature analysis, discover context, compile final prompts, or
-expose MCP.
+separately from source facts. Bounded hierarchical
+[repository architecture and feature maps](repository-maps.md) preserve the
+same facts-versus-interpretation boundary. ContextForge does not yet discover
+task-specific context, compile final prompts, or expose MCP.
 
 ## Excluded from v0.1.0
 

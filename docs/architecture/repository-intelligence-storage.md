@@ -10,13 +10,13 @@ relationship resolution, incremental invalidation, atomic staged records,
 immutable generations, an atomic active pointer, bounded single-writer locking,
 recovery, cleanup, and scanner protection.
 
-The semantic builder may call the approved provider adapter for bounded file and
-symbol analysis. Its `*.interpretation.json` records are model interpretations;
-source and CodeMap facts remain authoritative. This boundary still does not
-perform global discovery, architecture/feature analysis, context selection,
-final prompt compilation, CLI orchestration, or MCP. The placeholder
-`architecture.json` and `features.json` values remain JSON `null` and do not
-claim that repository-wide analysis ran.
+The semantic builders may call the approved provider adapter for bounded file,
+symbol, and hierarchical repository analysis. `*.interpretation.json`,
+`architecture.json`, and `features.json` are model interpretations; source and
+CodeMap facts remain authoritative. `overview.json` is a deterministic CodeMap
+projection. This boundary still does not perform task-specific discovery,
+context selection, final prompt compilation, CLI orchestration, or MCP. See
+[Repository architecture and feature maps](repository-maps.md).
 
 ## Ownership and layout
 
@@ -34,6 +34,7 @@ The layout follows the approved immutable-generation design:
       files/                          # per-file records
       symbols.jsonl
       relationships.jsonl
+      overview.json
       architecture.json
       features.json
   contexts/                           # generated saved context packages
@@ -199,8 +200,9 @@ an active lock or relying on flaky elapsed-time thresholds.
   deliberately receive file-level fallback records.
 - Python name and call resolution is conservative and incomplete for dynamic
   dispatch, rebinding, wildcard imports, and ambiguous module layouts.
-- File and symbol semantic records are implemented; architecture maps, feature
-  maps, discovery, and context selection belong to later approved components.
+- File/symbol semantics and repository architecture/feature maps are
+  implemented. Task-specific discovery and context selection remain later
+  approved components.
 - Validated semantic task checkpoints can be resumed by reopening the same run
   ID. General phase journals are not implemented yet.
 - Generation retention policy is not automatic; explicit cleanup resets only
