@@ -55,8 +55,11 @@ Repository intelligence currently includes deterministic CodeMaps and local
 immutable storage, documented in
 [Repository intelligence storage](repository-intelligence-storage.md). The
 [model-provider foundation](model-providers.md) adds bounded structured calls,
-a deterministic fake, and a local Ollama adapter. ContextForge does not yet
-perform repository-wide semantic indexing, discover context, or expose MCP.
+a deterministic fake, and a local Ollama adapter. Incremental model-assisted
+[file and symbol semantic analysis](semantic-analysis.md) stores interpretations
+separately from source facts. ContextForge does not yet perform global
+architecture/feature analysis, discover context, compile final prompts, or
+expose MCP.
 
 ## Excluded from v0.1.0
 

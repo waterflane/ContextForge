@@ -379,6 +379,37 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
     return manifest
 
 
+def load_generation_manifest(
+    repository_root: str | Path, generation_id: str
+) -> IndexManifest:
+    """Load one explicitly pinned immutable generation by its content ID."""
+
+    if (
+        not isinstance(generation_id, str)
+        or len(generation_id) != 64
+        or any(character not in "0123456789abcdef" for character in generation_id)
+    ):
+        raise IndexManifestReadError("generation ID must be lowercase SHA-256")
+    layout = _layout(repository_root)
+    generation = layout.generations / generation_id
+    manifest_path = generation / ACTIVE_MANIFEST_FILENAME
+    if not os.path.lexists(manifest_path):
+        raise IndexManifestReadError("requested immutable generation is unavailable")
+    _require_safe_existing_chain(layout.generations, manifest_path)
+    manifest = _read_persisted_model(
+        manifest_path,
+        IndexManifest,
+        expected_schema=MANIFEST_SCHEMA_VERSION,
+    )
+    _require_supported_schema_versions(manifest.schema_versions)
+    if (
+        manifest.generation_id != generation_id
+        or calculate_generation_id(manifest) != generation_id
+    ):
+        raise IndexManifestReadError("generation manifest digest is invalid")
+    return manifest
+
+
 def load_index_record(
     repository_root: str | Path,
     state: IndexedFileState,
@@ -403,6 +434,82 @@ def load_index_record(
     if hashlib.sha256(content).hexdigest() != state.record_sha256:
         raise IndexManifestReadError("published record digest does not match manifest")
     return content
+
+
+def load_interpretation_record(
+    repository_root: str | Path,
+    state: IndexedFileState,
+    *,
+    manifest: IndexManifest | None = None,
+) -> bytes:
+    """Read one separately persisted, digest-checked semantic interpretation."""
+
+    active = manifest if manifest is not None else load_manifest(repository_root)
+    indexed = next((item for item in active.files if item.path == state.path), None)
+    if indexed is None or indexed != state:
+        raise IndexManifestReadError(
+            "interpretation state is not present in the pinned manifest"
+        )
+    if (
+        state.semantic_status != "complete"
+        or state.interpretation_record_location is None
+        or state.interpretation_record_sha256 is None
+    ):
+        raise IndexManifestReadError("indexed state has no complete interpretation")
+    content = load_generation_record(
+        repository_root,
+        state.interpretation_record_location,
+        manifest=active,
+    )
+    if hashlib.sha256(content).hexdigest() != state.interpretation_record_sha256:
+        raise IndexManifestReadError(
+            "published interpretation digest does not match manifest"
+        )
+    return content
+
+
+def load_generation_record(
+    repository_root: str | Path,
+    record_location: str,
+    *,
+    manifest: IndexManifest,
+) -> bytes:
+    """Read one approved record from a caller-pinned immutable generation."""
+
+    location = _validate_record_location(record_location)
+    referenced = {
+        candidate
+        for state in manifest.files
+        for candidate in (
+            state.record_location,
+            state.interpretation_record_location,
+        )
+        if candidate is not None
+    }
+    if location not in _STAGED_ROOT_RECORDS and location not in referenced:
+        raise IndexManifestReadError(
+            "record location is not referenced by the pinned manifest"
+        )
+    layout = _layout(repository_root)
+    generation = layout.generations / manifest.generation_id
+    record = generation.joinpath(*location.split("/"))
+    _require_safe_existing_chain(generation, record)
+    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
+
+
+def load_staged_index_record(
+    lock: IndexWriteLock, record_location: str
+) -> bytes | None:
+    """Load a validated checkpoint from this writer's resumable staging area."""
+
+    _require_lock(lock)
+    location = _validate_record_location(record_location)
+    stage = begin_index_build(lock)
+    record = stage.joinpath(*location.split("/"))
+    if not os.path.lexists(record):
+        return None
+    _require_safe_existing_chain(stage, record)
+    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
 
 
 def inspect_index_status(
@@ -642,6 +749,24 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             raise IndexPublicationError(
                 f"record digest does not match manifest for {state.path}"
             )
+        if (
+            state.interpretation_record_location is not None
+            and state.interpretation_record_sha256 is not None
+        ):
+            interpretation = root.joinpath(
+                *state.interpretation_record_location.split("/")
+            )
+            _require_safe_existing_chain(root, interpretation)
+            interpretation_content = _read_bounded_bytes(
+                interpretation, MAX_RECORD_BYTES
+            )
+            if (
+                hashlib.sha256(interpretation_content).hexdigest()
+                != state.interpretation_record_sha256
+            ):
+                raise IndexPublicationError(
+                    f"interpretation digest does not match manifest for {state.path}"
+                )
 
 
 def _read_persisted_model[ModelType: BaseModel](

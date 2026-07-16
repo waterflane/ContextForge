@@ -2,18 +2,21 @@
 
 ## Implemented boundary
 
-ContextForge has a deterministic local storage and structural-fact foundation
-for repository intelligence. It provides strict CodeMap and manifest models,
+ContextForge has deterministic local storage for structural facts and separate
+incremental semantic interpretations. It provides strict CodeMap and manifest
+models,
 Python AST extraction, unsupported-language fallback records, conservative
 relationship resolution, incremental invalidation, atomic staged records,
 immutable generations, an atomic active pointer, bounded single-writer locking,
 recovery, cleanup, and scanner protection.
 
-This boundary does not call a model, infer business behavior, discover context,
-add CLI index commands, or expose MCP. A separate provider foundation can make
-bounded structured calls, but it is not connected to an index-wide semantic
-build. The placeholder `architecture.json` and `features.json` values in a new
-staging area are JSON `null`; they do not claim that model analysis ran.
+The semantic builder may call the approved provider adapter for bounded file and
+symbol analysis. Its `*.interpretation.json` records are model interpretations;
+source and CodeMap facts remain authoritative. This boundary still does not
+perform global discovery, architecture/feature analysis, context selection,
+final prompt compilation, CLI orchestration, or MCP. The placeholder
+`architecture.json` and `features.json` values remain JSON `null` and do not
+claim that repository-wide analysis ran.
 
 ## Ownership and layout
 
@@ -196,10 +199,10 @@ an active lock or relying on flaky elapsed-time thresholds.
   deliberately receive file-level fallback records.
 - Python name and call resolution is conservative and incomplete for dynamic
   dispatch, rebinding, wildcard imports, and ambiguous module layouts.
-- Architecture maps, feature maps, and all semantic interpretation records
-  belong to later approved components.
-- Staging can be resumed by reopening the same run ID, but phase journals and
-  semantic task checkpoints are not implemented yet.
+- File and symbol semantic records are implemented; architecture maps, feature
+  maps, discovery, and context selection belong to later approved components.
+- Validated semantic task checkpoints can be resumed by reopening the same run
+  ID. General phase journals are not implemented yet.
 - Generation retention policy is not automatic; explicit cleanup resets only
   generated index truth and preserves config, saved contexts, and runs.
 - Lock recovery can prove same-host process absence only as well as the host

@@ -4,9 +4,10 @@
 
 ContextForge has a provider-independent foundation for bounded, schema-bound
 model analysis. It defines the request/response/configuration contracts, a
-deterministic scripted fake, and a local Ollama adapter. It does **not** run a
-repository-wide semantic index build, infer repository architecture or
-features, discover context, expose MCP, or give a model tools.
+deterministic scripted fake, and a local Ollama adapter. The incremental file
+and symbol semantic builder composes this foundation. It does **not** infer
+repository-wide architecture or features, discover context, compile final
+prompts, expose MCP, or give a model tools.
 
 Provider output is interpretation input, never a verified CodeMap fact. The
 canonical repository-intelligence index remains independent of request

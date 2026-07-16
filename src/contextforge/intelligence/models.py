@@ -16,6 +16,15 @@ Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 RecordStatus = Literal["complete", "failed", "skipped", "unsupported"]
+SemanticStatus = Literal[
+    "pending",
+    "analyzing",
+    "complete",
+    "failed",
+    "stale",
+    "skipped",
+    "disabled",
+]
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$")
@@ -81,6 +90,9 @@ class IndexedFileState(IndexModel):
     record_location: str | None = None
     record_sha256: Sha256 | None = None
     record_status: RecordStatus
+    interpretation_record_location: str | None = None
+    interpretation_record_sha256: Sha256 | None = None
+    semantic_status: SemanticStatus = "disabled"
 
     @field_validator("path")
     @classmethod
@@ -99,6 +111,22 @@ class IndexedFileState(IndexModel):
         location = validate_portable_relative_path(value)
         if not location.startswith("files/"):
             raise ValueError("file record locations must be beneath files/")
+        return location
+
+    @field_validator("interpretation_record_location")
+    @classmethod
+    def validate_interpretation_record_location(cls, value: str | None) -> str | None:
+        """Keep interpretation references separate from structural facts."""
+
+        if value is None:
+            return None
+        location = validate_portable_relative_path(value)
+        if not location.startswith("files/") or not location.endswith(
+            ".interpretation.json"
+        ):
+            raise ValueError(
+                "interpretation record locations must be files/*.interpretation.json"
+            )
         return location
 
     @field_validator("language")
@@ -126,6 +154,18 @@ class IndexedFileState(IndexModel):
             raise ValueError("successful records require a location and digest")
         if self.record_status in {"failed", "skipped"} and has_location:
             raise ValueError("failed or skipped records cannot reference a record")
+        has_interpretation_location = self.interpretation_record_location is not None
+        has_interpretation_digest = self.interpretation_record_sha256 is not None
+        if has_interpretation_location != has_interpretation_digest:
+            raise ValueError(
+                "interpretation record location and digest must be set together"
+            )
+        if self.semantic_status == "complete" and not has_interpretation_location:
+            raise ValueError("complete semantic records require a location and digest")
+        if self.semantic_status != "complete" and has_interpretation_location:
+            raise ValueError(
+                "non-complete semantic records cannot reference an interpretation"
+            )
         return self
 
 
