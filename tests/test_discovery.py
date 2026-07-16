@@ -152,7 +152,7 @@ def _execute(
 
 
 def test_discovery_models_and_all_tool_schemas_are_closed_and_typed() -> None:
-    assert DiscoveryRequest(task=" task ").task == "task"
+    assert DiscoveryRequest(task=" task ").task == " task "
     assert DiscoveryRequest(task="x").mode is DiscoveryMode.HYBRID
     assert set(DISCOVERY_TOOL_SCHEMAS) == {
         "get_repository_overview",

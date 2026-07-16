@@ -100,10 +100,11 @@ class DiscoveryRequest(DiscoveryModel):
     @field_validator("task")
     @classmethod
     def validate_task(cls, value: str) -> str:
-        task = value.strip()
-        if not task or "\x00" in task:
+        if not value.strip() or "\x00" in value:
             raise ValueError("task must be bounded non-empty text")
-        return task
+        # The original user task is an immutable handoff input. Validation must
+        # not normalize away leading/trailing whitespace or line structure.
+        return value
 
     @field_validator("pinned_paths", "excluded_paths")
     @classmethod

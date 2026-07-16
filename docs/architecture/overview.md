@@ -21,7 +21,9 @@ The project is organized as a modular monolith with these boundaries:
   package construction, rendering, and offline JSON inspection;
 - `intelligence`: deterministic index schemas, invalidation, immutable local
   generations, atomic record publication, and single-writer locking;
-- `prompts`: future prompt package construction;
+- `handoff`: discovery review, verified package materialization, optional Git
+  context, task refinement provenance, and deterministic prompt compilation;
+- `prompts`: portable compiled prompt text models;
 - `repositories`: repository and language analysis adapters;
 - `storage`: storage adapters;
 - `models`: model-provider adapters;
@@ -59,8 +61,11 @@ a deterministic fake, and a local Ollama adapter. Incremental model-assisted
 [file and symbol semantic analysis](semantic-analysis.md) stores interpretations
 separately from source facts. Bounded hierarchical
 [repository architecture and feature maps](repository-maps.md) preserve the
-same facts-versus-interpretation boundary. ContextForge does not yet discover
-task-specific context, compile final prompts, or expose MCP.
+same facts-versus-interpretation boundary. Model-guided repository discovery is
+documented in [Repository discovery](repository-discovery.md), and its
+review-to-package integration and pure prompt compiler are documented in
+[Context handoffs and prompt compilation](context-handoffs.md). ContextForge
+does not execute compiled prompts or expose MCP.
 
 ## Excluded from v0.1.0
 

@@ -1,0 +1,72 @@
+"""Reviewable discovery-to-package handoffs and deterministic prompt compilation."""
+
+from contextforge.handoff.compiler import PromptCompileError, compile_prompt
+from contextforge.handoff.flow import discover_context_handoff
+from contextforge.handoff.materialize import (
+    DEFAULT_EXPECTED_RESPONSE_FORMAT,
+    ContextMaterializationError,
+    ContextReviewError,
+    create_task_handoff,
+    prepare_context_review,
+)
+from contextforge.handoff.models import (
+    HANDOFF_SCHEMA_VERSION,
+    PROMPT_COMPILER_VERSION,
+    TASK_REFINEMENT_PROMPT_VERSION,
+    ArchitectureNote,
+    CompiledPrompt,
+    CompiledPromptMetadata,
+    ContextSelectionReview,
+    DiscoveryHandoffResult,
+    DiscoveryProvenance,
+    HandoffBudgetLimits,
+    HandoffBudgetUsage,
+    HandoffCodeMap,
+    ReviewLineRange,
+    ReviewSelectionItem,
+    SelectionOverride,
+    TaskHandoff,
+    TaskRefinement,
+    TaskRefinementResponse,
+    calculate_context_package_identity,
+    calculate_handoff_identity,
+)
+from contextforge.handoff.refinement import (
+    TASK_REFINEMENT_SYSTEM_INSTRUCTIONS,
+    TaskRefinementError,
+    refine_task,
+)
+
+__all__ = [
+    "DEFAULT_EXPECTED_RESPONSE_FORMAT",
+    "HANDOFF_SCHEMA_VERSION",
+    "PROMPT_COMPILER_VERSION",
+    "TASK_REFINEMENT_PROMPT_VERSION",
+    "TASK_REFINEMENT_SYSTEM_INSTRUCTIONS",
+    "ArchitectureNote",
+    "CompiledPrompt",
+    "CompiledPromptMetadata",
+    "ContextMaterializationError",
+    "ContextReviewError",
+    "ContextSelectionReview",
+    "DiscoveryHandoffResult",
+    "DiscoveryProvenance",
+    "HandoffBudgetLimits",
+    "HandoffBudgetUsage",
+    "HandoffCodeMap",
+    "PromptCompileError",
+    "ReviewLineRange",
+    "ReviewSelectionItem",
+    "SelectionOverride",
+    "TaskHandoff",
+    "TaskRefinement",
+    "TaskRefinementError",
+    "TaskRefinementResponse",
+    "calculate_context_package_identity",
+    "calculate_handoff_identity",
+    "compile_prompt",
+    "create_task_handoff",
+    "discover_context_handoff",
+    "prepare_context_review",
+    "refine_task",
+]
