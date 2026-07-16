@@ -19,7 +19,7 @@ from contextforge.intelligence.models import (
 )
 
 CODEMAP_SCHEMA_VERSION: Literal[1] = 1
-RESOLVER_VERSION = "1"
+RESOLVER_VERSION = "2"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -254,6 +254,13 @@ class SymbolRecord(IndexModel):
 
     @model_validator(mode="after")
     def validate_shape(self) -> SymbolRecord:
+        if self.kind == SymbolKind.ASYNC_FUNCTION and not self.is_async:
+            raise ValueError("async function symbols must be marked asynchronous")
+        if self.is_async and self.kind not in {
+            SymbolKind.ASYNC_FUNCTION,
+            SymbolKind.METHOD,
+        }:
+            raise ValueError("only async functions or methods can be asynchronous")
         if self.kind not in {
             SymbolKind.FUNCTION,
             SymbolKind.ASYNC_FUNCTION,
@@ -268,6 +275,14 @@ class SymbolRecord(IndexModel):
             sorted(set(self.configuration_keys))
         ):
             raise ValueError("configuration keys must be unique and canonical")
+        decorator_keys = tuple(_decorator_order(item) for item in self.decorators)
+        if decorator_keys != tuple(sorted(decorator_keys)):
+            raise ValueError("decorators must use canonical source order")
+        call_keys = tuple(_call_order(item) for item in self.direct_calls)
+        if call_keys != tuple(sorted(call_keys)) or len(call_keys) != len(
+            set(call_keys)
+        ):
+            raise ValueError("direct calls must be unique and canonical")
         return self
 
     @property
@@ -317,8 +332,16 @@ class FileCodeMap(IndexModel):
                 and symbol.parent_symbol_id not in known
             ):
                 raise ValueError("parent symbol ID is absent from the CodeMap")
+            if symbol.parent_symbol_id == symbol.symbol_id:
+                raise ValueError("a symbol cannot contain itself")
             if any(method not in known for method in symbol.contained_methods):
                 raise ValueError("contained method ID is absent from the CodeMap")
+            for call in symbol.direct_calls:
+                if (
+                    call.target_file_path == self.path
+                    and call.target_symbol_id not in known
+                ):
+                    raise ValueError("local call target is absent from the CodeMap")
         if tuple(self.top_level_constants) != tuple(
             sorted(set(self.top_level_constants))
         ):
@@ -338,8 +361,50 @@ class FileCodeMap(IndexModel):
         for keys, label in key_groups:
             if keys != tuple(sorted(keys)):
                 raise ValueError(f"{label} must use canonical order")
-        if self.parse_status != "parsed" and (self.symbols or self.relationships):
-            raise ValueError("unparsed CodeMaps cannot claim symbols or relationships")
+        _validate_unique_ids("imports", tuple(item.import_id for item in self.imports))
+        _validate_unique_ids("exports", tuple(item.export_id for item in self.exports))
+        _validate_unique_ids(
+            "relationships",
+            tuple(item.relationship_id for item in self.relationships),
+        )
+        for export in self.exports:
+            if (
+                export.target_symbol_id is not None
+                and export.target_symbol_id not in known
+            ):
+                raise ValueError("export target is absent from the CodeMap")
+        for relationship in self.relationships:
+            if relationship.source_file_path != self.path:
+                raise ValueError("relationship source path does not match the CodeMap")
+            if (
+                relationship.source_symbol_id is not None
+                and relationship.source_symbol_id not in known
+            ):
+                raise ValueError(
+                    "relationship source symbol is absent from the CodeMap"
+                )
+            if (
+                relationship.target.file_path == self.path
+                and relationship.target.symbol_id is not None
+                and relationship.target.symbol_id not in known
+            ):
+                raise ValueError(
+                    "relationship target symbol is absent from the CodeMap"
+                )
+        for source_range in _all_source_ranges(self):
+            if source_range.start_line > max(self.line_count, 1) or (
+                source_range.end_line > max(self.line_count, 1)
+            ):
+                raise ValueError("source range exceeds the canonical source line count")
+        if self.parse_status != "parsed" and (
+            self.module_docstring is not None
+            or self.imports
+            or self.exports
+            or self.top_level_constants
+            or self.symbols
+            or self.relationships
+        ):
+            raise ValueError("unparsed CodeMaps cannot claim structural facts")
         return self
 
 
@@ -416,6 +481,34 @@ def _relationship_order(value: RelationshipRecord) -> tuple[object, ...]:
 def _diagnostic_order(value: ParserDiagnostic) -> tuple[object, ...]:
     position = (0, 0, 0, 0) if value.range is None else _range_key(value.range)
     return (*position, value.severity, value.code, value.message)
+
+
+def _decorator_order(value: DecoratorRecord) -> tuple[object, ...]:
+    return (*_range_key(value.source_range), value.expression)
+
+
+def _call_order(value: CallReference) -> tuple[object, ...]:
+    return (*_range_key(value.source_range), value.observed_name)
+
+
+def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
+    ranges: list[SourceRange] = []
+    ranges.extend(item.source_range for item in code_map.imports)
+    ranges.extend(item.source_range for item in code_map.exports)
+    ranges.extend(item.source_range for item in code_map.relationships)
+    ranges.extend(item.range for item in code_map.diagnostics if item.range is not None)
+    for symbol in code_map.symbols:
+        ranges.append(symbol.declaration_range)
+        if symbol.body_range is not None:
+            ranges.append(symbol.body_range)
+        ranges.extend(item.source_range for item in symbol.decorators)
+        ranges.extend(item.source_range for item in symbol.direct_calls)
+    return tuple(ranges)
+
+
+def _validate_unique_ids(label: str, identifiers: tuple[str, ...]) -> None:
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError(f"{label} must have unique IDs")
 
 
 __all__ = [

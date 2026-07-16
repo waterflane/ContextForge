@@ -12,6 +12,7 @@ from contextforge.context import (
     SelectedFileOutsideRootError,
 )
 from contextforge.intelligence import (
+    RESOLVER_VERSION,
     CallReference,
     FileCodeMap,
     ImportRecord,
@@ -24,6 +25,7 @@ from contextforge.intelligence import (
     extract_code_map,
     extract_code_maps,
     serialize_code_map,
+    stable_fact_id,
 )
 from contextforge.repositories import (
     ProjectFile,
@@ -297,6 +299,103 @@ def test_ambiguous_snapshot_module_and_relative_missing_stay_unresolved(
     )
 
 
+def test_call_resolution_respects_bindings_scopes_and_exact_module_prefixes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(
+        tmp_path,
+        "pkg/targets.py",
+        "def target():\n    return None\n\nclass Service:\n    pass\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from pkg.targets import target
+import pkg.targets
+from pkg.targets import Service
+
+def resolved():
+    target()
+    pkg.targets.target()
+
+def parameter_shadow(target):
+    target()
+
+def assignment_shadow():
+    target = lambda: None
+    target()
+
+def wrong_prefix():
+    pkg.other.target()
+
+def imported_object_member():
+    Service.target()
+""",
+    )
+    _write(
+        tmp_path,
+        "scoped.py",
+        """def owner():
+    from pkg.targets import target
+    target()
+
+def unrelated():
+    target()
+""",
+    )
+
+    maps = extract_code_maps(scan_repository(tmp_path))
+    app = next(item for item in maps if item.path == "app.py")
+    scoped = next(item for item in maps if item.path == "scoped.py")
+    calls = {
+        symbol.name: tuple(symbol.direct_calls)
+        for symbol in (*app.symbols, *scoped.symbols)
+    }
+
+    assert tuple(call.resolution for call in calls["resolved"]) == (
+        "internal",
+        "internal",
+    )
+    assert calls["parameter_shadow"][0].resolution == "unresolved"
+    assert calls["assignment_shadow"][0].resolution == "unresolved"
+    assert calls["assignment_shadow"][0].detection_method == "python_shadowed_name"
+    assert calls["wrong_prefix"][0].resolution == "unresolved"
+    assert calls["imported_object_member"][0].resolution == "unresolved"
+    assert calls["owner"][0].resolution == "internal"
+    assert calls["unrelated"][0].resolution == "unresolved"
+
+
+def test_relationship_ids_include_the_declared_resolver_version(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "module.py",
+        "def target():\n    pass\n\ndef caller():\n    target()\n",
+    )
+
+    relationship = next(
+        item for item in _map(tmp_path).relationships if item.kind == "call"
+    )
+    source_range = relationship.source_range
+
+    assert relationship.resolver_version == RESOLVER_VERSION
+    assert relationship.relationship_id == stable_fact_id(
+        "relationship",
+        relationship.kind,
+        relationship.source_file_path,
+        relationship.source_symbol_id,
+        (
+            source_range.start_line,
+            source_range.start_column,
+            source_range.end_line,
+            source_range.end_column,
+        ),
+        relationship.target.model_dump(mode="json"),
+        relationship.detection_method,
+        RESOLVER_VERSION,
+    )
+
+
 def test_forged_outside_path_never_reaches_the_filesystem(tmp_path: Path) -> None:
     project_file = ProjectFile.model_construct(
         path="../outside.py",
@@ -450,6 +549,33 @@ def test_file_codemap_rejects_tampered_references_and_order(tmp_path: Path) -> N
         FileCodeMap.model_validate({**payload, "top_level_constants": ("Z", "A")})
     with pytest.raises(ValidationError, match="unparsed"):
         FileCodeMap.model_validate({**payload, "parse_status": "parse_error"})
+
+    duplicate_relationships = (
+        code_map.relationships[0],
+        code_map.relationships[0],
+    )
+    with pytest.raises(ValidationError, match="unique IDs"):
+        FileCodeMap.model_validate(
+            {**payload, "relationships": duplicate_relationships}
+        )
+    with pytest.raises(ValidationError, match="line count"):
+        FileCodeMap.model_validate(
+            {
+                **payload,
+                "symbols": (
+                    symbols[0],
+                    {
+                        **symbols[1],
+                        "declaration_range": {
+                            "start_line": 99,
+                            "start_column": 0,
+                            "end_line": 99,
+                            "end_column": 1,
+                        },
+                    },
+                ),
+            }
+        )
 
     with pytest.raises(ValueError, match="bytes or text"):
         deserialize_code_map(1)  # type: ignore[arg-type]

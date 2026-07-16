@@ -113,11 +113,19 @@ same qualified name and receive distinct deterministic ordinal-based IDs.
 
 Python signatures and annotations are exact canonical source slices. Calls are
 observed syntax facts. A call is `internal` only for an unambiguous local
-lexical name or resolved import alias; dynamic and ambiguous targets remain
-`unresolved`. Absolute imports absent from the snapshot are `external`, which
-means only “outside this snapshot,” not that the module exists or can be
-imported. Test links use an unambiguous internal import or path/name convention
-and store that detection basis; they do not claim runtime coverage.
+lexical name or resolved import alias in the applicable lexical scope. Parameter
+or local rebinding, cross-function imports, inexact dotted module prefixes, and
+attributes of imported objects remain `unresolved`. Absolute imports absent
+from the snapshot are `external`, which means only “outside this snapshot,” not
+that the module exists or can be imported. Test links use an unambiguous
+internal import or path/name convention and store that detection basis; they do
+not claim runtime coverage.
+
+CodeMap validation rejects duplicate fact IDs, dangling same-file symbol
+references, relationship source-path mismatches, ranges beyond the verified
+canonical source line count, and structural claims on parse-error or fallback
+records. Relationship IDs include the resolver version; Python extractor and
+resolver behavior changes therefore invalidate reusable records explicitly.
 
 Ranges use one-based lines and zero-based half-open columns. Python records
 preserve the standard AST's UTF-8 byte-column convention, including for Unicode

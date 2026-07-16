@@ -12,6 +12,7 @@ from typing import Literal, Protocol, cast
 
 from contextforge.context import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
+    RESOLVER_VERSION,
     CallReference,
     DecoratorRecord,
     ExportRecord,
@@ -31,7 +32,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="1",
+    analyzer_version="2",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -115,6 +116,47 @@ class _DirectFactVisitor(ast.NodeVisitor):
             self.configuration_keys.add(key)
 
 
+class _BoundNameVisitor(ast.NodeVisitor):
+    """Collect bindings that make an outer same-name target unsafe to claim."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+        self.outer_declarations: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store):
+            self.names.add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return None
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return None
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return None
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return None
+
+    def visit_Import(self, node: ast.Import) -> None:
+        return None
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        return None
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.outer_declarations.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.outer_declarations.update(node.names)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+
 def extract_python_code_map(
     snapshot: ProjectSnapshot,
     project_file: ProjectFile,
@@ -150,7 +192,7 @@ def extract_python_code_map(
     drafts = _collect_symbol_drafts(module, project_file.path)
     _assign_symbol_ids(drafts, project_file.path)
     symbols = _build_symbols(drafts, source, project_file.path)
-    symbols = _resolve_local_calls(symbols, project_file.path)
+    symbols = _resolve_local_calls(symbols, drafts, project_file.path)
     imports = _extract_imports(module, source, project_file.path)
     exports = _extract_exports(module, symbols, source, project_file.path)
     relationships = _local_relationships(project_file.path, symbols, imports, exports)
@@ -389,13 +431,14 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
 
 
 def _resolve_local_calls(
-    symbols: tuple[SymbolRecord, ...], path: str
+    symbols: tuple[SymbolRecord, ...], drafts: list[_SymbolDraft], path: str
 ) -> tuple[SymbolRecord, ...]:
     by_name: dict[str, list[SymbolRecord]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
     result: list[SymbolRecord] = []
-    for symbol in symbols:
+    for symbol, draft in zip(symbols, drafts, strict=True):
+        shadowed_names = _shadowed_names(draft.node)
         calls: list[CallReference] = []
         for call in symbol.direct_calls:
             candidates = (
@@ -418,7 +461,9 @@ def _resolve_local_calls(
             module_level = [
                 item for item in candidates if item.parent_symbol_id is None
             ]
-            if len(contained) == 1:
+            if call.observed_name in shadowed_names:
+                selected = []
+            elif len(contained) == 1:
                 selected = contained
             elif contained:
                 selected = []
@@ -441,9 +486,36 @@ def _resolve_local_calls(
                     )
                 )
             else:
-                calls.append(call)
+                calls.append(
+                    call.model_copy(update={"detection_method": "python_shadowed_name"})
+                    if call.observed_name in shadowed_names
+                    else call
+                )
         result.append(symbol.model_copy(update={"direct_calls": tuple(calls)}))
     return tuple(result)
+
+
+def _shadowed_names(node: ast.stmt) -> set[str]:
+    visitor = _BoundNameVisitor()
+    if isinstance(node, _Callable):
+        arguments = node.args
+        visitor.names.update(
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        )
+        if arguments.vararg is not None:
+            visitor.names.add(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            visitor.names.add(arguments.kwarg.arg)
+    body = getattr(node, "body", ())
+    if isinstance(body, list):
+        for statement in body:
+            visitor.visit(statement)
+    return visitor.names - visitor.outer_declarations
 
 
 def _extract_imports(
@@ -677,6 +749,7 @@ def _relationship(
         _range_tuple(source_range),
         target.model_dump(mode="json"),
         method,
+        RESOLVER_VERSION,
     )
     return RelationshipRecord(
         relationship_id=relationship_id,

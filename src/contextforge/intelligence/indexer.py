@@ -9,6 +9,7 @@ from pathlib import Path
 from contextforge.context import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     CODEMAP_SCHEMA_VERSION,
+    RESOLVER_VERSION,
     FileCodeMap,
     deserialize_code_map,
     serialize_code_map,
@@ -318,7 +319,7 @@ def _build_options_digest(max_source_bytes: int) -> str:
                 "fallback_analyzer": FALLBACK_ANALYZER.model_dump(mode="json"),
                 "max_source_bytes": max_source_bytes,
                 "python_analyzer": PYTHON_ANALYZER.model_dump(mode="json"),
-                "resolver_version": "1",
+                "resolver_version": RESOLVER_VERSION,
             }
         )
     ).hexdigest()

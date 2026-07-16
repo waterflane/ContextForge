@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from contextforge.intelligence.codemap import (
+    RESOLVER_VERSION,
     CallReference,
     FileCodeMap,
     ImportRecord,
@@ -43,7 +44,7 @@ def resolve_relationships(
             for item in code_map.imports
         )
         symbols = tuple(
-            _resolve_imported_calls(symbol, imports, by_path)
+            _resolve_imported_calls(symbol, imports, code_map.symbols, by_path)
             for symbol in code_map.symbols
         )
         relationships = _rebuild_resolved_relationships(code_map, imports, symbols)
@@ -83,21 +84,18 @@ def _clear_repository_resolution(code_map: FileCodeMap) -> FileCodeMap:
         )
         for symbol in code_map.symbols
     )
-    relationships = tuple(
-        item
-        for item in code_map.relationships
-        if item.kind not in {"import", "call", "tests", "tested_by", "test_reference"}
-    )
     return code_map.model_copy(
         update={
             "imports": imports,
             "symbols": symbols,
-            "relationships": relationships,
+            "relationships": (),
         }
     )
 
 
 def _clear_call_resolution(call: CallReference, source_path: str) -> CallReference:
+    if call.detection_method == "python_shadowed_name":
+        return call
     if (
         call.resolution == "internal"
         and call.target_file_path == source_path
@@ -194,6 +192,7 @@ def _absolute_import_modules(item: ImportRecord, source_path: str) -> tuple[str,
 def _resolve_imported_calls(
     symbol: SymbolRecord,
     imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
     maps_by_path: dict[str, FileCodeMap],
 ) -> SymbolRecord:
     calls: list[CallReference] = []
@@ -201,9 +200,20 @@ def _resolve_imported_calls(
         if call.resolution == "internal":
             calls.append(call)
             continue
+        if call.detection_method == "python_shadowed_name":
+            calls.append(call)
+            continue
+        if call.observed_name.split(".")[0] in {
+            parameter.name for parameter in symbol.parameters
+        }:
+            calls.append(call)
+            continue
         targets: list[tuple[str, str]] = []
         for item in imports:
             if item.resolution != "internal" or item.target_file_path is None:
+                continue
+            containing_symbol = _containing_symbol(symbols, item.source_range)
+            if containing_symbol not in {None, symbol.symbol_id}:
                 continue
             target_map = maps_by_path.get(item.target_file_path)
             if target_map is None:
@@ -239,17 +249,17 @@ def _call_target_from_import(observed_name: str, item: ImportRecord) -> str | No
     parts = observed_name.split(".")
     if item.imported_name is not None:
         binding = item.alias or item.imported_name
-        if parts[0] != binding:
+        if parts != [binding]:
             return None
-        if len(parts) == 1:
-            return item.imported_name
-        return parts[-1] if len(parts) == 2 else None
+        return item.imported_name
     if item.module is None:
         return None
-    binding = item.alias or item.module.split(".")[0]
-    if parts[0] != binding:
+    if item.alias is not None:
+        return parts[1] if len(parts) == 2 and parts[0] == item.alias else None
+    module_parts = item.module.split(".")
+    if parts[:-1] != module_parts:
         return None
-    return parts[-1] if len(parts) >= 2 else None
+    return parts[-1] if len(parts) == len(module_parts) + 1 else None
 
 
 def _rebuild_resolved_relationships(
@@ -257,9 +267,47 @@ def _rebuild_resolved_relationships(
     imports: tuple[ImportRecord, ...],
     symbols: tuple[SymbolRecord, ...],
 ) -> tuple[RelationshipRecord, ...]:
-    relationships = [
-        item for item in code_map.relationships if item.kind not in {"import", "call"}
-    ]
+    relationships: list[RelationshipRecord] = []
+    for symbol in symbols:
+        if symbol.parent_symbol_id is not None:
+            relationships.append(
+                _relationship(
+                    kind="contains",
+                    source_path=code_map.path,
+                    source_symbol_id=symbol.parent_symbol_id,
+                    source_range=symbol.declaration_range,
+                    observed_text=symbol.name,
+                    target=RelationshipTarget(
+                        resolution="internal",
+                        file_path=code_map.path,
+                        symbol_id=symbol.symbol_id,
+                    ),
+                    method="python_lexical_parent",
+                )
+            )
+    for export in code_map.exports:
+        relationships.append(
+            _relationship(
+                kind="export",
+                source_path=code_map.path,
+                source_symbol_id=None,
+                source_range=export.source_range,
+                observed_text=export.name,
+                target=RelationshipTarget(
+                    resolution=(
+                        "internal"
+                        if export.target_symbol_id is not None
+                        else "unresolved"
+                    ),
+                    file_path=(
+                        code_map.path if export.target_symbol_id is not None else None
+                    ),
+                    symbol_id=export.target_symbol_id,
+                    observed_name=export.name,
+                ),
+                method=f"python_{export.kind}_export",
+            )
+        )
     for item in imports:
         module_name = "." * item.level + (item.module or "")
         relationships.append(
@@ -423,6 +471,7 @@ def _relationship(
         _range_key(source_range),
         target.model_dump(mode="json"),
         method,
+        RESOLVER_VERSION,
     )
     return RelationshipRecord(
         relationship_id=relationship_id,
