@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+import contextforge.intelligence.store as store_module
 from contextforge.intelligence import (
     AnalysisDiagnostic,
     BehaviorDescription,
@@ -21,6 +22,7 @@ from contextforge.intelligence import (
     build_semantic_index,
     build_structural_index,
     load_file_semantic_analysis,
+    load_generation_manifest,
     load_manifest,
 )
 from contextforge.models import (
@@ -275,9 +277,45 @@ def test_prompt_injection_stays_untrusted_and_cannot_select_paths(
     ["malformed", "invalid_evidence", "invalid_column", "unknown_symbol"],
 )
 def test_invalid_model_outputs_are_failed_never_complete(
-    tmp_path: Path, failure: str
+    tmp_path: Path, failure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot = _snapshot_with_facts(tmp_path, {"app.py": "def run():\n    return 1\n"})
+    previous = load_manifest(tmp_path)
+    lifecycle = {"reads": 0, "writes": 0, "publication_checked": False}
+
+    if failure == "malformed":
+        original_read = store_module._read_bounded_bytes
+        original_write = store_module._write_temporary
+        original_publish = store_module._replace_directory_for_publication
+
+        def tracked_read(path: Path, maximum: int) -> bytes:
+            lifecycle["reads"] += 1
+            try:
+                return original_read(path, maximum)
+            finally:
+                lifecycle["reads"] -= 1
+
+        def tracked_write(destination: Path, content: bytes) -> Path:
+            lifecycle["writes"] += 1
+            try:
+                return original_write(destination, content)
+            finally:
+                lifecycle["writes"] -= 1
+
+        def checked_publish(source: Path, destination: Path) -> None:
+            assert lifecycle["reads"] == 0
+            assert lifecycle["writes"] == 0
+            current = asyncio.current_task()
+            assert current is not None
+            assert asyncio.all_tasks() == {current}
+            lifecycle["publication_checked"] = True
+            original_publish(source, destination)
+
+        monkeypatch.setattr(store_module, "_read_bounded_bytes", tracked_read)
+        monkeypatch.setattr(store_module, "_write_temporary", tracked_write)
+        monkeypatch.setattr(
+            store_module, "_replace_directory_for_publication", checked_publish
+        )
 
     def invalid(request: ModelRequest, index: int) -> str:
         if failure == "malformed":
@@ -302,6 +340,11 @@ def test_invalid_model_outputs_are_failed_never_complete(
     assert result.manifest.files[0].interpretation_record_location is None
     with pytest.raises(IndexManifestReadError, match="complete interpretation"):
         load_file_semantic_analysis(tmp_path, "app.py")
+    if failure == "malformed":
+        assert lifecycle["publication_checked"] is True
+        assert load_generation_manifest(tmp_path, previous.generation_id) == previous
+        assert not (tmp_path / ".contextforge/index/staging/semantics").exists()
+        assert not list((tmp_path / ".contextforge/index").rglob("*.contextforge-tmp"))
 
 
 def test_malformed_response_retries_then_recovers(tmp_path: Path) -> None:

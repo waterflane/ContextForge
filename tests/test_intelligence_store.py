@@ -44,6 +44,98 @@ def _sha(value: bytes | str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+class _WindowsReplaceError(PermissionError):
+    winerror: int
+
+    def __init__(self, winerror: int, message: str) -> None:
+        super().__init__(message)
+        self.winerror = winerror
+
+
+def test_windows_directory_publication_retries_only_bounded_sharing_errors() -> None:
+    errors = [
+        _WindowsReplaceError(5, "access denied"),
+        _WindowsReplaceError(32, "sharing violation"),
+    ]
+    attempts: list[tuple[Path, Path]] = []
+    delays: list[float] = []
+
+    def replace(source: Path, destination: Path) -> None:
+        attempts.append((source, destination))
+        if errors:
+            raise errors.pop(0)
+
+    store_module._replace_directory_for_publication(
+        Path("stage"),
+        Path("generation"),
+        replace=replace,
+        sleeper=delays.append,
+        retry_delays=(0.01, 0.05),
+        platform="nt",
+    )
+
+    assert len(attempts) == 3
+    assert delays == [0.01, 0.05]
+
+
+@pytest.mark.parametrize(
+    ("platform", "winerror"),
+    [("nt", 2), ("posix", 5)],
+)
+def test_directory_publication_does_not_retry_unrelated_errors(
+    platform: str, winerror: int
+) -> None:
+    error = _WindowsReplaceError(winerror, "not retryable")
+    attempts = 0
+    delays: list[float] = []
+
+    def replace(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        del source, destination
+        attempts += 1
+        raise error
+
+    with pytest.raises(PermissionError) as captured:
+        store_module._replace_directory_for_publication(
+            Path("stage"),
+            Path("generation"),
+            replace=replace,
+            sleeper=delays.append,
+            platform=platform,
+        )
+
+    assert captured.value is error
+    assert attempts == 1
+    assert delays == []
+
+
+def test_exhausted_directory_publication_preserves_first_error() -> None:
+    first = _WindowsReplaceError(5, "first access denial")
+    errors = [
+        first,
+        _WindowsReplaceError(32, "sharing violation"),
+        _WindowsReplaceError(33, "lock violation"),
+    ]
+    delays: list[float] = []
+
+    def replace(source: Path, destination: Path) -> None:
+        del source, destination
+        raise errors.pop(0)
+
+    with pytest.raises(PermissionError) as captured:
+        store_module._replace_directory_for_publication(
+            Path("stage"),
+            Path("generation"),
+            replace=replace,
+            sleeper=delays.append,
+            retry_delays=(0.01, 0.05),
+            platform="nt",
+        )
+
+    assert captured.value is first
+    assert delays == [0.01, 0.05]
+
+
 def _analyzer() -> AnalyzerIdentity:
     return AnalyzerIdentity(
         analyzer_id="python-ast",

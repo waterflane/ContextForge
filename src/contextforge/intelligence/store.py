@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import shutil
 import socket
 import stat
 import tempfile
+import time
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -50,6 +52,9 @@ RUNS_DIRECTORY = "runs"
 TEMPORARY_SUFFIX = ".contextforge-tmp"
 MAX_MANIFEST_BYTES = 4_000_000
 MAX_RECORD_BYTES = 16_000_000
+WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS = (0.01, 0.05)
+MAX_WINDOWS_DIRECTORY_REPLACE_RETRIES = len(WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS)
+_WINDOWS_RETRYABLE_DIRECTORY_REPLACE_ERRORS = frozenset({5, 32, 33})
 
 DEFAULT_CONFIG = """config_version = 1
 
@@ -321,7 +326,7 @@ def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
         )
         _fsync_directory(stage)
         try:
-            os.replace(stage, generation)
+            _replace_directory_for_publication(stage, generation)
         except OSError as exc:
             raise IndexPublicationError(
                 "unable to materialize immutable generation"
@@ -646,6 +651,59 @@ def _atomic_create_bytes(destination: Path, content: bytes) -> None:
     finally:
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
+
+
+def _replace_directory_for_publication(
+    source: Path,
+    destination: Path,
+    *,
+    replace: Callable[[Path, Path], None] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    retry_delays: tuple[float, ...] = WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS,
+    platform: str | None = None,
+) -> None:
+    """Atomically rename a generation with narrowly bounded Windows retries.
+
+    Windows can briefly deny a directory rename after all application handles
+    are closed. Only documented sharing/access/lock errors are retryable, and
+    the first such error remains the publication failure cause on exhaustion.
+    """
+
+    if len(retry_delays) > MAX_WINDOWS_DIRECTORY_REPLACE_RETRIES or any(
+        not isinstance(delay, (int, float))
+        or isinstance(delay, bool)
+        or not math.isfinite(delay)
+        or delay < 0
+        or delay > 1
+        for delay in retry_delays
+    ):
+        raise ValueError("directory publication retry delays are invalid")
+    active_replace = os.replace if replace is None else replace
+    active_sleeper = time.sleep if sleeper is None else sleeper
+    active_platform = os.name if platform is None else platform
+    first_error: OSError | None = None
+
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            active_replace(source, destination)
+            return
+        except OSError as exc:
+            if not _is_retryable_directory_replace_error(exc, active_platform):
+                raise
+            if first_error is None:
+                first_error = exc
+            if attempt == len(retry_delays):
+                if first_error is exc:
+                    raise
+                raise first_error from exc
+            active_sleeper(retry_delays[attempt])
+    raise AssertionError("bounded directory publication retry did not terminate")
+
+
+def _is_retryable_directory_replace_error(error: OSError, platform: str) -> bool:
+    return platform == "nt" and getattr(error, "winerror", None) in (
+        _WINDOWS_RETRYABLE_DIRECTORY_REPLACE_ERRORS
+    )
 
 
 def _atomic_write_bytes[ErrorType: IndexStorageError](

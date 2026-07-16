@@ -1,5 +1,7 @@
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -78,6 +80,25 @@ def _configuration(
         local_only=True,
         credential_env=credential_env,
     )
+
+
+def test_provider_package_import_is_independent_of_semantic_indexing() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import contextforge.models; "
+                "assert 'contextforge.intelligence' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def _request(

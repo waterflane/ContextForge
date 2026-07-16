@@ -8,11 +8,17 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from contextforge.core.validation import (
+    Sha256 as Sha256,
+)
+from contextforge.core.validation import (
+    validate_portable_relative_path as validate_portable_relative_path,
+)
+
 INDEX_SCHEMA_VERSION: Literal[1] = 1
 MANIFEST_SCHEMA_VERSION: Literal[1] = 1
 RECORD_SCHEMA_VERSION: Literal[1] = 1
 
-Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 RecordStatus = Literal["complete", "failed", "skipped", "unsupported"]
@@ -26,7 +32,6 @@ SemanticStatus = Literal[
     "disabled",
 ]
 
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$")
 
 
@@ -319,15 +324,3 @@ def analyzer_identity_key(identity: AnalyzerIdentity) -> tuple[str, ...]:
         model.provider_id if model is not None else "",
         model.model_id if model is not None else "",
     )
-
-
-def validate_portable_relative_path(value: str) -> str:
-    """Validate one already-canonical portable path without filesystem access."""
-
-    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
-        raise ValueError("path must be a canonical portable relative path")
-    if value.startswith("/") or _WINDOWS_DRIVE.match(value):
-        raise ValueError("path must be a canonical portable relative path")
-    if any(part in {"", ".", ".."} for part in value.split("/")):
-        raise ValueError("path must be a canonical portable relative path")
-    return value

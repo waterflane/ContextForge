@@ -23,7 +23,7 @@ from pydantic import (
     model_validator,
 )
 
-from contextforge.intelligence.models import Sha256, validate_portable_relative_path
+from contextforge.core.validation import Sha256, validate_portable_relative_path
 
 SUPPORTED_RESPONSE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
