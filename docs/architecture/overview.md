@@ -51,10 +51,12 @@ completed, unreleased v0.3 context-package application logic is contained in
 the `context` boundary. Typer commands and table/JSON scan presentation remain
 in the thin CLI boundary.
 
-The first repository-intelligence implementation is storage-only. Its local
-contract is documented in
-[Repository intelligence storage](repository-intelligence-storage.md). It does
-not yet extract CodeMaps, call a model, discover context, or expose MCP.
+Repository intelligence currently includes deterministic CodeMaps and local
+immutable storage, documented in
+[Repository intelligence storage](repository-intelligence-storage.md). The
+[model-provider foundation](model-providers.md) adds bounded structured calls,
+a deterministic fake, and a local Ollama adapter. ContextForge does not yet
+perform repository-wide semantic indexing, discover context, or expose MCP.
 
 ## Excluded from v0.1.0
 

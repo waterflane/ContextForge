@@ -10,9 +10,10 @@ immutable generations, an atomic active pointer, bounded single-writer locking,
 recovery, cleanup, and scanner protection.
 
 This boundary does not call a model, infer business behavior, discover context,
-add CLI index commands, or expose MCP. The placeholder `architecture.json` and
-`features.json` values in a new staging area are JSON `null`; they do not claim
-that model analysis ran.
+add CLI index commands, or expose MCP. A separate provider foundation can make
+bounded structured calls, but it is not connected to an index-wide semantic
+build. The placeholder `architecture.json` and `features.json` values in a new
+staging area are JSON `null`; they do not claim that model analysis ran.
 
 ## Ownership and layout
 
