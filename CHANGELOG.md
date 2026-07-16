@@ -9,6 +9,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Added `contextforge index build|update|status|clean` as thin adapters over
+  deterministic CodeMaps, incremental semantic analysis, repository maps,
+  immutable generation storage, locking, and policy-bounded cleanup.
+- Added strict project/command provider configuration for local Ollama,
+  structural-only operation, and a deterministic offline fake without storing
+  credential values in generated artifacts.
+- Added `contextforge context suggest` for indexed, fresh, and hybrid discovery
+  with reviewable paths/ranges, reasons, confidence, warnings, and byte budgets.
+- Extended `contextforge context create` with opt-in automatic discovery,
+  labelled task refinement, bounded read-only Git context, portable task
+  handoffs, and deterministic compiled-prompt output while preserving manual
+  behavior when automatic discovery is absent.
+- Added `contextforge context review` for portable handoff validation and review
+  without the original repository.
+- Added a local read-only stdio MCP foundation with bounded overview, tree,
+  search, summary, relationship, verified-read, Git-diff, suggestion,
+  in-memory package-build, and portable package-inspection tools.
+- Added offline CLI and MCP protocol/security tests covering structured stdout,
+  stderr diagnostics, incremental reuse, path rejection, byte bounds,
+  cancellation, overwrite policy, and absence of write capabilities.
+
 - Added `contextforge context create [PATH]` as a thin adapter over the public
   context builder and Markdown/JSON renderers, with exact, directory, glob,
   exclusion, line-range, optional-tree, task, and byte/file-limit options.
@@ -34,6 +55,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   existing `ProjectSnapshot` model.
 
 ### Fixed
+
+- Preserve the prior active index generation when a strict multi-phase CLI
+  build fails after a previous valid generation exists.
+- Keep JSON stdout free of operational messages for discovery, status, and
+  automatic handoff output.
 
 - Configure the shared console and module entry points for UTF-8 stdout and
   stderr so valid Unicode packages do not fail on legacy Windows code pages.

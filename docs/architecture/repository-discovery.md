@@ -5,11 +5,11 @@
 `contextforge.discovery` provides bounded, read-only task-context discovery in
 `indexed`, `fresh`, and `hybrid` modes. Hybrid is the default. The component
 returns a `DiscoveryRunRecord` containing a reviewable `FinalContextSelection`;
-it does not itself construct or change `ContextPackage` schema 1, add CLI
-commands, expose MCP, execute repository code, or modify source. The separate
-[Context handoff](context-handoffs.md) boundary validates that selection,
-re-scans and re-verifies current source, and delegates package construction to
-the existing builder.
+it does not itself construct or change `ContextPackage` schema 1, execute
+repository code, or modify source. Thin CLI and read-only MCP adapters call this
+same service. The separate [Context handoff](context-handoffs.md) boundary
+validates a selection, re-scans and re-verifies current source, and delegates
+package construction to the existing builder.
 
 Every session is pinned to a caller-supplied `ProjectSnapshot`. Initial index,
 symbol, text, or semantic matches are hints only. The trusted model request

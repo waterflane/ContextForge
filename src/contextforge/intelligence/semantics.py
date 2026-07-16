@@ -186,6 +186,7 @@ class SemanticAnalysisOptions:
     max_files: int | None = None
     fail_on_error: bool = False
     resume: bool = True
+    force_reanalyze: bool = False
     status_callback: StatusCallback | None = None
 
     def __post_init__(self) -> None:
@@ -215,7 +216,11 @@ class SemanticAnalysisOptions:
             raise ValueError("max_files must be a positive integer or None")
         if self.max_source_bytes_per_request > self.max_request_bytes:
             raise ValueError("source byte limit cannot exceed request byte limit")
-        if type(self.fail_on_error) is not bool or type(self.resume) is not bool:
+        if (
+            type(self.fail_on_error) is not bool
+            or type(self.resume) is not bool
+            or type(self.force_reanalyze) is not bool
+        ):
             raise ValueError("semantic policy switches must be booleans")
 
 
@@ -313,13 +318,17 @@ async def build_semantic_index(
     structural_states = {item.path: item for item in structural.files}
     for code_map in code_maps:
         state = structural_states[code_map.path]
-        reused = _find_reusable_analysis(
-            snapshot.root,
-            reusable_manifests,
-            state,
-            code_map,
-            analyzer,
-            options_digest,
+        reused = (
+            None
+            if active_options.force_reanalyze
+            else _find_reusable_analysis(
+                snapshot.root,
+                reusable_manifests,
+                state,
+                code_map,
+                analyzer,
+                options_digest,
+            )
         )
         if reused is not None:
             analyses[code_map.path] = reused
@@ -373,7 +382,7 @@ async def build_semantic_index(
     ) -> tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]:
         _raise_if_cancelled(cancellation)
         location = _interpretation_location(project_file.path)
-        if active_options.resume:
+        if active_options.resume and not active_options.force_reanalyze:
             checkpoint = load_staged_index_record(lock, location)
             if checkpoint is not None:
                 resumed = _deserialize_analysis(checkpoint)

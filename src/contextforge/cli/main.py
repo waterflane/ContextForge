@@ -9,6 +9,8 @@ import typer
 
 from contextforge._metadata import APP_NAME, __version__
 from contextforge.cli.context_commands import context_app
+from contextforge.cli.intelligence_commands import index_app
+from contextforge.cli.mcp_commands import mcp_app
 from contextforge.cli.scan_output import (
     OutputWriteError,
     ScanReport,
@@ -52,6 +54,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(context_app, name="context")
+app.add_typer(index_app, name="index")
+app.add_typer(mcp_app, name="mcp")
 
 
 def run() -> None:

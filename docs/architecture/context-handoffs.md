@@ -4,8 +4,9 @@
 
 `contextforge.handoff` connects an accepted model-guided discovery selection to
 the existing verified `ContextPackage` builder and then compiles a portable
-prompt. It adds no CLI or MCP command, does not invoke a coding agent, and does
-not modify repository source.
+prompt. Thin `context create` and `context review` commands expose this flow,
+and the read-only MCP adapter can build or inspect a package in memory. Neither
+surface invokes a coding agent or modifies repository source.
 
 The flow is:
 

@@ -194,15 +194,14 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 ## Current limitations
 
-- There is no CLI index orchestration command yet; the structural builder is a
-  Python domain API.
+- The CLI orchestrates build, update, status, and policy-bounded cleanup for a
+  single repository root. Full multi-root workspaces remain deferred.
 - Python is the only structural language extractor. Other selectable text files
   deliberately receive file-level fallback records.
 - Python name and call resolution is conservative and incomplete for dynamic
   dispatch, rebinding, wildcard imports, and ambiguous module layouts.
-- File/symbol semantics and repository architecture/feature maps are
-  implemented. Task-specific discovery and context selection remain later
-  approved components.
+- File/symbol semantics, repository architecture/feature maps, and
+  task-specific indexed/fresh/hybrid discovery are implemented.
 - Validated semantic task checkpoints can be resumed by reopening the same run
   ID. General phase journals are not implemented yet.
 - Generation retention policy is not automatic; explicit cleanup resets only

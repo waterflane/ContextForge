@@ -103,5 +103,6 @@ prompt. Strict mode publishes nothing after any global-map failure.
   external-boundary descriptions are model interpretations and may vary.
 - Hierarchical summaries reduce prompt size but can lose detail. Coverage and
   unresolved questions remain visible rather than implying completeness.
-- No task-specific context discovery, context recommendation, CLI command, or
-  MCP surface is implemented by this component.
+- Task-specific discovery consumes these maps through the shared discovery
+  service. CLI and MCP adapters expose that service rather than duplicating map
+  or selection logic.

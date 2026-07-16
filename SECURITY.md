@@ -22,11 +22,13 @@ Include:
 
 ## Scope
 
-ContextForge does not execute repository content, make model calls, or build a
-repository index. The scanner reads local files to classify and hash them. The
-v0.3 context builder additionally includes explicitly selected UTF-8 source
-content in Markdown or JSON output, so packages and stdout must be handled as
-copies of the selected source data.
+ContextForge does not execute repository content or provide source-write,
+shell, arbitrary-process, Git-mutation, worktree, or autonomous-agent tools.
+The scanner and CodeMap extractor read local files to classify, hash, and parse
+them without importing repository modules. Model-assisted analysis and
+discovery send bounded verified source/facts only to the explicitly configured
+provider. Packages, prompts, diffs, index interpretations, and stdout must be
+handled as sensitive copies or interpretations of repository data.
 
 Repository paths in snapshots and packages are portable relative paths.
 Absolute, traversal, Windows drive-relative, and UNC-style selectors are
@@ -45,3 +47,23 @@ another process with the same account continuously rewriting the tree.
 Output parents must already exist. Package output is fully rendered before a
 sibling temporary file is atomically published. Existing destinations are
 refused unless the context or tree command is given `--force`.
+
+The generated index uses immutable generations and an atomic active pointer.
+Only `.contextforge/index` is removed by `index clean`; user-authored
+`.contextforge/config.toml`, saved contexts, and runs are preserved. Index
+paths, record references, and every filesystem component are validated without
+following symlinks or junctions. Failed strict orchestration restores the prior
+active pointer when one existed.
+
+Provider configuration contains endpoint/model policy and, optionally, an
+environment-variable name. It rejects inline credentials, sensitive query
+parameters, unknown fields, and non-local endpoints when `local_only=true`.
+Credential values are resolved only at request time, redacted from typed
+errors, and forbidden from indexes, reviews, handoffs, prompts, and run data.
+
+The MCP server is local stdio and pins one validated repository snapshot/index
+generation per session. It delegates queries and reads to the same bounded
+discovery executor as in-process callers. It advertises only read-only tools
+and resources: no sampling, remote transport, subscriptions, source/index
+mutation, shell/process execution, Git mutation, or agent orchestration.
+Protocol output is isolated on stdout; diagnostics use stderr.

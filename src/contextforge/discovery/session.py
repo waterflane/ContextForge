@@ -155,22 +155,35 @@ class DiscoverySession:
             budget_usage=self.budget.usage(),
         )
 
+    def prepare_read_only_tools(
+        self,
+    ) -> tuple[DiscoveryToolExecutor, tuple[CompletenessWarning, ...]]:
+        """Load mode-aware knowledge and expose the existing bounded tool executor.
+
+        This does not call the model provider or mutate source, configuration, or
+        index data. Interface adapters such as MCP use it instead of duplicating
+        discovery search, path validation, freshness, and read logic.
+        """
+
+        loaded = self._load_knowledge()
+        self._knowledge = loaded.knowledge
+        self.warnings.extend(loaded.warnings)
+        self._executor = DiscoveryToolExecutor(
+            loaded.knowledge,
+            self.budget,
+            pinned_paths=self.request.pinned_paths,
+            excluded_paths=self.request.excluded_paths,
+            git_diff_provider=self.git_diff_provider,
+        )
+        return self._executor, loaded.warnings
+
     async def run(self) -> DiscoveryRunRecord:
         """Iterate until verified finalization or one typed all-or-nothing failure."""
 
         self._started = self.clock()
         try:
             self._raise_if_cancelled()
-            loaded = self._load_knowledge()
-            self._knowledge = loaded.knowledge
-            self.warnings.extend(loaded.warnings)
-            self._executor = DiscoveryToolExecutor(
-                loaded.knowledge,
-                self.budget,
-                pinned_paths=self.request.pinned_paths,
-                excluded_paths=self.request.excluded_paths,
-                git_diff_provider=self.git_diff_provider,
-            )
+            self.prepare_read_only_tools()
             while True:
                 self._check_limits_before_model()
                 actions = await self._request_actions()

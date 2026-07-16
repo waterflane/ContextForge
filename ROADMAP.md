@@ -22,15 +22,24 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Export deterministic Markdown and schema-versioned JSON.
 - [x] Inspect and validate JSON packages without the original repository.
 
-## v0.4: Local model integration
+## v0.4: Repository intelligence and read-only integrations (milestone complete)
 
-- Add initial model-provider boundaries.
-- Support local model workflows where appropriate.
-- Keep provider-specific details outside the core.
+- [x] Build deterministic Python CodeMaps with an honest fallback elsewhere.
+- [x] Persist immutable incremental index generations and global repository maps.
+- [x] Support bounded local/fake provider workflows with semantic provenance.
+- [x] Discover context in indexed, fresh, and hybrid modes.
+- [x] Build reviewable handoffs with optional Git diff and compiled prompts.
+- [x] Expose thin CLI commands and a local read-only stdio MCP foundation.
 
 ## Later
 
-- IDE integration.
-- Advanced project memory.
-- More context optimization strategies.
-- Broader model and agent target support.
+- Full multi-root workspaces.
+- Additional deterministic language extractors based on measured demand.
+- Optional supplementary retrieval strategies that do not replace complete
+  allowed-tree/text access.
+- Graphical workspace review UI.
+- External coding-agent integrations that consume handoffs under their own
+  authority.
+
+Autonomous edits, coding-agent orchestration, Git worktree management, and Git
+mutation are not part of the current roadmap.

@@ -3,30 +3,33 @@
 Create deterministic, portable, reviewable context packages from local
 repositories.
 
-ContextForge is an early-stage local context-packaging tool. It scans a local
-repository, applies explicit selectors, verifies selected source files, and
-renders deterministic Markdown or JSON packages for review or use by other
-tools.
+ContextForge is an early-stage local repository-intelligence and context
+packaging tool. It builds deterministic CodeMaps, maintains an immutable local
+index, supports bounded indexed/fresh/hybrid context discovery, verifies final
+source selections, and produces reviewable handoffs and compiled prompts.
 
 ## Status
 
-The unreleased v0.3 milestone adds manual context selection, verified source
-reading, portable Markdown and JSON packages, and offline JSON inspection to
-the repository-scanning foundation. ContextForge does not perform automatic
-relevance selection, prompt optimization, model calls, embeddings, or
-repository indexing.
+The unreleased v0.4 milestone implements repository intelligence, model-provider
+adapters, architecture/feature maps, automatic context discovery, Git-aware
+handoffs, prompt compilation, thin CLI commands, and a local read-only stdio MCP
+foundation. Structural indexing works without a model. Model-assisted behavior
+uses a configured local Ollama provider by default; the deterministic fake is
+for offline tests and demonstrations.
 
 ## Non-goals
 
 The current implementation deliberately excludes:
 
-- repository indexing or retrieval;
 - embeddings or vector databases;
-- model-provider SDKs;
-- knowledge graphs;
-- prompt generation logic;
+- autonomous source edits or patch application;
+- shell or arbitrary process tools;
+- coding-agent or multi-agent orchestration;
+- Git mutation and worktree management;
+- full multi-root workspaces;
 - IDE extensions;
-- background services or persistent storage.
+- graphical workspace UI;
+- remote MCP transport or MCP sampling.
 
 ## Architecture
 
@@ -87,6 +90,101 @@ contextforge context create . --format json --output context.json
 contextforge context inspect context.json
 ```
 
+Automatic discovery is opt-in, so the existing manual command remains
+unchanged when `--discovery` is absent:
+
+```bash
+contextforge context suggest . --task "Fix index invalidation" --discovery hybrid
+contextforge context suggest . --task "Audit parsing" --discovery fresh --format json
+contextforge context create . --task "Fix index invalidation" --discovery hybrid --format json --output handoff.json
+contextforge context create . --task "Review staged behavior" --discovery indexed --git-diff staged --prompt-output prompt.md
+contextforge context review handoff.json
+```
+
+`context suggest` writes a review only. It never creates or modifies source
+files. Table output shows selected paths/ranges, reasons, confidence, warnings,
+estimated bytes, and mode. JSON stdout is a directly parseable
+`FinalContextSelection`. Exact `--include` paths are pinned and exact
+`--exclude` paths have precedence.
+
+Automatic `context create` emits a portable `TaskHandoff` as JSON or the
+compiled prompt as Markdown. `--prompt-output` can publish the prompt as a
+separate atomic artifact. `context review` validates and displays a JSON
+handoff without the original repository.
+
+### Repository index
+
+```bash
+contextforge index build .
+contextforge index update .
+contextforge index status .
+contextforge index status . --format json
+contextforge index clean .
+contextforge index clean . --force
+```
+
+`index build` and `index update` support `--provider`, `--model`, `--config`,
+`--concurrency`, `--fail-on-error`, `--force-reanalyze`, `--max-files`, and
+`--local-only`. Use `--provider none` for deterministic structural-only
+indexing. Updates reuse unchanged valid facts and interpretations, while new,
+changed, deleted, analyzer-stale, prompt-stale, and model-stale records are
+processed explicitly. A failed strict build restores the prior active pointer.
+
+`index status` is read-only and reports schema, repository and generation
+identity, indexed/stale/failed/deleted files, provider/model and prompt
+provenance, global-map availability, and lock state. It never prints credential
+values. `index clean` removes only generated index truth; it preserves
+`.contextforge/config.toml`, saved contexts, and run data.
+
+### Provider configuration
+
+Project configuration is read from `.contextforge/config.toml` or an explicit
+`--config PATH`. Command-line provider/model/concurrency choices override the
+file for one operation. The default is local Ollama:
+
+```toml
+config_version = 1
+
+[models]
+provider = "ollama"
+endpoint = "http://127.0.0.1:11434/api/chat"
+model = "qwen2.5-coder"
+timeout_seconds = 120.0
+max_response_bytes = 1000000
+concurrency_limit = 2
+retry_limit = 2
+local_only = true
+external_data_policy = "deny"
+store_raw_prompts = false
+store_raw_responses = false
+```
+
+Configuration is closed and secret-free. An optional `credential_env` stores
+only an environment-variable name; its value is resolved at request time and
+is never persisted in the index or handoff.
+
+### Read-only MCP
+
+Configure an MCP client to launch one stdio server pinned to one repository:
+
+```json
+{
+  "mcpServers": {
+    "contextforge": {
+      "command": "contextforge",
+      "args": ["mcp", "serve", "/absolute/path/to/repository", "--provider", "none"]
+    }
+  }
+}
+```
+
+The server exposes repository overview/tree/search/summary/relationship tools,
+verified file/range reads, bounded read-only Git diff, context suggestion,
+in-memory package building, and portable package inspection. It has no source
+write, shell/process, Git mutation, index mutation, sampling, prompt, remote
+transport, or agent-orchestration capability. Stdio contains protocol JSON
+only; operational diagnostics go to stderr.
+
 PowerShell accepts the normal separated option/value form. ContextForge
 disables Click's Windows glob expansion so selector patterns reach the
 GitWildMatch selector unchanged:
@@ -139,10 +237,11 @@ schema and semantic validation without accessing the original repository, then
 prints the task, schema version, counts, statistics, selected paths, and line
 ranges. Malformed or unsupported packages are rejected without a traceback.
 
-Context command exit code 0 means success, 1 means an operational, read,
-decode, render, output, or package-validation failure, and 2 means invalid
-command input, repository root, selector, range, task, or limit. Code 3 remains
-reserved for `scan --fail-on-error`.
+Exit code 0 means success, 1 means an operational/provider/read/write/protocol
+failure, 2 means invalid usage/configuration/mode/schema/selector/ref/budget,
+3 remains reserved for `scan --fail-on-error`, and 130 means cancellation.
+Partial non-strict semantic coverage returns 0 with an explicit `partial`
+summary; `--fail-on-error` turns it into an operational failure.
 
 ### Repository scanning
 

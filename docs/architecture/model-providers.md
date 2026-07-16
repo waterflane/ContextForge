@@ -5,9 +5,10 @@
 ContextForge has a provider-independent foundation for bounded, schema-bound
 model analysis. It defines the request/response/configuration contracts, a
 deterministic scripted fake, and a local Ollama adapter. The incremental file
-and symbol semantic builder composes this foundation. It does **not** infer
-repository-wide architecture or features, discover context, compile final
-prompts, expose MCP, or give a model tools.
+and symbol semantic builder, repository maps, task discovery, and optional task
+refinement compose this foundation. Providers do **not** receive tools, mutate
+source, execute compiled prompts, or acquire arbitrary network access through
+the read-only MCP server.
 
 Provider output is interpretation input, never a verified CodeMap fact. The
 canonical repository-intelligence index remains independent of request

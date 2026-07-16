@@ -1,7 +1,16 @@
 # ContextForge v0.4.0 — Repository Intelligence
 
-Status: proposed implementation plan. This document designs the milestone only;
-it does not authorize production implementation or dependency changes.
+Status: implemented milestone specification. Core repository intelligence,
+thin CLI adapters, and the dependency-free local read-only stdio MCP foundation
+are implemented. This document remains the architectural contract; deferred
+items and limitations are still explicit and complete RepoPrompt parity is not
+claimed.
+
+Implementation note (2026-07-16): the public CLI uses the concise `index`
+group and `context suggest` spelling requested during implementation. Existing
+manual `context create`, `context inspect`, scan, tree, version, and doctor
+contracts remain compatible. No official MCP SDK dependency was added; the
+foundation implements the bounded JSON-RPC stdio subset documented below.
 
 ## 1. Current repository assessment
 
@@ -923,46 +932,49 @@ does not call a model, read a repository, or modify source.
   artifacts are inspectable only through a dedicated future migrator, never
   guessed or coerced during materialization.
 
-## 21. CLI contract
+## 21. Implemented CLI contract
 
-Existing `scan`, `tree`, `context create`, and `context inspect` contracts stay
-compatible.
+Existing `scan`, `tree`, manual `context create`, and `context inspect`
+contracts stay compatible.
 
 ```text
-contextforge intelligence init [PATH]
-contextforge intelligence build [PATH]
-  [--semantics | --no-semantics]
+contextforge index build [PATH]
   [--provider PROVIDER] [--model MODEL]
-  [--resume] [--require-semantics]
-  [--max-concurrency INTEGER]
-contextforge intelligence status [PATH] [--format table|json]
-contextforge intelligence inspect [PATH] [--file PATH] [--symbol ID]
+  [--config CONFIG] [--concurrency INTEGER]
+  [--fail-on-error] [--force-reanalyze]
+  [--max-files INTEGER] [--local-only]
+contextforge index update [PATH] [same model-analysis options]
+contextforge index status [PATH] [--format table|json] [--config CONFIG]
+contextforge index clean [PATH] [--force]
 
-contextforge context discover [PATH]
+contextforge context suggest [PATH]
   --task TEXT
-  [--mode indexed|fresh|hybrid]
+  [--discovery indexed|fresh|hybrid]
   [--provider PROVIDER] [--model MODEL]
-  [--git-diff none|working|staged|base] [--base REF]
-  [--max-steps INTEGER] [--max-files INTEGER]
-  [--max-context-bytes INTEGER] [--max-prompt-tokens INTEGER]
-  [--format markdown|json] [--output REVIEW]
+  [--include PATH] [--exclude PATH]
+  [--max-files INTEGER] [--max-context-bytes INTEGER]
+  [--format table|json] [--explain]
+  [--output REVIEW] [--force]
 
 contextforge context create [PATH]
   [existing manual selectors unchanged]
-  [--review REVIEW.json]
+  [--discovery indexed|fresh|hybrid]
+  [--provider PROVIDER] [--model MODEL] [--config CONFIG]
+  [--refine-task]
+  [--git-diff none|working|staged|base] [--base REF]
+  [--prompt-output PROMPT.md]
+contextforge context review HANDOFF.json
 
-contextforge prompt compile PACKAGE.json
-  [--review REVIEW.json] [--diff DIFF.json]
-  [--output PROMPT.md] [--max-prompt-tokens INTEGER]
-
-contextforge mcp serve [PATH] --transport stdio
+contextforge mcp serve [PATH]
+  [--provider PROVIDER] [--model MODEL] [--config CONFIG]
 ```
 
-`init` creates missing ContextForge directories/config only and refuses to
-replace config. `status`/`inspect` never build or call a model. Discovery
-defaults hybrid and writes nothing unless output/diagnostics are enabled.
-`--review` is mutually exclusive with manual selectors and materializes only a
-current accepted review. Prompt compilation is offline over artifacts.
+`index build` initializes missing generated storage/config and never replaces
+an existing config. `status` and `context review` never build or call a model.
+Suggestion defaults hybrid and writes nothing unless `--output` is given.
+Automatic context creation is explicitly enabled by `--discovery`; otherwise
+the fully manual v0.3 behavior is unchanged. Markdown automatic output is the
+compiled prompt; JSON automatic output is the portable `TaskHandoff`.
 
 Exit codes:
 
@@ -972,23 +984,24 @@ Exit codes:
 | 1 | Operational/provider/read/write/protocol failure |
 | 2 | Invalid usage/config/mode/schema/selector/ref/budget |
 | 3 | Existing `scan --fail-on-error` only |
-| 4 | Optional partial semantic/coverage success signal |
 | 130 | User cancellation where supported |
 
-Exit 4 is an approval checkpoint. If omitted, semantic partial success is 0
-with explicit status unless `--require-semantics`, which returns 1.
+Non-strict partial semantic/coverage success returns 0 with an explicit
+`partial` summary. `--fail-on-error` returns 1 and restores a prior active
+generation when one existed. Exit code 4 is not used.
 
-## 22. MCP foundation contract
+## 22. Implemented MCP foundation contract
 
-v0.4 exposes a local stdio MCP server. MCP uses JSON-RPC capability negotiation
-and tools/resources over stdio; see the official
+v0.4 exposes a local newline-delimited JSON-RPC stdio MCP server. MCP uses
+capability negotiation and tools/resources over stdio; see the official
 [architecture overview](https://modelcontextprotocol.io/docs/learn/architecture)
 and [stdio transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 
 The server:
 
 - pins one validated root and snapshot/index generation per session;
-- negotiates protocol versions supported by the official Python MCP SDK;
+- negotiates the implemented 2024-11-05, 2025-06-18, and 2025-11-25 protocol
+  versions without adding an SDK dependency;
 - exposes read-only overview, tree, index/symbol/text search, summaries,
   relationships, verified reads, and bounded diff tools;
 - exposes `contextforge://repository/overview`,
@@ -997,12 +1010,17 @@ The server:
 - labels facts/interpretations and paginates;
 - logs only to stderr under stdio; and
 - exposes no subscription, remote HTTP, prompt, sampling, elicitation, source
-  write, publication, model call, shell, or agent orchestration capability.
+  write, publication, shell, Git mutation, index mutation, or agent
+  orchestration capability. `suggest_context` can use only the provider fixed
+  by server configuration; tool arguments cannot select an endpoint or grant
+  arbitrary network access.
 
-The same path, size, freshness, timeout, cancellation, and audit controls apply
-as in-process tools. The official SDK is an optional extra so core/manual
-packages remain importable without it. Its compatible range is reviewed at
-implementation time; no dependency is added by this plan.
+The adapter delegates repository overview, tree, index/symbol/text search,
+summaries, relationships, verified reads, and bounded Git diff to the existing
+discovery executor. In-memory package building delegates to `context` APIs and
+portable package inspection delegates to the strict offline inspector. The
+same path, size, freshness, timeout, and cancellation controls therefore apply
+without duplicating discovery logic.
 
 ## 23. Security model
 
