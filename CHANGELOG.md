@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Applied nested `.gitignore` files relative to their containing directories
+  during repository scans, including inherited rules and Git-style negation.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added

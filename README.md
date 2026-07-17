@@ -315,12 +315,14 @@ ignored. Common caches, including `.uv-cache/`, are excluded by default, while
 `uv.lock` remains scannable. Protected `.git`, `.hg`, and `.svn` roots are
 always pruned and cannot be re-included.
 
-The scanner reads ignore rules from the repository-root `.gitignore` and
-`.contextforgeignore`; nested ignore files are currently ordinary scanned files,
-not additional rule sources. Text detection accepts UTF-8 (including ASCII) and
-treats an initial sample containing invalid UTF-8, NUL bytes, or many control
-bytes as binary-like. Symbolic links and Windows directory junctions are
-reported but never followed.
+The scanner reads `.gitignore` rules throughout the repository, applying each
+file relative to its containing directory with inherited Git-style precedence.
+The repository-root `.contextforgeignore` remains the highest-precedence
+ordinary rule source. Ignore control files remain ordinary scanned files unless
+an active rule excludes them. Text detection accepts UTF-8 (including ASCII)
+and treats an initial sample containing invalid UTF-8, NUL bytes, or many
+control bytes as binary-like. Symbolic links and Windows directory junctions
+are reported but never followed.
 
 `discovered_count` counts file-like entries actually reached during traversal.
 `ignored_count` counts reached files or directory roots excluded by ordinary

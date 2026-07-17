@@ -2,8 +2,10 @@
 
 Protected VCS metadata is matched independently and can never be negated.
 Ordinary rules are combined in ascending precedence: built-in defaults,
-``.gitignore``, then ``.contextforgeignore``. Within that ordinary rule stack,
-Git-style last-match semantics allow later files to negate earlier exclusions.
+repository and nested ``.gitignore`` files, then ``.contextforgeignore``.
+Nested Git rules are scoped to the directory containing their control file.
+Within that ordinary rule stack, Git-style last-match semantics allow later
+files to negate earlier exclusions.
 """
 
 from __future__ import annotations
@@ -61,13 +63,24 @@ class IgnoreMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class _RuleScope:
+    """One compiled rule file applied below a repository-relative directory."""
+
+    base: str
+    spec: GitIgnoreSpec
+    matches: tuple[IgnoreMatch, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class IgnoreRules:
-    """Compiled Git-style ignore rules for one repository root."""
+    """Compiled inherited Git-style ignore rules for one traversal scope."""
 
     root: Path
     _protected_matches: tuple[IgnoreMatch, ...]
-    _ordinary_spec: GitIgnoreSpec
-    _ordinary_matches: tuple[IgnoreMatch, ...]
+    _default_scope: _RuleScope
+    _gitignore_scopes: tuple[_RuleScope, ...]
+    _contextforge_scope: _RuleScope
+    _include_gitignore: bool
 
     def is_ignored(self, path: str | Path, *, is_directory: bool = False) -> bool:
         """Return whether a repository-relative path matches the active rules."""
@@ -86,7 +99,52 @@ class IgnoreRules:
         protected = _match_protected(self._protected_matches, candidate)
         if protected is not None:
             return protected
-        return _match_rule(self._ordinary_spec, self._ordinary_matches, candidate)
+        return _match_ordinary(
+            (
+                self._default_scope,
+                *self._gitignore_scopes,
+                self._contextforge_scope,
+            ),
+            candidate,
+        )
+
+    def for_directory(self, directory: Path) -> IgnoreRules:
+        """Return inherited rules extended by ``directory/.gitignore``.
+
+        The root control file is loaded by :func:`load_ignore_rules`. A nested
+        control file is read only after traversal has established that its
+        containing directory is reachable, matching Git's ignored-parent rule.
+        """
+
+        if not self._include_gitignore or directory == self.root:
+            return self
+        try:
+            relative = directory.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(
+                "ignore-rule directory is outside repository root"
+            ) from exc
+        base = normalize_relative_path(relative)
+        rules = tuple(
+            IgnoreMatch("gitignore", pattern)
+            for pattern in _read_ignore_file(directory / ".gitignore")
+        )
+        if not rules:
+            return self
+        try:
+            scope = _compile_scope(base, rules)
+        except Exception as exc:
+            raise IgnoreRulesError(
+                f"invalid ignore pattern for directory: {base}/.gitignore"
+            ) from exc
+        return IgnoreRules(
+            root=self.root,
+            _protected_matches=self._protected_matches,
+            _default_scope=self._default_scope,
+            _gitignore_scopes=(*self._gitignore_scopes, scope),
+            _contextforge_scope=self._contextforge_scope,
+            _include_gitignore=self._include_gitignore,
+        )
 
 
 def load_ignore_rules(
@@ -105,16 +163,18 @@ def load_ignore_rules(
     if not resolved_root.is_dir():
         raise NotADirectoryError(f"repository root is not a directory: {root}")
 
-    ordinary_rules = [
+    default_rules = [
         IgnoreMatch("default", pattern) for pattern in DEFAULT_IGNORE_PATTERNS
     ]
+    gitignore_rules: list[IgnoreMatch] = []
     if include_gitignore:
-        ordinary_rules.extend(
+        gitignore_rules.extend(
             IgnoreMatch("gitignore", pattern)
             for pattern in _read_ignore_file(resolved_root / ".gitignore")
         )
+    contextforge_rules: list[IgnoreMatch] = []
     if include_contextforgeignore:
-        ordinary_rules.extend(
+        contextforge_rules.extend(
             IgnoreMatch("contextforgeignore", pattern)
             for pattern in _read_ignore_file(resolved_root / ".contextforgeignore")
         )
@@ -124,32 +184,54 @@ def load_ignore_rules(
     )
 
     try:
-        ordinary_spec, ordinary_matches = _compile_rules(ordinary_rules)
+        default_scope = _compile_scope("", default_rules)
+        gitignore_scope = _compile_scope("", gitignore_rules)
+        contextforge_scope = _compile_scope("", contextforge_rules)
     except Exception as exc:
         raise IgnoreRulesError(f"invalid ignore pattern for root: {root}") from exc
     return IgnoreRules(
         root=resolved_root,
         _protected_matches=protected_rules,
-        _ordinary_spec=ordinary_spec,
-        _ordinary_matches=ordinary_matches,
+        _default_scope=default_scope,
+        _gitignore_scopes=(gitignore_scope,),
+        _contextforge_scope=contextforge_scope,
+        _include_gitignore=include_gitignore,
     )
 
 
-def _compile_rules(
+def _compile_scope(
+    base: str,
     rules: list[IgnoreMatch] | tuple[IgnoreMatch, ...],
-) -> tuple[GitIgnoreSpec, tuple[IgnoreMatch, ...]]:
+) -> _RuleScope:
     nonempty_rules = tuple(rule for rule in rules if rule.pattern)
     spec = GitIgnoreSpec.from_lines(rule.pattern for rule in nonempty_rules)
-    return spec, nonempty_rules
+    return _RuleScope(base=base, spec=spec, matches=nonempty_rules)
 
 
-def _match_rule(
-    spec: GitIgnoreSpec, rules: tuple[IgnoreMatch, ...], candidate: str
+def _match_ordinary(
+    scopes: tuple[_RuleScope, ...], candidate: str
 ) -> IgnoreMatch | None:
-    result = spec.check_file(candidate)
-    if not result.include or result.index is None:
+    match: IgnoreMatch | None = None
+    ignored = False
+    for scope in scopes:
+        scoped_candidate = _scoped_candidate(scope.base, candidate)
+        if scoped_candidate is None:
+            continue
+        result = scope.spec.check_file(scoped_candidate)
+        if result.include is None or result.index is None:
+            continue
+        ignored = result.include
+        match = scope.matches[result.index]
+    return match if ignored else None
+
+
+def _scoped_candidate(base: str, candidate: str) -> str | None:
+    if not base:
+        return candidate
+    prefix = f"{base}/"
+    if not candidate.startswith(prefix):
         return None
-    return rules[result.index]
+    return candidate[len(prefix) :]
 
 
 def _match_protected(

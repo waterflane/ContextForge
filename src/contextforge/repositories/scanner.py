@@ -86,9 +86,10 @@ def _scan_directories(
     options: ScanOptions,
     state: _ScanState,
 ) -> None:
-    pending_directories = [root]
+    pending_directories = [(root, rules)]
     while pending_directories:
-        directory = pending_directories.pop()
+        directory, inherited_rules = pending_directories.pop()
+        directory_rules = inherited_rules.for_directory(directory)
         try:
             entries = tuple(directory.iterdir())
         except OSError as exc:
@@ -120,7 +121,7 @@ def _scan_directories(
                 )
                 continue
 
-            protected_match = rules.match(relative_path)
+            protected_match = directory_rules.match(relative_path)
             if protected_match is not None and protected_match.source == "protected":
                 if not stat.S_ISDIR(mode) and not is_junction:
                     state.discovered_count += 1
@@ -144,7 +145,7 @@ def _scan_directories(
                     )
                 )
             elif stat.S_ISDIR(mode):
-                ignore_match = rules.match(relative_path, is_directory=True)
+                ignore_match = directory_rules.match(relative_path, is_directory=True)
                 if ignore_match is not None:
                     state.ignored_files.append(
                         IgnoredFile(
@@ -158,7 +159,7 @@ def _scan_directories(
                     child_directories.append(path)
             elif stat.S_ISREG(mode):
                 state.discovered_count += 1
-                _scan_file(path, relative_path, rules, options, state)
+                _scan_file(path, relative_path, directory_rules, options, state)
             else:
                 state.discovered_count += 1
                 state.skipped_files.append(
@@ -172,7 +173,9 @@ def _scan_directories(
                     )
                 )
 
-        pending_directories.extend(reversed(child_directories))
+        pending_directories.extend(
+            (child, directory_rules) for child in reversed(child_directories)
+        )
 
 
 def _scan_file(
