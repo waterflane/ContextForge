@@ -202,7 +202,12 @@ def _scan_file(
             max_size_bytes=options.max_file_size_bytes,
         )
         if inspection.is_binary:
-            state.skipped_files.append(SkippedFile(path=relative_path, reason="binary"))
+            state.skipped_files.append(
+                SkippedFile(
+                    path=relative_path,
+                    reason=inspection.binary_reason or "binary",
+                )
+            )
             return
     except FileTooLargeError as exc:
         state.skipped_files.append(
@@ -258,6 +263,7 @@ def _build_summary(
         ignored_count=ignored_count,
         protected_count=protected_count,
         binary_count=reason_counts["binary"],
+        invalid_encoding_count=reason_counts["invalid_encoding"],
         oversized_count=reason_counts["too_large"],
         failed_count=reason_counts["unreadable"],
         symlink_count=reason_counts["symlink"],

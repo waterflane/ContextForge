@@ -68,7 +68,11 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert built.exit_code == 0, built.output
     assert "Status: complete" in _plain(built.stdout)
     first = load_manifest(tmp_path)
-    assert all(item.semantic_status == "complete" for item in first.files)
+    assert all(
+        item.semantic_status
+        == ("skipped" if item.path.startswith(".contextforge/") else "complete")
+        for item in first.files
+    )
 
     unchanged = _invoke("index", "update", str(tmp_path), "--provider", "fake")
     assert unchanged.exit_code == 0, unchanged.output
@@ -229,6 +233,39 @@ def test_index_cancellation_maps_to_130(
     result = _invoke("index", "build", str(tmp_path), "--provider", "none")
 
     assert result.exit_code == 130
+
+
+def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    built = _invoke(
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--progress",
+        "never",
+    )
+    suggested = _invoke(
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "Review VALUE",
+        "--provider",
+        "fake",
+        "--format",
+        "json",
+        "--progress",
+        "never",
+    )
+
+    assert built.exit_code == suggested.exit_code == 0
+    assert built.stderr == ""
+    assert suggested.stderr == ""
+    assert json.loads(suggested.stdout)["mode"] == "hybrid"
 
 
 @pytest.mark.parametrize("mode", ["fresh", "hybrid"])

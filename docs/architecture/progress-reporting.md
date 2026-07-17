@@ -15,9 +15,10 @@ phase-based, with bounded per-file updates where the work total is known.
 
 ## Event schema
 
-`ProgressEvent` is a frozen Pydantic model with unknown fields forbidden. Its
-schema version is `1`, and `model_dump(mode="json")` or `model_dump_json()`
-produces JSON-compatible data.
+`ProgressEvent` is a frozen Pydantic model with unknown fields forbidden. New
+events use schema version `3`; schema-version-1 and version-2 payloads remain
+accepted and receive compatibility defaults. `model_dump(mode="json")` or
+`model_dump_json()` produces JSON-compatible data.
 
 Each event contains:
 
@@ -33,6 +34,38 @@ Each event contains:
 - `sequence`: a deterministic zero-based event order within the operation; and
 - `indeterminate`: whether the current underlying workload has an unknown
   extent.
+
+Schema version 2 adds display-complete, presentation-neutral fields:
+
+- `overall_percent` mirrors the retained `percentage` field;
+- `phase_label`, `phase_percent`, and `phase_weight` describe the current
+  weighted phase;
+- `completed_units`, `total_units`, and `unit_type` describe phase work;
+- `current_item`, `last_completed_item`, and `last_failed_item` expose bounded
+  portable paths without source content;
+- `active_items` and `active_item_count` represent concurrent work;
+- `reused_units`, `skipped_units`, and `failed_units` keep non-request outcomes
+  explicit;
+- `elapsed_seconds` is measured from the operation reporter; and
+- `activity` is `idle`, `active`, or `waiting`.
+
+Schema version 3 makes semantic accounting and provider lifecycle explicit:
+
+- `planned_units` and `processed_units` define the semantic phase metric;
+- `succeeded_units`, `fallback_units`, `failed_units`, `skipped_units`, and
+  `reused_units` split terminal outcomes without inference;
+- `active_units` mirrors the concurrent active count;
+- `current_attempt` and `max_attempts` expose bounded retries;
+- `lifecycle_state` distinguishes planning, provider wait, validation,
+  in-memory acceptance, durable staging, retry, failure, and publication;
+- `safe_error_code` and `safe_error_message` provide bounded diagnostics;
+- `request_elapsed_seconds` resets for each attempt; and
+- `operation_elapsed_seconds` measures the whole operation.
+
+These fields are sufficient for an HTTP API, SSE/WebSocket stream, or GUI to
+reproduce terminal state without parsing `message` or any CLI output. Provider
+and model IDs may appear in metadata; endpoints, credentials, prompts, request
+bodies, responses, and source contents never do.
 
 Percentages may represent weighted phase units when the underlying workload is
 unknown. In that case an adapter can still draw overall progress. For a truly
@@ -95,20 +128,88 @@ type, not exception text that could contain source content or secrets.
 
 CLI rendering is outside this contract and is intentionally not implemented by
 the progress foundation. `contextforge.cli.progress.CLIProgressRenderer` is the
-single Typer adapter. It listens to the same immutable events, coalesces repeated
-updates, and writes percentage plus phase to stderr only. It emits discrete,
-non-ANSI lines when redirected, which preserves JSON, Markdown, MCP, and other
-structured stdout.
+single Typer adapter. It uses Typer's actual Rich stderr console rather than
+testing stdout. In `auto` mode an interactive stderr receives one transient
+Rich `Live` panel with spinner, bars, items, elapsed time, and provider/model.
+The panel refreshes its spinner and elapsed clock while a provider request is
+quiet without emitting fake progress events or changing percentages. Redirected
+stderr receives coalesced, non-ANSI records only for meaningful phase,
+percentage, item, counter, or terminal changes. `never` suppresses rendering;
+`always` never forces terminal controls onto an unsafe redirected stream.
 
 ## Weighted workflow phases
 
-Index builds assign stable ranges to initialization, repository scan, previous
-generation comparison, structural extraction and relationship construction,
-semantic file analysis, repository maps, validation, and atomic publication.
-Semantic terminal states (`complete`, `failed`, and deliberately `skipped`) each
-credit one file exactly once; reused analyses therefore advance the same total
-as newly analyzed files. Publication remains below 100 until the active
-generation is reloaded and checked after its atomic pointer switch.
+Model-enabled index builds use the following cost-oriented default ranges:
+
+- initialization and scan: 0–5%;
+- incremental comparison and planning: 5–8%;
+- structural extraction: 8–18%;
+- semantic per-file model analysis: 18–82%;
+- model-backed global repository maps: 82–94%;
+- deterministic relationships/finalization: 94–97%; and
+- validation and atomic publication: 97–100%.
+
+Structural-only builds use 0–10% scan, 10–15% planning, 15–75% structural work,
+75–90% deterministic finalization, and 90–100% validation/publication. If an
+incremental model phase contains no provider work, it completes at its start and
+its unused range is assigned to the remaining model-map phase rather than
+showing a misleading semantic jump.
+
+Within semantic analysis, the denominator is the complete routed plan, including
+model analysis, deterministic summaries, reused records, and explicit skipped
+or preflight outcomes. The phase bar uses the documented metric
+`processed_units / planned_units`; “processed” means an item reached one terminal
+state and does not imply success. Retries remain inside one work item. A failed
+item therefore produces `processed=1`, `succeeded=0`, `failed=1`, and cannot be
+rendered as `0/N` with a non-zero phase percentage.
+
+Overall semantic percentage uses deterministic cost weights. Metadata, reuse,
+and skip routes cost one unit. Model routes cost eight base units plus
+`ceil(size_bytes / 32768)`, with source units capped at 16 per file. The model
+range therefore dominates expensive work while cheap routes finish quickly.
+
+An `analyzing` event is emitted immediately before a file's provider work and
+sets `current_item`, active paths, and `activity=waiting`. Completion/failure is
+emitted from that task as soon as it finishes, before later batches, and clears
+or replaces the old current item. Event-loop-local set updates keep concurrent
+completion monotonic. Publication remains below 100 until the active generation
+is reloaded and checked after its atomic pointer switch.
+
+Example semantic event (abridged):
+
+```json
+{
+  "schema_version": 3,
+  "operation_type": "repository.index.build",
+  "overall_percent": 53.0,
+  "phase_id": "semantic_analysis",
+  "phase_label": "Semantic analysis",
+  "phase_percent": 31.0,
+  "phase_weight": 64.0,
+  "completed_units": 9.0,
+  "total_units": 26.0,
+  "unit_type": "items",
+  "planned_units": 26,
+  "processed_units": 9,
+  "succeeded_units": 8,
+  "fallback_units": 0,
+  "current_item": "src/service.py",
+  "last_completed_item": "src/app.py",
+  "active_item_count": 2,
+  "reused_units": 4,
+  "skipped_units": 0,
+  "failed_units": 1,
+  "last_failed_item": ".env.example",
+  "safe_error_code": "structured_output_validation_failed",
+  "safe_error_message": "structured response validation failed",
+  "current_attempt": 1,
+  "max_attempts": 3,
+  "lifecycle_state": "waiting_for_provider",
+  "request_elapsed_seconds": 12.4,
+  "operation_elapsed_seconds": 94.1,
+  "activity": "waiting"
+}
+```
 
 Discovery composes mode-aware knowledge loading, bounded model/tool analysis,
 final selection verification, handoff review, source re-scan, package and

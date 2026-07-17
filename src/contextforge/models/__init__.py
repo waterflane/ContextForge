@@ -45,6 +45,7 @@ from contextforge.models.providers import (
     UntrustedSource,
     classify_retry,
     parse_structured_response,
+    provider_error_details,
     redact_secrets,
 )
 
@@ -91,5 +92,6 @@ __all__ = [
     "UnsupportedResponseSchemaError",
     "classify_retry",
     "parse_structured_response",
+    "provider_error_details",
     "redact_secrets",
 ]

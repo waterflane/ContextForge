@@ -21,7 +21,7 @@ from contextforge.application import (
     render_handoff_review,
     suggest_repository_context,
 )
-from contextforge.cli.progress import CLIProgressRenderer
+from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.context import (
     MAX_JSON_PACKAGE_BYTES,
@@ -145,10 +145,19 @@ def suggest_context(
         bool,
         typer.Option("--force", help="Atomically replace an existing output file."),
     ] = False,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering: auto, always when safe, or never.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Suggest reviewable task context without modifying repository source."""
 
     active_provider: ModelProvider | None = None
+    progress_renderer = CLIProgressRenderer(progress)
     try:
         if not task.strip():
             raise ValueError("--task must be non-empty")
@@ -172,7 +181,7 @@ def suggest_context(
                 path,
                 active_provider,
                 request,
-                progress=CLIProgressRenderer(),
+                progress=progress_renderer,
             )
         )
         selection = run.final_selection
@@ -202,6 +211,7 @@ def suggest_context(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     finally:
+        progress_renderer.close()
         _close_provider(active_provider)
 
     _publish_or_echo(representation, output=output, force=force)
@@ -335,6 +345,14 @@ def create_context(
             "--prompt-output", help="Also write the compiled prompt atomically."
         ),
     ] = None,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering for automatic discovery.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Build a manual package or an automatic reviewable compiled handoff."""
 
@@ -360,6 +378,7 @@ def create_context(
             output=output,
             prompt_output=prompt_output,
             force=force,
+            progress_mode=progress,
         )
         return
 
@@ -507,8 +526,10 @@ def _create_automatic_context(
     output: Path | None,
     prompt_output: Path | None,
     force: bool,
+    progress_mode: ProgressMode,
 ) -> None:
     provider: ModelProvider | None = None
+    progress_renderer = CLIProgressRenderer(progress_mode)
     try:
         if task is None or not task.strip():
             raise ValueError("automatic context creation requires --task")
@@ -551,7 +572,7 @@ def _create_automatic_context(
                 request,
                 refine_task=refine_task_option,
                 git_diff_request=git_request,
-                progress=CLIProgressRenderer(),
+                progress=progress_renderer,
             )
         )
         representation = (
@@ -587,6 +608,7 @@ def _create_automatic_context(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     finally:
+        progress_renderer.close()
         _close_provider(provider)
 
     _publish_or_echo(representation, output=output, force=force)

@@ -19,7 +19,7 @@ from contextforge.application import (
     clean_repository_index,
     inspect_repository_index,
 )
-from contextforge.cli.progress import CLIProgressRenderer
+from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.intelligence import (
     GlobalMapAnalysisError,
     IndexStorageError,
@@ -55,15 +55,18 @@ def _index_operation(
     base_url: str | None,
     config: Path | None,
     concurrency: int | None,
+    request_timeout: float | None,
+    max_output_tokens: int | None,
     fail_on_error: bool,
     force_reanalyze: bool,
     max_files: int | None,
     local_only: bool,
     recover_stale_lock: bool,
     confirm_unknown_lock: bool,
+    progress_mode: ProgressMode,
 ) -> None:
     provider: ModelProvider | None = None
-    progress = CLIProgressRenderer()
+    progress = CLIProgressRenderer(progress_mode)
     try:
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
@@ -72,6 +75,7 @@ def _index_operation(
             model=model,
             base_url=base_url,
             concurrency=concurrency,
+            timeout_seconds=request_timeout,
             local_only=True if local_only else None,
         )
         if provider_configuration is not None:
@@ -93,6 +97,11 @@ def _index_operation(
                 fail_on_error=fail_on_error,
                 force_reanalyze=force_reanalyze,
                 max_files=max_files,
+                semantic_max_output_tokens=(
+                    project.models.semantic_max_output_tokens
+                    if max_output_tokens is None
+                    else max_output_tokens
+                ),
                 recover_stale_lock=recover_stale_lock,
                 confirm_unknown_lock=confirm_unknown_lock,
                 progress=progress,
@@ -113,6 +122,7 @@ def _index_operation(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     finally:
+        progress.close()
         if provider is not None:
             with suppress(ModelProviderError):
                 asyncio.run(provider.close())
@@ -145,6 +155,24 @@ def build_index(
         int | None,
         typer.Option(
             "--concurrency", min=1, max=8, help="Maximum semantic file concurrency."
+        ),
+    ] = None,
+    request_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--request-timeout",
+            min=1.0,
+            max=600.0,
+            help="Per-attempt model request timeout in seconds.",
+        ),
+    ] = None,
+    max_output_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-output-tokens",
+            min=256,
+            max=32_768,
+            help="Bound semantic structured-output tokens per request.",
         ),
     ] = None,
     fail_on_error: Annotated[
@@ -187,6 +215,14 @@ def build_index(
             help="Explicitly replace malformed or other-host lock metadata.",
         ),
     ] = False,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering: auto, always when safe, or never.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Scan and publish deterministic CodeMaps, semantics, and repository maps."""
 
@@ -198,12 +234,15 @@ def build_index(
         base_url=base_url,
         config=config,
         concurrency=concurrency,
+        request_timeout=request_timeout,
+        max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,
         recover_stale_lock=recover_stale_lock,
         confirm_unknown_lock=confirm_unknown_lock,
+        progress_mode=progress,
     )
 
 
@@ -229,6 +268,14 @@ def update_index(
     concurrency: Annotated[
         int | None, typer.Option("--concurrency", min=1, max=8)
     ] = None,
+    request_timeout: Annotated[
+        float | None,
+        typer.Option("--request-timeout", min=1.0, max=600.0),
+    ] = None,
+    max_output_tokens: Annotated[
+        int | None,
+        typer.Option("--max-output-tokens", min=256, max=32_768),
+    ] = None,
     fail_on_error: Annotated[bool, typer.Option("--fail-on-error")] = False,
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,
     max_files: Annotated[int | None, typer.Option("--max-files", min=1)] = None,
@@ -237,6 +284,14 @@ def update_index(
     confirm_unknown_lock: Annotated[
         bool, typer.Option("--confirm-unknown-lock")
     ] = False,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering: auto, always when safe, or never.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Increment only new, changed, deleted, or stale index records."""
 
@@ -248,12 +303,15 @@ def update_index(
         base_url=base_url,
         config=config,
         concurrency=concurrency,
+        request_timeout=request_timeout,
+        max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,
         recover_stale_lock=recover_stale_lock,
         confirm_unknown_lock=confirm_unknown_lock,
+        progress_mode=progress,
     )
 
 

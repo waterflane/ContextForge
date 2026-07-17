@@ -1,25 +1,34 @@
 import asyncio
 import io
 import json
+import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
+from rich.console import Console
 
 import contextforge.application as application_module
 from contextforge import (
     NO_OP_PROGRESS_OBSERVER,
     NoOpProgressObserver,
+    ProgressActivity,
     ProgressEvent,
     ProgressReporter,
     ProgressStatus,
 )
 from contextforge.application import build_repository_index, inspect_repository_index
-from contextforge.cli.progress import CLIProgressRenderer
+from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.discovery import DiscoveryRequest, DiscoveryRunRecord
 from contextforge.intelligence import load_manifest
-from contextforge.models import ModelProvider, ModelProviderError
+from contextforge.models import (
+    FakeModelProvider,
+    ModelProvider,
+    ModelProviderError,
+    ProviderConfiguration,
+)
+from contextforge.project_config import create_model_provider
 from contextforge.repositories import ProjectSnapshot
 
 
@@ -47,21 +56,81 @@ def test_progress_event_is_closed_frozen_and_json_serializable() -> None:
     payload = event.model_dump(mode="json")
     assert json.loads(event.model_dump_json()) == payload
     assert ProgressEvent.model_validate_json(event.model_dump_json()) == event
-    assert payload == {
-        "schema_version": 1,
-        "operation_id": "operation-1",
-        "operation_type": "repository.scan",
-        "phase_id": "inventory",
-        "message": "Scanning repository files.",
-        "completed": 1.0,
-        "total": 4.0,
-        "percentage": 25.0,
-        "status": "running",
-        "parent_operation_id": None,
-        "metadata": {"units": "phases", "cached": False},
-        "sequence": 2,
-        "indeterminate": False,
-    }
+    assert payload["schema_version"] == 3
+    assert {
+        "operation_id",
+        "operation_type",
+        "status",
+        "overall_percent",
+        "phase_id",
+        "phase_label",
+        "phase_percent",
+        "phase_weight",
+        "completed_units",
+        "total_units",
+        "unit_type",
+        "current_item",
+        "last_completed_item",
+        "active_items",
+        "active_item_count",
+        "reused_units",
+        "skipped_units",
+        "failed_units",
+        "planned_units",
+        "processed_units",
+        "succeeded_units",
+        "fallback_units",
+        "active_units",
+        "current_attempt",
+        "max_attempts",
+        "lifecycle_state",
+        "safe_error_code",
+        "safe_error_message",
+        "request_elapsed_seconds",
+        "operation_elapsed_seconds",
+        "elapsed_seconds",
+        "metadata",
+    } <= payload.keys()
+    assert {
+        "overall_percent": 25.0,
+        "phase_label": "Scanning repository files",
+        "phase_percent": 25.0,
+        "phase_weight": 100.0,
+        "completed_units": 1.0,
+        "total_units": 4.0,
+        "unit_type": "percent",
+        "active_items": [],
+        "active_item_count": 0,
+        "elapsed_seconds": 0.0,
+    }.items() <= payload.items()
+
+    legacy = ProgressEvent.model_validate(
+        {
+            **{
+                key: value
+                for key, value in payload.items()
+                if key
+                in {
+                    "operation_id",
+                    "operation_type",
+                    "phase_id",
+                    "message",
+                    "completed",
+                    "total",
+                    "percentage",
+                    "status",
+                    "parent_operation_id",
+                    "metadata",
+                    "sequence",
+                    "indeterminate",
+                }
+            },
+            "schema_version": 1,
+        }
+    )
+    assert legacy.schema_version == 1
+    assert legacy.overall_percent == legacy.percentage
+    assert legacy.phase_label == "Scanning repository files"
     with pytest.raises(ValidationError):
         event.message = "Changed"
     with pytest.raises(ValidationError):
@@ -88,6 +157,8 @@ def test_progress_event_validates_work_terminal_state_and_metadata() -> None:
         _event(metadata={"not_json": Path("repository")})
     with pytest.raises(ValidationError, match="JSON serializable"):
         _event(metadata={"not_finite": float("inf")})
+    with pytest.raises(ValidationError, match="overall_percent"):
+        _event(overall_percent=24)
 
 
 def test_reporter_enforces_monotonic_percentages_and_one_terminal_event() -> None:
@@ -134,7 +205,14 @@ def test_scaled_child_events_use_the_same_monotonic_parent_contract() -> None:
 
 def test_failure_and_cancellation_preserve_last_percentage() -> None:
     failed = ProgressReporter("failed-1", "repository.index")
-    failed.report("build", "Building index.", percentage=60)
+    failed.report(
+        "build",
+        "Building index.",
+        percentage=60,
+        current_item="app.py",
+        active_items=("app.py",),
+        active_item_count=1,
+    )
     failed_event = failed.fail(metadata={"error_type": "OSError"})
 
     cancelled = ProgressReporter("cancelled-1", "repository.index")
@@ -146,6 +224,8 @@ def test_failure_and_cancellation_preserve_last_percentage() -> None:
         60,
     )
     assert failed_event.metadata == {"error_type": "OSError"}
+    assert failed_event.current_item is None
+    assert failed_event.active_item_count == 0
     assert (cancelled_event.status, cancelled_event.percentage) == (
         ProgressStatus.CANCELLED,
         35,
@@ -276,7 +356,7 @@ def test_incremental_index_progress_credits_reused_files(tmp_path: Path) -> None
     structural = next(
         event
         for event in events
-        if event.phase_id == "structural_index" and event.percentage == 42
+        if event.phase_id == "structural_index" and event.phase_percent == 100
     )
     assert structural.metadata["extracted"] == 0
     assert structural.metadata["reused"] == structural.total
@@ -285,6 +365,128 @@ def test_incremental_index_progress_credits_reused_files(tmp_path: Path) -> None
     assert [event.percentage for event in events] == sorted(
         event.percentage for event in events
     )
+    assert structural.phase_weight == 60
+    assert not any(event.phase_id == "semantic_analysis" for event in events)
+
+
+def test_semantic_file_events_track_current_completion_and_weight(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("B = 2\n", encoding="utf-8")
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="semantic-progress",
+        concurrency_limit=2,
+        retry_limit=0,
+    )
+    events: list[ProgressEvent] = []
+
+    async def exercise() -> None:
+        delegate = cast(FakeModelProvider, create_model_provider(configuration))
+        release = asyncio.Event()
+        started = 0
+
+        class GatedProvider:
+            provider_id = "fake"
+            configuration = delegate.configuration
+
+            def capabilities(self) -> object:
+                return delegate.capabilities()
+
+            async def complete_structured(
+                self, request: object, *, cancellation: asyncio.Event | None = None
+            ) -> object:
+                nonlocal started
+                if getattr(request, "purpose", None) == "file-semantics":
+                    started += 1
+                    if started >= 2:
+                        release.set()
+                    await release.wait()
+                return await delegate.complete_structured(
+                    cast(Any, request), cancellation=cancellation
+                )
+
+            async def close(self) -> None:
+                await delegate.close()
+
+        provider = cast(ModelProvider, GatedProvider())
+        await build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=configuration,
+            concurrency=2,
+            progress=events.append,
+        )
+        await provider.close()
+
+    asyncio.run(exercise())
+
+    semantic = [event for event in events if event.phase_id == "semantic_analysis"]
+    starts = [event for event in semantic if event.current_item is not None]
+    completions = [event for event in semantic if event.last_completed_item is not None]
+    assert starts
+    assert all(event.activity is ProgressActivity.WAITING for event in starts)
+    assert completions
+    assert completions[-1].completed_units == completions[-1].total_units
+    assert all(event.current_item != event.last_completed_item for event in completions)
+    assert all(event.phase_weight == 63 for event in semantic)
+    assert max(event.active_item_count for event in semantic) >= 2
+    assert max(event.percentage for event in semantic) <= 81
+    assert [event.percentage for event in events] == sorted(
+        event.percentage for event in events
+    )
+    assert events[-1].percentage == 100
+    assert [event for event in events if event.percentage == 100] == [events[-1]]
+    assert events[-1].status is ProgressStatus.COMPLETED
+    assert events[-1].metadata["model_id"] == "semantic-progress"
+
+
+def test_incremental_semantic_reuse_completes_empty_model_phase_without_jump(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="reuse-progress",
+        retry_limit=0,
+    )
+    first_provider = cast(FakeModelProvider, create_model_provider(configuration))
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=first_provider,
+            provider_configuration=configuration,
+        )
+    )
+    asyncio.run(first_provider.close())
+
+    events: list[ProgressEvent] = []
+    update_provider = cast(FakeModelProvider, create_model_provider(configuration))
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=update_provider,
+            provider_configuration=configuration,
+            update_only=True,
+            progress=events.append,
+        )
+    )
+    asyncio.run(update_provider.close())
+
+    semantic = next(
+        event
+        for event in events
+        if event.phase_id == "semantic_index" and event.phase_percent == 100
+    )
+    assert semantic.percentage == 18
+    assert semantic.phase_weight == 0
+    assert semantic.total_units == 1
+    assert semantic.processed_units == 1
+    assert semantic.reused_units > 0
+    assert events[-1].percentage == 100
 
 
 def test_provider_failure_preserves_progress_and_is_reraised(
@@ -330,6 +532,153 @@ def test_cli_renderer_is_discrete_non_ansi_and_suppresses_duplicate_updates() ->
     assert "\x1b" not in stream.getvalue()
 
 
+class _TTYStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_interactive_stderr_chooses_dynamic_when_stdout_is_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = io.StringIO()
+    stderr = _TTYStringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    renderer = CLIProgressRenderer(ProgressMode.AUTO)
+
+    assert stdout.isatty() is False
+    assert renderer.rendering_mode == "dynamic"
+    renderer.close()
+
+
+def test_dynamic_panel_shows_overall_phase_activity_and_elapsed() -> None:
+    stream = _TTYStringIO()
+    console = Console(file=stream, force_terminal=True, width=120)
+    now = [0.0]
+    renderer = CLIProgressRenderer(
+        ProgressMode.AUTO, console=console, clock=lambda: now[0]
+    )
+    waiting = _event(
+        operation_type="repository.index.build",
+        phase_id="semantic_analysis",
+        phase_label="Semantic analysis",
+        phase_percent=35,
+        phase_weight=64,
+        completed_units=9,
+        total_units=26,
+        unit_type="files",
+        current_item="src/contextforge/application.py",
+        last_completed_item="src/contextforge/project_config.py",
+        active_items=("src/contextforge/application.py",),
+        active_item_count=1,
+        activity=ProgressActivity.WAITING,
+        metadata={"provider_id": "lmstudio", "model_id": "qwen-test"},
+    )
+    renderer(waiting)
+    initial_percent = waiting.percentage
+    now[0] = 10.0
+    console.print(renderer._render_dynamic())
+    renderer.close()
+
+    rendered = stream.getvalue()
+    assert "Overall" in rendered
+    assert "Phase" in rendered
+    assert "Semantic analysis" in rendered
+    assert "waiting for provider" in rendered
+    assert "src/contextforge/application.py" in rendered
+    assert "src/contextforge/project_config.py" in rendered
+    assert "elapsed 00:10" in rendered
+    assert waiting.percentage == initial_percent
+
+
+def test_renderer_labels_failed_semantic_work_as_processed() -> None:
+    stream = io.StringIO()
+    renderer = CLIProgressRenderer(stream)
+    renderer(
+        _event(
+            operation_type="repository.index.build",
+            phase_id="semantic_analysis",
+            phase_label="Semantic analysis",
+            phase_percent=4,
+            completed=1,
+            total=26,
+            completed_units=1,
+            total_units=26,
+            unit_type="items",
+            planned_units=26,
+            processed_units=1,
+            failed_units=1,
+            last_failed_item=".env.example",
+            current_item=".gitignore",
+            current_attempt=1,
+            max_attempts=3,
+            lifecycle_state="waiting_for_provider",
+            safe_error_code="structured_output_validation_failed",
+            safe_error_message="structured response validation failed",
+            activity=ProgressActivity.WAITING,
+        )
+    )
+
+    output = stream.getvalue()
+    assert "1/26 processed" in output
+    assert "processed=1/26" in output
+    assert "succeeded=0" in output
+    assert "reason=structured_output_validation_failed" in output
+    assert "0/26" not in output
+
+
+def test_progress_never_suppresses_all_terminal_output() -> None:
+    stream = _TTYStringIO()
+    renderer = CLIProgressRenderer(ProgressMode.NEVER, stream=stream)
+    renderer(_event(operation_type="repository.index.build"))
+    renderer.close()
+
+    assert renderer.rendering_mode == "disabled"
+    assert stream.getvalue() == ""
+
+
+@pytest.mark.parametrize("status", [ProgressStatus.FAILED, ProgressStatus.CANCELLED])
+def test_dynamic_renderer_cleans_up_unsuccessful_terminal_state(
+    status: ProgressStatus,
+) -> None:
+    stream = _TTYStringIO()
+    console = Console(file=stream, force_terminal=True, width=100)
+    renderer = CLIProgressRenderer(console=console)
+    renderer(_event(operation_type="repository.index.build"))
+    renderer(
+        _event(
+            operation_type="repository.index.build",
+            status=status,
+            sequence=3,
+        )
+    )
+    renderer.close()
+
+    assert renderer._live is None
+    assert status.value in stream.getvalue()
+
+
+def test_observer_error_does_not_leave_dynamic_renderer_live() -> None:
+    stream = _TTYStringIO()
+    renderer = CLIProgressRenderer(
+        console=Console(file=stream, force_terminal=True, width=100)
+    )
+
+    def broken(event: ProgressEvent) -> None:
+        renderer(event)
+        raise RuntimeError("observer failed")
+
+    reporter = ProgressReporter(
+        "observer-cleanup", "repository.index.build", observer=broken
+    )
+    reporter.report("scan", "Scanning.", percentage=10)
+    reporter.complete()
+
+    assert reporter.observer_error_count == 2
+    assert renderer._live is None
+
+
 def test_async_application_cancellation_emits_terminal_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,3 +704,30 @@ def test_async_application_cancellation_emits_terminal_event(
         asyncio.run(exercise())
     assert events[-1].status is ProgressStatus.CANCELLED
     assert events[-1].percentage == 0
+
+
+def test_keyboard_interrupt_is_reported_as_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    events: list[ProgressEvent] = []
+
+    def interrupt(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(application_module, "build_structural_index", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            build_repository_index(
+                tmp_path,
+                provider=None,
+                provider_configuration=None,
+                progress=events.append,
+            )
+        )
+
+    assert events[-1].status is ProgressStatus.CANCELLED
+    assert events[-1].percentage < 100
+    assert events[-1].active_item_count == 0

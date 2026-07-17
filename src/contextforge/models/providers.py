@@ -24,6 +24,7 @@ from pydantic import (
 )
 
 from contextforge.core.validation import Sha256, validate_portable_relative_path
+from contextforge.progress import ProgressActivity, ProgressObserver, ProgressReporter
 
 SUPPORTED_RESPONSE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
@@ -69,7 +70,7 @@ class ProviderConfiguration(ProviderModel):
     provider_id: str
     endpoint: str
     model_id: str
-    timeout_seconds: float = 120.0
+    timeout_seconds: float = 90.0
     max_response_bytes: int = Field(
         default=DEFAULT_MAX_RESPONSE_BYTES, ge=1, le=16_000_000, strict=True
     )
@@ -265,6 +266,7 @@ class ModelRequest:
     response_path_pointers: tuple[str, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
     untrusted_contexts: tuple[UntrustedModelContext, ...] = ()
+    progress: ProgressObserver | None = field(default=None, repr=False, compare=False)
     _trusted_json: str = field(init=False, repr=False, compare=False)
     _schema_json: str = field(init=False, repr=False, compare=False)
 
@@ -570,9 +572,42 @@ class ProviderRuntime:
         last_error: ModelProviderError | None = None
         attempts = self.configuration.retry_limit + 1
         timeout = self.configuration.timeout_seconds
+        progress = ProgressReporter(
+            request.operation_id,
+            "model.request",
+            observer=request.progress,
+            metadata={
+                "provider_id": self.configuration.provider_id,
+                "model_id": self.configuration.model_id,
+                "purpose": request.purpose,
+            },
+            clock=self._clock,
+        )
 
         for attempt in range(attempts):
+            attempt_started = self._clock()
             validation: Literal["valid", "invalid", "not_received"] = "not_received"
+            current_item = request.metadata.get("path")
+            progress.report(
+                "provider_request",
+                "Waiting for provider response.",
+                percentage=0,
+                completed=0,
+                total=1,
+                phase_label="Provider request",
+                phase_percent=0,
+                completed_units=0,
+                total_units=1,
+                unit_type="requests",
+                current_item=current_item,
+                active_items=(current_item,) if current_item else (),
+                active_item_count=1,
+                planned_units=1,
+                current_attempt=attempt + 1,
+                max_attempts=attempts,
+                lifecycle_state="waiting_for_provider",
+                activity=ProgressActivity.WAITING,
+            )
             try:
                 await _await_bounded(
                     self._semaphore.acquire(),
@@ -607,6 +642,26 @@ class ProviderRuntime:
                     validation=validation,
                     usage=raw.usage,
                 )
+                progress.report(
+                    "provider_response",
+                    "Provider response parsed and validated.",
+                    percentage=99,
+                    completed=1,
+                    total=1,
+                    phase_label="Response validation",
+                    phase_percent=100,
+                    completed_units=1,
+                    total_units=1,
+                    unit_type="requests",
+                    planned_units=1,
+                    processed_units=1,
+                    succeeded_units=1,
+                    current_attempt=attempt + 1,
+                    max_attempts=attempts,
+                    lifecycle_state="validated",
+                    request_elapsed_seconds=max(0.0, self._clock() - attempt_started),
+                )
+                progress.complete(message="Provider request completed.")
                 return ModelResponse(
                     normalized_json=normalized,
                     value=value,
@@ -626,6 +681,7 @@ class ProviderRuntime:
                     validation=validation,
                     usage=None,
                 )
+                progress.cancel(message="Provider request cancelled.")
                 raise
             except TimeoutError as exc:
                 last_error = ProviderTimeoutError("provider request timed out")
@@ -634,6 +690,7 @@ class ProviderRuntime:
                 last_error = _redacted_provider_error(exc, secret_values)
 
             assert last_error is not None
+            safe_code, safe_message = provider_error_details(last_error)
             if (
                 classify_retry(last_error) is RetryClassification.NON_RETRYABLE
                 or attempt + 1 >= attempts
@@ -651,8 +708,51 @@ class ProviderRuntime:
                     ),
                     usage=None,
                 )
+                progress.report(
+                    "provider_failure",
+                    safe_message,
+                    percentage=0,
+                    completed=1,
+                    total=1,
+                    phase_label="Provider request",
+                    phase_percent=100,
+                    completed_units=1,
+                    total_units=1,
+                    unit_type="requests",
+                    planned_units=1,
+                    processed_units=1,
+                    failed_units=1,
+                    current_attempt=attempt + 1,
+                    max_attempts=attempts,
+                    lifecycle_state="failed",
+                    safe_error_code=safe_code,
+                    safe_error_message=safe_message,
+                    request_elapsed_seconds=max(0.0, self._clock() - attempt_started),
+                )
+                progress.fail(message=safe_message)
                 raise last_error
             delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
+            progress.report(
+                "provider_retry",
+                f"{safe_message}; retrying.",
+                percentage=0,
+                completed=0,
+                total=1,
+                phase_label="Provider retry",
+                phase_percent=0,
+                completed_units=0,
+                total_units=1,
+                unit_type="requests",
+                current_item=current_item,
+                planned_units=1,
+                current_attempt=attempt + 1,
+                max_attempts=attempts,
+                lifecycle_state="retry_wait",
+                safe_error_code=safe_code,
+                safe_error_message=safe_message,
+                request_elapsed_seconds=max(0.0, self._clock() - attempt_started),
+                activity=ProgressActivity.ACTIVE,
+            )
             try:
                 await _await_bounded(
                     asyncio.sleep(delay),
@@ -669,6 +769,7 @@ class ProviderRuntime:
                     validation=validation,
                     usage=None,
                 )
+                progress.cancel(message="Provider request cancelled during retry.")
                 raise
         raise AssertionError("bounded provider loop did not terminate")
 
@@ -684,6 +785,53 @@ def classify_retry(error: BaseException) -> RetryClassification:
     if isinstance(error, ModelProviderError):
         return error.retry_classification
     return RetryClassification.NON_RETRYABLE
+
+
+def provider_error_details(error: BaseException) -> tuple[str, str]:
+    """Return a stable safe code and bounded message without provider payloads."""
+
+    message = str(error).replace("\x00", "").replace("\r", " ").replace("\n", " ")
+    lowered = message.casefold()
+    if isinstance(error, ProviderTimeoutError):
+        return "provider_timeout", "provider request timed out"
+    if isinstance(error, ProviderCancelledError):
+        return "cancelled", "provider request was cancelled"
+    if isinstance(error, StructuredResponseError):
+        if (
+            "malformed json" in lowered
+            or "valid json" in lowered
+            or "duplicate json" in lowered
+            or "json numeric" in lowered
+        ):
+            return "malformed_json", "model returned malformed JSON"
+        if any(
+            marker in lowered
+            for marker in (
+                "valid utf-8",
+                "invalid unicode",
+                "fenced model response",
+                "response root",
+                "must be bytes or text",
+            )
+        ):
+            return "malformed_response", "model returned a malformed response"
+        return (
+            "structured_output_validation_failed",
+            "structured response validation failed",
+        )
+    if isinstance(error, ProviderRequestError):
+        if "model" in lowered and ("not found" in lowered or "unknown" in lowered):
+            return "model_not_found", "configured model was not found"
+        if "http" in lowered or "status" in lowered:
+            return "http_error", "provider returned an HTTP error"
+        return "provider_request_error", "provider rejected the request"
+    if isinstance(error, ProviderUnavailableError):
+        if "http" in lowered or "status" in lowered:
+            return "http_error", "provider returned an HTTP error"
+        return "connection_error", "unable to reach the model provider"
+    if isinstance(error, ProviderConfigurationError):
+        return "provider_configuration_error", "provider configuration is invalid"
+    return "provider_error", (message or type(error).__name__)[:1_000]
 
 
 def parse_structured_response(
@@ -983,5 +1131,6 @@ __all__ = [
     "UnsupportedResponseSchemaError",
     "classify_retry",
     "parse_structured_response",
+    "provider_error_details",
     "redact_secrets",
 ]

@@ -6,6 +6,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from contextforge.filesystem import (
     FileTooLargeError as FileTooLargeError,
@@ -26,6 +27,7 @@ class FileInspection:
     size_bytes: int
     is_binary: bool
     sha256: str
+    binary_reason: Literal["binary", "invalid_encoding"] | None = None
 
 
 def normalize_relative_path(path: str | Path) -> str:
@@ -93,17 +95,25 @@ def is_binary_file(path: Path, *, sample_size: int = BINARY_SAMPLE_SIZE) -> bool
 
 
 def _sample_is_binary(sample: bytes) -> bool:
+    return _sample_binary_reason(sample) is not None
+
+
+def _sample_binary_reason(
+    sample: bytes,
+) -> Literal["binary", "invalid_encoding"] | None:
     if b"\x00" in sample:
-        return True
+        return "binary"
     try:
         sample.decode("utf-8")
     except UnicodeDecodeError:
-        return True
+        return "invalid_encoding"
 
     control_count = sum(
         byte < 32 and byte not in _ALLOWED_TEXT_CONTROLS for byte in sample
     )
-    return bool(sample) and control_count / len(sample) > 0.3
+    if bool(sample) and control_count / len(sample) > 0.3:
+        return "binary"
+    return None
 
 
 def is_text_file(path: Path, *, sample_size: int = BINARY_SAMPLE_SIZE) -> bool:
@@ -147,16 +157,24 @@ def inspect_file(
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero")
 
+    binary_reason: Literal["binary", "invalid_encoding"] | None = None
+
+    def stop_after_sample(sample: bytes) -> bool:
+        nonlocal binary_reason
+        binary_reason = _sample_binary_reason(sample)
+        return binary_reason is not None
+
     result = read_file_stably(
         path,
         max_size_bytes=max_size_bytes,
         chunk_size=chunk_size,
         initial_chunk_size=sample_size,
-        stop_after_initial=_sample_is_binary,
+        stop_after_initial=stop_after_sample,
         capture_content=False,
     )
     return FileInspection(
         size_bytes=result.size_bytes,
         is_binary=not result.complete,
         sha256=result.sha256,
+        binary_reason=binary_reason,
     )

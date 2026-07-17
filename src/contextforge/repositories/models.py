@@ -64,7 +64,14 @@ class SkippedFile(BaseModel):
     """A non-ignored repository entry excluded from the useful inventory."""
 
     path: str
-    reason: Literal["binary", "too_large", "unreadable", "symlink", "unsupported"]
+    reason: Literal[
+        "binary",
+        "invalid_encoding",
+        "too_large",
+        "unreadable",
+        "symlink",
+        "unsupported",
+    ]
     detail: str | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -94,6 +101,7 @@ class ScanSummary(BaseModel):
     discovered_count: NonNegativeInt = 0
     protected_count: NonNegativeInt = 0
     binary_count: NonNegativeInt = 0
+    invalid_encoding_count: NonNegativeInt = 0
     oversized_count: NonNegativeInt = 0
     failed_count: NonNegativeInt = 0
     symlink_count: NonNegativeInt = 0

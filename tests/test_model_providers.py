@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +32,7 @@ from contextforge.models import (
     classify_retry,
     parse_structured_response,
 )
+from contextforge.progress import ProgressEvent, ProgressStatus
 
 
 class _ClosedModel(BaseModel):
@@ -333,6 +335,40 @@ def test_retryable_failure_retries_and_reports_retry_count() -> None:
     assert classify_retry(ProviderUnavailableError("offline")) == (
         RetryClassification.RETRYABLE
     )
+
+
+def test_provider_attempts_emit_shared_progress_without_artificial_completion() -> None:
+    events: list[ProgressEvent] = []
+
+    async def exercise() -> FakeModelProvider:
+        provider = FakeModelProvider(
+            _configuration(retry_limit=1),
+            scripts=[
+                ProviderTimeoutError("timed out"),
+                ProviderTimeoutError("timed out"),
+            ],
+            retry_delays=(0,),
+        )
+        request = replace(
+            _request(),
+            metadata={"analyzer_version": "1", "path": "src/app.py"},
+            progress=events.append,
+        )
+        with pytest.raises(ProviderTimeoutError):
+            await provider.complete_structured(request)
+        return provider
+
+    provider = asyncio.run(exercise())
+
+    assert provider.call_count == 2
+    waiting = [
+        event for event in events if event.lifecycle_state == "waiting_for_provider"
+    ]
+    assert [event.current_attempt for event in waiting] == [1, 2]
+    assert all(event.percentage == 0 for event in waiting)
+    assert events[-1].status is ProgressStatus.FAILED
+    assert events[-1].percentage < 100
+    assert events[-1].safe_error_code == "provider_timeout"
 
 
 def test_structured_failure_is_retryable_but_request_failure_is_not() -> None:

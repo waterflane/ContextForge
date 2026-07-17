@@ -31,7 +31,9 @@ from contextforge.models import (
     ModelRequest,
     ProviderCancelledError,
     ProviderConfiguration,
+    ProviderTimeoutError,
 )
+from contextforge.progress import ProgressEvent
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 
@@ -370,11 +372,182 @@ def test_malformed_response_retries_then_recovers(tmp_path: Path) -> None:
         retry_limit=1,
         scripts=["bad", _valid_response_for_script("app.py")],
     )
+    statuses: list[tuple[str, str]] = []
 
-    result = _build_semantics(snapshot, valid_provider)
+    result = _build_semantics(
+        snapshot,
+        valid_provider,
+        options=SemanticAnalysisOptions(
+            status_callback=lambda path, status: statuses.append((path, status))
+        ),
+    )
 
     assert result.manifest.files[0].semantic_status == "complete"
     assert valid_provider.call_count == 2
+    assert statuses.count(("app.py", "analyzing")) == 1
+    assert statuses.count(("app.py", "complete")) == 1
+
+
+def test_failed_item_progress_uses_processed_denominator_and_safe_reason(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
+    events: list[ProgressEvent] = []
+
+    result = _build_semantics(
+        snapshot,
+        _provider(scripts=["not-json"]),
+        options=SemanticAnalysisOptions(progress=events.append),
+    )
+
+    assert result.failed_paths == ("app.py",)
+    failed = next(
+        event
+        for event in reversed(events)
+        if event.last_failed_item == "app.py" and event.processed_units == 1
+    )
+    assert failed.planned_units == 1
+    assert failed.processed_units == 1
+    assert failed.succeeded_units == 0
+    assert failed.failed_units == 1
+    assert failed.phase_percent == 100
+    assert failed.current_item is None
+    assert failed.safe_error_code == "malformed_json"
+    assert "not-json" not in failed.model_dump_json()
+
+
+def test_semantic_progress_observer_failure_cannot_change_published_records(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
+
+    def broken_observer(event: ProgressEvent) -> None:
+        del event
+        raise RuntimeError("observer failed")
+
+    result = _build_semantics(
+        snapshot,
+        _provider(),
+        options=SemanticAnalysisOptions(progress=broken_observer),
+    )
+
+    assert result.manifest == load_manifest(tmp_path)
+    assert result.manifest.files[0].semantic_status == "complete"
+    assert load_file_semantic_analysis(tmp_path, "app.py") == result.analyses[0]
+
+
+def test_timeout_retry_attempts_are_visible_and_count_one_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
+    events: list[ProgressEvent] = []
+    provider = _provider(
+        retry_limit=1,
+        scripts=[
+            ProviderTimeoutError("provider request timed out"),
+            ProviderTimeoutError("provider request timed out"),
+        ],
+    )
+
+    result = _build_semantics(
+        snapshot,
+        provider,
+        options=SemanticAnalysisOptions(progress=events.append),
+    )
+
+    assert result.failed_paths == ("app.py",)
+    assert provider.call_count == 2
+    attempts = [
+        event.current_attempt
+        for event in events
+        if event.current_item == "app.py" and event.current_attempt is not None
+    ]
+    assert 1 in attempts and 2 in attempts
+    terminal = next(event for event in reversed(events) if event.failed_units == 1)
+    assert terminal.processed_units == 1
+    assert terminal.failed_units == 1
+    assert terminal.last_failed_item == "app.py"
+    assert terminal.current_item is None
+    assert terminal.safe_error_code == "retry_exhausted"
+
+
+def test_metadata_routes_avoid_model_calls_and_env_values(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {
+            ".gitignore": "dist/\n*.log\n",
+            ".env.example": "PUBLIC_NAME=visible\nSECRET_TOKEN=do-not-store\n",
+            "empty.txt": "",
+            "assets/.gitkeep": "placeholder\n",
+            "README.md": "# Useful project\n",
+        },
+    )
+    provider = _provider()
+
+    result = _build_semantics(snapshot, provider)
+
+    assert provider.call_count == 1
+    routes = {analysis.path: analysis.analysis_route for analysis in result.analyses}
+    assert routes["README.md"] == "generic_model_analysis"
+    for path in (".gitignore", ".env.example", "empty.txt", "assets/.gitkeep"):
+        assert routes[path] == "deterministic_metadata_summary"
+    env = next(item for item in result.analyses if item.path == ".env.example")
+    assert env.primary_purpose is not None
+    assert "PUBLIC_NAME" in env.primary_purpose.claim
+    assert "SECRET_TOKEN" in env.primary_purpose.claim
+    assert "visible" not in env.primary_purpose.claim
+    assert "do-not-store" not in env.model_dump_json()
+    assert sum(item.model_request for item in result.plan.items) == 1
+
+
+def test_invalid_utf8_is_planned_without_a_provider_call(tmp_path: Path) -> None:
+    (tmp_path / "broken.txt").write_bytes(b"valid-prefix\xff")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "invalid-facts") as lock:
+        build_structural_index(snapshot, lock)
+    provider = _provider()
+
+    result = _build_semantics(snapshot, provider, run_id="invalid-semantics")
+
+    planned = next(item for item in result.plan.items if item.path == "broken.txt")
+    assert planned.route == "invalid_encoding"
+    assert planned.model_request is False
+    assert provider.call_count == 0
+    diagnostic = next(
+        item.diagnostic for item in result.outcomes if item.path == "broken.txt"
+    )
+    assert diagnostic is not None
+    assert diagnostic.code == "invalid_encoding"
+
+
+@pytest.mark.parametrize(
+    ("path", "language"),
+    [
+        ("app.js", "JavaScript"),
+        ("README.md", "Markdown"),
+        ("page.html", "HTML"),
+        ("style.css", "CSS"),
+        ("script.ps1", "PowerShell"),
+        ("build.cmd", "Batch"),
+        ("schema.json", "JSON"),
+        ("settings.example", None),
+    ],
+)
+def test_meaningful_non_ast_files_use_generic_model_semantics(
+    tmp_path: Path, path: str, language: str | None
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {path: "meaningful content\n"})
+    provider = _provider()
+
+    result = _build_semantics(snapshot, provider)
+
+    analysis = next(item for item in result.analyses if item.path == path)
+    assert analysis.language == language
+    assert analysis.analysis_route == "generic_model_analysis"
+    assert analysis.codemap_analyzer.analyzer_id == "unsupported-language-fallback"
+    assert provider.call_count == 1
 
 
 def test_combined_response_rejects_symbol_evidence_outside_symbol(
@@ -518,12 +691,14 @@ def test_changed_new_deleted_and_renamed_files_update_incrementally(
     assert first.manifest.generation_id != changed.manifest.generation_id
     assert changed.reused_paths == ("keep.py",)
     assert changed.analyzed_paths == (
-        ".contextforge/config.toml",
         "a.py",
         "new.py",
         "renamed.py",
     )
-    assert provider.call_count == 4
+    assert all(
+        not item.path.startswith(".contextforge/") for item in changed.plan.items
+    )
+    assert provider.call_count == 3
     assert tuple(item.path for item in changed.manifest.files) == (
         ".contextforge/config.toml",
         "a.py",

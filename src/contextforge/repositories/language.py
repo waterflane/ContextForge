@@ -9,7 +9,11 @@ from typing import Final
 LANGUAGES_BY_FILENAME: Final = MappingProxyType(
     {
         ".dockerignore": "Dockerfile",
+        ".editorconfig": "EditorConfig",
         ".env": "Dotenv",
+        ".env.example": "Dotenv template",
+        ".env.sample": "Dotenv template",
+        ".gitattributes": "Git attributes",
         ".gitignore": "Git ignore",
         "dockerfile": "Dockerfile",
         "gemfile": "Ruby",
@@ -27,6 +31,8 @@ LANGUAGES_BY_EXTENSION: Final = MappingProxyType(
         ".cs": "C#",
         ".css": "CSS",
         ".cxx": "C++",
+        ".bat": "Batch",
+        ".cmd": "Batch",
         ".go": "Go",
         ".h": "C",
         ".hpp": "C++",

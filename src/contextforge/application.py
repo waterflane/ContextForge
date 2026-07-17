@@ -70,7 +70,12 @@ from contextforge.models import (
     ProviderCancelledError,
     ProviderConfiguration,
 )
-from contextforge.progress import ProgressObserver, ProgressReporter
+from contextforge.progress import (
+    ProgressActivity,
+    ProgressEvent,
+    ProgressObserver,
+    ProgressReporter,
+)
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 MAX_HANDOFF_BYTES = 16 * 1024 * 1024
@@ -176,6 +181,7 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
+    semantic_max_output_tokens: int = 4_096,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
     progress: ProgressObserver | None = None,
@@ -189,8 +195,28 @@ async def build_repository_index(
         progress,
         operation_id=operation_id,
         parent_operation_id=parent_operation_id,
+        metadata={
+            "provider_id": (
+                provider_configuration.provider_id
+                if provider_configuration is not None
+                else None
+            ),
+            "model_id": (
+                provider_configuration.model_id
+                if provider_configuration is not None
+                else None
+            ),
+        },
     )
-    reporter.report("initialize", "Initializing repository index.", percentage=0)
+    reporter.report(
+        "initialize",
+        "Initializing repository index.",
+        percentage=0,
+        phase_label="Initialization",
+        phase_percent=0,
+        phase_weight=2,
+        activity=ProgressActivity.ACTIVE,
+    )
     try:
         report = await _build_repository_index(
             repository_root,
@@ -201,6 +227,7 @@ async def build_repository_index(
             fail_on_error=fail_on_error,
             force_reanalyze=force_reanalyze,
             max_files=max_files,
+            semantic_max_output_tokens=semantic_max_output_tokens,
             recover_stale_lock=recover_stale_lock,
             confirm_unknown_lock=confirm_unknown_lock,
             progress=reporter,
@@ -225,6 +252,7 @@ async def _build_repository_index(
     fail_on_error: bool,
     force_reanalyze: bool,
     max_files: int | None,
+    semantic_max_output_tokens: int,
     recover_stale_lock: bool,
     confirm_unknown_lock: bool,
     progress: ProgressReporter,
@@ -242,18 +270,39 @@ async def _build_repository_index(
                 "no active repository index exists; run 'contextforge index build'"
             ) from None
         previous = None
-    progress.report("scan", "Scanning repository files.", percentage=2)
+    model_enabled = provider is not None
+    scan_end = 5.0 if model_enabled else 10.0
+    compare_end = 8.0 if model_enabled else 15.0
+    structural_end = 18.0 if model_enabled else 75.0
+    progress.report(
+        "scan",
+        "Scanning repository files.",
+        percentage=1,
+        phase_label="Repository scan",
+        phase_percent=0,
+        phase_weight=scan_end,
+        activity=ProgressActivity.ACTIVE,
+    )
     snapshot = scan_repository(root)
     progress.report(
         "scan",
         "Repository scan completed.",
-        percentage=12,
+        percentage=scan_end,
+        phase_label="Repository scan",
+        phase_percent=100,
+        phase_weight=scan_end,
+        completed_units=len(snapshot.files),
+        total_units=len(snapshot.files),
+        unit_type="files",
         metadata={"files": len(snapshot.files)},
     )
     progress.report(
         "compare",
         "Compared the repository with the previous index generation.",
-        percentage=18,
+        percentage=compare_end,
+        phase_label="Incremental planning",
+        phase_percent=100,
+        phase_weight=compare_end - scan_end,
         metadata={
             "previous_generation": previous.generation_id if previous else None,
             "update": update_only,
@@ -272,9 +321,16 @@ async def _build_repository_index(
             progress.report(
                 "structural_index",
                 "Building structural repository index.",
-                percentage=18,
+                percentage=compare_end,
                 completed=0,
                 total=len(snapshot.files),
+                phase_label="Structural extraction",
+                phase_percent=0,
+                phase_weight=structural_end - compare_end,
+                completed_units=0,
+                total_units=len(snapshot.files),
+                unit_type="files",
+                activity=ProgressActivity.ACTIVE,
             )
             structural = build_structural_index(
                 snapshot,
@@ -284,38 +340,72 @@ async def _build_repository_index(
             progress.report(
                 "structural_index",
                 "Structural extraction and relationship construction completed.",
-                percentage=42,
+                percentage=structural_end,
                 completed=len(snapshot.files),
                 total=len(snapshot.files),
+                phase_label="Structural extraction",
+                phase_percent=100,
+                phase_weight=structural_end - compare_end,
+                completed_units=len(snapshot.files),
+                total_units=len(snapshot.files),
+                unit_type="files",
+                reused_units=len(structural.reused_paths),
                 metadata={
                     "extracted": len(structural.extracted_paths),
                     "reused": len(structural.reused_paths),
                 },
             )
             if provider is not None:
-                semantic_completed: set[str] = set()
+                semantic_start = 18.0
+                semantic_end = 82.0
+                semantic_running_end = semantic_start
+                model_semantic_observer = progress.scaled_observer(semantic_start, 81.0)
+                metadata_semantic_observer = progress.scaled_observer(
+                    semantic_start, 22.0
+                )
+                reused_semantic_observer = progress.scaled_observer(
+                    semantic_start, semantic_start
+                )
 
-                def semantic_status(path: str, status: str) -> None:
-                    if status not in {"complete", "failed", "skipped"}:
-                        return
-                    semantic_completed.add(path)
-                    total = len(snapshot.files)
-                    percentage = 45 + 30 * len(semantic_completed) / max(total, 1)
-                    progress.report(
-                        "semantic_analysis",
-                        "Analyzing repository files semantically.",
-                        percentage=percentage,
-                        completed=len(semantic_completed),
-                        total=total,
-                        metadata={"files": total, "path": path, "status": status},
-                    )
+                def observe_semantic(event: ProgressEvent) -> None:
+                    nonlocal semantic_running_end
+                    route_totals = event.metadata.get("route_totals")
+                    model_units = 0
+                    metadata_units = 0
+                    if isinstance(route_totals, dict):
+                        model_units = sum(
+                            value
+                            for key, value in route_totals.items()
+                            if key in {"rich_model_analysis", "generic_model_analysis"}
+                            and isinstance(value, int)
+                        )
+                        metadata_value = route_totals.get(
+                            "deterministic_metadata_summary", 0
+                        )
+                        if isinstance(metadata_value, int):
+                            metadata_units = metadata_value
+                    if model_units:
+                        semantic_running_end = 81.0
+                        model_semantic_observer(event)
+                    elif metadata_units:
+                        semantic_running_end = 22.0
+                        metadata_semantic_observer(event)
+                    else:
+                        reused_semantic_observer(event)
 
                 progress.report(
                     "semantic_index",
-                    "Building semantic repository index.",
-                    percentage=45,
+                    "Planning semantic repository analysis.",
+                    percentage=semantic_start,
                     completed=0,
-                    total=len(snapshot.files),
+                    total=0,
+                    phase_label="Semantic analysis",
+                    phase_percent=0,
+                    phase_weight=semantic_end - semantic_start,
+                    completed_units=0,
+                    total_units=0,
+                    unit_type="files",
+                    activity=ProgressActivity.ACTIVE,
                 )
                 semantic = await build_semantic_index(
                     snapshot,
@@ -324,29 +414,68 @@ async def _build_repository_index(
                     options=SemanticAnalysisOptions(
                         max_concurrency=concurrency,
                         max_files=max_files,
+                        max_output_tokens=semantic_max_output_tokens,
                         fail_on_error=fail_on_error,
                         force_reanalyze=force_reanalyze,
                         resume=not force_reanalyze,
-                        status_callback=semantic_status,
+                        progress=observe_semantic,
                     ),
                     previous_manifest=previous,
                 )
-                progress.report(
-                    "semantic_index",
-                    "Semantic analysis was validated and published.",
-                    percentage=75,
-                    completed=len(snapshot.files),
-                    total=len(snapshot.files),
-                    metadata={
-                        "analyzed": len(semantic.analyzed_paths),
-                        "reused": len(semantic.reused_paths),
-                        "failed": len(semantic.failed_paths),
-                    },
+                semantic_event = progress.last_event
+                if semantic_event is not None:
+                    semantic_publish_end = (
+                        semantic_end
+                        if semantic_running_end == 81.0
+                        else 23.0
+                        if semantic_running_end == 22.0
+                        else semantic_start
+                    )
+                    progress.report(
+                        "semantic_index",
+                        "Semantic analysis was validated and published.",
+                        percentage=semantic_publish_end,
+                        completed=semantic_event.processed_units,
+                        total=semantic_event.planned_units,
+                        phase_label="Semantic analysis",
+                        phase_percent=100,
+                        phase_weight=semantic_publish_end - semantic_start,
+                        completed_units=semantic_event.processed_units,
+                        total_units=semantic_event.planned_units,
+                        unit_type="items",
+                        last_completed_item=semantic_event.last_completed_item,
+                        last_failed_item=semantic_event.last_failed_item,
+                        reused_units=semantic_event.reused_units,
+                        skipped_units=semantic_event.skipped_units,
+                        failed_units=semantic_event.failed_units,
+                        planned_units=semantic_event.planned_units,
+                        processed_units=semantic_event.processed_units,
+                        succeeded_units=semantic_event.succeeded_units,
+                        fallback_units=semantic_event.fallback_units,
+                        lifecycle_state="published",
+                        safe_error_code=semantic_event.safe_error_code,
+                        safe_error_message=semantic_event.safe_error_message,
+                        metadata={
+                            "analyzed": len(semantic.analyzed_paths),
+                            "reused": len(semantic.reused_paths),
+                            "failed": len(semantic.failed_paths),
+                        },
+                    )
+                maps_start = (
+                    semantic_end
+                    if semantic_running_end == 81.0
+                    else 23.0
+                    if semantic_running_end == 22.0
+                    else semantic_start
                 )
                 progress.report(
                     "repository_maps",
                     "Building repository maps.",
-                    percentage=78,
+                    percentage=maps_start,
+                    phase_label="Semantic repository maps",
+                    phase_percent=0,
+                    phase_weight=94 - maps_start,
+                    activity=ProgressActivity.WAITING,
                 )
                 maps = await build_repository_maps(
                     snapshot,
@@ -358,6 +487,9 @@ async def _build_repository_index(
                     "repository_maps",
                     "Repository maps were validated and published.",
                     percentage=94,
+                    phase_label="Semantic repository maps",
+                    phase_percent=100,
+                    phase_weight=94 - maps_start,
                     metadata={
                         "outcomes": {
                             item.map_kind: item.status for item in maps.outcomes
@@ -368,14 +500,29 @@ async def _build_repository_index(
                 progress.report(
                     "model_analysis",
                     "Model-backed analysis was not requested.",
-                    percentage=94,
+                    percentage=structural_end,
+                    phase_label="Model analysis",
+                    phase_percent=100,
+                    phase_weight=0,
                     metadata={"skipped": True},
                 )
 
             progress.report(
+                "finalization",
+                "Deterministic relationships and index records finalized.",
+                percentage=97 if model_enabled else 90,
+                phase_label="Deterministic finalization",
+                phase_percent=100,
+                phase_weight=3 if model_enabled else 15,
+            )
+            progress.report(
                 "validation",
                 "Validating the active index generation.",
-                percentage=96,
+                percentage=97 if model_enabled else 90,
+                phase_label="Validation and publication",
+                phase_percent=0,
+                phase_weight=3 if model_enabled else 10,
+                activity=ProgressActivity.ACTIVE,
             )
             active = load_manifest(root)
             expected = (
@@ -393,6 +540,9 @@ async def _build_repository_index(
                 "publication",
                 "Atomic index publication completed.",
                 percentage=99,
+                phase_label="Validation and publication",
+                phase_percent=(2 / 3 * 100 if model_enabled else 9 / 10 * 100),
+                phase_weight=3 if model_enabled else 10,
                 metadata={"generation_id": active.generation_id},
             )
         except BaseException:
@@ -1019,6 +1169,7 @@ def _progress_reporter(
     *,
     operation_id: str | None,
     parent_operation_id: str | None,
+    metadata: dict[str, Any] | None = None,
 ) -> ProgressReporter:
     """Create one application operation reporter with a unique default ID."""
 
@@ -1027,6 +1178,7 @@ def _progress_reporter(
         operation_type,
         observer=observer,
         parent_operation_id=parent_operation_id,
+        metadata=metadata,
     )
 
 
@@ -1073,7 +1225,12 @@ def _report_terminal_exception(
     metadata = {"error_type": type(error).__name__}
     if isinstance(
         error,
-        (asyncio.CancelledError, DiscoveryCancelledError, ProviderCancelledError),
+        (
+            asyncio.CancelledError,
+            DiscoveryCancelledError,
+            KeyboardInterrupt,
+            ProviderCancelledError,
+        ),
     ):
         reporter.cancel(metadata=metadata)
     else:

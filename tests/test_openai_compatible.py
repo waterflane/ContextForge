@@ -431,6 +431,7 @@ credential_env = "LM_STUDIO_API_KEY"
         model="cli/model",
         base_url="http://localhost:9999/v1",
         concurrency=5,
+        timeout_seconds=45,
     )
 
     assert configured is not None
@@ -443,6 +444,7 @@ credential_env = "LM_STUDIO_API_KEY"
     assert overridden.model_id == "cli/model"
     assert overridden.endpoint == "http://localhost:9999/v1"
     assert overridden.concurrency_limit == 5
+    assert overridden.timeout_seconds == 45
     assert "LM_STUDIO_API_KEY" in overridden.model_dump_json()
     assert "local-secret" not in overridden.model_dump_json()
     assert isinstance(create_model_provider(overridden), OpenAICompatibleModelProvider)
@@ -480,6 +482,8 @@ def test_cli_help_and_provider_selection_include_base_url(tmp_path: Path) -> Non
 
     assert help_result.exit_code == 0
     assert "--base-url" in help_result.output
+    assert "--request-timeout" in help_result.output
+    assert "--max-output-tokens" in help_result.output
     assert selected.exit_code == 1
     assert "OpenAI-compatible base URL must be an HTTP URL" in selected.output
 

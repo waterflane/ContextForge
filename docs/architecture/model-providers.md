@@ -48,17 +48,19 @@ policy:
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 120
+timeout_seconds = 90
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
+semantic_max_output_tokens = 4096
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
 ```
 
-`ProviderConfiguration` enforces a timeout in `(0, 600]`, a response cap in
+`ProviderConfiguration` enforces a timeout in `(0, 600]`, with a 90-second
+default per attempt, a response cap in
 `[1, 16,000,000]`, concurrency in `[1, 8]`, and at most two retries after the
 first attempt. An individual request may lower its response cap. Ollama's
 `local_only=true` policy accepts only `127.0.0.1`, `::1`, or `localhost`.
@@ -116,6 +118,16 @@ explicit cancellation event or cancellation of the caller task cancels the
 active transport task and raises `ProviderCancelledError`. There is no
 unbounded queue, unbounded response read, infinite retry, or live-model
 requirement in tests.
+
+Every attempt emits the shared structured `ProgressEvent` lifecycle before the
+provider call, after validated acceptance, on bounded retry, and on terminal
+failure. The event exposes attempt counts and safe error codes such as
+`provider_timeout`, `connection_error`, `http_error`, `model_not_found`,
+`malformed_json`, and `structured_output_validation_failed`; it never includes
+raw responses. Semantic requests set a bounded `max_output_tokens` (4096 by
+default, configurable through `semantic_max_output_tokens` or CLI
+`--max-output-tokens`). OpenAI-compatible requests transmit that bound as
+`max_tokens`, so a small file cannot request unbounded output.
 
 ## Trust boundary
 

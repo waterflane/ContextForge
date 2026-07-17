@@ -20,10 +20,11 @@ the loopback interface:
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 120
+timeout_seconds = 90
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
+semantic_max_output_tokens = 4096
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -39,6 +40,34 @@ Keep local-model concurrency low. The semantic builder additionally bounds
 scheduled files, simultaneous file tasks, request and response bytes, source
 bytes per request, output tokens, chunks and model requests per file, provider retries, and
 cancellation. Provider limits may be stricter than analysis limits.
+
+`--request-timeout` overrides the per-attempt deadline for one index command;
+`--max-output-tokens` overrides the bounded semantic response budget. The
+default retry limit is two retries after the first attempt. Attempt elapsed time
+resets on retry, while total operation elapsed time remains monotonic.
+
+## Semantic routing and planning
+
+The complete semantic work plan is classified before its denominator is
+reported. Each candidate has exactly one route: rich model analysis, generic
+model analysis, deterministic metadata summary, reusable record, skipped,
+unsupported binary, oversized, invalid encoding, or preflight failure.
+`.contextforge` paths never enter this plan.
+
+Python files use rich model analysis. Meaningful readable JavaScript/JSX,
+TypeScript/TSX, Markdown, HTML, CSS, PowerShell, batch, JSON, TOML, YAML, XML,
+shell, and other text files use generic schema-bound model analysis even when
+their structural CodeMap uses the unsupported-language fallback. Generic model
+success is recorded as `generic_model_analysis`, never as a semantic fallback.
+
+`.gitignore`, `.gitattributes`, `.editorconfig`, `.env.example`, `.env.sample`,
+lock files, `.gitkeep`, and empty files use deterministic metadata summaries and
+make no provider call. Environment templates persist declared variable names
+only; assigned values are neither placed in semantic records nor progress.
+Secret-bearing `.env` files are skipped. Deterministic metadata work has one
+cost unit; a model-routed file has eight base units plus one unit per 32 KiB of
+source, capped at 16 source units. Thus model work dominates overall progress
+without pretending that reused or deterministic items made an LLM request.
 
 ## Input and trust boundary
 

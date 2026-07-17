@@ -42,10 +42,13 @@ class ProjectModelSettings(_ConfigModel):
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT
     base_url: str | None = None
     model_id: str = Field(default=DEFAULT_MODEL_ID, alias="model")
-    timeout_seconds: float = 120.0
+    timeout_seconds: float = 90.0
     max_response_bytes: int = 1_000_000
     concurrency_limit: int = 2
     retry_limit: int = 2
+    semantic_max_output_tokens: int = Field(
+        default=4_096, ge=256, le=32_768, strict=True
+    )
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     store_raw_prompts: bool = False
@@ -111,6 +114,7 @@ def resolve_provider_configuration(
     model: str | None = None,
     base_url: str | None = None,
     concurrency: int | None = None,
+    timeout_seconds: float | None = None,
     local_only: bool | None = None,
 ) -> ProviderConfiguration | None:
     """Apply command overrides and return a secret-free provider configuration."""
@@ -145,7 +149,9 @@ def resolve_provider_configuration(
         "provider_id": provider_id,
         "endpoint": endpoint,
         "model_id": model_id,
-        "timeout_seconds": settings.timeout_seconds,
+        "timeout_seconds": (
+            settings.timeout_seconds if timeout_seconds is None else timeout_seconds
+        ),
         "max_response_bytes": settings.max_response_bytes,
         "concurrency_limit": (
             settings.concurrency_limit if concurrency is None else concurrency

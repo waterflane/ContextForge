@@ -113,11 +113,20 @@ separate atomic artifact. `context review` validates and displays a JSON
 handoff without the original repository.
 
 Long-running index and automatic context commands report weighted progress to
-stderr. Structured results remain the only content on stdout, so redirection
-and pipelines stay safe:
+stderr. `--progress auto` (the default) uses one compact Rich live panel when
+stderr is interactive and discrete records when stderr is redirected.
+`--progress never` suppresses terminal progress; `--progress always` requests
+the live display only when the actual stderr console can render it safely.
+Captured or redirected stdout does not disable an interactive stderr panel.
+
+During model analysis the live panel shows overall and phase bars,
+processed/planned, succeeded/failed/fallback/skipped/reused counters, current,
+last successful and last failed files, a safe failure reason, attempt count,
+request and total elapsed time, active concurrency, and provider/model. A
+semantic file transition is also fully available to programmatic observers:
 
 ```text
-Indexing repository: 37% — Analyzing repository files semantically (42/114 files)
+Indexing repository: 53% — Semantic analysis 9/26 processed · 35%; completed=src/app.py current=src/service.py failures=1 processed=9/26 succeeded=8
 ```
 
 ```bash
@@ -125,9 +134,11 @@ contextforge context suggest . --task "Audit parsing" --format json > selection.
 python -m json.tool selection.json
 ```
 
-Interactive and redirected runs use the same phase events. Redirected stderr
-contains discrete readable lines and no ANSI control sequences. Progress does
-not change exit codes; Ctrl+C still exits with 130.
+Interactive and redirected runs use the same structured phase events.
+Redirected stderr contains readable lines and no ANSI control sequences or
+spinner ticks. Structured JSON and Markdown remain the only stdout content.
+Progress does not change exit codes; Ctrl+C still exits with 130 and restores
+the live display.
 
 ### Repository index
 
@@ -141,13 +152,24 @@ contextforge index clean . --force
 ```
 
 `index build` and `index update` support `--provider`, `--model`, `--base-url`, `--config`,
-`--concurrency`, `--fail-on-error`, `--force-reanalyze`, `--max-files`, and
-`--local-only`. Use `--provider none` for deterministic structural-only
+`--concurrency`, `--request-timeout`, `--max-output-tokens`, `--fail-on-error`,
+`--force-reanalyze`, `--max-files`, and `--local-only`. Use `--provider none` for deterministic structural-only
 indexing. Updates reuse unchanged valid facts and interpretations, while new,
 changed, deleted, analyzer-stale, prompt-stale, and model-stale records are
 processed explicitly. A failed strict build restores the prior active pointer.
-Progress credits reused and deliberately skipped files as completed work. The
-100% event is emitted only after generation validation and atomic active-pointer
+For model-enabled builds, scan/planning occupy approximately 0–8%, structural
+extraction 8–18%, per-file semantic model work 18–82%, repository-map model work
+82–94%, deterministic finalization 94–97%, and validation/publication 97–100%.
+Structural-only builds redistribute the model ranges. The semantic phase bar is
+`processed_units / planned_units`, where failures and reuse are terminal work,
+not successes. Overall weighting gives deterministic metadata/reuse one unit and
+model files eight base units plus one unit per 32 KiB (source units capped at
+16). `.gitignore`, `.gitattributes`, `.editorconfig`, environment examples,
+lock files, `.gitkeep`, and empty files avoid provider calls; environment
+examples store variable names only. Meaningful non-Python text still uses
+generic model semantics even when its structural CodeMap is a fallback.
+`.contextforge` never enters the semantic plan. The sole successful 100% event
+is emitted only after generation validation and atomic active-pointer
 publication succeed.
 
 `index status` is read-only and reports schema, repository and generation
@@ -169,10 +191,11 @@ config_version = 1
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 120.0
+timeout_seconds = 90.0
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
+semantic_max_output_tokens = 4096
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -203,7 +226,10 @@ concurrency_limit = 2
 
 The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
 Schema output and checks the exact configured ID through `GET /v1/models`.
-CLI `--model`, `--base-url`, and `--concurrency` values override this section.
+CLI `--model`, `--base-url`, `--concurrency`, `--request-timeout`, and
+`--max-output-tokens` values override this section. Each provider attempt has a
+90-second default deadline and the existing retry policy permits two retries
+(three attempts total).
 
 Remote endpoints are fail-closed unless configuration explicitly sets both
 `local_only = false` and `external_data_policy = "allow_repository"`.
