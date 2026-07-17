@@ -183,6 +183,7 @@ class SemanticAnalysisOptions:
     max_response_bytes: int = 1_000_000
     max_output_tokens: int = 4_096
     max_chunks_per_file: int = 64
+    max_requests_per_file: int = 512
     max_files: int | None = None
     fail_on_error: bool = False
     resume: bool = True
@@ -207,6 +208,7 @@ class SemanticAnalysisOptions:
             ("max_response_bytes", self.max_response_bytes, 16_000_000),
             ("max_output_tokens", self.max_output_tokens, 1_000_000),
             ("max_chunks_per_file", self.max_chunks_per_file, 1_000),
+            ("max_requests_per_file", self.max_requests_per_file, 10_000),
         ):
             if type(value) is not int or not 1 <= value <= upper:
                 raise ValueError(f"{name} must be an integer between 1 and {upper}")
@@ -420,17 +422,22 @@ async def build_semantic_index(
             )
             return project_file.path, None, diagnostic, False
 
-    tasks = [
-        asyncio.create_task(analyze_one(project_file, code_map, state))
-        for project_file, code_map, state in selected_stale
-    ]
-    try:
-        task_results = await asyncio.gather(*tasks)
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    task_results: list[
+        tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]
+    ] = []
+    for offset in range(0, len(selected_stale), active_options.max_concurrency):
+        batch = selected_stale[offset : offset + active_options.max_concurrency]
+        tasks = [
+            asyncio.create_task(analyze_one(project_file, code_map, state))
+            for project_file, code_map, state in batch
+        ]
+        try:
+            task_results.extend(await asyncio.gather(*tasks))
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     failures: list[AnalysisDiagnostic] = []
     for path, work, diagnostic, resumed in task_results:
@@ -606,6 +613,26 @@ async def analyze_file_semantics(
         raise SemanticAnalysisError(
             "large file requires more chunks than the configured safe limit"
         )
+    symbol_work: list[tuple[SymbolRecord, tuple[_SourceChunk, ...]]] = []
+    for symbol in code_map.symbols:
+        if symbol.kind not in _ANALYZED_SYMBOL_KINDS:
+            continue
+        symbol_chunks = _chunks_for_range(
+            source, symbol.declaration_range, options.max_source_bytes_per_request
+        )
+        if len(symbol_chunks) > options.max_chunks_per_file:
+            raise SemanticAnalysisError(
+                f"symbol {symbol.symbol_id} exceeds the configured chunk limit"
+            )
+        symbol_work.append((symbol, symbol_chunks))
+    required_requests = (
+        len(chunks) + sum(len(symbol_chunks) for _, symbol_chunks in symbol_work) + 1
+    )
+    if required_requests > options.max_requests_per_file:
+        raise SemanticAnalysisError(
+            "large-file semantic analysis exceeds the per-file model-request limit"
+        )
+
     file_parts: list[_RawFileAnalysis] = []
     request_count = 0
     for index, chunk in enumerate(chunks):
@@ -637,16 +664,7 @@ async def analyze_file_semantics(
         request_count += 1
 
     symbol_analyses: list[SymbolSemanticAnalysis] = []
-    for symbol in code_map.symbols:
-        if symbol.kind not in _ANALYZED_SYMBOL_KINDS:
-            continue
-        symbol_chunks = _chunks_for_range(
-            source, symbol.declaration_range, options.max_source_bytes_per_request
-        )
-        if len(symbol_chunks) > options.max_chunks_per_file:
-            raise SemanticAnalysisError(
-                f"symbol {symbol.symbol_id} exceeds the configured chunk limit"
-            )
+    for symbol, symbol_chunks in symbol_work:
         raw_parts: list[_RawSymbolAnalysis] = []
         for index, chunk in enumerate(symbol_chunks):
             _raise_if_cancelled(cancellation)
@@ -1496,6 +1514,7 @@ def _analysis_options_digest(options: SemanticAnalysisOptions) -> str:
                 "large_file_strategy": "complete-chunks-symbols-synthesis-v2",
                 "max_chunks_per_file": options.max_chunks_per_file,
                 "max_output_tokens": options.max_output_tokens,
+                "max_requests_per_file": options.max_requests_per_file,
                 "max_request_bytes": options.max_request_bytes,
                 "max_response_bytes": options.max_response_bytes,
                 "max_source_bytes_per_request": options.max_source_bytes_per_request,

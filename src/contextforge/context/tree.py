@@ -199,8 +199,8 @@ def _canonical_entry_specs(
 def _portable_inventory_path(path: str) -> str:
     if not isinstance(path, str):
         raise ProjectTreeError("inventory path must be a string")
-    if "\x00" in path:
-        raise ProjectTreeError("inventory path must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in path):
+        raise ProjectTreeError("inventory path must not contain control characters")
 
     portable = path.replace("\\", "/")
     if not portable or portable.startswith("/") or _WINDOWS_DRIVE.match(portable):

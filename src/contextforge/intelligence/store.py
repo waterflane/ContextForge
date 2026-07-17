@@ -321,6 +321,7 @@ def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
         _validate_generation(generation, manifest)
     else:
         stage = begin_index_build(lock)
+        _prune_unreferenced_staged_records(stage, manifest)
         _validate_generation_records(stage, manifest)
         manifest_bytes = canonical_json_bytes(manifest.model_dump(mode="json"))
         _atomic_write_bytes(
@@ -562,6 +563,7 @@ def clean_generated_index(
     *,
     run_id: str = "clean",
     recover_stale_lock: bool = False,
+    confirm_unknown_lock: bool = False,
 ) -> None:
     """Reset generated index truth while preserving config, contexts, and runs."""
 
@@ -569,6 +571,7 @@ def clean_generated_index(
         repository_root,
         run_id,
         recover_stale=recover_stale_lock,
+        confirm_unknown=confirm_unknown_lock,
     ) as lock:
         if os.path.lexists(lock.layout.active_manifest):
             _require_regular_file(lock.layout.active_manifest)
@@ -802,15 +805,14 @@ def _validate_generation(generation: Path, manifest: IndexManifest) -> None:
 
 def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None:
     for state in manifest.files:
-        if state.record_location is None or state.record_sha256 is None:
-            continue
-        record = root.joinpath(*state.record_location.split("/"))
-        _require_safe_existing_chain(root, record)
-        content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
-        if hashlib.sha256(content).hexdigest() != state.record_sha256:
-            raise IndexPublicationError(
-                f"record digest does not match manifest for {state.path}"
-            )
+        if state.record_location is not None and state.record_sha256 is not None:
+            record = root.joinpath(*state.record_location.split("/"))
+            _require_safe_existing_chain(root, record)
+            content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
+            if hashlib.sha256(content).hexdigest() != state.record_sha256:
+                raise IndexPublicationError(
+                    f"record digest does not match manifest for {state.path}"
+                )
         if (
             state.interpretation_record_location is not None
             and state.interpretation_record_sha256 is not None
@@ -829,6 +831,44 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 raise IndexPublicationError(
                     f"interpretation digest does not match manifest for {state.path}"
                 )
+
+
+def _prune_unreferenced_staged_records(stage: Path, manifest: IndexManifest) -> None:
+    """Remove crash leftovers that are not part of the generation being published."""
+
+    allowed = {
+        location
+        for state in manifest.files
+        for location in (
+            state.record_location,
+            state.interpretation_record_location,
+        )
+        if location is not None
+    }
+    allowed.update(_STAGED_ROOT_RECORDS)
+    allowed.add(ACTIVE_MANIFEST_FILENAME)
+
+    def prune(directory: Path) -> None:
+        _require_directory(directory)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink() or path.is_junction():
+                    raise IndexPathError("staged generation contains a linked path")
+                if entry.is_dir(follow_symlinks=False):
+                    prune(path)
+                    with os.scandir(path) as remaining:
+                        is_empty = next(remaining, None) is None
+                    if path != stage / "files" and is_empty:
+                        path.rmdir()
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise IndexPathError("staged generation contains a special file")
+                relative = path.relative_to(stage).as_posix()
+                if relative.endswith(TEMPORARY_SUFFIX) or relative not in allowed:
+                    path.unlink()
+
+    prune(stage)
 
 
 def _read_persisted_model[ModelType: BaseModel](

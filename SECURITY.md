@@ -58,6 +58,12 @@ active pointer when one existed.
 Provider configuration contains endpoint/model policy and, optionally, an
 environment-variable name. It rejects inline credentials, sensitive query
 parameters, unknown fields, and non-local endpoints when `local_only=true`.
+When `local_only=false`, a remote endpoint is still rejected unless
+`external_data_policy="allow_repository"`; `deny` and `allow_selected` do not
+authorize remote transport in v0.4.0. Repository-wide authorization can send
+any selectable snapshot file, including files with secret-like names, so users
+must review ignore rules and provider retention before enabling it. ContextForge
+does not claim complete secret detection.
 Credential values are resolved only at request time, redacted from typed
 errors, and forbidden from indexes, reviews, handoffs, prompts, and run data.
 

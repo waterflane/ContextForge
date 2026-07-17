@@ -246,6 +246,7 @@ def test_duplicate_and_non_text_snapshot_entries_fail_closed(tmp_path: Path) -> 
         "C:/repo/file.txt",
         r"C:file.txt",
         "bad\x00.txt",
+        "bad\x1b[2J.txt",
         "dir//file.txt",
         "./file.txt",
     ],

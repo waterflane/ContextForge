@@ -757,6 +757,28 @@ def test_large_file_limit_is_explicit_failure_not_truncation(tmp_path: Path) -> 
     assert "chunks" in diagnostic.message
 
 
+def test_large_file_request_count_is_bounded_before_provider_calls(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "\n".join(f"def q{index}():\n    return {index}" for index in range(8)) + "\n"
+    )
+    snapshot = _snapshot_with_facts(tmp_path, {"large.py": source})
+    provider = _provider()
+    result = _build_semantics(
+        snapshot,
+        provider,
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=32,
+            max_chunks_per_file=64,
+            max_requests_per_file=2,
+        ),
+    )
+
+    assert result.failed_paths == ("large.py",)
+    assert provider.call_count == 0
+
+
 def test_request_byte_limit_fails_before_calling_provider(tmp_path: Path) -> None:
     snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
     provider = _provider()

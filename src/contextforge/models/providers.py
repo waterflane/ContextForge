@@ -78,6 +78,7 @@ class ProviderConfiguration(ProviderModel):
     )
     retry_limit: int = Field(default=2, ge=0, le=MAX_PROVIDER_RETRIES, strict=True)
     local_only: bool = True
+    external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     credential_env: str | None = None
 
     @field_validator("provider_id", "model_id")

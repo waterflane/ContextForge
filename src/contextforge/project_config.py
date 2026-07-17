@@ -152,6 +152,7 @@ def resolve_provider_configuration(
         ),
         "retry_limit": settings.retry_limit,
         "local_only": settings.local_only if local_only is None else local_only,
+        "external_data_policy": settings.external_data_policy,
         "credential_env": settings.credential_env,
     }
     if provider_id == "fake":

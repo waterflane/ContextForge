@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
 ### Added
 
 - Added `contextforge index build|update|status|clean` as thin adapters over
@@ -55,6 +57,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   existing `ProjectSnapshot` model.
 
 ### Fixed
+
+- Prune unreferenced crash leftovers before immutable generation publication
+  and validate semantic interpretation records independently of structural
+  record presence.
+- Reserve discovery read budget for model-directed inspection and final source
+  verification instead of allowing the fresh CodeMap prepass to exhaust it.
+- Bound scheduled semantic tasks, per-file semantic requests, repository-map
+  calls, and MCP request-line memory.
+- Enforce external repository-data policy for non-loopback model endpoints and
+  reject ASCII control characters in portable paths across persisted and
+  portable artifacts.
+- Report staged Git additions as `added`, validate required MCP initialize
+  fields, and propagate MCP cancellation rather than converting it to an
+  internal protocol error.
 
 - Preserve the prior active index generation when a strict multi-phase CLI
   build fails after a previous valid generation exists.

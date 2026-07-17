@@ -229,7 +229,11 @@ def test_mcp_protocol_initialize_lists_calls_resources_and_no_write_capability(
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "2025-11-25"},
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "tests", "version": "1"},
+                },
             }
         )
     )
@@ -403,12 +407,29 @@ def test_mcp_server_additional_protocol_branches(tmp_path: Path) -> None:
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "unsupported"},
+                "params": {
+                    "protocolVersion": "unsupported",
+                    "capabilities": {},
+                    "clientInfo": {"name": "tests", "version": "1"},
+                },
             }
         )
     )
     assert fallback is not None
     assert fallback["result"]["protocolVersion"] == "2025-11-25"
+
+    invalid_initialize = asyncio.run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            }
+        )
+    )
+    assert invalid_initialize is not None
+    assert invalid_initialize["error"]["code"] == -32602
 
     ping = asyncio.run(
         server.handle_message(
@@ -483,6 +504,40 @@ def test_stdio_protocol_smoke_and_parse_error(
     ]
     assert messages[0]["error"]["code"] == -32700
     assert messages[1]["result"] == {}
+
+
+def test_stdio_drains_oversized_lines_and_propagates_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "app.py", "pass\n")
+    oversized = b"x" * (server_module.MAX_MCP_REQUEST_BYTES + 1) + b"\n"
+    incoming = _BinaryStream(
+        oversized + b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}\n'
+    )
+    outgoing = _BinaryStream()
+    monkeypatch.setattr(sys, "stdin", incoming)
+    monkeypatch.setattr(sys, "stdout", outgoing)
+
+    asyncio.run(server_module._serve_stdio(_foundation(tmp_path)))
+    messages = [
+        json.loads(line)
+        for line in outgoing.buffer.getvalue().decode("utf-8").splitlines()
+    ]
+    assert [item.get("error", {}).get("code") for item in messages] == [-32700, None]
+    assert messages[1]["result"] == {}
+
+    cancelled_input = _BinaryStream(
+        b'{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}\n'
+    )
+    monkeypatch.setattr(sys, "stdin", cancelled_input)
+
+    async def cancel(self: server_module.MCPServer, message: dict[str, Any]) -> None:
+        del self, message
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(server_module.MCPServer, "handle_message", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server_module._serve_stdio(_foundation(tmp_path)))
 
 
 def test_mcp_cli_success_usage_operational_and_cancellation(

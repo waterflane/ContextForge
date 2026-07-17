@@ -39,6 +39,14 @@ def test_project_file_normalizes_path_and_validates_metadata() -> None:
 
     with pytest.raises(ValidationError):
         ProjectFile(
+            path="src/evil\x1b[2J.py",
+            size_bytes=0,
+            sha256=SHA256,
+            is_text=True,
+        )
+
+    with pytest.raises(ValidationError):
+        ProjectFile(
             path="../app.py",
             size_bytes=-1,
             sha256="not-a-hash",

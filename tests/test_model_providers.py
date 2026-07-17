@@ -607,6 +607,16 @@ def test_provider_configuration_is_bounded_and_ollama_is_local_by_default() -> N
     )
     with pytest.raises(ProviderConfigurationError, match="loopback"):
         OllamaModelProvider(remote)
+    remote_without_data_approval = remote.model_copy(update={"local_only": False})
+    with pytest.raises(ProviderConfigurationError, match="allow_repository"):
+        OllamaModelProvider(remote_without_data_approval)
+    explicitly_approved = remote.model_copy(
+        update={
+            "local_only": False,
+            "external_data_policy": "allow_repository",
+        }
+    )
+    assert OllamaModelProvider(explicitly_approved).capabilities().local is False
 
 
 def test_untrusted_source_digest_must_cover_exact_transmitted_text() -> None:

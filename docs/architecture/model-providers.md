@@ -62,6 +62,10 @@ store_raw_responses = false
 `[1, 16,000,000]`, concurrency in `[1, 8]`, and at most two retries after the
 first attempt. An individual request may lower its response cap. Ollama's
 `local_only=true` policy accepts only `127.0.0.1`, `::1`, or `localhost`.
+For a non-loopback endpoint, `local_only=false` is not sufficient by itself:
+`external_data_policy="allow_repository"` is also required. The
+`allow_selected` value is reserved and does not authorize remote transport in
+v0.4.0 because path-level transmission enforcement is not implemented.
 
 Credentials are optional and indirect. `credential_env` names an environment
 variable; the configuration stores only that name and resolves its value at

@@ -299,35 +299,61 @@ class DiscoverySession:
                 for path in sorted(current_files)
                 if path not in code_maps
             ]
+            reserve_files = max(
+                1,
+                min(
+                    self.request.budget.max_context_files,
+                    self.request.budget.max_files_read // 2,
+                ),
+            )
+            reserve_bytes = max(
+                1,
+                min(
+                    self.request.budget.max_context_bytes,
+                    self.request.budget.max_source_bytes // 2,
+                ),
+            )
+            prepass_limited = False
             for project_file in missing:
+                if (
+                    self.budget.files_read + 1
+                    > self.request.budget.max_files_read - reserve_files
+                    or self.budget.source_bytes + project_file.size_bytes
+                    > self.request.budget.max_source_bytes - reserve_bytes
+                ):
+                    prepass_limited = True
+                    continue
                 try:
                     self.budget.charge_read(project_file.size_bytes)
                 except ToolBudgetExceededError:
-                    warnings.append(
-                        CompletenessWarning(
-                            code="fresh-structural-budget-limited",
-                            message=(
-                                "The in-memory fresh CodeMap pass reached its "
-                                "source-read budget. Every allowed file remains "
-                                "reachable through tree "
-                                "and validated source tools while budget remains."
-                            ),
-                            related_paths=tuple(
-                                item.path
-                                for item in missing
-                                if item.path not in code_maps
-                            )[:50],
-                            confidence=0.25,
-                        )
-                    )
+                    prepass_limited = True
                     break
                 code_maps[project_file.path] = extract_code_map(
                     self.snapshot, project_file
                 )
+            if prepass_limited:
+                warnings.append(
+                    CompletenessWarning(
+                        code="fresh-structural-budget-limited",
+                        message=(
+                            "The in-memory fresh CodeMap prepass reserved read "
+                            "budget for model-directed inspection and final source "
+                            "verification. Files without CodeMaps remain reachable "
+                            "through tree and validated source tools."
+                        ),
+                        related_paths=tuple(
+                            item.path for item in missing if item.path not in code_maps
+                        )[:50],
+                        confidence=0.25,
+                    )
+                )
             if code_maps:
                 code_maps = {
                     item.path: item
-                    for item in resolve_relationships(tuple(code_maps.values()))
+                    for item in resolve_relationships(
+                        tuple(code_maps.values()),
+                        repository_paths=current_files,
+                    )
                 }
             if mode is DiscoveryMode.FRESH:
                 semantics = {}

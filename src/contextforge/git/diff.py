@@ -187,8 +187,9 @@ def collect_git_diff(
             encoded = _truncate_utf8(encoded, request.max_bytes)
         text = _strict_utf8(encoded, "Git diff")
 
-        touched = set(_collect_names(root, request, deleted=False))
-        deleted = set(_collect_names(root, request, deleted=True))
+        touched = set(_collect_names(root, request, diff_filter="ACMRTUXB"))
+        deleted = set(_collect_names(root, request, diff_filter="D"))
+        added = set(_collect_names(root, request, diff_filter="A"))
         untracked: set[str] = set()
         if request.mode == "working":
             untracked = set(_collect_untracked(root, request))
@@ -203,6 +204,8 @@ def collect_git_diff(
                     if path in untracked
                     else "deleted"
                     if path in deleted
+                    else "added"
+                    if path in added
                     else "modified"
                 ),
             )
@@ -247,10 +250,10 @@ def _diff_arguments(request: GitDiffRequest, *, names_only: bool) -> tuple[str, 
 
 
 def _collect_names(
-    root: Path, request: GitDiffRequest, *, deleted: bool
+    root: Path, request: GitDiffRequest, *, diff_filter: str
 ) -> tuple[str, ...]:
     arguments = list(_diff_arguments(request, names_only=True))
-    arguments.insert(5, "--diff-filter=D" if deleted else "--diff-filter=ACMRTUXB")
+    arguments.insert(5, f"--diff-filter={diff_filter}")
     result = _run_git(root, tuple(arguments), request)
     if result.returncode not in {0, 1}:
         raise GitDiffError("Git changed-file summary failed")

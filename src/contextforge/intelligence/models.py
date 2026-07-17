@@ -167,6 +167,11 @@ class IndexedFileState(IndexModel):
             )
         if self.semantic_status == "complete" and not has_interpretation_location:
             raise ValueError("complete semantic records require a location and digest")
+        if self.semantic_status == "complete" and self.record_status not in {
+            "complete",
+            "unsupported",
+        }:
+            raise ValueError("complete semantic records require published facts")
         if self.semantic_status != "complete" and has_interpretation_location:
             raise ValueError(
                 "non-complete semantic records cannot reference an interpretation"

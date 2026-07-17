@@ -309,7 +309,11 @@ def _authorize_candidate(
 
 
 def _strict_snapshot_path(path: object) -> str:
-    if not isinstance(path, str) or "\x00" in path or "\\" in path:
+    if (
+        not isinstance(path, str)
+        or "\\" in path
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
         raise SelectedFileOutsideRootError(
             f"selected snapshot path is not portable: {path!r}"
         )

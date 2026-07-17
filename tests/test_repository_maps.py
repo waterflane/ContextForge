@@ -504,3 +504,17 @@ def test_global_records_are_deterministic_across_repository_roots(
 def test_global_option_bounds_reject_nonreducing_hierarchy() -> None:
     with pytest.raises(ValueError, match="between 2 and 100"):
         GlobalMapAnalysisOptions(max_summaries_per_group=1)
+
+
+def test_global_model_call_limit_fails_before_provider_work(tmp_path: Path) -> None:
+    snapshot = _facts(tmp_path, {"main.py": "def main():\n    return 1\n"})
+    responder = _Responder()
+
+    with pytest.raises(GlobalMapAnalysisError, match="model calls"):
+        _maps(
+            snapshot,
+            responder,
+            options=GlobalMapAnalysisOptions(max_model_calls=3),
+        )
+
+    assert responder.requests == []

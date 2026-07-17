@@ -1,10 +1,10 @@
 # ContextForge v0.4.0 — Repository Intelligence
 
-Status: implemented milestone specification. Core repository intelligence,
-thin CLI adapters, and the dependency-free local read-only stdio MCP foundation
-are implemented. This document remains the architectural contract; deferred
-items and limitations are still explicit and complete RepoPrompt parity is not
-claimed.
+Status: historical implementation plan. Core repository intelligence, thin CLI
+adapters, and the dependency-free local read-only stdio MCP foundation are
+implemented, but current behavior and limits are authoritative in `README.md`,
+`SECURITY.md`, and `docs/architecture/`. Planning snapshots, counts, and policy
+proposals below are retained for design history and are not release claims.
 
 Implementation note (2026-07-16): the public CLI uses the concise `index`
 group and `context suggest` spelling requested during implementation. Existing

@@ -335,7 +335,7 @@ def _validate_snapshot_path(path: str) -> str:
     if (
         not portable
         or portable != path
-        or "\x00" in portable
+        or any(ord(character) < 32 or ord(character) == 127 for character in portable)
         or portable.startswith("/")
         or _WINDOWS_DRIVE.match(portable)
     ):
@@ -387,7 +387,9 @@ def _normalize_path_selector(
     *,
     allow_root: bool,
 ) -> str:
-    if not isinstance(selector, str) or "\x00" in selector:
+    if not isinstance(selector, str) or any(
+        ord(character) < 32 or ord(character) == 127 for character in selector
+    ):
         raise InvalidSelectorError(selector_type, selector)
 
     portable = selector.replace("\\", "/")
@@ -412,7 +414,9 @@ def _normalize_path_selector(
 def _compile_glob(
     selector_type: Literal["glob", "exclusion"], selector: object
 ) -> tuple[str, GitWildMatchPattern]:
-    if not isinstance(selector, str) or "\x00" in selector:
+    if not isinstance(selector, str) or any(
+        ord(character) < 32 or ord(character) == 127 for character in selector
+    ):
         raise InvalidSelectorError(selector_type, selector)
 
     normalized = selector.replace("\\", "/")

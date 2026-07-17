@@ -298,6 +298,56 @@ def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> No
     assert any(item.code == "hybrid-index-unavailable" for item in result.warnings)
 
 
+def test_fresh_prepass_reserves_budget_for_files_outside_initial_maps(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(
+        tmp_path,
+        {
+            "a.py": "from z9 import q\nA = q\n",
+            "b.py": "B = 1\n",
+            "c.py": "C = 1\n",
+            "z9.py": "def q():\n    return 'relevant behavior'\n",
+        },
+    )
+    request = DiscoveryRequest(
+        task="Find relevant behavior",
+        mode="fresh",
+        budget=DiscoveryBudget(
+            max_files_read=2,
+            max_source_bytes=1_000,
+            max_context_files=1,
+            max_context_bytes=500,
+        ),
+    )
+    result = _run(
+        snapshot,
+        _batch(
+            _call(
+                "outside",
+                "add_to_context",
+                {"path": "z9.py", "reason": "body behavior is relevant"},
+            ),
+            _finalize(),
+        ),
+        _batch(_finalize("reviewed")),
+        request=request,
+    )
+
+    assert result.final_selection is not None
+    assert result.final_selection.selected[0].path == "z9.py"
+    assert result.budget_usage.files_read == 2
+    assert any(
+        item.code == "fresh-structural-budget-limited" for item in result.warnings
+    )
+
+    session = DiscoverySession(snapshot, _provider(), request)
+    executor, _ = session.prepare_read_only_tools()
+    summary = _execute(executor, "get_file_summary", {"path": "a.py"})
+    assert summary.data["facts"]["imports"][0]["resolution"] == "internal"
+    assert summary.data["facts"]["imports"][0]["target_file_path"] == "z9.py"
+
+
 def test_line_range_selection_uses_exact_verified_content_bytes(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "one\ntwo\nthree\n"})
     result = _run(

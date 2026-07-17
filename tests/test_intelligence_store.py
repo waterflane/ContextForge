@@ -26,6 +26,7 @@ from contextforge.intelligence import (
     acquire_index_lock,
     begin_index_build,
     build_index_manifest,
+    calculate_generation_id,
     calculate_source_snapshot_digest,
     clean_generated_index,
     cleanup_stale_temporary_files,
@@ -264,6 +265,72 @@ def test_existing_valid_index_round_trips_through_atomic_pointer(
     assert load_index_record(tmp_path, loaded.files[0], manifest=loaded) == (
         _record_content(files[0])
     )
+
+
+def test_publication_prunes_unreferenced_interrupted_records(
+    tmp_path: Path,
+) -> None:
+    stale = _file("deleted.py", "secret from interrupted build")
+    current = _file("current.py", "current")
+    manifest = _manifest((current,))
+
+    with acquire_index_lock(tmp_path, "resumed") as lock:
+        write_index_record(lock, _record_location(stale), _record_content(stale))
+        _stage_records(lock, (current,))
+        stage = begin_index_build(lock)
+        leftover = stage / "files" / "crash.contextforge-tmp"
+        leftover.write_bytes(b"partial secret")
+        generation = write_manifest(lock, manifest)
+
+    assert not generation.joinpath(*_record_location(stale).split("/")).exists()
+    assert not (generation / "files" / leftover.name).exists()
+    assert generation.joinpath(*_record_location(current).split("/")).is_file()
+
+
+def test_publication_validates_interpretations_even_for_forged_partial_state(
+    tmp_path: Path,
+) -> None:
+    project_file = _file("app.py", "pass")
+    interpretation_location = f"files/{_sha('app.py')}.interpretation.json"
+    forged = IndexedFileState.model_construct(
+        path=project_file.path,
+        source_sha256=project_file.sha256,
+        source_size_bytes=project_file.size_bytes,
+        language=project_file.language,
+        analyzer=_analyzer(),
+        record_location=None,
+        record_sha256=None,
+        record_status="failed",
+        interpretation_record_location=interpretation_location,
+        interpretation_record_sha256=_sha("missing interpretation"),
+        semantic_status="complete",
+    )
+    build = IndexBuildState(
+        source_snapshot_digest=calculate_source_snapshot_digest((project_file,)),
+        index_config_digest=_sha("config"),
+        build_options_digest=_sha("options"),
+        facts_digest=_sha("facts"),
+    )
+    valid_failed = IndexedFileState(
+        path=project_file.path,
+        source_sha256=project_file.sha256,
+        source_size_bytes=project_file.size_bytes,
+        language=project_file.language,
+        analyzer=_analyzer(),
+        record_status="failed",
+        semantic_status="failed",
+    )
+    base = build_index_manifest(build=build, files=(valid_failed,))
+    draft = base.model_copy(update={"generation_id": "0" * 64, "files": (forged,)})
+    manifest = draft.model_copy(
+        update={"generation_id": calculate_generation_id(draft)}
+    )
+
+    with (
+        acquire_index_lock(tmp_path, "forged") as lock,
+        pytest.raises(IndexPathError),
+    ):
+        write_manifest(lock, manifest)
 
 
 def test_record_reader_rejects_unpinned_state_and_digest_tampering(

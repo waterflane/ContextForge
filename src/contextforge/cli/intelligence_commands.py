@@ -58,6 +58,8 @@ def _index_operation(
     force_reanalyze: bool,
     max_files: int | None,
     local_only: bool,
+    recover_stale_lock: bool,
+    confirm_unknown_lock: bool,
 ) -> None:
     provider: ModelProvider | None = None
     try:
@@ -89,6 +91,8 @@ def _index_operation(
                 fail_on_error=fail_on_error,
                 force_reanalyze=force_reanalyze,
                 max_files=max_files,
+                recover_stale_lock=recover_stale_lock,
+                confirm_unknown_lock=confirm_unknown_lock,
             )
         )
     except (FileNotFoundError, NotADirectoryError, ProjectConfigError) as exc:
@@ -166,6 +170,20 @@ def build_index(
             "--local-only", help="Require a loopback/local provider endpoint."
         ),
     ] = False,
+    recover_stale_lock: Annotated[
+        bool,
+        typer.Option(
+            "--recover-stale-lock",
+            help="Recover a stopped same-host writer lock before building.",
+        ),
+    ] = False,
+    confirm_unknown_lock: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-unknown-lock",
+            help="Explicitly replace malformed or other-host lock metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Scan and publish deterministic CodeMaps, semantics, and repository maps."""
 
@@ -181,6 +199,8 @@ def build_index(
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,
+        recover_stale_lock=recover_stale_lock,
+        confirm_unknown_lock=confirm_unknown_lock,
     )
 
 
@@ -210,6 +230,10 @@ def update_index(
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,
     max_files: Annotated[int | None, typer.Option("--max-files", min=1)] = None,
     local_only: Annotated[bool, typer.Option("--local-only")] = False,
+    recover_stale_lock: Annotated[bool, typer.Option("--recover-stale-lock")] = False,
+    confirm_unknown_lock: Annotated[
+        bool, typer.Option("--confirm-unknown-lock")
+    ] = False,
 ) -> None:
     """Increment only new, changed, deleted, or stale index records."""
 
@@ -225,6 +249,8 @@ def update_index(
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,
+        recover_stale_lock=recover_stale_lock,
+        confirm_unknown_lock=confirm_unknown_lock,
     )
 
 
@@ -276,6 +302,20 @@ def clean_index(
             "--force", help="Skip the interactive generated-data confirmation."
         ),
     ] = False,
+    recover_stale_lock: Annotated[
+        bool,
+        typer.Option(
+            "--recover-stale-lock",
+            help="Recover a stopped same-host writer lock before cleaning.",
+        ),
+    ] = False,
+    confirm_unknown_lock: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-unknown-lock",
+            help="Explicitly replace malformed or other-host lock metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Delete generated index truth while preserving ``config.toml``."""
 
@@ -285,7 +325,11 @@ def clean_index(
             abort=True,
         )
     try:
-        clean_repository_index(path)
+        clean_repository_index(
+            path,
+            recover_stale_lock=recover_stale_lock,
+            confirm_unknown_lock=confirm_unknown_lock,
+        )
     except (FileNotFoundError, NotADirectoryError) as exc:
         _exit_with_error(str(exc), code=2)
     except (IndexStorageError, OSError) as exc:

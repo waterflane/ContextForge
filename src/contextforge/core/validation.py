@@ -15,7 +15,12 @@ _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 def validate_portable_relative_path(value: str) -> str:
     """Validate one already-canonical portable path without filesystem access."""
 
-    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise ValueError("path must be a canonical portable relative path")
     if value.startswith("/") or _WINDOWS_DRIVE.match(value):
         raise ValueError("path must be a canonical portable relative path")

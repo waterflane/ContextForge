@@ -248,6 +248,7 @@ class GlobalMapAnalysisOptions:
     max_request_bytes: int = 2_000_000
     max_response_bytes: int = 1_000_000
     max_output_tokens: int = 8_192
+    max_model_calls: int = 256
     fail_on_error: bool = False
     recover_previous: bool = True
 
@@ -265,6 +266,7 @@ class GlobalMapAnalysisOptions:
             ("max_request_bytes", self.max_request_bytes, 16_000_000),
             ("max_response_bytes", self.max_response_bytes, 16_000_000),
             ("max_output_tokens", self.max_output_tokens, 1_000_000),
+            ("max_model_calls", self.max_model_calls, 10_000),
         ):
             if type(value) is not int or not 1 <= value <= upper:
                 raise ValueError(f"{name} must be an integer between 1 and {upper}")
@@ -438,7 +440,6 @@ async def build_repository_maps(
     analyzer = _global_analyzer(active_options, provider_id, model_id, base_url_sha256)
     options_digest = _options_digest(active_options)
     source_interpretations_digest = _file_interpretations_digest(current)
-
     previous_records = _try_load_global_records(snapshot.root, current)
     if previous_records is not None:
         old_overview, old_architecture, old_features = previous_records
@@ -476,6 +477,14 @@ async def build_repository_maps(
                 group_summary_count=0,
                 published=False,
             )
+
+    required_model_calls = _required_model_calls(code_maps, active_options)
+    if required_model_calls > active_options.max_model_calls:
+        raise GlobalMapAnalysisError(
+            "repository map synthesis requires "
+            f"{required_model_calls} model calls; limit is "
+            f"{active_options.max_model_calls}"
+        )
 
     hierarchy = await _build_hierarchy(
         code_maps,
@@ -1907,6 +1916,7 @@ def _options_digest(options: GlobalMapAnalysisOptions) -> str:
                 "global_map_schema_version": GLOBAL_MAP_SCHEMA_VERSION,
                 "hierarchy_strategy": "package-group-repository-v1",
                 "max_files_per_package": options.max_files_per_package,
+                "max_model_calls": options.max_model_calls,
                 "max_output_tokens": options.max_output_tokens,
                 "max_relationships_per_file": options.max_relationships_per_file,
                 "max_request_bytes": options.max_request_bytes,
@@ -1917,6 +1927,25 @@ def _options_digest(options: GlobalMapAnalysisOptions) -> str:
             }
         )
     ).hexdigest()
+
+
+def _required_model_calls(
+    code_maps: tuple[FileCodeMap, ...], options: GlobalMapAnalysisOptions
+) -> int:
+    grouped = Counter(_package_key(item.path) for item in code_maps)
+    summaries = sum(
+        (count + options.max_files_per_package - 1) // options.max_files_per_package
+        for count in grouped.values()
+    )
+    total = summaries + 2
+    while summaries:
+        summaries = (
+            summaries + options.max_summaries_per_group - 1
+        ) // options.max_summaries_per_group
+        total += summaries
+        if summaries <= 1:
+            break
+    return total
 
 
 def _map_inputs_match(

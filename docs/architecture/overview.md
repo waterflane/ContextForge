@@ -49,7 +49,7 @@ They translate user or tool requests into calls against the application/core
 layer, then return results in their own format.
 
 The repository scanner is contained in the `repositories` boundary. The
-completed, unreleased v0.3 context-package application logic is contained in
+completed v0.3 context-package application logic is contained in
 the `context` boundary. Typer commands and table/JSON scan presentation remain
 in the thin CLI boundary.
 
@@ -84,4 +84,6 @@ The initial release deliberately excludes:
 - plugin systems or complex dependency injection.
 
 Repository scanning was excluded from v0.1.0 and is implemented by the
-subsequent v0.2 milestone. Indexing and retrieval remain unimplemented.
+subsequent v0.2 milestone. Context selection/export shipped in v0.3, and
+repository intelligence, bounded discovery, handoffs, and read-only MCP are
+implemented in v0.4.0.

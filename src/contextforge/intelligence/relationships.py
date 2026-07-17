@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -20,6 +21,8 @@ from contextforge.intelligence.codemap import (
 
 def resolve_relationships(
     code_maps: tuple[FileCodeMap, ...],
+    *,
+    repository_paths: Iterable[str] | None = None,
 ) -> tuple[FileCodeMap, ...]:
     """Resolve only unambiguous snapshot modules, names, and test associations."""
 
@@ -31,7 +34,7 @@ def resolve_relationships(
     )
     if len({item.path for item in ordered}) != len(ordered):
         raise ValueError("CodeMap paths must be unique")
-    module_paths = _module_path_index(ordered)
+    module_paths = _module_path_index(ordered, repository_paths=repository_paths)
     by_path = {item.path: item for item in ordered}
 
     resolved: list[FileCodeMap] = []
@@ -114,13 +117,16 @@ def _clear_call_resolution(call: CallReference, source_path: str) -> CallReferen
 
 def _module_path_index(
     code_maps: tuple[FileCodeMap, ...],
+    *,
+    repository_paths: Iterable[str] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     values: dict[str, set[str]] = {}
-    for code_map in code_maps:
-        if code_map.language != "Python":
-            continue
-        for module in _module_names_for_path(code_map.path):
-            values.setdefault(module, set()).add(code_map.path)
+    paths = {item.path for item in code_maps if item.language == "Python"}
+    if repository_paths is not None:
+        paths.update(path for path in repository_paths if path.endswith(".py"))
+    for path in sorted(paths):
+        for module in _module_names_for_path(path):
+            values.setdefault(module, set()).add(path)
     return {module: tuple(sorted(paths)) for module, paths in values.items()}
 
 

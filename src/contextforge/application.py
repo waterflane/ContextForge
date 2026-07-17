@@ -168,6 +168,8 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
+    recover_stale_lock: bool = False,
+    confirm_unknown_lock: bool = False,
 ) -> IndexBuildReport:
     """Build/update all index phases while retaining a prior pointer on failure."""
 
@@ -186,7 +188,12 @@ async def build_repository_index(
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
-    with acquire_index_lock(root, run_id) as lock:
+    with acquire_index_lock(
+        root,
+        run_id,
+        recover_stale=recover_stale_lock,
+        confirm_unknown=confirm_unknown_lock,
+    ) as lock:
         try:
             structural = build_structural_index(
                 snapshot,
@@ -356,10 +363,19 @@ def inspect_repository_index(
     )
 
 
-def clean_repository_index(repository_root: str | Path) -> None:
+def clean_repository_index(
+    repository_root: str | Path,
+    *,
+    recover_stale_lock: bool = False,
+    confirm_unknown_lock: bool = False,
+) -> None:
     """Delete only policy-approved generated index truth."""
 
-    clean_generated_index(repository_root)
+    clean_generated_index(
+        repository_root,
+        recover_stale_lock=recover_stale_lock,
+        confirm_unknown_lock=confirm_unknown_lock,
+    )
 
 
 async def suggest_repository_context(
@@ -597,7 +613,8 @@ def build_discovery_request(
         excluded_paths=tuple(sorted(set(excludes))),
         budget=DiscoveryBudget(
             max_context_files=max_files,
-            max_files_read=max_files,
+            max_files_read=min(1_000, max_files * 2),
+            max_source_bytes=min(16 * 1024 * 1024, max_context_bytes * 2),
             max_context_bytes=max_context_bytes,
         ),
     )

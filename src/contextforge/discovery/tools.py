@@ -1173,7 +1173,7 @@ def _bounded_data(data: dict[str, Any], maximum: int) -> _ToolResult:
 def _validate_glob(value: str) -> None:
     if (
         not value
-        or "\x00" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
         or "\\" in value
         or value.startswith("/")
         or re.match(r"^[A-Za-z]:", value)

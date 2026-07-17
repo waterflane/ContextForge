@@ -177,6 +177,18 @@ def test_record_reference_and_manifest_statistics_are_validated() -> None:
                 "statistics": manifest.statistics.model_copy(update={"file_count": 99}),
             }
         )
+    with pytest.raises(ValidationError, match="published facts"):
+        IndexedFileState(
+            **{
+                **complete.model_dump(),
+                "record_location": None,
+                "record_sha256": None,
+                "record_status": "failed",
+                "interpretation_record_location": "files/value.interpretation.json",
+                "interpretation_record_sha256": _sha("interpretation"),
+                "semantic_status": "complete",
+            }
+        )
 
 
 def test_added_changed_unchanged_and_deleted_detection() -> None:

@@ -359,7 +359,11 @@ def calculate_context_statistics(
 def validate_portable_package_path(path: str) -> str:
     """Validate an already-canonical portable repository-relative path."""
 
-    if not isinstance(path, str) or "\x00" in path or "\\" in path:
+    if (
+        not isinstance(path, str)
+        or "\\" in path
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
         raise ValueError("package path must be a portable relative path")
     if not path or path.startswith("/") or _WINDOWS_DRIVE.match(path):
         raise ValueError("package path must be a portable relative path")

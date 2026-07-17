@@ -37,7 +37,7 @@ suite uses `FakeModelProvider` and requires no model or network.
 
 Keep local-model concurrency low. The semantic builder additionally bounds
 scheduled files, simultaneous file tasks, request and response bytes, source
-bytes per request, output tokens, chunks per file, provider retries, and
+bytes per request, output tokens, chunks and model requests per file, provider retries, and
 cancellation. Provider limits may be stricter than analysis limits.
 
 ## Input and trust boundary
@@ -98,6 +98,9 @@ Even a local prompt contains repository source and may contain secrets. Treat
 semantic records and any retained diagnostics as sensitive repository data.
 Raw prompt and response retention is off by default. Loopback Ollama keeps the
 provider path local, but users remain responsible for the model process and
-its retention policy. Sending repository content to an external provider
-requires a separate explicit external-data policy and acknowledgement; this
-file-analysis component does not grant that permission automatically.
+its retention policy. Sending repository content to a non-loopback provider
+requires `local_only=false` and `external_data_policy="allow_repository"`.
+`allow_selected` does not authorize remote transport in v0.4.0. Repository-wide
+authorization can include secret-like selectable files; ContextForge does not
+claim complete secret detection, so ignore rules and provider retention must be
+reviewed first.

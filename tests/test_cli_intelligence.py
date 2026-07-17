@@ -136,6 +136,31 @@ def test_index_update_requires_existing_index_and_status_handles_missing(
     assert payload["added_files"] == [".contextforge/config.toml", "app.py"]
 
 
+def test_index_cli_requires_explicit_confirmation_to_recover_unknown_lock(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "pass\n")
+    assert _invoke("index", "build", str(tmp_path), "--provider", "none").exit_code == 0
+    lock = tmp_path / ".contextforge/index/lock.json"
+    lock.write_text("{", encoding="utf-8")
+
+    refused = _invoke("index", "update", str(tmp_path), "--provider", "none")
+    recovered = _invoke(
+        "index",
+        "update",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--confirm-unknown-lock",
+    )
+
+    assert refused.exit_code == 1
+    assert refused.stdout == ""
+    assert "explicit confirmation is required" in _plain(refused.stderr)
+    assert recovered.exit_code == 0, recovered.output
+    assert not lock.exists()
+
+
 def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> None:
     _write(tmp_path, "a.py", "A = 1\n")
     _write(tmp_path, "b.py", "B = 1\n")

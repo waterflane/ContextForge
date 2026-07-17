@@ -10,7 +10,7 @@ source selections, and produces reviewable handoffs and compiled prompts.
 
 ## Status
 
-The unreleased v0.4 milestone implements repository intelligence, model-provider
+The v0.4.0 milestone implements repository intelligence, model-provider
 adapters, architecture/feature maps, automatic context discovery, Git-aware
 handoffs, prompt compilation, thin CLI commands, and a local read-only stdio MCP
 foundation. Structural indexing works without a model. Model-assisted behavior
@@ -184,6 +184,13 @@ concurrency_limit = 2
 The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
 Schema output and checks the exact configured ID through `GET /v1/models`.
 CLI `--model`, `--base-url`, and `--concurrency` values override this section.
+
+Remote endpoints are fail-closed unless configuration explicitly sets both
+`local_only = false` and `external_data_policy = "allow_repository"`.
+`allow_selected` is reserved for a future path-level transmission policy and
+does not authorize a remote endpoint in v0.4.0. External repository-wide use
+can transmit any selectable snapshot content, so review ignore rules and
+provider retention before enabling it.
 
 ### Read-only MCP
 

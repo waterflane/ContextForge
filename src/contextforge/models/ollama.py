@@ -52,11 +52,12 @@ class OllamaModelProvider:
         return "ollama"
 
     def capabilities(self) -> ProviderCapabilities:
+        hostname = urlsplit(self.configuration.endpoint).hostname
         return ProviderCapabilities(
             structured_responses=True,
             cancellation=True,
             token_usage=True,
-            local=True,
+            local=hostname is not None and _is_loopback_host(hostname),
         )
 
     async def complete_structured(
@@ -118,14 +119,20 @@ def _validate_ollama_endpoint(configuration: ProviderConfiguration) -> None:
         raise ProviderConfigurationError(
             "Ollama endpoint must not contain credentials or a fragment"
         )
-    if configuration.local_only and parsed.hostname.lower() not in {
-        "127.0.0.1",
-        "::1",
-        "localhost",
-    }:
+    is_loopback = _is_loopback_host(parsed.hostname)
+    if configuration.local_only and not is_loopback:
         raise ProviderConfigurationError(
             "local-only policy requires a loopback Ollama endpoint"
         )
+    if not is_loopback and configuration.external_data_policy != "allow_repository":
+        raise ProviderConfigurationError(
+            "an external Ollama endpoint requires "
+            "external_data_policy='allow_repository'"
+        )
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    return hostname.lower() in {"127.0.0.1", "::1", "localhost"}
 
 
 def _parse_ollama_envelope(data: bytes) -> ProviderTransportResponse:

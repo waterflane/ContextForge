@@ -67,7 +67,9 @@ Global analysis never sends the full repository source in one request. It uses:
 Source text is absent from global requests. Prior file analyses and hierarchy
 outputs are framed as untrusted model context. Repository text and prior model
 prose cannot change instructions, select another path, request tools, or expand
-budgets. All response paths are checked against the pinned snapshot; all final
+budgets. The complete hierarchy is preflighted against a hard model-call limit
+before the first summary request, so repository size cannot create an unbounded
+provider-call sequence. All response paths are checked against the pinned snapshot; all final
 symbols, facts, ranges, confidence values, and evidence are validated before
 publication.
 

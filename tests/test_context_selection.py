@@ -314,6 +314,7 @@ def test_include_validation_happens_before_exclusion_precedence(tmp_path: Path) 
         "",
         ".",
         "\x00bad.py",
+        "\x1b[2Jbad.py",
         "../secret.py",
         "safe/../secret.py",
         "/etc/passwd",
@@ -339,6 +340,7 @@ def test_unsafe_exact_paths_are_rejected(tmp_path: Path, selector: str) -> None:
     [
         "",
         "bad\x00*.py",
+        "bad\x1b[2J*.py",
         "../*.py",
         "safe/../*.py",
         "/root/*.py",
@@ -363,7 +365,15 @@ def test_malformed_or_unsafe_globs_are_rejected(tmp_path: Path, selector: str) -
 
 @pytest.mark.parametrize(
     "selector",
-    ["", "../*.py", "/root/*", r"\\server\share\*", r"C:*.py", "!*.py"],
+    [
+        "",
+        "../*.py",
+        "/root/*",
+        r"\\server\share\*",
+        r"C:*.py",
+        "!*.py",
+        "bad\x1b[2J*",
+    ],
 )
 def test_unsafe_exclusions_are_rejected(tmp_path: Path, selector: str) -> None:
     snapshot = _snapshot(tmp_path, "src/app.py")

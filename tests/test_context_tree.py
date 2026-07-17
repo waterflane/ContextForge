@@ -163,6 +163,7 @@ def test_builder_accepts_included_file_inventory_without_traversal(
         r"C:file.py",
         r"\\server\share\file.py",
         "nul\x00file.py",
+        "escape\x1b[2J.py",
     ],
 )
 def test_malformed_and_nonportable_inventory_paths_are_rejected(

@@ -37,7 +37,12 @@ def normalize_relative_path(path: str | Path) -> str:
     """
 
     raw_path = str(path).replace("\\", "/")
-    if not raw_path or raw_path.startswith("/") or _WINDOWS_DRIVE.match(raw_path):
+    if (
+        not raw_path
+        or raw_path.startswith("/")
+        or _WINDOWS_DRIVE.match(raw_path)
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw_path)
+    ):
         raise ValueError("path must be a non-empty relative path")
 
     normalized_parts: list[str] = []

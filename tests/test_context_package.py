@@ -560,7 +560,14 @@ def test_file_validation_covers_every_semantic_invariant() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    [r"src\file.py", "/root.py", "safe/../file.py", "dir//file.py", "\x00bad.py"],
+    [
+        r"src\file.py",
+        "/root.py",
+        "safe/../file.py",
+        "dir//file.py",
+        "\x00bad.py",
+        "\x1b[2Jbad.py",
+    ],
 )
 def test_package_paths_reject_every_nonportable_shape(path: str) -> None:
     with pytest.raises(ValidationError, match="portable relative path"):

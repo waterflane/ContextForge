@@ -60,6 +60,10 @@ def test_working_staged_and_base_diffs_use_bounded_portable_context(
     )
     assert staged.available is comparison.available is True
     assert "new.py" in staged.touched_paths
+    assert (
+        next(item for item in staged.changed_files if item.path == "new.py").status
+        == "added"
+    )
     assert comparison.base_revision == base
 
 

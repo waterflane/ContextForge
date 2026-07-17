@@ -6,7 +6,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, BinaryIO
 
 from contextforge._metadata import APP_NAME, __version__
 from contextforge.mcp.foundation import ReadOnlyMCPFoundation, ReadOnlyToolError
@@ -63,7 +63,17 @@ class MCPServer:
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "initialize":
-            requested = params.get("protocolVersion")
+            requested = params["protocolVersion"]
+            capabilities = params["capabilities"]
+            client_info = params["clientInfo"]
+            if (
+                not isinstance(requested, str)
+                or not isinstance(capabilities, dict)
+                or not isinstance(client_info, dict)
+                or not isinstance(client_info.get("name"), str)
+                or not isinstance(client_info.get("version"), str)
+            ):
+                raise ValueError("initialize parameters are invalid")
             protocol = (
                 requested
                 if requested in SUPPORTED_PROTOCOL_VERSIONS
@@ -126,7 +136,7 @@ def serve_stdio(foundation: ReadOnlyMCPFoundation) -> None:
 async def _serve_stdio(foundation: ReadOnlyMCPFoundation) -> None:
     server = MCPServer(foundation)
     while True:
-        raw = await asyncio.to_thread(sys.stdin.buffer.readline)
+        raw = await asyncio.to_thread(_read_bounded_line, sys.stdin.buffer)
         if not raw:
             return
         request_id: object = None
@@ -144,7 +154,7 @@ async def _serve_stdio(foundation: ReadOnlyMCPFoundation) -> None:
             response = await server.handle_message(message)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             response = _error(request_id, -32700, f"Parse error: {exc}")
-        except BaseException as exc:
+        except Exception as exc:
             print(
                 f"ContextForge MCP operational error: {type(exc).__name__}",
                 file=sys.stderr,
@@ -154,6 +164,16 @@ async def _serve_stdio(foundation: ReadOnlyMCPFoundation) -> None:
             encoded = (_canonical_json(response) + "\n").encode("utf-8")
             sys.stdout.buffer.write(encoded)
             sys.stdout.buffer.flush()
+
+
+def _read_bounded_line(stream: BinaryIO) -> bytes:
+    raw = stream.readline(MAX_MCP_REQUEST_BYTES + 1)
+    if len(raw) <= MAX_MCP_REQUEST_BYTES or raw.endswith(b"\n"):
+        return raw
+    while True:
+        remainder = stream.readline(MAX_MCP_REQUEST_BYTES + 1)
+        if not remainder or remainder.endswith(b"\n"):
+            return raw
 
 
 def _error(

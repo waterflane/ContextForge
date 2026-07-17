@@ -78,11 +78,12 @@ class OpenAICompatibleModelProvider:
         return OPENAI_COMPATIBLE_PROVIDER_ID
 
     def capabilities(self) -> ProviderCapabilities:
+        hostname = urlsplit(self.configuration.endpoint).hostname
         return ProviderCapabilities(
             structured_responses=True,
             cancellation=True,
             token_usage=True,
-            local=True,
+            local=hostname is not None and _is_loopback_host(hostname),
         )
 
     async def complete_structured(
@@ -222,14 +223,20 @@ def _validate_base_url(configuration: ProviderConfiguration) -> None:
             "OpenAI-compatible base URL must not contain credentials, a query, "
             "or a fragment"
         )
-    if configuration.local_only and parsed.hostname.lower() not in {
-        "127.0.0.1",
-        "::1",
-        "localhost",
-    }:
+    is_loopback = _is_loopback_host(parsed.hostname)
+    if configuration.local_only and not is_loopback:
         raise ProviderConfigurationError(
             "local-only policy requires a loopback OpenAI-compatible base URL"
         )
+    if not is_loopback and configuration.external_data_policy != "allow_repository":
+        raise ProviderConfigurationError(
+            "an external OpenAI-compatible base URL requires "
+            "external_data_policy='allow_repository'"
+        )
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    return hostname.lower() in {"127.0.0.1", "::1", "localhost"}
 
 
 def _endpoint(base_url: str, resource: str) -> str:
