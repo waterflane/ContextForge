@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +32,7 @@ from contextforge.intelligence import (
     extract_code_map,
     serialize_code_map,
 )
+from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 from .models import (
@@ -259,14 +261,30 @@ def create_task_handoff(
     include_codemaps: bool = True,
     known_constraints: tuple[str, ...] = (),
     expected_response_format: str = DEFAULT_EXPECTED_RESPONSE_FORMAT,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> TaskHandoff:
     """Re-scan, verify every source item, and return one complete handoff or fail."""
 
     if not isinstance(review, ContextSelectionReview):
         raise TypeError("handoff creation requires a ContextSelectionReview")
+    reporter = ProgressReporter(
+        operation_id or uuid.uuid4().hex,
+        "repository.handoff.materialize",
+        observer=progress,
+        parent_operation_id=parent_operation_id,
+    )
     root = source.root if isinstance(source, ProjectSnapshot) else source
+    reporter.report("scan", "Re-scanning repository source.", percentage=0)
     try:
         snapshot = scan_repository(root)
+        reporter.report(
+            "scan",
+            "Repository source scan completed.",
+            percentage=15,
+            metadata={"files": len(snapshot.files)},
+        )
         digest = calculate_source_snapshot_digest(snapshot)
         if digest != review.discovery.source_snapshot_digest:
             raise ContextMaterializationError(
@@ -285,6 +303,12 @@ def create_task_handoff(
                 raise ContextMaterializationError(
                     f"reviewed source identity is no longer current: {item.path}"
                 )
+        reporter.report(
+            "verify",
+            "Verified reviewed source identities.",
+            percentage=30,
+            metadata={"files": len(review.selected_items)},
+        )
         context_selection = ContextSelection(
             exact_paths=tuple(item.path for item in source_items),
             line_ranges=tuple(
@@ -315,6 +339,12 @@ def create_task_handoff(
                 max_total_content_bytes=max(allowed_source_bytes, 1),
             ),
         )
+        reporter.report(
+            "package",
+            "Materialized the verified context package.",
+            percentage=55,
+            metadata={"files": package.statistics.selected_file_count},
+        )
         package_identity = calculate_context_package_identity(package)
         if (
             review.refined_task is not None
@@ -331,12 +361,24 @@ def create_task_handoff(
             include_codemaps=include_codemaps,
             warnings=warnings,
         )
+        reporter.report(
+            "codemaps",
+            "Materialized selected structural CodeMaps.",
+            percentage=70,
+            metadata={"codemaps": len(codemaps)},
+        )
         notes = _build_architecture_notes(
             digest,
             review,
             architecture=architecture,
             features=features,
             warnings=warnings,
+        )
+        reporter.report(
+            "repository_maps",
+            "Materialized architecture and feature notes.",
+            percentage=82,
+            metadata={"notes": len(notes)},
         )
         git_diff = None
         if git_diff_request is not None:
@@ -360,6 +402,12 @@ def create_task_handoff(
                         confidence=1.0,
                     )
                 )
+        reporter.report(
+            "git_context",
+            "Materialized optional Git context.",
+            percentage=90,
+            metadata={"included": git_diff is not None},
+        )
         architecture_bytes = len(
             canonical_json_bytes([item.model_dump(mode="json") for item in notes])
         )
@@ -371,7 +419,7 @@ def create_task_handoff(
                 0 if git_diff is None else len(git_diff.text.encode("utf-8"))
             ),
         )
-        return TaskHandoff(
+        handoff = TaskHandoff(
             original_task=review.original_task,
             refined_task=review.refined_task,
             acceptance_criteria=review.acceptance_criteria,
@@ -386,9 +434,21 @@ def create_task_handoff(
             expected_response_format=expected_response_format,
             budget_usage=usage,
         )
-    except ContextMaterializationError:
+        reporter.report(
+            "validate",
+            "Validated the complete task handoff.",
+            percentage=98,
+        )
+        reporter.complete(message="Task handoff materialization completed.")
+        return handoff
+    except ContextMaterializationError as exc:
+        reporter.fail(metadata={"error_type": type(exc).__name__})
+        raise
+    except KeyboardInterrupt:
+        reporter.cancel()
         raise
     except Exception as exc:
+        reporter.fail(metadata={"error_type": type(exc).__name__})
         raise ContextMaterializationError(
             "context handoff materialization failed; no partial package was returned"
         ) from exc

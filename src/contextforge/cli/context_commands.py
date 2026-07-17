@@ -21,6 +21,7 @@ from contextforge.application import (
     render_handoff_review,
     suggest_repository_context,
 )
+from contextforge.cli.progress import CLIProgressRenderer
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.context import (
     MAX_JSON_PACKAGE_BYTES,
@@ -53,7 +54,6 @@ from contextforge.project_config import (
     load_project_configuration,
     resolve_provider_configuration,
 )
-from contextforge.repositories import scan_repository
 from contextforge.repositories.ignore import IgnoreRulesError
 
 
@@ -159,7 +159,6 @@ def suggest_context(
         if provider_configuration is None:
             raise ValueError("context suggestion requires a model provider")
         active_provider = create_model_provider(provider_configuration)
-        snapshot = scan_repository(path)
         request = build_discovery_request(
             task=task,
             mode=discovery.value,
@@ -169,7 +168,12 @@ def suggest_context(
             max_context_bytes=max_context_bytes,
         )
         run = asyncio.run(
-            suggest_repository_context(snapshot, active_provider, request)
+            suggest_repository_context(
+                path,
+                active_provider,
+                request,
+                progress=CLIProgressRenderer(),
+            )
         )
         selection = run.final_selection
         if selection is None:
@@ -524,7 +528,6 @@ def _create_automatic_context(
         if provider_configuration is None:
             raise ValueError("automatic context creation requires a model provider")
         provider = create_model_provider(provider_configuration)
-        snapshot = scan_repository(path)
         request = build_discovery_request(
             task=task,
             mode=discovery.value,
@@ -543,11 +546,12 @@ def _create_automatic_context(
         )
         result, compiled = asyncio.run(
             create_automatic_handoff(
-                snapshot,
+                path,
                 provider,
                 request,
                 refine_task=refine_task_option,
                 git_diff_request=git_request,
+                progress=CLIProgressRenderer(),
             )
         )
         representation = (

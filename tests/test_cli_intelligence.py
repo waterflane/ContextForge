@@ -267,7 +267,8 @@ def test_context_suggest_table_and_json_are_read_only(
     assert table.exit_code == structured.exit_code == 0
     assert "Discovery mode:" in _plain(table.stdout)
     assert "reason:" in _plain(table.stdout)
-    assert structured.stderr == ""
+    assert "Suggesting context:" in _plain(structured.stderr)
+    assert "\x1b" not in structured.stderr
     payload = json.loads(structured.stdout)
     assert payload["mode"] == mode
     assert payload["selected"][0]["path"] == "app.py"
@@ -398,6 +399,9 @@ def test_context_create_automatic_json_prompt_and_portable_review(
     )
 
     assert created.exit_code == 0, created.output
+    assert "Creating automatic context: 0%" in _plain(created.stderr)
+    assert "Creating automatic context: 100%" in _plain(created.stderr)
+    assert "\x1b" not in created.stderr
     payload = cast(dict[str, Any], json.loads(handoff_path.read_text(encoding="utf-8")))
     assert payload["original_task"] == "Implement behavior"
     assert payload["review"]["discovery"]["mode"] == "fresh"

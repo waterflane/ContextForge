@@ -112,6 +112,23 @@ compiled prompt as Markdown. `--prompt-output` can publish the prompt as a
 separate atomic artifact. `context review` validates and displays a JSON
 handoff without the original repository.
 
+Long-running index and automatic context commands report weighted progress to
+stderr. Structured results remain the only content on stdout, so redirection
+and pipelines stay safe:
+
+```text
+Indexing repository: 37% — Analyzing repository files semantically (42/114 files)
+```
+
+```bash
+contextforge context suggest . --task "Audit parsing" --format json > selection.json
+python -m json.tool selection.json
+```
+
+Interactive and redirected runs use the same phase events. Redirected stderr
+contains discrete readable lines and no ANSI control sequences. Progress does
+not change exit codes; Ctrl+C still exits with 130.
+
 ### Repository index
 
 ```bash
@@ -129,6 +146,9 @@ contextforge index clean . --force
 indexing. Updates reuse unchanged valid facts and interpretations, while new,
 changed, deleted, analyzer-stale, prompt-stale, and model-stale records are
 processed explicitly. A failed strict build restores the prior active pointer.
+Progress credits reused and deliberately skipped files as completed work. The
+100% event is emitted only after generation validation and atomic active-pointer
+publication succeed.
 
 `index status` is read-only and reports schema, repository and generation
 identity, indexed/stale/failed/deleted files, provider/model and prompt

@@ -161,6 +161,50 @@ class ProgressReporter:
 
         return self._observer_error_count
 
+    def scaled_observer(
+        self,
+        start_percentage: float,
+        end_percentage: float,
+        *,
+        phase_prefix: str | None = None,
+    ) -> ProgressObserver:
+        """Map a child event stream into one weighted range of this operation.
+
+        Child terminal states remain phase observations in the parent. The parent
+        workflow owns its terminal event, so rollback and exception classification
+        continue to happen at the application boundary.
+        """
+
+        if (
+            not math.isfinite(start_percentage)
+            or not math.isfinite(end_percentage)
+            or not 0 <= start_percentage <= end_percentage < 100
+        ):
+            raise ValueError("scaled progress range must be within 0 and 100")
+
+        def observe(event: ProgressEvent) -> None:
+            percentage = start_percentage + (
+                (end_percentage - start_percentage) * event.percentage / 100
+            )
+            phase_id = (
+                event.phase_id
+                if phase_prefix is None
+                else f"{phase_prefix}.{event.phase_id}"
+            )
+            self.report(
+                phase_id,
+                event.message,
+                percentage=percentage,
+                metadata={
+                    **event.metadata,
+                    "child_operation_id": event.operation_id,
+                    "child_operation_type": event.operation_type,
+                    "child_status": event.status.value,
+                },
+            )
+
+        return observe
+
     def report(
         self,
         phase_id: str,

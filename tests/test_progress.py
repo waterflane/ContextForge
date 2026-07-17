@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 from pathlib import Path
 from typing import cast
@@ -15,9 +16,10 @@ from contextforge import (
     ProgressStatus,
 )
 from contextforge.application import build_repository_index, inspect_repository_index
+from contextforge.cli.progress import CLIProgressRenderer
 from contextforge.discovery import DiscoveryRequest, DiscoveryRunRecord
 from contextforge.intelligence import load_manifest
-from contextforge.models import ModelProvider
+from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.repositories import ProjectSnapshot
 
 
@@ -107,6 +109,27 @@ def test_reporter_enforces_monotonic_percentages_and_one_terminal_event() -> Non
     assert completed.percentage == 100
     with pytest.raises(RuntimeError, match="terminal event"):
         reporter.report("extra", "Too late.", percentage=100)
+
+
+def test_scaled_child_events_use_the_same_monotonic_parent_contract() -> None:
+    events: list[ProgressEvent] = []
+    parent = ProgressReporter(
+        "parent", "repository.index.build", observer=events.append
+    )
+    child = ProgressReporter(
+        "child",
+        "repository.semantic_index",
+        observer=parent.scaled_observer(40, 70, phase_prefix="semantic"),
+    )
+
+    parent.report("structural", "Structural work completed.", percentage=40)
+    child.report("analyze", "Analyzing files.", percentage=50)
+    child.complete(message="Semantic analysis completed.")
+    parent.complete()
+
+    assert [event.percentage for event in events] == [40, 55, 70, 100]
+    assert events[1].phase_id == "semantic.analyze"
+    assert events[1].metadata["child_operation_id"] == "child"
 
 
 def test_failure_and_cancellation_preserve_last_percentage() -> None:
@@ -226,6 +249,85 @@ def test_async_index_build_is_unchanged_by_broken_observer(tmp_path: Path) -> No
     assert [event.percentage for event in events] == sorted(
         event.percentage for event in events
     )
+
+
+def test_incremental_index_progress_credits_reused_files(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("answer = 42\n", encoding="utf-8")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    events: list[ProgressEvent] = []
+
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+            update_only=True,
+            progress=events.append,
+            operation_id="update-reuse",
+        )
+    )
+
+    structural = next(
+        event
+        for event in events
+        if event.phase_id == "structural_index" and event.percentage == 42
+    )
+    assert structural.metadata["extracted"] == 0
+    assert structural.metadata["reused"] == structural.total
+    assert events[0].percentage == 0
+    assert events[-1].percentage == 100
+    assert [event.percentage for event in events] == sorted(
+        event.percentage for event in events
+    )
+
+
+def test_provider_failure_preserves_progress_and_is_reraised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[ProgressEvent] = []
+
+    async def fail(*args: object, **kwargs: object) -> DiscoveryRunRecord:
+        del args, kwargs
+        raise ModelProviderError("provider failed")
+
+    monkeypatch.setattr(application_module, "discover_repository", fail)
+    with pytest.raises(ModelProviderError, match="provider failed"):
+        asyncio.run(
+            application_module.suggest_repository_context(
+                cast(ProjectSnapshot, object()),
+                cast(ModelProvider, object()),
+                cast(DiscoveryRequest, object()),
+                progress=events.append,
+            )
+        )
+
+    assert events[-1].status is ProgressStatus.FAILED
+    assert events[-1].percentage < 100
+
+
+def test_cli_renderer_is_discrete_non_ansi_and_suppresses_duplicate_updates() -> None:
+    stream = io.StringIO()
+    renderer = CLIProgressRenderer(stream)
+    renderer(_event(operation_type="repository.index.build", percentage=10.2))
+    renderer(_event(operation_type="repository.index.build", percentage=10.8))
+    renderer(
+        _event(
+            operation_type="repository.index.build",
+            percentage=11,
+            sequence=3,
+        )
+    )
+
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("Indexing repository: 10%")
+    assert "\x1b" not in stream.getvalue()
 
 
 def test_async_application_cancellation_emits_terminal_event(

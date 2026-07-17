@@ -62,6 +62,7 @@ from contextforge.intelligence import (
     calculate_source_snapshot_digest,
 )
 from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.progress import ProgressEvent, ProgressStatus
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 
@@ -214,6 +215,7 @@ def test_end_to_end_flow_runs_discovery_review_verification_and_packaging(
         ),
         scripts=[actions],
     )
+    events: list[ProgressEvent] = []
 
     result = asyncio.run(
         discover_context_handoff(
@@ -221,12 +223,19 @@ def test_end_to_end_flow_runs_discovery_review_verification_and_packaging(
             provider,
             DiscoveryRequest(task="Preserve VALUE.", mode=DiscoveryMode.FRESH),
             acceptance_criteria=("VALUE remains present.",),
+            progress=events.append,
         )
     )
 
     assert result.discovery_run.status == "complete"
     assert result.handoff.context_package.files[0].blocks[0].text == "VALUE = 1\n"
     assert result.handoff.acceptance_criteria == ("VALUE remains present.",)
+    assert events[0].percentage == 0
+    assert events[-1].status is ProgressStatus.COMPLETED
+    assert events[-1].percentage == 100
+    assert [event.percentage for event in events] == sorted(
+        event.percentage for event in events
+    )
 
 
 def test_original_task_is_preserved_verbatim_in_discovery_review_and_prompt(

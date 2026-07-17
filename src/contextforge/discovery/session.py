@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from contextforge.models import (
     ProviderCancelledError,
     UntrustedModelContext,
 )
+from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.repositories import ProjectSnapshot
 
 from .completeness import review_completeness
@@ -119,6 +121,9 @@ class DiscoverySession:
         git_diff_provider: GitDiffProvider | None = None,
         cancellation: asyncio.Event | None = None,
         clock: Callable[[], float] = time.monotonic,
+        progress: ProgressObserver | None = None,
+        operation_id: str | None = None,
+        parent_operation_id: str | None = None,
     ) -> None:
         if not isinstance(snapshot, ProjectSnapshot):
             raise TypeError("discovery requires a ProjectSnapshot")
@@ -140,6 +145,13 @@ class DiscoverySession:
         self._executor: DiscoveryToolExecutor | None = None
         self._repeat_counts: dict[str, int] = {}
         self._completeness_pass_requested = False
+        self._progress = ProgressReporter(
+            operation_id or uuid.uuid4().hex,
+            "repository.context.discovery",
+            observer=progress,
+            parent_operation_id=parent_operation_id,
+            metadata={"mode": request.mode.value},
+        )
 
     @property
     def state(self) -> DiscoveryState:
@@ -181,21 +193,76 @@ class DiscoverySession:
         """Iterate until verified finalization or one typed all-or-nothing failure."""
 
         self._started = self.clock()
+        mode = self.request.mode.value
+        self._progress.report(
+            "knowledge",
+            f"Loading {mode} repository knowledge.",
+            percentage=0,
+        )
         try:
             self._raise_if_cancelled()
             self.prepare_read_only_tools()
+            knowledge = self._require_knowledge()
+            self._progress.report(
+                "knowledge",
+                f"Loaded {mode} repository knowledge.",
+                percentage=20,
+                metadata={
+                    "structural_files": len(knowledge.code_maps),
+                    "semantic_files": len(knowledge.semantic_analyses),
+                    "stale_files": len(knowledge.stale_index_paths),
+                },
+            )
             while True:
                 self._check_limits_before_model()
+                percentage = 20 + 60 * max(
+                    self.budget.steps / self.request.budget.max_steps,
+                    self.budget.model_calls / self.request.budget.max_model_calls,
+                )
+                self._progress.report(
+                    "analysis",
+                    f"Analyzing repository context in {mode} mode.",
+                    percentage=min(percentage, 80),
+                    metadata={
+                        "steps": self.budget.steps,
+                        "max_steps": self.request.budget.max_steps,
+                        "model_calls": self.budget.model_calls,
+                        "max_model_calls": self.request.budget.max_model_calls,
+                    },
+                )
                 actions = await self._request_actions()
                 for action in actions:
                     self._raise_if_cancelled()
                     self._check_step_limit()
                     finalized = self._execute_action(action)
                     if finalized is not None:
+                        self._progress.report(
+                            "verification",
+                            "Verified the final repository context selection.",
+                            percentage=95,
+                            metadata={
+                                "selected": len(
+                                    finalized.final_selection.selected
+                                    if finalized.final_selection is not None
+                                    else ()
+                                )
+                            },
+                        )
+                        self._progress.complete(
+                            message="Repository context discovery completed."
+                        )
                         return finalized
-        except DiscoveryError:
+        except DiscoveryError as exc:
+            if isinstance(exc, DiscoveryCancelledError):
+                self._progress.cancel()
+            else:
+                self._progress.fail(metadata={"error_type": type(exc).__name__})
+            raise
+        except asyncio.CancelledError:
+            self._progress.cancel()
             raise
         except ProviderCancelledError as exc:
+            self._progress.cancel()
             raise self._failure(
                 DiscoveryCancelledError,
                 "cancelled",
@@ -203,18 +270,21 @@ class DiscoverySession:
                 status="cancelled",
             ) from exc
         except ModelProviderError as exc:
+            self._progress.fail(metadata={"error_type": type(exc).__name__})
             raise self._failure(
                 DiscoveryProtocolError,
                 "provider_protocol_error",
                 "model provider could not return valid discovery actions",
             ) from exc
         except ToolBudgetExceededError as exc:
+            self._progress.fail(metadata={"error_type": type(exc).__name__})
             raise self._failure(
                 DiscoveryLimitError,
                 "budget_exceeded",
                 str(exc),
             ) from exc
         except (IndexManifestReadError, ValueError, OSError) as exc:
+            self._progress.fail(metadata={"error_type": type(exc).__name__})
             raise self._failure(
                 DiscoverySourceChangedError,
                 "source_or_index_changed",
@@ -788,6 +858,9 @@ async def discover_repository(
     *,
     git_diff_provider: GitDiffProvider | None = None,
     cancellation: asyncio.Event | None = None,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> DiscoveryRunRecord:
     """Convenience API for one complete all-or-nothing discovery run."""
 
@@ -797,6 +870,9 @@ async def discover_repository(
         request,
         git_diff_provider=git_diff_provider,
         cancellation=cancellation,
+        progress=progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
     ).run()
 
 

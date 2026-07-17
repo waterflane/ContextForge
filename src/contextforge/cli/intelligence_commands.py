@@ -19,6 +19,7 @@ from contextforge.application import (
     clean_repository_index,
     inspect_repository_index,
 )
+from contextforge.cli.progress import CLIProgressRenderer
 from contextforge.intelligence import (
     GlobalMapAnalysisError,
     IndexStorageError,
@@ -62,6 +63,7 @@ def _index_operation(
     confirm_unknown_lock: bool,
 ) -> None:
     provider: ModelProvider | None = None
+    progress = CLIProgressRenderer()
     try:
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
@@ -93,6 +95,7 @@ def _index_operation(
                 max_files=max_files,
                 recover_stale_lock=recover_stale_lock,
                 confirm_unknown_lock=confirm_unknown_lock,
+                progress=progress,
             )
         )
     except (FileNotFoundError, NotADirectoryError, ProjectConfigError) as exc:

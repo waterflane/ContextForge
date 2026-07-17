@@ -9,7 +9,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -242,13 +242,22 @@ async def _build_repository_index(
                 "no active repository index exists; run 'contextforge index build'"
             ) from None
         previous = None
-    progress.report("scan", "Scanning repository files.", percentage=10)
+    progress.report("scan", "Scanning repository files.", percentage=2)
     snapshot = scan_repository(root)
     progress.report(
         "scan",
         "Repository scan completed.",
-        percentage=20,
+        percentage=12,
         metadata={"files": len(snapshot.files)},
+    )
+    progress.report(
+        "compare",
+        "Compared the repository with the previous index generation.",
+        percentage=18,
+        metadata={
+            "previous_generation": previous.generation_id if previous else None,
+            "update": update_only,
+        },
     )
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
@@ -263,7 +272,9 @@ async def _build_repository_index(
             progress.report(
                 "structural_index",
                 "Building structural repository index.",
-                percentage=25,
+                percentage=18,
+                completed=0,
+                total=len(snapshot.files),
             )
             structural = build_structural_index(
                 snapshot,
@@ -272,14 +283,39 @@ async def _build_repository_index(
             )
             progress.report(
                 "structural_index",
-                "Structural repository index completed.",
-                percentage=45,
+                "Structural extraction and relationship construction completed.",
+                percentage=42,
+                completed=len(snapshot.files),
+                total=len(snapshot.files),
+                metadata={
+                    "extracted": len(structural.extracted_paths),
+                    "reused": len(structural.reused_paths),
+                },
             )
             if provider is not None:
+                semantic_completed: set[str] = set()
+
+                def semantic_status(path: str, status: str) -> None:
+                    if status not in {"complete", "failed", "skipped"}:
+                        return
+                    semantic_completed.add(path)
+                    total = len(snapshot.files)
+                    percentage = 45 + 30 * len(semantic_completed) / max(total, 1)
+                    progress.report(
+                        "semantic_analysis",
+                        "Analyzing repository files semantically.",
+                        percentage=percentage,
+                        completed=len(semantic_completed),
+                        total=total,
+                        metadata={"files": total, "path": path, "status": status},
+                    )
+
                 progress.report(
                     "semantic_index",
                     "Building semantic repository index.",
-                    percentage=50,
+                    percentage=45,
+                    completed=0,
+                    total=len(snapshot.files),
                 )
                 semantic = await build_semantic_index(
                     snapshot,
@@ -291,18 +327,26 @@ async def _build_repository_index(
                         fail_on_error=fail_on_error,
                         force_reanalyze=force_reanalyze,
                         resume=not force_reanalyze,
+                        status_callback=semantic_status,
                     ),
                     previous_manifest=previous,
                 )
                 progress.report(
                     "semantic_index",
-                    "Semantic repository index completed.",
+                    "Semantic analysis was validated and published.",
                     percentage=75,
+                    completed=len(snapshot.files),
+                    total=len(snapshot.files),
+                    metadata={
+                        "analyzed": len(semantic.analyzed_paths),
+                        "reused": len(semantic.reused_paths),
+                        "failed": len(semantic.failed_paths),
+                    },
                 )
                 progress.report(
                     "repository_maps",
                     "Building repository maps.",
-                    percentage=80,
+                    percentage=78,
                 )
                 maps = await build_repository_maps(
                     snapshot,
@@ -312,16 +356,45 @@ async def _build_repository_index(
                 )
                 progress.report(
                     "repository_maps",
-                    "Repository maps completed.",
-                    percentage=95,
+                    "Repository maps were validated and published.",
+                    percentage=94,
+                    metadata={
+                        "outcomes": {
+                            item.map_kind: item.status for item in maps.outcomes
+                        }
+                    },
                 )
             else:
                 progress.report(
                     "model_analysis",
                     "Model-backed analysis was not requested.",
-                    percentage=95,
+                    percentage=94,
                     metadata={"skipped": True},
                 )
+
+            progress.report(
+                "validation",
+                "Validating the active index generation.",
+                percentage=96,
+            )
+            active = load_manifest(root)
+            expected = (
+                maps.manifest
+                if maps is not None
+                else semantic.manifest
+                if semantic is not None
+                else structural.manifest
+            )
+            if active != expected:
+                raise ApplicationError(
+                    "published index generation does not match the completed build"
+                )
+            progress.report(
+                "publication",
+                "Atomic index publication completed.",
+                percentage=99,
+                metadata={"generation_id": active.generation_id},
+            )
         except BaseException:
             if previous is not None:
                 with suppress(Exception):
@@ -530,7 +603,7 @@ def clean_repository_index(
 
 
 async def suggest_repository_context(
-    snapshot: ProjectSnapshot,
+    snapshot: ProjectSnapshot | str | Path,
     provider: ModelProvider,
     request: DiscoveryRequest,
     *,
@@ -546,11 +619,25 @@ async def suggest_repository_context(
         operation_id=operation_id,
         parent_operation_id=parent_operation_id,
     )
-    reporter.report(
-        "discovery", "Discovering relevant repository context.", percentage=0
-    )
+    reporter.report("scan", "Preparing repository snapshot.", percentage=0)
     try:
-        result = await discover_repository(snapshot, provider, request)
+        active_snapshot = _workflow_snapshot(snapshot, reporter, end_percentage=10)
+        discovery_mode = (
+            request.mode.value if isinstance(request, DiscoveryRequest) else "hybrid"
+        )
+        result = await discover_repository(
+            active_snapshot,
+            provider,
+            request,
+            progress=reporter.scaled_observer(
+                10, 95, phase_prefix=f"{discovery_mode}_discovery"
+            ),
+            parent_operation_id=(
+                reporter.last_event.operation_id
+                if reporter.last_event is not None
+                else None
+            ),
+        )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
         raise
@@ -562,7 +649,7 @@ async def suggest_repository_context(
 
 
 async def create_automatic_handoff(
-    snapshot: ProjectSnapshot,
+    snapshot: ProjectSnapshot | str | Path,
     provider: ModelProvider,
     request: DiscoveryRequest,
     *,
@@ -587,8 +674,9 @@ async def create_automatic_handoff(
     )
 
     try:
+        active_snapshot = _workflow_snapshot(snapshot, reporter, end_percentage=10)
         result = await _create_automatic_handoff(
-            snapshot,
+            active_snapshot,
             provider,
             request,
             refine_task=refine_task,
@@ -634,9 +722,24 @@ async def _create_automatic_handoff(
             max_source_bytes=request.budget.max_context_bytes,
             max_files=request.budget.max_context_files,
         ),
+        progress=progress.scaled_observer(15, 88, phase_prefix="handoff"),
+        parent_operation_id=(
+            progress.last_event.operation_id
+            if progress.last_event is not None
+            else None
+        ),
     )
     progress.report("compile", "Compiling the portable context handoff.", percentage=90)
-    return result, compile_prompt(result.handoff)
+    compiled = compile_prompt(
+        result.handoff,
+        progress=progress.scaled_observer(90, 99, phase_prefix="compile"),
+        parent_operation_id=(
+            progress.last_event.operation_id
+            if progress.last_event is not None
+            else None
+        ),
+    )
+    return result, compiled
 
 
 def canonical_json(value: object) -> str:
@@ -925,6 +1028,41 @@ def _progress_reporter(
         observer=observer,
         parent_operation_id=parent_operation_id,
     )
+
+
+def _workflow_snapshot(
+    source: object,
+    reporter: ProgressReporter,
+    *,
+    end_percentage: float,
+) -> ProjectSnapshot:
+    """Resolve a workflow snapshot while preserving existing snapshot callers."""
+
+    if isinstance(source, ProjectSnapshot):
+        reporter.report(
+            "scan",
+            "Using the caller-provided repository snapshot.",
+            percentage=end_percentage,
+            metadata={"files": len(source.files), "reused": True},
+        )
+        return source
+    if isinstance(source, (str, Path)):
+        reporter.report(
+            "scan",
+            "Scanning repository files.",
+            percentage=min(2, end_percentage),
+        )
+        snapshot = scan_repository(source)
+        reporter.report(
+            "scan",
+            "Repository scan completed.",
+            percentage=end_percentage,
+            metadata={"files": len(snapshot.files), "reused": False},
+        )
+        return snapshot
+    # Retain compatibility with duck-typed test and adapter callers; downstream
+    # validation still owns rejection of an invalid snapshot.
+    return cast(ProjectSnapshot, source)
 
 
 def _report_terminal_exception(
