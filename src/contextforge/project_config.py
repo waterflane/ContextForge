@@ -12,10 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from contextforge.models import (
     DEFAULT_OLLAMA_ENDPOINT,
+    DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    OPENAI_COMPATIBLE_PROVIDER_ID,
     FakeModelProvider,
     ModelProvider,
     ModelRequest,
     OllamaModelProvider,
+    OpenAICompatibleModelProvider,
     ProviderConfiguration,
     ProviderConfigurationError,
 )
@@ -37,6 +40,7 @@ class ProjectModelSettings(_ConfigModel):
 
     provider: str = "ollama"
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT
+    base_url: str | None = None
     model_id: str = Field(default=DEFAULT_MODEL_ID, alias="model")
     timeout_seconds: float = 120.0
     max_response_bytes: int = 1_000_000
@@ -105,19 +109,41 @@ def resolve_provider_configuration(
     *,
     provider: str | None = None,
     model: str | None = None,
+    base_url: str | None = None,
     concurrency: int | None = None,
     local_only: bool | None = None,
 ) -> ProviderConfiguration | None:
     """Apply command overrides and return a secret-free provider configuration."""
 
     settings = project.models
-    provider_id = provider or settings.provider
+    requested_provider = provider or settings.provider
+    provider_id = (
+        OPENAI_COMPATIBLE_PROVIDER_ID
+        if requested_provider == "lmstudio"
+        else requested_provider
+    )
     if provider_id == "none":
         return None
+    if (
+        provider_id == OPENAI_COMPATIBLE_PROVIDER_ID
+        and model is None
+        and "model_id" not in settings.model_fields_set
+    ):
+        raise ProjectConfigError(
+            "an exact --model ID from GET /v1/models is required for "
+            "the OpenAI-compatible provider"
+        )
     model_id = model or settings.model_id
+    endpoint = settings.endpoint
+    if provider_id == OPENAI_COMPATIBLE_PROVIDER_ID:
+        endpoint = base_url or settings.base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+    elif base_url is not None:
+        raise ProjectConfigError(
+            "--base-url is only supported by the OpenAI-compatible provider"
+        )
     values = {
         "provider_id": provider_id,
-        "endpoint": settings.endpoint,
+        "endpoint": endpoint,
         "model_id": model_id,
         "timeout_seconds": settings.timeout_seconds,
         "max_response_bytes": settings.max_response_bytes,
@@ -142,6 +168,8 @@ def create_model_provider(configuration: ProviderConfiguration) -> ModelProvider
 
     if configuration.provider_id == "ollama":
         return OllamaModelProvider(configuration)
+    if configuration.provider_id == OPENAI_COMPATIBLE_PROVIDER_ID:
+        return OpenAICompatibleModelProvider(configuration)
     if configuration.provider_id == "fake":
         return FakeModelProvider(configuration, responder=_fixture_response)
     raise ProviderConfigurationError(

@@ -434,8 +434,8 @@ async def build_repository_maps(
     )
     overview = build_repository_overview(current, code_maps)
     semantic_analyses = _load_available_semantics(snapshot.root, current)
-    provider_id, model_id = _provider_identity(provider)
-    analyzer = _global_analyzer(active_options, provider_id, model_id)
+    provider_id, model_id, base_url_sha256 = _provider_identity(provider)
+    analyzer = _global_analyzer(active_options, provider_id, model_id, base_url_sha256)
     options_digest = _options_digest(active_options)
     source_interpretations_digest = _file_interpretations_digest(current)
 
@@ -1880,14 +1880,22 @@ def _file_interpretations_digest(manifest: IndexManifest) -> str:
 
 
 def _global_analyzer(
-    options: GlobalMapAnalysisOptions, provider_id: str, model_id: str
+    options: GlobalMapAnalysisOptions,
+    provider_id: str,
+    model_id: str,
+    base_url_sha256: str | None,
 ) -> AnalyzerIdentity:
     return AnalyzerIdentity(
         analyzer_id=GLOBAL_MAP_ANALYZER_ID,
-        analyzer_version=GLOBAL_MAP_ANALYZER_VERSION,
+        analyzer_version=_connection_bound_version(
+            GLOBAL_MAP_ANALYZER_VERSION, base_url_sha256
+        ),
         analysis_prompt_version=options.prompt_version,
         response_schema_version=GLOBAL_MAP_SCHEMA_VERSION,
-        model_identity=ModelIdentity(provider_id=provider_id, model_id=model_id),
+        model_identity=ModelIdentity(
+            provider_id=provider_id,
+            model_id=model_id,
+        ),
     )
 
 
@@ -1927,7 +1935,7 @@ def _map_inputs_match(
     )
 
 
-def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
+def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
     provider_id = provider.provider_id
     configuration = getattr(provider, "configuration", None)
     model_id = getattr(configuration, "model_id", None)
@@ -1935,7 +1943,23 @@ def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
         raise GlobalMapAnalysisError(
             "global map provider must expose stable provider and model identity"
         )
-    return provider_id, model_id
+    endpoint = getattr(configuration, "endpoint", None)
+    base_url_sha256 = None
+    if provider_id == "openai-compatible":
+        if not isinstance(endpoint, str):
+            raise GlobalMapAnalysisError(
+                "OpenAI-compatible provider must expose a stable base URL identity"
+            )
+        base_url_sha256 = hashlib.sha256(
+            endpoint.rstrip("/").encode("utf-8")
+        ).hexdigest()
+    return provider_id, model_id, base_url_sha256
+
+
+def _connection_bound_version(version: str, base_url_sha256: str | None) -> str:
+    if base_url_sha256 is None:
+        return version
+    return f"{version}+base.{base_url_sha256}"
 
 
 def _validate_build_inputs(snapshot: ProjectSnapshot, lock: IndexWriteLock) -> None:

@@ -51,8 +51,9 @@ def _index_operation(
     update_only: bool,
     provider_name: str | None,
     model: str | None,
+    base_url: str | None,
     config: Path | None,
-    concurrency: int,
+    concurrency: int | None,
     fail_on_error: bool,
     force_reanalyze: bool,
     max_files: int | None,
@@ -65,18 +66,26 @@ def _index_operation(
             project,
             provider=provider_name,
             model=model,
+            base_url=base_url,
             concurrency=concurrency,
             local_only=True if local_only else None,
         )
         if provider_configuration is not None:
             provider = create_model_provider(provider_configuration)
+        effective_concurrency = (
+            provider_configuration.concurrency_limit
+            if provider_configuration is not None
+            else (
+                project.models.concurrency_limit if concurrency is None else concurrency
+            )
+        )
         report = asyncio.run(
             build_repository_index(
                 path,
                 provider=provider,
                 provider_configuration=provider_configuration,
                 update_only=update_only,
-                concurrency=concurrency,
+                concurrency=effective_concurrency,
                 fail_on_error=fail_on_error,
                 force_reanalyze=force_reanalyze,
                 max_files=max_files,
@@ -114,16 +123,23 @@ def build_index(
     model: Annotated[
         str | None, typer.Option("--model", help="Model ID override.")
     ] = None,
+    base_url: Annotated[
+        str | None,
+        typer.Option(
+            "--base-url",
+            help="OpenAI-compatible API base URL (for example LM Studio /v1).",
+        ),
+    ] = None,
     config: Annotated[
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
     concurrency: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--concurrency", min=1, max=8, help="Maximum semantic file concurrency."
         ),
-    ] = 2,
+    ] = None,
     fail_on_error: Annotated[
         bool,
         typer.Option(
@@ -158,6 +174,7 @@ def build_index(
         update_only=False,
         provider_name=provider,
         model=model,
+        base_url=base_url,
         config=config,
         concurrency=concurrency,
         fail_on_error=fail_on_error,
@@ -178,11 +195,17 @@ def update_index(
     model: Annotated[
         str | None, typer.Option("--model", help="Model ID override.")
     ] = None,
+    base_url: Annotated[
+        str | None,
+        typer.Option("--base-url", help="OpenAI-compatible API base URL."),
+    ] = None,
     config: Annotated[
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
-    concurrency: Annotated[int, typer.Option("--concurrency", min=1, max=8)] = 2,
+    concurrency: Annotated[
+        int | None, typer.Option("--concurrency", min=1, max=8)
+    ] = None,
     fail_on_error: Annotated[bool, typer.Option("--fail-on-error")] = False,
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,
     max_files: Annotated[int | None, typer.Option("--max-files", min=1)] = None,
@@ -195,6 +218,7 @@ def update_index(
         update_only=True,
         provider_name=provider,
         model=model,
+        base_url=base_url,
         config=config,
         concurrency=concurrency,
         fail_on_error=fail_on_error,

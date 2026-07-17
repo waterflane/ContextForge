@@ -304,8 +304,10 @@ async def build_semantic_index(
         load_file_code_map(snapshot.root, item.path, manifest=structural)
         for item in structural.files
     )
-    provider_id, model_id = _provider_identity(provider)
-    analyzer = _semantic_analyzer(active_options, provider_id, model_id)
+    provider_id, model_id, base_url_sha256 = _provider_identity(provider)
+    analyzer = _semantic_analyzer(
+        active_options, provider_id, model_id, base_url_sha256
+    )
     options_digest = _analysis_options_digest(active_options)
     reusable_manifests = _reuse_manifests(
         snapshot.root, structural, previous_manifest=previous_manifest
@@ -1427,18 +1429,26 @@ def _known_fact_ids(code_map: FileCodeMap) -> frozenset[str]:
 
 
 def _semantic_analyzer(
-    options: SemanticAnalysisOptions, provider_id: str, model_id: str
+    options: SemanticAnalysisOptions,
+    provider_id: str,
+    model_id: str,
+    base_url_sha256: str | None,
 ) -> AnalyzerIdentity:
     return AnalyzerIdentity(
         analyzer_id=SEMANTIC_ANALYZER_ID,
-        analyzer_version=SEMANTIC_ANALYZER_VERSION,
+        analyzer_version=_connection_bound_version(
+            SEMANTIC_ANALYZER_VERSION, base_url_sha256
+        ),
         analysis_prompt_version=options.prompt_version,
         response_schema_version=SEMANTIC_SCHEMA_VERSION,
-        model_identity=ModelIdentity(provider_id=provider_id, model_id=model_id),
+        model_identity=ModelIdentity(
+            provider_id=provider_id,
+            model_id=model_id,
+        ),
     )
 
 
-def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
+def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
     provider_id = provider.provider_id
     configuration = getattr(provider, "configuration", None)
     model_id = getattr(configuration, "model_id", None)
@@ -1446,7 +1456,23 @@ def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
         raise SemanticAnalysisError(
             "semantic provider must expose stable provider and model identity"
         )
-    return provider_id, model_id
+    endpoint = getattr(configuration, "endpoint", None)
+    base_url_sha256 = None
+    if provider_id == "openai-compatible":
+        if not isinstance(endpoint, str):
+            raise SemanticAnalysisError(
+                "OpenAI-compatible provider must expose a stable base URL identity"
+            )
+        base_url_sha256 = hashlib.sha256(
+            endpoint.rstrip("/").encode("utf-8")
+        ).hexdigest()
+    return provider_id, model_id, base_url_sha256
+
+
+def _connection_bound_version(version: str, base_url_sha256: str | None) -> str:
+    if base_url_sha256 is None:
+        return version
+    return f"{version}+base.{base_url_sha256}"
 
 
 def _validate_response_identity(

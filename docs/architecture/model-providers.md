@@ -4,7 +4,8 @@
 
 ContextForge has a provider-independent foundation for bounded, schema-bound
 model analysis. It defines the request/response/configuration contracts, a
-deterministic scripted fake, and a local Ollama adapter. The incremental file
+deterministic scripted fake, a local Ollama adapter, and a local
+OpenAI-compatible adapter with an LM Studio alias. The incremental file
 and symbol semantic builder, repository maps, task discovery, and optional task
 refinement compose this foundation. Providers do **not** receive tools, mutate
 source, execute compiled prompts, or acquire arbitrary network access through
@@ -25,6 +26,8 @@ durations, retry counts, token usage, and other operational diagnostics.
   `ProviderUnavailableError`, and `ProviderCancelledError`;
 - `FakeModelProvider` for deterministic offline tests;
 - `OllamaModelProvider` for Ollama's local non-streaming chat endpoint; and
+- `OpenAICompatibleModelProvider` for non-streaming JSON Schema chat
+  completions and model diagnostics; and
 - `classify_retry()` and `parse_structured_response()` for shared policy.
 
 An adapter supplies raw response text and optional usage/finish metadata to
@@ -148,3 +151,23 @@ task cancellation closes the active asyncio stream.
 The adapter accepts an async transport function for offline contract tests.
 The production default uses Python's standard-library asyncio HTTP client, so
 this foundation adds no provider SDK dependency.
+
+## OpenAI-compatible and LM Studio adapter
+
+`OpenAICompatibleModelProvider` defaults to the LM Studio base URL
+`http://localhost:1234/v1`; `lmstudio` is accepted by configuration and CLI as
+an alias for the canonical persisted provider ID `openai-compatible`. It first
+checks the configured model against the exact IDs in `GET /v1/models`, then
+sends non-streaming `POST /v1/chat/completions` requests with
+`response_format.type=json_schema`. No model name is supplied by default.
+
+The base URL is configurable with `[models].base_url` or CLI `--base-url`.
+Changing it changes the credential-free SHA-256 suffix on semantic and
+repository-map analyzer identity versions, invalidating model-dependent records
+without changing the persisted provider/model schema.
+An optional bearer token is loaded only through the configured
+`credential_env` name. Authentication failures, safe structured error bodies,
+missing model IDs, malformed envelopes, structured-output rejection,
+unavailability, timeout, and cancellation are translated to the shared typed
+provider errors. The adapter uses the same bounded retry runtime as Ollama and
+accepts an injectable async HTTP transport for offline tests.

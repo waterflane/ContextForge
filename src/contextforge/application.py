@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import suppress
 from dataclasses import dataclass
@@ -609,7 +610,9 @@ def _semantic_identity(
         return None
     return AnalyzerIdentity(
         analyzer_id=SEMANTIC_ANALYZER_ID,
-        analyzer_version=SEMANTIC_ANALYZER_VERSION,
+        analyzer_version=_model_dependent_analyzer_version(
+            SEMANTIC_ANALYZER_VERSION, configuration
+        ),
         analysis_prompt_version=SEMANTIC_PROMPT_VERSION,
         response_schema_version=1,
         model_identity=ModelIdentity(
@@ -617,6 +620,16 @@ def _semantic_identity(
             model_id=configuration.model_id,
         ),
     )
+
+
+def _model_dependent_analyzer_version(
+    analyzer_version: str, configuration: ProviderConfiguration
+) -> str:
+    if configuration.provider_id != "openai-compatible":
+        return analyzer_version
+    canonical = configuration.endpoint.rstrip("/")
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{analyzer_version}+base.{digest}"
 
 
 def _manifest_model_identity(

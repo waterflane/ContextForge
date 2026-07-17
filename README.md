@@ -123,7 +123,7 @@ contextforge index clean .
 contextforge index clean . --force
 ```
 
-`index build` and `index update` support `--provider`, `--model`, `--config`,
+`index build` and `index update` support `--provider`, `--model`, `--base-url`, `--config`,
 `--concurrency`, `--fail-on-error`, `--force-reanalyze`, `--max-files`, and
 `--local-only`. Use `--provider none` for deterministic structural-only
 indexing. Updates reuse unchanged valid facts and interpretations, while new,
@@ -162,6 +162,28 @@ store_raw_responses = false
 Configuration is closed and secret-free. An optional `credential_env` stores
 only an environment-variable name; its value is resolved at request time and
 is never persisted in the index or handoff.
+
+LM Studio is available through the `lmstudio` alias for the canonical
+`openai-compatible` provider. Select the model by copying its exact ID from
+`GET /v1/models`; ContextForge has no default LM Studio model:
+
+```bash
+contextforge index build . --provider lmstudio --model <MODEL_ID>
+contextforge index update . --provider openai-compatible --model <MODEL_ID>
+```
+
+```toml
+[models]
+provider = "openai-compatible"
+model = "<MODEL_ID>"
+base_url = "http://localhost:1234/v1"
+concurrency_limit = 2
+# credential_env = "LM_STUDIO_API_KEY"
+```
+
+The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
+Schema output and checks the exact configured ID through `GET /v1/models`.
+CLI `--model`, `--base-url`, and `--concurrency` values override this section.
 
 ### Read-only MCP
 

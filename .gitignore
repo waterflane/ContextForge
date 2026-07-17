@@ -3,6 +3,7 @@
 .agents/
 .uv-cache/
 .python/
+.contextforge/
 
 __pycache__/
 *.py[cod]

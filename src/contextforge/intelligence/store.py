@@ -61,6 +61,8 @@ DEFAULT_CONFIG = """config_version = 1
 [models]
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
+# For provider = "openai-compatible" (or the CLI alias "lmstudio"):
+# base_url = "http://localhost:1234/v1"
 model = "qwen2.5-coder"
 timeout_seconds = 120
 max_response_bytes = 1000000
@@ -70,6 +72,7 @@ local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
+# credential_env = "LM_STUDIO_API_KEY"
 
 [retention]
 runs = 10

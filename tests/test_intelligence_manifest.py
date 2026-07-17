@@ -139,6 +139,7 @@ def test_manifest_serialization_and_generation_id_are_deterministic() -> None:
 
 def test_manifest_models_are_closed_frozen_and_do_not_accept_credentials() -> None:
     identity = ModelIdentity(provider_id="ollama", model_id="qwen")
+    assert identity.model_dump() == {"provider_id": "ollama", "model_id": "qwen"}
 
     with pytest.raises(ValidationError):
         identity.provider_id = "changed"
@@ -326,3 +327,32 @@ def test_invalid_build_options_digest_is_rejected() -> None:
             expected_analyzer=_analyzer(),
             build_options_digest="invalid",
         )
+
+
+def test_openai_compatible_base_url_identity_change_invalidates_model_records() -> None:
+    project_file = _file("app.py", "pass")
+    first = _analyzer().model_copy(
+        update={
+            "analyzer_version": "1+base." + _sha("http://localhost:1234/v1"),
+            "model_identity": ModelIdentity(
+                provider_id="openai-compatible",
+                model_id="exact/model",
+            ),
+        }
+    )
+    changed = first.model_copy(
+        update={
+            "analyzer_version": "1+base." + _sha("http://localhost:9999/v1"),
+        }
+    )
+    manifest = _manifest((project_file,), analyzer=first)
+
+    assert (
+        identify_stale_analysis(
+            manifest,
+            (project_file,),
+            expected_analyzer=changed,
+            build_options_digest=_sha("options"),
+        )
+        == manifest.files
+    )

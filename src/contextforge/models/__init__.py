@@ -6,6 +6,13 @@ from contextforge.models.ollama import (
     OllamaModelProvider,
     OllamaTransport,
 )
+from contextforge.models.openai_compatible import (
+    DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    OPENAI_COMPATIBLE_PROVIDER_ID,
+    OpenAICompatibleHTTPResponse,
+    OpenAICompatibleModelProvider,
+    OpenAICompatibleTransport,
+)
 from contextforge.models.providers import (
     DEFAULT_MAX_RESPONSE_BYTES,
     MAX_PROVIDER_CONCURRENCY,
@@ -44,6 +51,7 @@ from contextforge.models.providers import (
 __all__ = [
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_OLLAMA_ENDPOINT",
+    "DEFAULT_OPENAI_COMPATIBLE_BASE_URL",
     "MAX_PROVIDER_CONCURRENCY",
     "MAX_PROVIDER_RETRIES",
     "MAX_PROVIDER_TIMEOUT_SECONDS",
@@ -62,6 +70,10 @@ __all__ = [
     "ModelUsage",
     "OllamaModelProvider",
     "OllamaTransport",
+    "OPENAI_COMPATIBLE_PROVIDER_ID",
+    "OpenAICompatibleHTTPResponse",
+    "OpenAICompatibleModelProvider",
+    "OpenAICompatibleTransport",
     "ProviderCancelledError",
     "ProviderCapabilities",
     "ProviderConfiguration",
