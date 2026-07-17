@@ -65,9 +65,12 @@ same facts-versus-interpretation boundary. Model-guided repository discovery is
 documented in [Repository discovery](repository-discovery.md), and its
 review-to-package integration and pure prompt compiler are documented in
 [Context handoffs and prompt compilation](context-handoffs.md). ContextForge
-does not execute compiled prompts. Thin Typer commands expose index and context
-workflows, while a bounded read-only MCP adapter exposes the same core APIs
-without shell, source-write, Git-mutation, or index-mutation capabilities.
+does not execute compiled prompts. The shared
+[application progress contract](progress-reporting.md) exposes structured,
+observer-isolated workflow phases without interface dependencies. Thin Typer
+commands expose index and context workflows, while a bounded read-only MCP
+adapter exposes the same core APIs without shell, source-write, Git-mutation,
+or index-mutation capabilities.
 
 ## Excluded from v0.1.0
 

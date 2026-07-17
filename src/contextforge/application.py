@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +15,7 @@ from pydantic import ValidationError
 
 from contextforge.discovery import (
     DiscoveryBudget,
+    DiscoveryCancelledError,
     DiscoveryMode,
     DiscoveryRequest,
     DiscoveryRunRecord,
@@ -62,7 +65,12 @@ from contextforge.intelligence import (
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
-from contextforge.models import ModelProvider, ProviderConfiguration
+from contextforge.models import (
+    ModelProvider,
+    ProviderCancelledError,
+    ProviderConfiguration,
+)
+from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 MAX_HANDOFF_BYTES = 16 * 1024 * 1024
@@ -170,8 +178,58 @@ async def build_repository_index(
     max_files: int | None = None,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> IndexBuildReport:
     """Build/update all index phases while retaining a prior pointer on failure."""
+
+    reporter = _progress_reporter(
+        "repository.index.update" if update_only else "repository.index.build",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report("initialize", "Initializing repository index.", percentage=0)
+    try:
+        report = await _build_repository_index(
+            repository_root,
+            provider=provider,
+            provider_configuration=provider_configuration,
+            update_only=update_only,
+            concurrency=concurrency,
+            fail_on_error=fail_on_error,
+            force_reanalyze=force_reanalyze,
+            max_files=max_files,
+            recover_stale_lock=recover_stale_lock,
+            confirm_unknown_lock=confirm_unknown_lock,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        raise
+    reporter.complete(
+        message="Repository index build completed.",
+        metadata={"partial": report.partial},
+    )
+    return report
+
+
+async def _build_repository_index(
+    repository_root: str | Path,
+    *,
+    provider: ModelProvider | None,
+    provider_configuration: ProviderConfiguration | None,
+    update_only: bool,
+    concurrency: int,
+    fail_on_error: bool,
+    force_reanalyze: bool,
+    max_files: int | None,
+    recover_stale_lock: bool,
+    confirm_unknown_lock: bool,
+    progress: ProgressReporter,
+) -> IndexBuildReport:
+    """Implement index construction under the public progress boundary."""
 
     root = Path(repository_root).expanduser().resolve(strict=True)
     initialize_index(root)
@@ -184,7 +242,14 @@ async def build_repository_index(
                 "no active repository index exists; run 'contextforge index build'"
             ) from None
         previous = None
+    progress.report("scan", "Scanning repository files.", percentage=10)
     snapshot = scan_repository(root)
+    progress.report(
+        "scan",
+        "Repository scan completed.",
+        percentage=20,
+        metadata={"files": len(snapshot.files)},
+    )
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
@@ -195,12 +260,27 @@ async def build_repository_index(
         confirm_unknown=confirm_unknown_lock,
     ) as lock:
         try:
+            progress.report(
+                "structural_index",
+                "Building structural repository index.",
+                percentage=25,
+            )
             structural = build_structural_index(
                 snapshot,
                 lock,
                 previous_manifest=previous,
             )
+            progress.report(
+                "structural_index",
+                "Structural repository index completed.",
+                percentage=45,
+            )
             if provider is not None:
+                progress.report(
+                    "semantic_index",
+                    "Building semantic repository index.",
+                    percentage=50,
+                )
                 semantic = await build_semantic_index(
                     snapshot,
                     lock,
@@ -214,11 +294,33 @@ async def build_repository_index(
                     ),
                     previous_manifest=previous,
                 )
+                progress.report(
+                    "semantic_index",
+                    "Semantic repository index completed.",
+                    percentage=75,
+                )
+                progress.report(
+                    "repository_maps",
+                    "Building repository maps.",
+                    percentage=80,
+                )
                 maps = await build_repository_maps(
                     snapshot,
                     lock,
                     provider,
                     options=GlobalMapAnalysisOptions(fail_on_error=fail_on_error),
+                )
+                progress.report(
+                    "repository_maps",
+                    "Repository maps completed.",
+                    percentage=95,
+                )
+            else:
+                progress.report(
+                    "model_analysis",
+                    "Model-backed analysis was not requested.",
+                    percentage=95,
+                    metadata={"skipped": True},
                 )
         except BaseException:
             if previous is not None:
@@ -247,11 +349,51 @@ def inspect_repository_index(
     repository_root: str | Path,
     *,
     provider_configuration: ProviderConfiguration | None,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> IndexStatusReport:
     """Compare current source with one pinned active generation without mutation."""
 
+    reporter = _progress_reporter(
+        "repository.index.inspect",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report("scan", "Scanning repository and index state.", percentage=0)
+    try:
+        report = _inspect_repository_index(
+            repository_root,
+            provider_configuration=provider_configuration,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        raise
+    reporter.complete(
+        message="Repository index inspection completed.",
+        metadata={"initialized": report.initialized},
+    )
+    return report
+
+
+def _inspect_repository_index(
+    repository_root: str | Path,
+    *,
+    provider_configuration: ProviderConfiguration | None,
+    progress: ProgressReporter,
+) -> IndexStatusReport:
+    """Implement synchronous index inspection with coarse phase reporting."""
+
     root = Path(repository_root).expanduser().resolve(strict=True)
     snapshot = scan_repository(root)
+    progress.report(
+        "scan",
+        "Repository scan completed.",
+        percentage=50,
+        metadata={"files": len(snapshot.files)},
+    )
     repository_identity = calculate_source_snapshot_digest(snapshot)
     index_root = root / ".contextforge" / "index"
     initialized = index_root.is_dir()
@@ -266,6 +408,11 @@ def inspect_repository_index(
     try:
         manifest = load_manifest(root)
     except IndexManifestNotFoundError:
+        progress.report(
+            "compare",
+            "No active repository index was found.",
+            percentage=90,
+        )
         return IndexStatusReport(
             initialized=initialized,
             index_schema=INDEX_SCHEMA_VERSION,
@@ -294,6 +441,7 @@ def inspect_repository_index(
             lock_status=lock_status,
         )
 
+    progress.report("compare", "Comparing repository and index state.", percentage=70)
     current = {item.path: item for item in snapshot.files}
     indexed = {item.path: item for item in manifest.files}
     added = tuple(sorted(set(current) - set(indexed)))
@@ -342,6 +490,9 @@ def inspect_repository_index(
             }
         )
     )
+    progress.report(
+        "compare", "Repository and index comparison completed.", percentage=90
+    )
     return IndexStatusReport(
         initialized=initialized,
         index_schema=manifest.schema_versions.index_schema_version,
@@ -382,10 +533,32 @@ async def suggest_repository_context(
     snapshot: ProjectSnapshot,
     provider: ModelProvider,
     request: DiscoveryRequest,
+    *,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> DiscoveryRunRecord:
     """Run existing bounded discovery without source or index mutation."""
 
-    return await discover_repository(snapshot, provider, request)
+    reporter = _progress_reporter(
+        "repository.context.suggest",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report(
+        "discovery", "Discovering relevant repository context.", percentage=0
+    )
+    try:
+        result = await discover_repository(snapshot, provider, request)
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        raise
+    reporter.complete(
+        message="Repository context discovery completed.",
+        metadata={"run_id": result.run_id},
+    )
+    return result
 
 
 async def create_automatic_handoff(
@@ -395,8 +568,50 @@ async def create_automatic_handoff(
     *,
     refine_task: bool = False,
     git_diff_request: GitDiffRequest | None = None,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> tuple[DiscoveryHandoffResult, CompiledPrompt]:
     """Discover, review, verify, package, and compile one automatic handoff."""
+
+    reporter = _progress_reporter(
+        "repository.handoff.create",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report(
+        "repository_knowledge",
+        "Loading repository knowledge.",
+        percentage=0,
+    )
+
+    try:
+        result = await _create_automatic_handoff(
+            snapshot,
+            provider,
+            request,
+            refine_task=refine_task,
+            git_diff_request=git_diff_request,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        raise
+    reporter.complete(message="Automatic context handoff completed.")
+    return result
+
+
+async def _create_automatic_handoff(
+    snapshot: ProjectSnapshot,
+    provider: ModelProvider,
+    request: DiscoveryRequest,
+    *,
+    refine_task: bool,
+    git_diff_request: GitDiffRequest | None,
+    progress: ProgressReporter,
+) -> tuple[DiscoveryHandoffResult, CompiledPrompt]:
+    """Implement handoff construction under the public progress boundary."""
 
     architecture: ArchitectureMap | None = None
     features = None
@@ -404,6 +619,9 @@ async def create_automatic_handoff(
         manifest = load_manifest(snapshot.root)
         architecture = load_architecture_map(snapshot.root, manifest=manifest)
         features = load_feature_map(snapshot.root, manifest=manifest)
+    progress.report(
+        "discovery", "Discovering and reviewing repository context.", percentage=15
+    )
     result = await discover_context_handoff(
         snapshot,
         provider,
@@ -417,6 +635,7 @@ async def create_automatic_handoff(
             max_files=request.budget.max_context_files,
         ),
     )
+    progress.report("compile", "Compiling the portable context handoff.", percentage=90)
     return result, compile_prompt(result.handoff)
 
 
@@ -689,6 +908,38 @@ def _global_statuses(
         status(load_architecture_map),
         status(load_feature_map),
     )
+
+
+def _progress_reporter(
+    operation_type: str,
+    observer: ProgressObserver | None,
+    *,
+    operation_id: str | None,
+    parent_operation_id: str | None,
+) -> ProgressReporter:
+    """Create one application operation reporter with a unique default ID."""
+
+    return ProgressReporter(
+        operation_id or f"{operation_type}:{uuid.uuid4()}",
+        operation_type,
+        observer=observer,
+        parent_operation_id=parent_operation_id,
+    )
+
+
+def _report_terminal_exception(
+    reporter: ProgressReporter, error: BaseException
+) -> None:
+    """Classify cancellation without allowing progress to replace the failure."""
+
+    metadata = {"error_type": type(error).__name__}
+    if isinstance(
+        error,
+        (asyncio.CancelledError, DiscoveryCancelledError, ProviderCancelledError),
+    ):
+        reporter.cancel(metadata=metadata)
+    else:
+        reporter.fail(metadata=metadata)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
