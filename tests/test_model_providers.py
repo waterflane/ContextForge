@@ -351,7 +351,15 @@ def test_provider_attempts_emit_shared_progress_without_artificial_completion() 
         )
         request = replace(
             _request(),
-            metadata={"analyzer_version": "1", "path": "src/app.py"},
+            metadata={
+                "analyzer_version": "1",
+                "path": "src/app.py",
+                "analyzer_kind": "generic-text-semantic",
+                "estimated_input_tokens": "42",
+                "output_token_budget": "128",
+                "input_truncated": "true",
+            },
+            max_output_tokens=128,
             progress=events.append,
         )
         with pytest.raises(ProviderTimeoutError):
@@ -366,9 +374,53 @@ def test_provider_attempts_emit_shared_progress_without_artificial_completion() 
     ]
     assert [event.current_attempt for event in waiting] == [1, 2]
     assert all(event.percentage == 0 for event in waiting)
+    assert all(event.analyzer_kind == "generic-text-semantic" for event in waiting)
+    assert all(event.estimated_input_tokens == 42 for event in waiting)
+    assert all(event.output_token_budget == 128 for event in waiting)
+    assert all(event.input_truncated is True for event in waiting)
     assert events[-1].status is ProgressStatus.FAILED
     assert events[-1].percentage < 100
     assert events[-1].safe_error_code == "provider_timeout"
+
+
+def test_debug_request_metrics_are_safe(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source_secret = "do-not-log-source"
+    raw_response = _valid_json("do-not-log-response")
+    request = replace(
+        _request(source_text=source_secret),
+        metadata={
+            "path": "src/app.py",
+            "analyzer_kind": "generic-text-semantic",
+            "estimated_input_tokens": "37",
+            "output_token_budget": "128",
+            "input_truncated": "false",
+        },
+        max_output_tokens=128,
+    )
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=[
+            ProviderTransportResponse(
+                text=raw_response,
+                usage=ModelUsage(input_tokens=37, output_tokens=12),
+            )
+        ],
+    )
+
+    with caplog.at_level("DEBUG", logger="contextforge.models.providers"):
+        asyncio.run(provider.complete_structured(request))
+
+    output = caplog.text
+    assert "path=src/app.py" in output
+    assert "analyzer=generic-text-semantic" in output
+    assert "estimated_input_tokens=37" in output
+    assert "output_token_limit=128" in output
+    assert "response_tokens=12" in output
+    assert "response_validation=valid" in output
+    assert source_secret not in output
+    assert raw_response not in output
 
 
 def test_structured_failure_is_retryable_but_request_failure_is_not() -> None:

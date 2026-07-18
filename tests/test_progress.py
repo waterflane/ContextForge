@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from rich.console import Console
 
 import contextforge.application as application_module
+import contextforge.cli.progress as cli_progress_module
 from contextforge import (
     NO_OP_PROGRESS_OBSERVER,
     NoOpProgressObserver,
@@ -88,6 +90,10 @@ def test_progress_event_is_closed_frozen_and_json_serializable() -> None:
         "safe_error_message",
         "request_elapsed_seconds",
         "operation_elapsed_seconds",
+        "analyzer_kind",
+        "estimated_input_tokens",
+        "output_token_budget",
+        "input_truncated",
         "elapsed_seconds",
         "metadata",
     } <= payload.keys()
@@ -135,6 +141,31 @@ def test_progress_event_is_closed_frozen_and_json_serializable() -> None:
         event.message = "Changed"
     with pytest.raises(ValidationError):
         _event(unknown=True)
+
+
+def test_progress_api_values_are_complete_and_untruncated() -> None:
+    current = "deep/path/to/the/actual-current-filename.json"
+    completed = "docs/README-with-a-complete-name.md"
+    failed = "licenses/LICENSE-with-a-complete-name.txt"
+    event = _event(
+        current_item=current,
+        last_completed_item=completed,
+        last_failed_item=failed,
+        analyzer_kind="generic-text-semantic",
+        estimated_input_tokens=123,
+        output_token_budget=160,
+        input_truncated=True,
+        lifecycle_state="waiting_for_provider",
+    )
+
+    payload = event.model_dump(mode="json")
+    assert payload["current_item"] == current
+    assert payload["last_completed_item"] == completed
+    assert payload["last_failed_item"] == failed
+    assert payload["analyzer_kind"] == "generic-text-semantic"
+    assert payload["estimated_input_tokens"] == 123
+    assert payload["output_token_budget"] == 160
+    assert payload["input_truncated"] is True
 
 
 @pytest.mark.parametrize("percentage", [-0.01, 100.01, float("nan")])
@@ -588,8 +619,141 @@ def test_dynamic_panel_shows_overall_phase_activity_and_elapsed() -> None:
     assert "waiting for provider" in rendered
     assert "src/contextforge/application.py" in rendered
     assert "src/contextforge/project_config.py" in rendered
-    assert "elapsed 00:10" in rendered
+    assert "Elapsed: 00:10" in rendered
     assert waiting.percentage == initial_percent
+
+
+def test_one_stream_has_one_idempotent_live_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"created": 0, "started": 0, "refreshed": 0, "stopped": 0}
+
+    class FakeLive:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            calls["created"] += 1
+
+        def start(self, *, refresh: bool) -> None:
+            assert refresh is True
+            calls["started"] += 1
+
+        def refresh(self) -> None:
+            calls["refreshed"] += 1
+
+        def stop(self) -> None:
+            calls["stopped"] += 1
+
+    monkeypatch.setattr(cli_progress_module, "Live", FakeLive)
+    stream = _TTYStringIO()
+    console = Console(file=stream, force_terminal=True, width=100)
+    owner = CLIProgressRenderer(console=console)
+    nested = CLIProgressRenderer(console=console)
+
+    owner(_event(operation_type="repository.index.build"))
+    nested(
+        _event(
+            operation_type="repository.index.build",
+            phase_id="provider_retry",
+            current_attempt=2,
+            max_attempts=3,
+            sequence=3,
+        )
+    )
+    nested.close()
+    owner.close()
+    owner.close()
+
+    assert calls == {"created": 1, "started": 1, "refreshed": 1, "stopped": 1}
+
+
+def test_logging_during_live_reuses_the_same_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = 0
+
+    class FakeLive:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal created
+            del kwargs
+            created += 1
+
+        def start(self, *, refresh: bool) -> None:
+            del refresh
+
+        def refresh(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli_progress_module, "Live", FakeLive)
+    stream = _TTYStringIO()
+    renderer = CLIProgressRenderer(
+        console=Console(file=stream, force_terminal=True, width=100)
+    )
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("contextforge.progress-test")
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        renderer(_event(operation_type="repository.index.build"))
+        assert handler.stream is not stream
+        logger.warning("safe diagnostic")
+        renderer(_event(operation_type="repository.index.build", sequence=3))
+    finally:
+        logger.removeHandler(handler)
+        renderer.close()
+
+    assert created == 1
+    assert stream.getvalue().count("safe diagnostic") == 1
+    assert handler.stream is stream
+
+
+@pytest.mark.parametrize("width", [120, 34])
+def test_dynamic_layout_keeps_complete_labels_and_wraps_values(width: int) -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=False, width=width)
+    renderer = CLIProgressRenderer(console=console)
+    event = _event(
+        operation_type="repository.index.build",
+        planned_units=26,
+        processed_units=11,
+        succeeded_units=3,
+        failed_units=1,
+        fallback_units=1,
+        skipped_units=2,
+        reused_units=4,
+        current_item="very/long/path/config.json",
+        last_completed_item="README.md",
+        last_failed_item="very/long/path/failed-file.txt",
+        current_attempt=2,
+        max_attempts=3,
+        lifecycle_state="waiting_for_provider",
+        analyzer_kind="generic-text-semantic",
+        metadata={"provider_id": "openai-compatible", "model_id": "long/model"},
+    )
+
+    renderer._event = event
+    console.print(renderer._render_dynamic())
+    rendered = stream.getvalue()
+
+    for label in (
+        "Processed:",
+        "Succeeded:",
+        "Failed:",
+        "Fallback:",
+        "Skipped:",
+        "Reused:",
+        "Current:",
+        "Done:",
+        "Last failure:",
+        "Attempt:",
+        "Model:",
+    ):
+        assert label in rendered
+    assert "…" not in rendered
+    assert "config.json" in rendered.replace("\n", "")
+    assert "failed-file.txt" in rendered.replace("\n", "")
 
 
 def test_renderer_labels_failed_semantic_work_as_processed() -> None:

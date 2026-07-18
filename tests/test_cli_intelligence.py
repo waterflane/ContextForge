@@ -89,7 +89,6 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert "CodeMaps extracted: 2" in _plain(updated.stdout)
     current = load_manifest(tmp_path)
     assert tuple(item.path for item in current.files) == (
-        ".contextforge/config.toml",
         "app.py",
         "new.py",
     )
@@ -98,9 +97,8 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert status.exit_code == 0
     assert status.stderr == ""
     payload = json.loads(status.stdout)
-    assert payload["indexed_files"] == 3
+    assert payload["indexed_files"] == 2
     assert payload["stale_files"] == [
-        ".contextforge/config.toml",
         "app.py",
         "new.py",
     ]
@@ -137,7 +135,7 @@ def test_index_update_requires_existing_index_and_status_handles_missing(
     assert status.exit_code == 0
     payload = json.loads(status.stdout)
     assert payload["active_generation_id"] is None
-    assert payload["added_files"] == [".contextforge/config.toml", "app.py"]
+    assert payload["added_files"] == ["app.py"]
 
 
 def test_index_cli_requires_explicit_confirmation_to_recover_unknown_lock(
@@ -184,7 +182,7 @@ def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> No
     assert forced.exit_code == 0
     assert "Semantic analyses completed: 1" in _plain(forced.stdout)
     manifest = load_manifest(tmp_path)
-    assert sum(item.semantic_status == "skipped" for item in manifest.files) == 2
+    assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
 
 
 def test_index_provider_failure_preserves_previous_active_generation(

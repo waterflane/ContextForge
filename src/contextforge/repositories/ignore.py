@@ -24,9 +24,7 @@ PROTECTED_IGNORE_PATTERNS = (
     ".git/",
     ".hg/",
     ".svn/",
-    ".contextforge/index/",
-    ".contextforge/contexts/",
-    ".contextforge/runs/",
+    ".contextforge/",
 )
 
 DEFAULT_IGNORE_PATTERNS = (

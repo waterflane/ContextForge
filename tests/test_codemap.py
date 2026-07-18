@@ -198,7 +198,7 @@ def test_unsupported_language_is_file_level_only_and_deterministic(
     assert first.parse_status == "unsupported"
     assert first.symbols == ()
     assert first.relationships == ()
-    assert first.diagnostics[0].code == "unsupported_language"
+    assert first.diagnostics[0].code == "no_structural_extractor"
 
 
 def test_serialization_is_canonical_strict_and_round_trips(tmp_path: Path) -> None:

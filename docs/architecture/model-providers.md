@@ -52,7 +52,7 @@ timeout_seconds = 90
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 4096
+semantic_max_output_tokens = 512
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -124,10 +124,16 @@ provider call, after validated acceptance, on bounded retry, and on terminal
 failure. The event exposes attempt counts and safe error codes such as
 `provider_timeout`, `connection_error`, `http_error`, `model_not_found`,
 `malformed_json`, and `structured_output_validation_failed`; it never includes
-raw responses. Semantic requests set a bounded `max_output_tokens` (4096 by
-default, configurable through `semantic_max_output_tokens` or CLI
-`--max-output-tokens`). OpenAI-compatible requests transmit that bound as
-`max_tokens`, so a small file cannot request unbounded output.
+raw responses. Semantic requests select an adaptive `max_output_tokens` from
+128 through 512 according to category, size, and structural complexity. The
+configured `semantic_max_output_tokens` or CLI `--max-output-tokens` is a
+ceiling, not a target. Global repository maps use a separate 2048-token bound.
+OpenAI-compatible requests transmit the selected limit as `max_tokens`.
+
+Debug logs contain only source path, analyzer kind, estimated input tokens,
+selected output limit, attempt, provider-reported response tokens, duration,
+validation result, and truncation state. They never contain prompts, source,
+complete responses, credentials, or headers. Normal CLI output remains concise.
 
 ## Trust boundary
 
@@ -141,6 +147,12 @@ default, configurable through `semantic_max_output_tokens` or CLI
 5. optional validated prior model output, still framed as untrusted context with
    its own label, SHA-256, UTF-8 byte length, and collision-safe delimiter; and
 6. the expected output schema.
+
+`ModelRequest.messages()` can include the schema for adapters that require a
+prompt-level contract. Ollama `format` and OpenAI-compatible
+`response_format.json_schema` carry it natively, so those adapters omit the
+duplicate schema prose. The user contract still requires concise JSON only,
+with no Markdown, reasoning, source repetition, or surrounding text.
 
 Each source is capped at 1,000,000 transmitted UTF-8 bytes. At most 100 source
 records, 100 prior-context records, and 4,000,000 combined untrusted bytes may

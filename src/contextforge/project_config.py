@@ -46,9 +46,7 @@ class ProjectModelSettings(_ConfigModel):
     max_response_bytes: int = 1_000_000
     concurrency_limit: int = 2
     retry_limit: int = 2
-    semantic_max_output_tokens: int = Field(
-        default=4_096, ge=256, le=32_768, strict=True
-    )
+    semantic_max_output_tokens: int = Field(default=512, ge=96, le=32_768, strict=True)
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     store_raw_prompts: bool = False
@@ -223,6 +221,34 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
     if purpose == "task-refinement":
         return json.dumps({"schema_version": 1})
     if purpose == "file-semantics":
+        analyzer_kind = request.metadata.get("analyzer_kind")
+        category = request.trusted_code_map_facts.get("file_category")
+        if analyzer_kind == "generic-text-semantic":
+            if category == "readme":
+                return json.dumps(
+                    {
+                        "schema_version": 1,
+                        "project_purpose": "Offline fixture project documentation.",
+                    }
+                )
+            if category == "license":
+                marker = request.trusted_code_map_facts.get("known_license_marker")
+                return json.dumps(
+                    {
+                        "schema_version": 1,
+                        "license_type": marker or "Unknown",
+                    }
+                )
+            if category == "config":
+                return json.dumps(
+                    {
+                        "schema_version": 1,
+                        "summary": "Offline fixture configuration.",
+                    }
+                )
+            return json.dumps(
+                {"schema_version": 1, "summary": "Offline fixture text analysis."}
+            )
         raw_symbols = request.trusted_code_map_facts.get("symbols", [])
         symbols = []
         if isinstance(raw_symbols, list):
@@ -235,12 +261,6 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
                 }:
                     symbols.append({"symbol_id": item.get("symbol_id")})
         return json.dumps({"schema_version": 1, "file": {}, "symbols": symbols})
-    if purpose in {"file-chunk-semantics", "file-synthesis"}:
-        return json.dumps({"schema_version": 1, "file": {}})
-    if purpose == "symbol-semantics":
-        symbol = request.trusted_code_map_facts.get("symbol", {})
-        symbol_id = symbol.get("symbol_id") if isinstance(symbol, dict) else None
-        return json.dumps({"schema_version": 1, "symbol": {"symbol_id": symbol_id}})
     if purpose in {"package-summary", "group-synthesis"}:
         match = re.search(r"Return scope_id '([^']+)' exactly", request.analysis_task)
         scope_id = match.group(1) if match is not None else "fixture-scope"

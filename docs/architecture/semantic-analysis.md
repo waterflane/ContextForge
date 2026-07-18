@@ -24,7 +24,7 @@ timeout_seconds = 90
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 4096
+semantic_max_output_tokens = 512
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -38,8 +38,8 @@ suite uses `FakeModelProvider` and requires no model or network.
 
 Keep local-model concurrency low. The semantic builder additionally bounds
 scheduled files, simultaneous file tasks, request and response bytes, source
-bytes per request, output tokens, chunks and model requests per file, provider retries, and
-cancellation. Provider limits may be stricter than analysis limits.
+bytes per file, one model request per file, provider retries, and cancellation.
+Provider limits may be stricter than analysis limits.
 
 `--request-timeout` overrides the per-attempt deadline for one index command;
 `--max-output-tokens` overrides the bounded semantic response budget. The
@@ -56,9 +56,11 @@ unsupported binary, oversized, invalid encoding, or preflight failure.
 
 Python files use rich model analysis. Meaningful readable JavaScript/JSX,
 TypeScript/TSX, Markdown, HTML, CSS, PowerShell, batch, JSON, TOML, YAML, XML,
-shell, and other text files use generic schema-bound model analysis even when
-their structural CodeMap uses the unsupported-language fallback. Generic model
-success is recorded as `generic_model_analysis`, never as a semantic fallback.
+shell, and other text files use generic schema-bound model analysis without a
+rich structural extractor. Their placeholder uses `generic-text-structure`
+with reason `no_structural_extractor`; successful semantics use the distinct
+`generic-text-semantic` identity and `generic_model_analysis` route, never an
+unsupported-language fallback.
 
 `.gitignore`, `.gitattributes`, `.editorconfig`, `.env.example`, `.env.sample`,
 lock files, `.gitkeep`, and empty files use deterministic metadata summaries and
@@ -71,21 +73,34 @@ without pretending that reused or deterministic items made an LLM request.
 
 ## Input and trust boundary
 
-Every request contains only one bounded file, symbol, or deterministic chunk;
-its trusted portable path and language; relevant verified CodeMap facts; and a
-closed response schema. Repository source and comments are framed as untrusted
-data. The model has no filesystem, network, Git, shell, command-execution,
-write, discovery, or MCP tools, and cannot select another path or expand a
-budget.
+Every per-file request contains only a compact system instruction, normalized
+path, language and category, bounded source or excerpt, minimal file-local
+facts, and a compact closed response schema. It never contains the repository
+tree, global maps, feature maps, unrelated files, or prior responses.
 
-For a large file, ContextForge covers the complete canonical source with
-deterministic bounded chunks, separately analyzes verified functions, methods,
-and classes, and synthesizes the file view from validated chunk and symbol
-analyses. Those prior model interpretations remain in an explicitly untrusted
-context envelope during synthesis; they are not relabeled as CodeMap facts.
-Synthesized evidence must match evidence already accepted from a bounded chunk
-or symbol response. Exceeding a chunk or request bound is an explicit failed
-analysis; source is never silently truncated and reported as successful.
+The default maximum excerpt is 65,536 UTF-8 bytes. Smaller files are sent
+completely. Larger files use a deterministic line-preserving selection weighted
+toward the beginning, verified declarations, and ending. Selection works on
+decoded text and whole encoded lines, with a codepoint-safe prefix fallback, so
+it cannot create invalid UTF-8. Progress records the input estimate and
+truncation state without exposing source.
+
+Each file makes at most one provider request. Adaptive output caps, also
+limited by the caller's lower ceiling, are:
+
+- deterministic metadata/control files: no provider output;
+- LICENSE: 128 tokens;
+- small README, Markdown, TXT, and configuration: 160 tokens, or 192 for a
+  larger document;
+- generic source: 192 tokens when small, otherwise 256;
+- Python rich analysis: 256 for trivial files, 320 for normal files, and at
+  most 512 for large or structurally complex files.
+
+README requests only project purpose, entry points, setup, and major
+components. LICENSE requests only type, obligations, and restrictions; common
+license markers are detected deterministically and supplied as a compact fact.
+JSON/configuration requests only summary, sections, and important keys. Arrays
+and strings are schema-bounded and responses may not quote source.
 
 ## Records and evidence
 

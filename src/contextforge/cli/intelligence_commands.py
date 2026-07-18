@@ -170,7 +170,7 @@ def build_index(
         int | None,
         typer.Option(
             "--max-output-tokens",
-            min=256,
+            min=96,
             max=32_768,
             help="Bound semantic structured-output tokens per request.",
         ),
@@ -274,7 +274,7 @@ def update_index(
     ] = None,
     max_output_tokens: Annotated[
         int | None,
-        typer.Option("--max-output-tokens", min=256, max=32_768),
+        typer.Option("--max-output-tokens", min=96, max=32_768),
     ] = None,
     fail_on_error: Annotated[bool, typer.Option("--fail-on-error")] = False,
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,

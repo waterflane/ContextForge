@@ -134,6 +134,10 @@ def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
             "strict": True,
         },
     }
+    user_message = payload["messages"][1]["content"]
+    assert "EXPECTED_OUTPUT_SCHEMA" not in user_message
+    assert '"additionalProperties"' not in user_message
+    assert "Return JSON only" in user_message
     assert response.value == _Answer(answer="works")
     assert response.finish_reason == "stop"
     assert response.usage == ModelUsage(input_tokens=11, output_tokens=7)

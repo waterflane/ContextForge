@@ -32,7 +32,6 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
         second = build_structural_index(snapshot, lock)
 
     assert first.extracted_paths == (
-        ".contextforge/config.toml",
         "README.md",
         "src/app.py",
     )
@@ -65,7 +64,7 @@ def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) ->
 
     assert changed.manifest.generation_id != first.manifest.generation_id
     assert changed.extracted_paths == ("b.py",)
-    assert changed.reused_paths == (".contextforge/config.toml", "a.py")
+    assert changed.reused_paths == ("a.py",)
     assert load_file_code_map(tmp_path, "b.py").source_sha256 != (
         next(item for item in first.code_maps if item.path == "b.py").source_sha256
     )

@@ -19,6 +19,8 @@ LANGUAGES_BY_FILENAME: Final = MappingProxyType(
         "gemfile": "Ruby",
         "makefile": "Makefile",
         "rakefile": "Ruby",
+        "readme": "Markdown",
+        "license": "License",
     }
 )
 
@@ -58,6 +60,7 @@ LANGUAGES_BY_EXTENSION: Final = MappingProxyType(
         ".toml": "TOML",
         ".ts": "TypeScript",
         ".tsx": "TypeScript",
+        ".txt": "Text",
         ".xml": "XML",
         ".yaml": "YAML",
         ".yml": "YAML",

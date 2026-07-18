@@ -61,6 +61,9 @@ Schema version 3 makes semantic accounting and provider lifecycle explicit:
 - `safe_error_code` and `safe_error_message` provide bounded diagnostics;
 - `request_elapsed_seconds` resets for each attempt; and
 - `operation_elapsed_seconds` measures the whole operation.
+- `analyzer_kind`, `estimated_input_tokens`, `output_token_budget`, and
+  `input_truncated` expose safe request planning metrics without prompt or source
+  material.
 
 These fields are sufficient for an HTTP API, SSE/WebSocket stream, or GUI to
 reproduce terminal state without parsing `message` or any CLI output. Provider
@@ -128,14 +131,31 @@ type, not exception text that could contain source content or secrets.
 
 CLI rendering is outside this contract and is intentionally not implemented by
 the progress foundation. `contextforge.cli.progress.CLIProgressRenderer` is the
-single Typer adapter. It uses Typer's actual Rich stderr console rather than
-testing stdout. In `auto` mode an interactive stderr receives one transient
-Rich `Live` panel with spinner, bars, items, elapsed time, and provider/model.
+single Typer adapter and the top-level CLI command is its sole owner. Nested
+work emits events only. A stream-scoped, synchronized ownership guard makes
+repeated initialization, start, refresh, and close idempotent; a nested adapter
+delegates to the owner and cannot create or stop another `Live` instance.
+
+The adapter uses Typer's actual Rich stderr console rather than testing stdout.
+In `auto` mode an interactive stderr receives one transient Rich `Live` panel
+with spinner, bars, items, elapsed time, and provider/model.
 The panel refreshes its spinner and elapsed clock while a provider request is
 quiet without emitting fake progress events or changing percentages. Redirected
 stderr receives coalesced, non-ANSI records only for meaningful phase,
 percentage, item, counter, or terminal changes. `never` suppresses rendering;
 `always` never forces terminal controls onto an unsafe redirected stream.
+
+Direct stderr and existing stderr logging handlers are routed through the same
+live console while it is active, then restored on the single stop path. This
+prints diagnostics above the panel instead of leaving a duplicate frame. All
+terminal outcomes and the final defensive close converge on exactly-once cursor
+restoration.
+
+The details layout reserves 16 characters for complete labels such as
+`Processed`, `Last failure`, and `Request elapsed`; values fold or wrap. Below
+58 columns, labels and values use separate lines. The panel width is capped at
+the current console width and remeasured on refresh. ASCII borders and spinner
+are used when Unicode is unavailable.
 
 ## Weighted workflow phases
 
@@ -206,6 +226,10 @@ Example semantic event (abridged):
   "max_attempts": 3,
   "lifecycle_state": "waiting_for_provider",
   "request_elapsed_seconds": 12.4,
+  "analyzer_kind": "generic-text-semantic",
+  "estimated_input_tokens": 824,
+  "output_token_budget": 192,
+  "input_truncated": false,
   "operation_elapsed_seconds": 94.1,
   "activity": "waiting"
 }

@@ -113,6 +113,8 @@ from contextforge.intelligence.semantic_models import (
     SymbolSemanticAnalysis,
 )
 from contextforge.intelligence.semantics import (
+    GENERIC_SEMANTIC_ANALYZER_ID,
+    GENERIC_SEMANTIC_ANALYZER_VERSION,
     SEMANTIC_ANALYZER_ID,
     SEMANTIC_ANALYZER_VERSION,
     SEMANTIC_PROMPT_VERSION,
@@ -176,6 +178,8 @@ __all__ = [
     "SEMANTIC_SCHEMA_VERSION",
     "SEMANTIC_ANALYZER_ID",
     "SEMANTIC_ANALYZER_VERSION",
+    "GENERIC_SEMANTIC_ANALYZER_ID",
+    "GENERIC_SEMANTIC_ANALYZER_VERSION",
     "SEMANTIC_PROMPT_VERSION",
     "SEMANTIC_SYSTEM_INSTRUCTIONS",
     "ActiveIndexPointer",

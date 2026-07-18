@@ -1,8 +1,10 @@
-"""Shared stderr-only CLI adapter for structured application progress events."""
+"""Single-owner stderr CLI adapter for structured application progress events."""
 
 from __future__ import annotations
 
+import logging
 import math
+import threading
 import time
 from collections.abc import Callable
 from enum import StrEnum
@@ -10,6 +12,7 @@ from typing import TextIO
 
 from rich import box
 from rich.console import Console, Group, RenderableType
+from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
@@ -26,6 +29,7 @@ _OPERATION_LABELS = {
     "repository.context.suggest": "Suggesting context",
     "repository.handoff.create": "Creating automatic context",
 }
+_LABEL_WIDTH = 16
 
 
 class ProgressMode(StrEnum):
@@ -37,7 +41,10 @@ class ProgressMode(StrEnum):
 
 
 class CLIProgressRenderer:
-    """Adapt shared progress events to one Rich live panel or discrete stderr."""
+    """Own at most one Rich live display for one top-level CLI operation."""
+
+    _ownership_lock = threading.RLock()
+    _active_owners: dict[int, CLIProgressRenderer] = {}
 
     def __init__(
         self,
@@ -58,9 +65,16 @@ class CLIProgressRenderer:
         self._console = console or self._console_for(stream)
         self._stream = self._console.file
         self._clock = clock
+        self._state_lock = threading.RLock()
         self._started: float | None = None
         self._event: ProgressEvent | None = None
         self._live: Live | None = None
+        self._owner: CLIProgressRenderer | None = None
+        self._owns_live = False
+        self._closed = False
+        self._redirected_handlers: list[
+            tuple[logging.StreamHandler[TextIO], TextIO]
+        ] = []
         self._last_discrete: dict[str, tuple[object, ...]] = {}
         self._request_key: tuple[str | None, int | None] | None = None
         self._request_started: float | None = None
@@ -73,8 +87,6 @@ class CLIProgressRenderer:
     @staticmethod
     def _console_for(stream: TextIO | None) -> Console:
         if stream is None:
-            # Typer owns ContextForge's console policy. stderr=True is important:
-            # captured/non-interactive stdout must not disable an interactive panel.
             return _get_rich_console(stderr=True)
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
         return Console(file=stream, force_terminal=is_tty, color_system="auto")
@@ -96,28 +108,60 @@ class CLIProgressRenderer:
         return "dynamic" if self._dynamic else "discrete"
 
     def __call__(self, event: ProgressEvent) -> None:
-        """Render one structured event without changing application semantics."""
+        """Render one event through the stream's idempotent live owner."""
 
-        if self.mode is ProgressMode.NEVER:
-            return
-        if self._started is None:
-            self._started = self._clock()
-        request_key = (event.current_item, event.current_attempt)
-        if request_key != self._request_key:
-            self._request_key = request_key
-            self._request_started = self._clock()
-        self._event = event
-        if self._dynamic:
+        with self._state_lock:
+            if self.mode is ProgressMode.NEVER or self._closed:
+                return
+            if self._started is None:
+                self._started = self._clock()
+            request_key = (event.current_item, event.current_attempt)
+            if request_key != self._request_key:
+                self._request_key = request_key
+                self._request_started = self._clock()
+            self._event = event
+            if not self._dynamic:
+                self._update_discrete(event)
+                return
+            owner = self._claim_dynamic_owner()
+            if owner is not self:
+                owner(event)
+                return
             self._update_dynamic(event)
-        else:
-            self._update_discrete(event)
 
     def close(self) -> None:
-        """Restore the terminal even if a caller exits outside a terminal event."""
+        """Stop an owned display once; delegated/nested close calls are harmless."""
 
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._owner is not None and self._owner is not self:
+                self._owner = None
+                return
+            if self._live is not None:
+                self._restore_logging_handlers()
+                self._live.stop()
+                self._live = None
+            if self._owns_live:
+                with self._ownership_lock:
+                    key = id(self._stream)
+                    if self._active_owners.get(key) is self:
+                        self._active_owners.pop(key, None)
+                self._owns_live = False
+
+    def _claim_dynamic_owner(self) -> CLIProgressRenderer:
+        if self._owner is not None:
+            return self._owner
+        with self._ownership_lock:
+            key = id(self._stream)
+            owner = self._active_owners.get(key)
+            if owner is None or owner._closed:
+                owner = self
+                self._active_owners[key] = self
+                self._owns_live = True
+            self._owner = owner
+            return owner
 
     def _update_dynamic(self, event: ProgressEvent) -> None:
         if self._live is None:
@@ -128,87 +172,146 @@ class CLIProgressRenderer:
                 refresh_per_second=8,
                 transient=True,
                 redirect_stdout=False,
-                redirect_stderr=False,
+                redirect_stderr=True,
             )
             self._live.start(refresh=True)
         else:
             self._live.refresh()
+        self._redirect_logging_handlers()
         if event.status is not ProgressStatus.RUNNING:
             self.close()
             if event.status is not ProgressStatus.COMPLETED:
                 self._console.print(self._terminal_summary(event))
 
+    def _redirect_logging_handlers(self) -> None:
+        """Route existing stderr handlers through the active Rich console."""
+
+        proxy = FileProxy(self._console, self._stream)
+        loggers = [logging.getLogger()]
+        loggers.extend(
+            logger
+            for logger in logging.Logger.manager.loggerDict.values()
+            if isinstance(logger, logging.Logger)
+        )
+        seen: set[int] = set()
+        for logger in loggers:
+            for handler in logger.handlers:
+                if (
+                    not isinstance(handler, logging.StreamHandler)
+                    or isinstance(handler, logging.FileHandler)
+                    or id(handler) in seen
+                    or handler.stream is not self._stream
+                ):
+                    continue
+                seen.add(id(handler))
+                previous = handler.setStream(proxy)
+                if previous is not None:
+                    self._redirected_handlers.append((handler, previous))
+
+    def _restore_logging_handlers(self) -> None:
+        for handler, stream in reversed(self._redirected_handlers):
+            handler.setStream(stream)
+        self._redirected_handlers.clear()
+
     def _render_dynamic(self) -> RenderableType:
         event = self._event
         if event is None:  # pragma: no cover - Live starts only after an event.
             return Text("")
-
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(width=9, no_wrap=True)
-        grid.add_column(ratio=1)
-        grid.add_column(justify="right", no_wrap=True)
-        activity = self._activity_label(event)
+        narrow = self._console.width < 58
+        header = Table.grid(expand=True, padding=(0, 1))
+        header.add_column(width=9, no_wrap=True)
+        header.add_column(ratio=1, overflow="fold")
+        if not narrow:
+            header.add_column(justify="right", no_wrap=True)
         activity_icon: RenderableType = (
             self._spinner
             if event.status is ProgressStatus.RUNNING
             else Text("done" if event.status is ProgressStatus.COMPLETED else "failed")
         )
-        grid.add_row(activity_icon, Text(activity, style="bold"), Text(""))
-        grid.add_row(
-            Text("Overall"),
-            ProgressBar(total=100, completed=event.overall_percent),
-            Text(f"{math.floor(event.overall_percent):>3}%"),
-        )
-        grid.add_row(
-            Text("Phase"),
-            ProgressBar(total=100, completed=event.phase_percent),
-            Text(self._phase_detail(event)),
-        )
-        details: list[RenderableType] = [grid]
-        item_grid = Table.grid(expand=True)
-        item_grid.add_column(width=9, no_wrap=True)
-        item_grid.add_column(ratio=1)
-        if event.planned_units:
-            counters = (
-                f"{event.processed_units}/{event.planned_units}"
-                f" · succeeded {event.succeeded_units}"
-                f" · failed {event.failed_units}"
+        activity = Text(self._activity_label(event), style="bold", overflow="fold")
+        if narrow:
+            header.add_row(activity_icon, activity)
+            header.add_row("Overall", f"{math.floor(event.overall_percent)}%")
+            header.add_row("Phase", self._phase_detail(event))
+        else:
+            header.add_row(activity_icon, activity, "")
+            header.add_row(
+                "Overall",
+                ProgressBar(total=100, completed=event.overall_percent),
+                f"{math.floor(event.overall_percent):>3}%",
             )
-            if event.fallback_units:
-                counters += f" · fallback {event.fallback_units}"
-            if event.skipped_units:
-                counters += f" · skipped {event.skipped_units}"
-            if event.reused_units:
-                counters += f" · reused {event.reused_units}"
-            item_grid.add_row("Processed:", Text(counters))
-        if event.current_item is not None:
-            item_grid.add_row("Current:", Text(event.current_item))
-        if event.last_completed_item is not None:
-            item_grid.add_row("Done:", Text(event.last_completed_item))
-        if event.last_failed_item is not None:
-            item_grid.add_row("Last fail:", Text(event.last_failed_item, style="red"))
-        if event.safe_error_message is not None:
-            item_grid.add_row("Reason:", Text(event.safe_error_message, style="red"))
-        if event.current_attempt is not None and event.max_attempts is not None:
-            item_grid.add_row(
-                "Attempt:", Text(f"{event.current_attempt}/{event.max_attempts}")
+            header.add_row(
+                "Phase",
+                ProgressBar(total=100, completed=event.phase_percent),
+                self._phase_detail(event),
             )
-        if event.active_item_count > 1:
-            item_grid.add_row("Active:", Text(str(event.active_item_count)))
-        if item_grid.row_count:
-            details.append(item_grid)
 
-        footer = self._footer(event)
-        if footer:
-            details.append(Text(footer, style="dim"))
-        panel_box = box.ASCII if not self._unicode else box.ROUNDED
+        rows = self._detail_rows(event)
+        details: list[RenderableType] = [header]
+        if rows:
+            if narrow:
+                values: list[RenderableType] = []
+                for label, value in rows:
+                    values.extend(
+                        (Text(label, style="bold"), Text(value, overflow="fold"))
+                    )
+                details.append(Group(*values))
+            else:
+                table = Table.grid(expand=True, padding=(0, 1))
+                table.add_column(width=_LABEL_WIDTH, no_wrap=True)
+                table.add_column(ratio=1, overflow="fold")
+                for label, value in rows:
+                    table.add_row(label, Text(value, overflow="fold"))
+                details.append(table)
+        details.append(Text(self._footer(event), style="dim"))
         return Panel(
             Group(*details),
             title=self._operation_label(event),
             title_align="left",
-            box=panel_box,
+            box=box.ASCII if not self._unicode else box.ROUNDED,
             padding=(0, 1),
+            width=self._console.width,
         )
+
+    def _detail_rows(self, event: ProgressEvent) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        if event.planned_units:
+            rows.extend(
+                (
+                    ("Processed:", f"{event.processed_units}/{event.planned_units}"),
+                    ("Succeeded:", str(event.succeeded_units)),
+                    ("Failed:", str(event.failed_units)),
+                    ("Fallback:", str(event.fallback_units)),
+                    ("Skipped:", str(event.skipped_units)),
+                    ("Reused:", str(event.reused_units)),
+                )
+            )
+        if event.current_item is not None:
+            rows.append(("Current:", event.current_item))
+        if event.last_completed_item is not None:
+            rows.append(("Done:", event.last_completed_item))
+        if event.last_failed_item is not None:
+            rows.append(("Last failure:", event.last_failed_item))
+        if event.safe_error_message is not None:
+            rows.append(("Reason:", event.safe_error_message))
+        if event.lifecycle_state not in {"idle", "active"}:
+            rows.append(("State:", event.lifecycle_state.replace("_", " ")))
+        if event.current_attempt is not None and event.max_attempts is not None:
+            rows.extend(
+                (
+                    ("Attempt:", f"{event.current_attempt}/{event.max_attempts}"),
+                    (
+                        "Request elapsed:",
+                        self._format_elapsed(self._request_elapsed(event)),
+                    ),
+                )
+            )
+        model = self._model_identity(event)
+        if model:
+            rows.append(("Model:", model))
+        if event.analyzer_kind is not None:
+            rows.append(("Analyzer:", event.analyzer_kind))
+        return rows
 
     def _update_discrete(self, event: ProgressEvent) -> None:
         signature = (
@@ -253,8 +356,12 @@ class CLIProgressRenderer:
         if event.failed_units:
             fields.append(f"failures={event.failed_units}")
         if event.planned_units:
-            fields.append(f"processed={event.processed_units}/{event.planned_units}")
-            fields.append(f"succeeded={event.succeeded_units}")
+            fields.extend(
+                (
+                    f"processed={event.processed_units}/{event.planned_units}",
+                    f"succeeded={event.succeeded_units}",
+                )
+            )
         if event.fallback_units:
             fields.append(f"fallback={event.fallback_units}")
         if event.current_attempt is not None and event.max_attempts is not None:
@@ -277,44 +384,37 @@ class CLIProgressRenderer:
             return (
                 f"{event.processed_units}/{event.planned_units} processed · {percent}%"
             )
-        completed = self._number(event.completed_units)
-        total = self._number(event.total_units)
-        return f"{completed}/{total} {event.unit_type} · {percent}%"
+        return (
+            f"{self._number(event.completed_units)}/"
+            f"{self._number(event.total_units)} {event.unit_type} · {percent}%"
+        )
 
     def _footer(self, event: ProgressEvent) -> str:
-        metadata = event.metadata
-        provider = metadata.get("provider_id")
-        model = metadata.get("model_id")
-        identity = ""
-        if isinstance(model, str):
-            identity = model
+        return f"Elapsed: {self._format_elapsed(self._elapsed(event))}"
+
+    @staticmethod
+    def _model_identity(event: ProgressEvent) -> str:
+        provider = event.metadata.get("provider_id")
+        model = event.metadata.get("model_id")
+        identity = model if isinstance(model, str) else ""
         if isinstance(provider, str) and provider not in {"none", "disabled"}:
             identity = f"{provider}/{identity}" if identity else provider
-        elapsed = self._elapsed(event)
-        fields = []
-        if identity:
-            fields.append(f"Model: {identity}")
-        if event.current_attempt is not None:
-            fields.append(
-                f"request {self._format_elapsed(self._request_elapsed(event))}"
-            )
-        fields.append(f"elapsed {self._format_elapsed(elapsed)}")
-        return " · ".join(fields)
+        return identity
 
     def _request_elapsed(self, event: ProgressEvent) -> float:
         if event.lifecycle_state != "waiting_for_provider":
             return event.request_elapsed_seconds
-        local_since_event = (
+        local = (
             0.0
             if self._request_started is None
             else max(0.0, self._clock() - self._request_started)
         )
-        return max(event.request_elapsed_seconds, local_since_event)
+        return max(event.request_elapsed_seconds, local)
 
     def _elapsed(self, event: ProgressEvent) -> float:
-        local = 0.0
-        if self._started is not None:
-            local = max(0.0, self._clock() - self._started)
+        local = (
+            0.0 if self._started is None else max(0.0, self._clock() - self._started)
+        )
         return max(local, event.elapsed_seconds)
 
     @staticmethod
@@ -350,9 +450,8 @@ class CLIProgressRenderer:
         return event.phase_label
 
     def _terminal_summary(self, event: ProgressEvent) -> Text:
-        label = self._operation_label(event)
         return Text(
-            f"{label}: {event.status.value} at "
+            f"{self._operation_label(event)}: {event.status.value} at "
             f"{math.floor(event.overall_percent)}% — {event.phase_label}",
             style="red" if event.status is ProgressStatus.FAILED else "yellow",
         )

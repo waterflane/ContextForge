@@ -83,6 +83,10 @@ class ProgressEvent(BaseModel):
     safe_error_message: str | None = None
     request_elapsed_seconds: float = Field(default=0, ge=0, allow_inf_nan=False)
     operation_elapsed_seconds: float = Field(default=0, ge=0, allow_inf_nan=False)
+    analyzer_kind: str | None = None
+    estimated_input_tokens: int | None = Field(default=None, ge=0, strict=True)
+    output_token_budget: int | None = Field(default=None, ge=1, strict=True)
+    input_truncated: bool = False
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -155,6 +159,13 @@ class ProgressEvent(BaseModel):
         ):
             raise ValueError("progress labels must be non-empty and bounded")
         return value
+
+    @field_validator("analyzer_kind")
+    @classmethod
+    def validate_optional_label(cls, value: str | None) -> str | None:
+        """Keep optional analyzer identities complete and presentation-neutral."""
+
+        return None if value is None else cls.validate_label(value)
 
     @field_validator(
         "current_item",
@@ -325,6 +336,10 @@ class ProgressReporter:
         self._last_safe_error_code: str | None = None
         self._last_safe_error_message: str | None = None
         self._last_request_elapsed_seconds = 0.0
+        self._last_analyzer_kind: str | None = None
+        self._last_estimated_input_tokens: int | None = None
+        self._last_output_token_budget: int | None = None
+        self._last_input_truncated = False
         self._terminal = False
         self._observer_error_count = 0
         self._last_event: ProgressEvent | None = None
@@ -402,6 +417,10 @@ class ProgressReporter:
                 safe_error_code=event.safe_error_code,
                 safe_error_message=event.safe_error_message,
                 request_elapsed_seconds=event.request_elapsed_seconds,
+                analyzer_kind=event.analyzer_kind,
+                estimated_input_tokens=event.estimated_input_tokens,
+                output_token_budget=event.output_token_budget,
+                input_truncated=event.input_truncated,
                 metadata={
                     **event.metadata,
                     "child_operation_id": event.operation_id,
@@ -446,6 +465,10 @@ class ProgressReporter:
         safe_error_code: str | None = None,
         safe_error_message: str | None = None,
         request_elapsed_seconds: float = 0,
+        analyzer_kind: str | None = None,
+        estimated_input_tokens: int | None = None,
+        output_token_budget: int | None = None,
+        input_truncated: bool = False,
         metadata: Mapping[str, JsonValue] | None = None,
     ) -> ProgressEvent:
         """Emit one running event, rejecting regressions within the operation."""
@@ -489,6 +512,10 @@ class ProgressReporter:
             safe_error_code=safe_error_code,
             safe_error_message=safe_error_message,
             request_elapsed_seconds=request_elapsed_seconds,
+            analyzer_kind=analyzer_kind,
+            estimated_input_tokens=estimated_input_tokens,
+            output_token_budget=output_token_budget,
+            input_truncated=input_truncated,
             metadata=metadata,
         )
 
@@ -541,6 +568,10 @@ class ProgressReporter:
             safe_error_code=self._last_safe_error_code,
             safe_error_message=self._last_safe_error_message,
             request_elapsed_seconds=0,
+            analyzer_kind=self._last_analyzer_kind,
+            estimated_input_tokens=self._last_estimated_input_tokens,
+            output_token_budget=self._last_output_token_budget,
+            input_truncated=self._last_input_truncated,
             metadata=metadata,
         )
 
@@ -611,6 +642,10 @@ class ProgressReporter:
             safe_error_code=self._last_safe_error_code,
             safe_error_message=self._last_safe_error_message,
             request_elapsed_seconds=self._last_request_elapsed_seconds,
+            analyzer_kind=self._last_analyzer_kind,
+            estimated_input_tokens=self._last_estimated_input_tokens,
+            output_token_budget=self._last_output_token_budget,
+            input_truncated=self._last_input_truncated,
             metadata=metadata,
         )
 
@@ -649,6 +684,10 @@ class ProgressReporter:
         safe_error_code: str | None,
         safe_error_message: str | None,
         request_elapsed_seconds: float,
+        analyzer_kind: str | None,
+        estimated_input_tokens: int | None,
+        output_token_budget: int | None,
+        input_truncated: bool,
         metadata: Mapping[str, JsonValue] | None,
     ) -> ProgressEvent:
         if self._terminal:
@@ -698,6 +737,10 @@ class ProgressReporter:
             safe_error_message=safe_error_message,
             request_elapsed_seconds=request_elapsed_seconds,
             operation_elapsed_seconds=max(0.0, self._clock() - self._started),
+            analyzer_kind=analyzer_kind,
+            estimated_input_tokens=estimated_input_tokens,
+            output_token_budget=output_token_budget,
+            input_truncated=input_truncated,
         )
         self._sequence += 1
         self._last_percentage = event.percentage
@@ -729,6 +772,10 @@ class ProgressReporter:
         self._last_safe_error_code = event.safe_error_code
         self._last_safe_error_message = event.safe_error_message
         self._last_request_elapsed_seconds = event.request_elapsed_seconds
+        self._last_analyzer_kind = event.analyzer_kind
+        self._last_estimated_input_tokens = event.estimated_input_tokens
+        self._last_output_token_budget = event.output_token_budget
+        self._last_input_truncated = event.input_truncated
         self._terminal = event.status is not ProgressStatus.RUNNING
         self._last_event = event
         try:

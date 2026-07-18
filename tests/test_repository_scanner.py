@@ -566,7 +566,7 @@ def test_summary_counters_language_distribution_and_bytes(
     assert summary.unsupported_count == 0
     assert summary.skipped_count == 5
     assert summary.total_size_bytes == 4
-    assert summary.languages == {"Python": 1}
+    assert summary.languages == {"License": 1, "Python": 1}
     assert _paths(snapshot.ignored_files) == [".git", "build"]
     assert all(item.is_directory for item in snapshot.ignored_files)
 

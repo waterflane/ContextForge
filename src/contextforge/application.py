@@ -35,6 +35,8 @@ from contextforge.handoff import (
 )
 from contextforge.intelligence import (
     FALLBACK_ANALYZER,
+    GENERIC_SEMANTIC_ANALYZER_ID,
+    GENERIC_SEMANTIC_ANALYZER_VERSION,
     GLOBAL_MAP_PROMPT_VERSION,
     INDEX_SCHEMA_VERSION,
     PYTHON_ANALYZER,
@@ -181,7 +183,7 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
-    semantic_max_output_tokens: int = 4_096,
+    semantic_max_output_tokens: int = 512,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
     progress: ProgressObserver | None = None,
@@ -455,6 +457,10 @@ async def _build_repository_index(
                         lifecycle_state="published",
                         safe_error_code=semantic_event.safe_error_code,
                         safe_error_message=semantic_event.safe_error_message,
+                        analyzer_kind=semantic_event.analyzer_kind,
+                        estimated_input_tokens=semantic_event.estimated_input_tokens,
+                        output_token_budget=semantic_event.output_token_budget,
+                        input_truncated=semantic_event.input_truncated,
                         metadata={
                             "analyzed": len(semantic.analyzed_paths),
                             "reused": len(semantic.reused_paths),
@@ -504,6 +510,9 @@ async def _build_repository_index(
                     phase_label="Model analysis",
                     phase_percent=100,
                     phase_weight=0,
+                    lifecycle_state="skipped",
+                    safe_error_code="provider_disabled",
+                    safe_error_message="model provider is disabled",
                     metadata={"skipped": True},
                 )
 
@@ -678,7 +687,6 @@ def _inspect_repository_index(
             or current[path].language != indexed[path].language
         )
     )
-    semantic_expected = _semantic_identity(provider_configuration)
     stale = set(added) | set(changed)
     for path in sorted(set(current) & set(indexed)):
         state = indexed[path]
@@ -687,6 +695,9 @@ def _inspect_repository_index(
         )
         if state.analyzer != structural_expected:
             stale.add(path)
+        semantic_expected = _semantic_identity(
+            provider_configuration, generic=current[path].language != "Python"
+        )
         if semantic_expected is not None and (
             state.semantic_status != "complete"
             or semantic_expected not in manifest.semantic_analyzers
@@ -1094,13 +1105,20 @@ def build_discovery_request(
 
 def _semantic_identity(
     configuration: ProviderConfiguration | None,
+    *,
+    generic: bool = False,
 ) -> AnalyzerIdentity | None:
     if configuration is None:
         return None
     return AnalyzerIdentity(
-        analyzer_id=SEMANTIC_ANALYZER_ID,
+        analyzer_id=(GENERIC_SEMANTIC_ANALYZER_ID if generic else SEMANTIC_ANALYZER_ID),
         analyzer_version=_model_dependent_analyzer_version(
-            SEMANTIC_ANALYZER_VERSION, configuration
+            (
+                GENERIC_SEMANTIC_ANALYZER_VERSION
+                if generic
+                else SEMANTIC_ANALYZER_VERSION
+            ),
+            configuration,
         ),
         analysis_prompt_version=SEMANTIC_PROMPT_VERSION,
         response_schema_version=1,

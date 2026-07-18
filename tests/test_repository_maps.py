@@ -251,6 +251,7 @@ def test_one_module_hierarchical_maps_persist_and_reuse_without_source_prompt(
     assert second_responder.requests == []
     assert second.manifest == first.manifest
     assert all(request.untrusted_sources == () for request in responder.requests)
+    assert all(request.max_output_tokens == 2_048 for request in responder.requests)
     assert all(
         injection not in request.messages()[0].content for request in responder.requests
     )

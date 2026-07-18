@@ -128,7 +128,10 @@ class OpenAICompatibleModelProvider:
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
         await self._ensure_model_available(credential)
-        messages = [message.model_dump(mode="json") for message in request.messages()]
+        messages = [
+            message.model_dump(mode="json")
+            for message in request.messages(include_response_schema=False)
+        ]
         payload: dict[str, Any] = {
             "messages": messages,
             "model": self.configuration.model_id,

@@ -247,7 +247,7 @@ class GlobalMapAnalysisOptions:
     max_relationships_per_file: int = 300
     max_request_bytes: int = 2_000_000
     max_response_bytes: int = 1_000_000
-    max_output_tokens: int = 8_192
+    max_output_tokens: int = 2_048
     max_model_calls: int = 256
     fail_on_error: bool = False
     recover_previous: bool = True
@@ -373,7 +373,7 @@ def build_repository_overview(
                     code=(
                         "parse-error"
                         if code_map.parse_status == "parse_error"
-                        else "unsupported-language"
+                        else "no-structural-extractor"
                     ),
                     message=(
                         f"{code_map.path} has no verified symbol graph because its "

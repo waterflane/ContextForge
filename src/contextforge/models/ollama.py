@@ -76,7 +76,10 @@ class OllamaModelProvider:
     async def _complete_once(
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
-        messages = [message.model_dump(mode="json") for message in request.messages()]
+        messages = [
+            message.model_dump(mode="json")
+            for message in request.messages(include_response_schema=False)
+        ]
         options: dict[str, Any] = {"temperature": request.temperature}
         if request.max_output_tokens is not None:
             options["num_predict"] = request.max_output_tokens

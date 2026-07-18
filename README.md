@@ -167,8 +167,8 @@ model files eight base units plus one unit per 32 KiB (source units capped at
 16). `.gitignore`, `.gitattributes`, `.editorconfig`, environment examples,
 lock files, `.gitkeep`, and empty files avoid provider calls; environment
 examples store variable names only. Meaningful non-Python text still uses
-generic model semantics even when its structural CodeMap is a fallback.
-`.contextforge` never enters the semantic plan. The sole successful 100% event
+generic model semantics through the separate `generic-text-semantic` identity.
+No `.contextforge` file enters structural or semantic routing. The sole successful 100% event
 is emitted only after generation validation and atomic active-pointer
 publication succeed.
 
@@ -195,7 +195,7 @@ timeout_seconds = 90.0
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 4096
+semantic_max_output_tokens = 512
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false

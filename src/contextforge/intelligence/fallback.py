@@ -1,4 +1,4 @@
-"""Verified file-level fallback for languages without a structural extractor."""
+"""Verified file-level structure placeholder for readable generic text."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from contextforge.intelligence.python import DEFAULT_CODEMAP_SOURCE_LIMIT
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 FALLBACK_ANALYZER = AnalyzerIdentity(
-    analyzer_id="unsupported-language-fallback",
-    analyzer_version="1",
+    analyzer_id="generic-text-structure",
+    analyzer_version="2",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -22,7 +22,7 @@ def extract_fallback_code_map(
     *,
     max_source_bytes: int = DEFAULT_CODEMAP_SOURCE_LIMIT,
 ) -> FileCodeMap:
-    """Verify one selectable text file and emit no invented declarations."""
+    """Verify readable text and emit no invented structural declarations."""
 
     selected = read_selected_text_file(
         snapshot,
@@ -44,8 +44,8 @@ def extract_fallback_code_map(
         line_count=selected.source_line_count,
         diagnostics=(
             ParserDiagnostic(
-                code="unsupported_language",
-                message=f"no structural extractor is available for {language}",
+                code="no_structural_extractor",
+                message=f"no rich structural extractor is available for {language}",
                 severity="info",
             ),
         ),
