@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Literal, cast
 
-from pydantic import Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
 from contextforge.context import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
@@ -1072,6 +1072,30 @@ async def analyze_file_semantics(
     )
     excerpt_limit = options.max_source_bytes_per_request
     max_fact_items = 100
+    source_line_bytes = tuple(
+        len(line.encode("utf-8")) for line in source.splitlines(keepends=True)
+    ) or (0,)
+
+    def validate_and_convert_response(value: BaseModel) -> None:
+        raw_value, symbol_values = _compact_response_to_raw(
+            value,
+            code_map,
+            analyzer,
+            analysis_route=analysis_route,
+        )
+        _validate_raw_file_claims(
+            raw_value, code_map, None, source_line_bytes=source_line_bytes
+        )
+        _build_file_analysis(
+            raw_value,
+            symbol_values,
+            code_map,
+            state,
+            analyzer,
+            options_digest,
+            allowed_range=None,
+        )
+
     while True:
         excerpt, excerpt_ranges, input_truncated = _bounded_source_excerpt(
             source, code_map, excerpt_limit
@@ -1097,6 +1121,7 @@ async def analyze_file_semantics(
             output_token_budget=output_budget,
             input_truncated=input_truncated or max_fact_items < 100,
         )
+        request = replace(request, response_validator=validate_and_convert_response)
         budget = estimate_request_context(request, provider.configuration)
         if budget.fits:
             request = replace(
@@ -1123,9 +1148,6 @@ async def analyze_file_semantics(
         analyzer,
         analysis_route=analysis_route,
     )
-    source_line_bytes = tuple(
-        len(line.encode("utf-8")) for line in source.splitlines(keepends=True)
-    ) or (0,)
     _validate_raw_file_claims(raw, code_map, None, source_line_bytes=source_line_bytes)
     analysis = _build_file_analysis(
         raw,
@@ -2049,12 +2071,12 @@ def _analyze_metadata_file(
 def _semantic_error_details(error: BaseException) -> tuple[str, str]:
     if isinstance(error, ModelProviderError):
         code, safe_message = provider_error_details(error)
+        if isinstance(error, StructuredResponseError):
+            return code, _bounded_error_message(error)
         diagnostic = getattr(error, "diagnostic", None)
         retries = getattr(diagnostic, "retry_count", 0)
         if retries and code not in {"cancelled", "model_not_found"}:
             return "retry_exhausted", f"{safe_message} after {retries + 1} attempts"
-        if isinstance(error, StructuredResponseError):
-            return code, _bounded_error_message(error)
         return code, safe_message
     if isinstance(error, IndexStorageError):
         return "persistence_failure", "semantic record could not be staged safely"

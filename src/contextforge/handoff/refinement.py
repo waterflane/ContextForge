@@ -42,6 +42,17 @@ async def refine_task(
     if not isinstance(context_package, ContextPackage):
         raise TypeError("task refinement requires a ContextPackage")
     identity = calculate_context_package_identity(context_package)
+
+    def validate_conversion(value: object) -> None:
+        if not isinstance(value, TaskRefinementResponse):
+            raise TypeError("expected TaskRefinementResponse")
+        TaskRefinement.from_response(
+            value,
+            provider=provider.provider_id,
+            model=provider.configuration.model_id,
+            source_package_identity=identity,
+        )
+
     request = ModelRequest(
         operation_id=f"task-refinement-{identity[:32]}",
         purpose="task-refinement",
@@ -66,6 +77,7 @@ async def refine_task(
         max_response_bytes=256 * 1024,
         temperature=0.0,
         metadata={"prompt_version": TASK_REFINEMENT_PROMPT_VERSION},
+        response_validator=validate_conversion,
     )
     try:
         response = await provider.complete_structured(

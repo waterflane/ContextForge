@@ -458,19 +458,26 @@ def test_every_path_tool_rejects_absolute_traversal_unc_and_drive_paths(
 
 def test_unknown_tool_and_malformed_action_are_typed(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"safe.py": "SAFE = 1\n"})
-    with pytest.raises(DiscoveryLimitError) as unknown:
+    unknown_response = _batch(
+        _call("unknown", "run_shell", {"command": "dir"})
+    )
+    with pytest.raises(DiscoveryProtocolError) as unknown:
         _run(
             snapshot,
-            _batch(_call("unknown", "run_shell", {"command": "dir"})),
+            *([unknown_response] * 6),
             request=DiscoveryRequest(
                 task="x",
                 mode="fresh",
                 budget=DiscoveryBudget(max_steps=1),
             ),
         )
-    assert unknown.value.run_record.observations[0].code == "unknown_tool"
+    assert unknown.value.run_record.failure_code == "invalid_field_value"
+    assert unknown.value.run_record.observations == ()
     with pytest.raises(DiscoveryProtocolError):
-        _run(snapshot, '{"schema_version":1,"actions":[{"bad":true}]}')
+        _run(
+            snapshot,
+            *(['{"schema_version":1,"actions":[{"bad":true}]}'] * 6),
+        )
 
 
 def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
@@ -573,7 +580,8 @@ def test_prompt_injection_is_untrusted_and_cannot_expand_path_authority(
     )
     assert result.status == "complete"
     assert requests[0].system_instructions == DISCOVERY_SYSTEM_INSTRUCTIONS
-    assert any(item.code == "invalid_input" for item in result.observations)
+    assert not any(item.code == "invalid_input" for item in result.observations)
+    assert "STRUCTURED_RESPONSE_REPAIR" in requests[2].analysis_task
 
 
 def test_discovery_never_invokes_shell_or_process_execution(

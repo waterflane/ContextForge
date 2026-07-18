@@ -97,6 +97,8 @@ def diagnostics_config(
     except (OSError, ProjectConfigError) as exc:
         _exit(str(exc))
     context = resolution["candidates"]["models.context_window"]
+    repair_key = "models.structured_response.max_repair_attempts"
+    repairs = resolution["candidates"][repair_key]
     value = {
         "schema_version": 1,
         "precedence": resolution["precedence"],
@@ -114,6 +116,17 @@ def diagnostics_config(
             ],
             "explicit": resolution["sources"]["models.context_window"]
             != "built-in default",
+        },
+        "structured_response": {
+            "cli_json_repair_attempts": repairs.get("CLI"),
+            "environment_json_repair_attempts": repairs.get("environment"),
+            "local_config_json_repair_attempts": repairs.get("config.local.toml"),
+            "shared_config_json_repair_attempts": repairs.get("config.toml"),
+            "default_json_repair_attempts": repairs.get("built-in default"),
+            "effective_json_repair_attempts": (
+                project.models.structured_response.max_repair_attempts
+            ),
+            "effective_json_repair_attempts_source": resolution["sources"][repair_key],
         },
         "logging": {
             "level": project.logging.level,
@@ -175,6 +188,7 @@ def diagnostics_provider(
             "read_timeout_seconds": provider.read_timeout_seconds,
             "operation_timeout_seconds": provider.operation_timeout_seconds,
             "retry_limit": provider.retry_limit,
+            "max_json_repair_attempts": provider.max_json_repair_attempts,
             "structured_output_expected": True,
             "probe_performed": False,
             "credential_reference_configured": provider.credential_env is not None,

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, cast
@@ -72,6 +72,7 @@ from contextforge.models import (
     ProviderCancelledError,
     StructuredResponseError,
     UntrustedModelContext,
+    ValidationIssue,
     ensure_request_fits_context,
     estimate_request_context,
 )
@@ -772,6 +773,7 @@ async def _request_summary(
     request = _model_request(
         purpose=purpose,
         scope_key=scope_id,
+        expected_scope_id=scope_id,
         analysis_task=(
             f"Summarize exactly {title}. Identify supported behavior, architectural "
             "signals, feature signals, and unresolved questions. Return scope_id "
@@ -787,8 +789,6 @@ async def _request_summary(
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
     value = cast(_SummaryResponse, response.value)
-    if value.scope_id != scope_id:
-        raise StructuredResponseError("model returned a mismatched summary scope")
     _convert_evidence(value.evidence, evidence_maps)
     return value
 
@@ -805,6 +805,7 @@ async def _request_architecture(
     request = _model_request(
         purpose="repository-architecture",
         scope_key=overview.facts_digest[:24],
+        expected_scope_id=scope_id,
         analysis_task=(
             "Return a compact repository architecture overview with at most eight "
             "architecture signals and six unresolved questions. Return scope_id "
@@ -820,8 +821,6 @@ async def _request_architecture(
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
     value = cast(_SummaryResponse, response.value)
-    if value.scope_id != scope_id:
-        raise StructuredResponseError("model returned a mismatched architecture scope")
     return value
 
 
@@ -836,6 +835,7 @@ async def _request_features(
     request = _model_request(
         purpose="repository-features",
         scope_key=overview.facts_digest[:24],
+        expected_scope_id=scope_id,
         analysis_task=(
             "Return a compact behavior overview with at most eight feature signals "
             "and six unresolved questions. Return scope_id "
@@ -851,8 +851,6 @@ async def _request_features(
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
     value = cast(_SummaryResponse, response.value)
-    if value.scope_id != scope_id:
-        raise StructuredResponseError("model returned a mismatched feature scope")
     return value
 
 
@@ -860,6 +858,7 @@ def _model_request(
     *,
     purpose: str,
     scope_key: str,
+    expected_scope_id: str,
     analysis_task: str,
     trusted_facts: dict[str, object],
     prior_context: str | None,
@@ -905,6 +904,7 @@ def _model_request(
                 "input_truncated": str(input_truncated).lower(),
             },
             progress=options.progress,
+            response_validator=_scope_validator(expected_scope_id),
         )
         budget = estimate_request_context(request, provider.configuration)
         if budget.fits or active_context is None:
@@ -945,6 +945,7 @@ def _model_request(
         max_response_bytes=request.max_response_bytes,
         allowed_response_paths=request.allowed_response_paths,
         response_path_pointers=request.response_path_pointers,
+        response_validator=request.response_validator,
         metadata={
             **request.metadata,
             "configured_context_window": str(budget.configured_context_window),
@@ -955,6 +956,28 @@ def _model_request(
             "estimated_total_tokens": str(budget.estimated_total_tokens),
         },
     )
+
+
+def _scope_validator(expected_scope_id: str) -> Callable[[object], None]:
+    """Bind task scope validation to the universal response gateway."""
+
+    def validate(value: object) -> None:
+        actual = getattr(value, "scope_id", None)
+        if actual != expected_scope_id:
+            raise StructuredResponseError(
+                "model returned a mismatched scope",
+                issues=(
+                    ValidationIssue(
+                        code="stale_record_reference",
+                        path="/scope_id",
+                        expected=expected_scope_id,
+                        actual=str(actual)[:200],
+                        message="response scope does not match the requested scope",
+                    ),
+                ),
+            )
+
+    return validate
 
 
 def _build_compact_architecture_map(

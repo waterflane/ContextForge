@@ -10,6 +10,7 @@ import uuid
 from contextforge.context import ContextFile, render_project_tree
 from contextforge.intelligence import serialize_code_map
 from contextforge.logging import LogLevel, emit
+from contextforge.models import validate_structured_text_content
 from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.prompts import PromptPackage
 
@@ -170,6 +171,11 @@ def _compile_prompt(handoff: TaskHandoff, reporter: ProgressReporter) -> Compile
     )
 
     body = "\n\n".join(sections).rstrip("\n") + "\n"
+    body = validate_structured_text_content(
+        body,
+        operation_id="prompt-compilation",
+        purpose="prompt-compilation",
+    )
     encoded = body.encode("utf-8")
     reporter.report("serialize", "Serialized the compiled prompt.", percentage=88)
     source_bytes = sum(

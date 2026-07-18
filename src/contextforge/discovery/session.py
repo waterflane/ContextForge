@@ -12,6 +12,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
 from contextforge.context import LineRange, ReaderLimits, read_selected_text_file
 from contextforge.intelligence import (
     FileCodeMap,
@@ -34,7 +36,9 @@ from contextforge.models import (
     ModelProviderError,
     ModelRequest,
     ProviderCancelledError,
+    StructuredResponseError,
     UntrustedModelContext,
+    ValidationIssue,
     provider_error_details,
 )
 from contextforge.progress import ProgressObserver, ProgressReporter
@@ -56,6 +60,7 @@ from .models import (
 )
 from .tools import (
     DISCOVERY_TOOL_SCHEMAS,
+    TOOL_INPUT_MODELS,
     DiscoveryKnowledge,
     DiscoveryToolExecutor,
     FinalizeContextInput,
@@ -657,6 +662,7 @@ class DiscoverySession:
             temperature=0.0,
             max_response_bytes=512 * 1024,
             metadata={"mode": self.request.mode.value, "run_id": self.run_id[:32]},
+            response_validator=self._validate_model_action_batch,
         )
         remaining = self._remaining_seconds()
         emit(
@@ -720,6 +726,88 @@ class DiscoverySession:
                 "provider returned the wrong validated action model",
             )
         return response.value.actions
+
+    def _validate_model_action_batch(self, value: object) -> None:
+        """Validate action/tool contracts before the gateway accepts a response."""
+
+        if not isinstance(value, DiscoveryActionBatch):
+            raise TypeError("expected DiscoveryActionBatch")
+        exact_path_tools = {
+            "get_file_summary",
+            "find_imports",
+            "find_importers",
+            "read_file",
+            "read_lines",
+            "add_to_context",
+            "remove_from_context",
+        }
+        allowed_paths = {item.path for item in self.snapshot.files}
+        for index, action in enumerate(value.actions):
+            tool_name = (
+                "finalize_context" if action.kind == "finalize" else action.tool_name
+            )
+            model = TOOL_INPUT_MODELS.get(tool_name or "")
+            if model is None:
+                raise StructuredResponseError(
+                    "model returned an unsupported discovery tool",
+                    issues=(
+                        ValidationIssue(
+                            code="invalid_field_value",
+                            path=f"/actions/{index}/tool_name",
+                            expected="supported discovery tool",
+                            actual=str(tool_name)[:200],
+                            message="unknown discovery tool",
+                        ),
+                    ),
+                )
+            try:
+                model.model_validate(action.arguments)
+            except ValidationError as exc:
+                item = exc.errors(include_url=False, include_context=False)[0]
+                suffix = "/".join(str(part) for part in item.get("loc", ()))
+                path = f"/actions/{index}/arguments"
+                if suffix:
+                    path += "/" + suffix
+                raise StructuredResponseError(
+                    "model returned invalid discovery tool arguments",
+                    issues=(
+                        ValidationIssue(
+                            code=(
+                                "missing_required_field"
+                                if item.get("type") == "missing"
+                                else "wrong_field_type"
+                            ),
+                            path=path,
+                            expected="tool schema value",
+                            actual=(
+                                "missing"
+                                if item.get("type") == "missing"
+                                else "invalid"
+                            ),
+                            message=str(
+                                item.get("msg", "invalid tool arguments")
+                            )[:500],
+                        ),
+                    ),
+                ) from exc
+            path_value = action.arguments.get("path")
+            if (
+                tool_name in exact_path_tools
+                and isinstance(path_value, str)
+                and path_value not in allowed_paths
+            ):
+                raise StructuredResponseError(
+                    "model returned an unknown repository path",
+                    issues=(
+                        ValidationIssue(
+                            code="invalid_repository_path",
+                            path=f"/actions/{index}/arguments/path",
+                            expected="path in the pinned repository snapshot",
+                            actual="unknown path",
+                            message="repository path is outside the pinned snapshot",
+                        ),
+                    ),
+                )
 
     def _log_failure(self, error: BaseException | None, code: str) -> None:
         emit(

@@ -62,6 +62,9 @@ local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
+
+[models.structured_response]
+max_repair_attempts = 5
 ```
 
 Generic OpenAI-compatible APIs do not standardize context-window discovery.
@@ -105,19 +108,28 @@ Every `ModelRequest` names a closed Pydantic response model with integer
 support native structured output. ContextForge then independently:
 
 1. applies the raw UTF-8 byte cap;
-2. optionally extracts one exact whole-response JSON fence;
-3. parses JSON while rejecting duplicate keys and non-finite numbers;
-4. validates object shape, required fields, and field types;
-5. inserts a missing constant version only if all other fields validate;
-6. validates the supported integer schema version;
-7. checks declared response path pointers against the request allowlist;
-8. performs strict closed-model validation; and
+2. checks the provider finish state and rejects truncation;
+3. deterministically trims whitespace and, when enabled by the request,
+   extracts one exact whole-response JSON fence;
+4. parses exactly one JSON value while rejecting duplicate keys, non-finite
+   numbers, trailing prose, and competing objects;
+5. validates top-level type, required fields, field types, limits, additional
+   properties, and the supported schema version;
+6. inserts a missing constant version only when it is the sole safe omission;
+7. checks declared paths and task-specific identifiers against the pinned
+   request allowlists;
+8. performs strict closed-model validation and internal-result conversion; and
 9. emits sorted-key, compact UTF-8 JSON with one final LF.
 
 Every model-facing schema requires `schema_version`; a default and `const`
 alone are not considered sufficient provider instructions.
 
-Fenced extraction is off by default. When explicitly enabled, the complete
+Text-producing operations use the closed
+`{"schema_version":1,"content":"..."}` envelope. The deterministic prompt
+compiler also validates its completed text through this envelope locally; the
+prompt body is neither sent for repair nor written to diagnostics.
+
+Fenced extraction is enabled for normal model tasks. When enabled, the complete
 response may contain exactly one ` ``` ` or lowercase ` ```json ` fence, with
 only whitespace outside it and a newline between the fence and JSON. Prose,
 multiple fences, other language labels, trailing content, and arbitrary
@@ -135,10 +147,12 @@ Retry classification is explicit on typed failures:
 - context overflow, model-not-found, invalid request schemas, rejected grammar,
   wrong response shapes, and unsupported versions are deterministic until the
   request changes;
-- malformed or schema-invalid output receives at most one compact repair retry,
-  whose correction instruction changes the payload.
+- malformed or schema-invalid output receives up to the independently configured
+  five compact repair generations by default (safe range 0–10); every response
+  is revalidated through the same gateway and the instruction progresses.
 
-The configured retry limit includes zero to two retries after the first call.
+The configured transport retry limit includes zero to two retries after the
+first transport call and never consumes JSON repair attempts.
 Default deterministic backoff is 250 ms, then 1 second. Every provider attempt,
 concurrency wait, and retry delay is deadline- and cancellation-aware. An
 explicit cancellation event or cancellation of the caller task cancels the

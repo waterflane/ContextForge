@@ -113,6 +113,10 @@ def suggest_context(
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option("--json-repair-attempts", min=0, max=10),
+    ] = None,
     includes: Annotated[
         list[str] | None,
         typer.Option("--include", help="Pin one exact snapshot path; repeatable."),
@@ -163,7 +167,10 @@ def suggest_context(
             raise ValueError("--task must be non-empty")
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
-            project, provider=provider_name, model=model
+            project,
+            provider=provider_name,
+            model=model,
+            json_repair_attempts=json_repair_attempts,
         )
         if provider_configuration is None:
             raise ValueError("context suggestion requires a model provider")
@@ -327,6 +334,10 @@ def create_context(
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option("--json-repair-attempts", min=0, max=10),
+    ] = None,
     refine_task_option: Annotated[
         bool,
         typer.Option("--refine-task", help="Add a labelled optional task refinement."),
@@ -369,6 +380,7 @@ def create_context(
             provider_name=provider_name,
             model=model,
             config=config,
+            json_repair_attempts=json_repair_attempts,
             refine_task_option=refine_task_option,
             git_diff=git_diff,
             base=base,
@@ -388,6 +400,7 @@ def create_context(
             provider_name,
             model,
             config,
+            json_repair_attempts,
             refine_task_option,
             git_diff is not GitDiffChoice.none,
             base,
@@ -517,6 +530,7 @@ def _create_automatic_context(
     provider_name: str | None,
     model: str | None,
     config: Path | None,
+    json_repair_attempts: int | None,
     refine_task_option: bool,
     git_diff: GitDiffChoice,
     base: str | None,
@@ -544,7 +558,10 @@ def _create_automatic_context(
             raise ValueError("--base is accepted only with --git-diff base")
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
-            project, provider=provider_name, model=model
+            project,
+            provider=provider_name,
+            model=model,
+            json_repair_attempts=json_repair_attempts,
         )
         if provider_configuration is None:
             raise ValueError("automatic context creation requires a model provider")

@@ -468,7 +468,7 @@ def test_failed_item_progress_uses_processed_denominator_and_safe_reason(
 
     result = _build_semantics(
         snapshot,
-        _provider(scripts=["not-json"]),
+        _provider(scripts=["not-json"] * 6),
         options=SemanticAnalysisOptions(progress=events.append),
     )
 

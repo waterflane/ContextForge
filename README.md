@@ -267,6 +267,9 @@ external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
 
+[models.structured_response]
+max_repair_attempts = 5
+
 [logging]
 level = "warning"
 format = "auto"
@@ -313,7 +316,9 @@ context_window = 4096
 The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
 Schema output and checks the exact configured ID through `GET /v1/models`.
 CLI `--model`, `--base-url`, `--concurrency`, `--request-timeout`,
-`--context-window`, and `--max-output-tokens` values override this section.
+`--context-window`, `--max-output-tokens`, and `--json-repair-attempts` values
+override this section. `CONTEXTFORGE_JSON_REPAIR_ATTEMPTS` is the corresponding
+environment override; the safe range is 0–10 and the default is five repairs.
 Defaults are 10 seconds for connection, 300 seconds for response read, and 360
 seconds for the complete operation. Transient failures retain bounded retries;
 context overflow and rejected schemas are never resent unchanged.

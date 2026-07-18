@@ -50,6 +50,9 @@ class OperationDiagnosticSummary:
     final_error_code: str | None
     error_chain: dict[str, Any] | None
     remediation_hints: tuple[str, ...]
+    transport_retry_count: int = 0
+    json_repair_count: int = 0
+    total_provider_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value = {
@@ -70,6 +73,9 @@ class OperationDiagnosticSummary:
             "actual_input_tokens": self.actual_input_tokens,
             "actual_output_tokens": self.actual_output_tokens,
             "retry_count": self.retry_count,
+            "transport_retry_count": self.transport_retry_count,
+            "json_repair_count": self.json_repair_count,
+            "total_provider_calls": self.total_provider_calls,
             "failed_phases": list(self.failed_phases),
             "fallback_phases": list(self.fallback_phases),
             "final_error_code": self.final_error_code,
@@ -181,6 +187,17 @@ def summarize_operation(
             else terminal_error.to_dict(include_stack=False)
         ),
         remediation_hints=remediation_hints,
+        transport_retry_count=sum(
+            item.event == "provider.retry.scheduled"
+            and item.data.get("structured_repair") is False
+            for item in ordered
+        ),
+        json_repair_count=sum(
+            item.event == "response.repair.scheduled" for item in ordered
+        ),
+        total_provider_calls=sum(
+            item.event == "provider.request.started" for item in ordered
+        ),
     )
 
 

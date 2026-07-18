@@ -10,13 +10,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+)
 
 from contextforge.logging import LogFormat, LoggingConfiguration, LogLevel
 from contextforge.models import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_MAX_JSON_REPAIR_ATTEMPTS,
     DEFAULT_OLLAMA_ENDPOINT,
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
     DEFAULT_OPERATION_TIMEOUT_SECONDS,
@@ -41,6 +49,21 @@ class ProjectConfigError(ValueError):
 
 class _ConfigModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+
+class StructuredResponseSettings(_ConfigModel):
+    """Universal model-response validation and repair policy."""
+
+    max_repair_attempts: int = Field(
+        default=DEFAULT_MAX_JSON_REPAIR_ATTEMPTS, ge=0, le=10, strict=True
+    )
+
+    @field_validator("max_repair_attempts", mode="before")
+    @classmethod
+    def clamp_repair_attempts(cls, value: object) -> object:
+        if type(value) is int:
+            return max(0, min(10, value))
+        return value
 
 
 class ProjectModelSettings(_ConfigModel):
@@ -75,6 +98,9 @@ class ProjectModelSettings(_ConfigModel):
     store_raw_prompts: bool = False
     store_raw_responses: bool = False
     credential_env: str | None = None
+    structured_response: StructuredResponseSettings = Field(
+        default_factory=StructuredResponseSettings
+    )
 
 
 class RetentionSettings(_ConfigModel):
@@ -164,6 +190,7 @@ def resolve_provider_configuration(
     concurrency: int | None = None,
     timeout_seconds: float | None = None,
     context_window: int | None = None,
+    json_repair_attempts: int | None = None,
     connect_timeout_seconds: float | None = None,
     read_timeout_seconds: float | None = None,
     operation_timeout_seconds: float | None = None,
@@ -228,6 +255,11 @@ def resolve_provider_configuration(
             settings.concurrency_limit if concurrency is None else concurrency
         ),
         "retry_limit": settings.retry_limit,
+        "max_json_repair_attempts": (
+            settings.structured_response.max_repair_attempts
+            if json_repair_attempts is None
+            else max(0, min(10, json_repair_attempts))
+        ),
         "local_only": settings.local_only if local_only is None else local_only,
         "external_data_policy": settings.external_data_policy,
         "credential_env": settings.credential_env,
@@ -377,6 +409,19 @@ def _apply_model_environment(
             raise ProjectConfigError(
                 f"environment variable {environment_name} is invalid"
             ) from exc
+    raw_repairs = environment.get("CONTEXTFORGE_JSON_REPAIR_ATTEMPTS")
+    if raw_repairs is not None:
+        structured = models.get("structured_response")
+        structured_values = dict(structured) if isinstance(structured, dict) else {}
+        try:
+            structured_values["max_repair_attempts"] = max(
+                0, min(10, int(raw_repairs))
+            )
+        except ValueError as exc:
+            raise ProjectConfigError(
+                "environment variable CONTEXTFORGE_JSON_REPAIR_ATTEMPTS is invalid"
+            ) from exc
+        models["structured_response"] = structured_values
     result["models"] = models
     return result
 
@@ -445,6 +490,46 @@ def _record_configuration_sources(
         source = "built-in default"
     project._value_sources["models.context_window"] = source
     project._value_candidates["models.context_window"] = candidates
+
+    shared_repairs = _nested_value(
+        shared_payload, "models", "structured_response"
+    )
+    local_repairs = _nested_value(local_payload, "models", "structured_response")
+    shared_repair_value = (
+        shared_repairs.get("max_repair_attempts")
+        if isinstance(shared_repairs, dict)
+        else None
+    )
+    local_repair_value = (
+        local_repairs.get("max_repair_attempts")
+        if isinstance(local_repairs, dict)
+        else None
+    )
+    environment_repair_value: int | None = None
+    raw_repair_environment = environment.get("CONTEXTFORGE_JSON_REPAIR_ATTEMPTS")
+    if raw_repair_environment is not None:
+        try:
+            environment_repair_value = max(0, min(10, int(raw_repair_environment)))
+        except ValueError:
+            environment_repair_value = None
+    repair_key = "models.structured_response.max_repair_attempts"
+    repair_source = (
+        "environment"
+        if environment_repair_value is not None
+        else "config.local.toml"
+        if local_repair_value is not None
+        else "config.toml"
+        if shared_repair_value is not None
+        else "built-in default"
+    )
+    project._value_sources[repair_key] = repair_source
+    project._value_candidates[repair_key] = {
+        "CLI": None,
+        "environment": environment_repair_value,
+        "config.local.toml": local_repair_value,
+        "config.toml": shared_repair_value,
+        "built-in default": DEFAULT_MAX_JSON_REPAIR_ATTEMPTS,
+    }
 
     logging_fields = ("level", "format", "file")
     for field_name in logging_fields:
@@ -624,6 +709,7 @@ __all__ = [
     "ProjectConfigError",
     "ProjectConfiguration",
     "ProjectModelSettings",
+    "StructuredResponseSettings",
     "LoggingSettings",
     "RetentionSettings",
     "configuration_resolution",

@@ -57,6 +57,7 @@ def _index_operation(
     concurrency: int | None,
     request_timeout: float | None,
     context_window: int | None,
+    json_repair_attempts: int | None,
     max_output_tokens: int | None,
     fail_on_error: bool,
     force_reanalyze: bool,
@@ -79,6 +80,7 @@ def _index_operation(
             timeout_seconds=request_timeout,
             operation_timeout_seconds=request_timeout,
             context_window=context_window,
+            json_repair_attempts=json_repair_attempts,
             local_only=True if local_only else None,
         )
         if provider_configuration is not None:
@@ -178,6 +180,15 @@ def build_index(
             help="Configured model context window in tokens.",
         ),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option(
+            "--json-repair-attempts",
+            min=0,
+            max=10,
+            help="Maximum model-assisted structured-response repairs.",
+        ),
+    ] = None,
     max_output_tokens: Annotated[
         int | None,
         typer.Option(
@@ -248,6 +259,7 @@ def build_index(
         concurrency=concurrency,
         request_timeout=request_timeout,
         context_window=context_window,
+        json_repair_attempts=json_repair_attempts,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,
@@ -289,6 +301,10 @@ def update_index(
         int | None,
         typer.Option("--context-window", min=1_024, max=2_000_000),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option("--json-repair-attempts", min=0, max=10),
+    ] = None,
     max_output_tokens: Annotated[
         int | None,
         typer.Option("--max-output-tokens", min=96, max=32_768),
@@ -322,6 +338,7 @@ def update_index(
         concurrency=concurrency,
         request_timeout=request_timeout,
         context_window=context_window,
+        json_repair_attempts=json_repair_attempts,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,
