@@ -14,6 +14,25 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+The contributor virtual environment above provides the CLI while it is
+activated. To keep an editable development command available independently of
+that environment and the current working directory, use an absolute path with
+`pipx`:
+
+```bash
+pipx install --editable /absolute/path/to/ContextForge
+```
+
+Entry-point launchers are generated from `[project.scripts]` at installation
+time. Merely editing `pyproject.toml` does not create, rename, or remove an
+installed command. Reinstall after every entry-point change:
+
+```bash
+python -m pip install -e ".[dev]"
+# For the standalone pipx installation:
+pipx install --force --editable /absolute/path/to/ContextForge
+```
+
 On Windows PowerShell:
 
 ```powershell
@@ -27,6 +46,9 @@ python -m pip install -e ".[dev]"
 
 ```bash
 contextforge version
+contextforge --version
+python -m contextforge --version
+ctxf --version
 contextforge doctor
 contextforge index build . --provider fake
 contextforge index status . --format json
@@ -37,6 +59,10 @@ mypy
 pytest
 git diff --check
 ```
+
+Both editable and regular package installations create `contextforge` and its
+short alias, `ctxf`. They invoke the same CLI application; `ctxf` does not have
+a separate command tree or behavior.
 
 The deterministic `fake` provider is intended for normal tests and offline
 smoke checks. It returns schema-valid fixture interpretations and a stable

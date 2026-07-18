@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
+from importlib.metadata import distribution
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +13,7 @@ import pytest
 
 import contextforge.__main__ as module_entry
 import contextforge.cli.main as cli_module
+from contextforge._metadata import APP_NAME, __version__
 
 
 def _write_entrypoint_repository(root: Path) -> None:
@@ -29,11 +31,18 @@ def _write_entrypoint_repository(root: Path) -> None:
         path.write_text(content, encoding="utf-8", newline="")
 
 
-def _console_command() -> list[str]:
-    executable_name = "contextforge.exe" if os.name == "nt" else "contextforge"
+def _console_command(name: str = "contextforge") -> list[str]:
+    executable_name = f"{name}.exe" if os.name == "nt" else name
     executable = Path(sys.executable).with_name(executable_name)
     assert executable.is_file(), f"installed console script is missing: {executable}"
     return [str(executable)]
+
+
+def _normalized_help(output: str, executable_name: str) -> str:
+    decoration = str.maketrans({character: " " for character in "─│┌┐└┘"})
+    return " ".join(
+        output.translate(decoration).replace(executable_name, "contextforge").split()
+    )
 
 
 def _run_entrypoint(
@@ -94,10 +103,94 @@ def test_console_script_and_module_share_the_run_wrapper() -> None:
         (project_root / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    assert configuration["project"]["scripts"]["contextforge"] == (
-        "contextforge.cli.main:run"
+    scripts = configuration["project"]["scripts"]
+    assert scripts["contextforge"] == scripts["ctxf"] == "contextforge.cli.main:run"
+    assert "cf" not in scripts
+    assert "version" not in configuration["project"]
+    assert configuration["project"]["dynamic"] == ["version"]
+    assert configuration["tool"]["hatch"]["version"]["path"] == (
+        "src/contextforge/_metadata.py"
     )
     assert module_entry.run is cli_module.run
+
+
+def test_installed_distribution_exposes_both_console_scripts() -> None:
+    console_scripts = {
+        entry_point.name: entry_point.value
+        for entry_point in distribution("contextforge").entry_points
+        if entry_point.group == "console_scripts"
+    }
+
+    assert console_scripts["contextforge"] == "contextforge.cli.main:run"
+    assert console_scripts["ctxf"] == console_scripts["contextforge"]
+    assert "cf" not in console_scripts
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "arguments"),
+    [
+        ("contextforge", ["version"]),
+        ("contextforge", ["--version"]),
+        ("module", ["--version"]),
+        ("ctxf", ["version"]),
+        ("ctxf", ["--version"]),
+    ],
+)
+def test_version_entrypoints_are_clean_outside_a_repository(
+    tmp_path: Path, entrypoint: str, arguments: list[str]
+) -> None:
+    command = (
+        [sys.executable, "-m", "contextforge"]
+        if entrypoint == "module"
+        else _console_command(entrypoint)
+    )
+
+    result = subprocess.run(
+        [*command, *arguments],
+        cwd=tmp_path,
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == f"{APP_NAME} {__version__}\n"
+    assert result.stderr == ""
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--help"],
+        ["doctor"],
+        ["index", "status", "--help"],
+        ["context", "suggest", "--help"],
+        ["mcp", "serve", "--help"],
+    ],
+)
+def test_console_alias_has_identical_help_and_command_behavior(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    results = [
+        subprocess.run(
+            [*_console_command(name), *arguments],
+            cwd=tmp_path,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        for name in ("contextforge", "ctxf")
+    ]
+
+    assert results[0].returncode == results[1].returncode
+    if "--help" in arguments:
+        assert _normalized_help(results[0].stdout, "contextforge") == _normalized_help(
+            results[1].stdout, "ctxf"
+        )
+    else:
+        assert results[0].stdout == results[1].stdout
+    assert results[0].stderr == results[1].stderr
 
 
 @pytest.mark.parametrize("entrypoint", ["console", "module"])

@@ -282,6 +282,7 @@ def test_schema_version_is_required_and_safe_constant_omission_is_normalized() -
         '{"summary":"compact"}', request=request, max_response_bytes=500
     )
 
+    assert isinstance(value, _DefaultedAnalysis)
     assert value.schema_version == 1
     assert '"schema_version":1' in normalized
 

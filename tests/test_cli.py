@@ -1,15 +1,19 @@
+import pytest
 from typer.testing import CliRunner
 
+from contextforge._metadata import APP_NAME, __version__
 from contextforge.cli.main import app
 
 
-def test_version_command() -> None:
+@pytest.mark.parametrize("arguments", [["version"], ["--version"]])
+def test_version_command(arguments: list[str]) -> None:
     runner = CliRunner()
 
-    result = runner.invoke(app, ["version"])
+    result = runner.invoke(app, arguments)
 
     assert result.exit_code == 0
-    assert "ContextForge 0.4.0" in result.stdout
+    assert result.stdout == f"{APP_NAME} {__version__}\n"
+    assert result.stderr == ""
 
 
 def test_doctor_command() -> None:

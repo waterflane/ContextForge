@@ -58,6 +58,29 @@ app.add_typer(index_app, name="index")
 app.add_typer(mcp_app, name="mcp")
 
 
+def _show_version(value: bool) -> None:
+    """Print application metadata and stop eager option processing."""
+
+    if value:
+        typer.echo(f"{APP_NAME} {__version__}")
+        raise typer.Exit
+
+
+@app.callback()
+def cli(
+    version_requested: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_show_version,
+            is_eager=True,
+            help="Show the installed ContextForge version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Build deterministic context packages from local repositories."""
+
+
 def run() -> None:
     """Run the CLI without Click rewriting native Windows arguments."""
 

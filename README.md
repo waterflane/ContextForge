@@ -57,6 +57,24 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+For an editable development command that remains available without activating
+the repository virtual environment, install it with `pipx` using an absolute
+repository path:
+
+```bash
+pipx install --editable /absolute/path/to/ContextForge
+```
+
+Console commands are generated during installation. After changing
+`[project.scripts]` in `pyproject.toml`, reinstall the package so additions or
+renames are reflected in the available commands:
+
+```bash
+python -m pip install -e ".[dev]"
+# Or refresh the standalone editable installation:
+pipx install --force --editable /absolute/path/to/ContextForge
+```
+
 On Windows PowerShell:
 
 ```powershell
@@ -70,7 +88,19 @@ python -m pip install -e ".[dev]"
 
 ```bash
 contextforge version
+contextforge --version
+python -m contextforge --version
 contextforge doctor
+```
+
+An installation also provides the short `ctxf` command. It invokes the same
+CLI application, so every command and option is interchangeable:
+
+```bash
+ctxf --version
+ctxf index status
+ctxf context suggest --help
+ctxf mcp serve --help
 ```
 
 ### Context packages

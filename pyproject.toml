@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "contextforge"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Build deterministic context packages from local repositories."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,6 +47,10 @@ Issues = "https://github.com/waterflane/contextforge/issues"
 
 [project.scripts]
 contextforge = "contextforge.cli.main:run"
+ctxf = "contextforge.cli.main:run"
+
+[tool.hatch.version]
+path = "src/contextforge/_metadata.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/contextforge"]

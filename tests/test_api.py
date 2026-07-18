@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from contextforge import __version__
 from contextforge.api.app import create_app
 
 
@@ -18,4 +19,4 @@ def test_version_endpoint() -> None:
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {"name": "ContextForge", "version": "0.4.0"}
+    assert response.json() == {"name": "ContextForge", "version": __version__}
