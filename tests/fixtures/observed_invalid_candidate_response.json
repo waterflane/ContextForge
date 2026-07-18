@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "candidate_ids": [
+    "src/contextforge/models/providers.py"
+  ],
+  "summary": "Observed path was returned instead of a serialized candidate ID."
+}

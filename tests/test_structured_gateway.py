@@ -19,7 +19,7 @@ from contextforge.models import (
     StructuredResponseError,
     validate_structured_response,
 )
-from contextforge.progress import ProgressEvent, ProgressStatus
+from contextforge.progress import ProgressEvent, ProgressObserver, ProgressStatus
 from contextforge.project_config import (
     load_project_configuration,
     resolve_provider_configuration,
@@ -41,7 +41,7 @@ class _Result(_Closed):
     relevance: float | None = Field(default=None, ge=0, le=1)
 
 
-def _request(*, progress=None) -> ModelRequest:
+def _request(*, progress: ProgressObserver | None = None) -> ModelRequest:
     return ModelRequest(
         operation_id="gateway-test",
         purpose="gateway-test",
@@ -97,9 +97,7 @@ def test_gateway_normalization_and_transport_edge_layers() -> None:
         request=_request(),
         max_response_bytes=1_000,
     )
-    assert numeric.normalization_actions == (
-        "normalize_integer_to_float:/relevance",
-    )
+    assert numeric.normalization_actions == ("normalize_integer_to_float:/relevance",)
 
     for payload, limit, code in (
         (b"\xff", 1_000, "malformed_json"),
@@ -167,8 +165,8 @@ def test_internal_conversion_failure_is_repairable_and_safe() -> None:
     )
     with pytest.raises(StructuredResponseError) as captured:
         asyncio.run(provider.complete_structured(request))
-    assert captured.value.issues[0].code == "internal_conversion_failure"
-    assert "bounded internal conversion failed" in str(captured.value)
+    assert captured.value.issues[0].code == "validation_issue_details_missing"
+    assert captured.value.issues[0].path is None
 
 
 @pytest.mark.parametrize(
@@ -191,7 +189,7 @@ def test_internal_conversion_failure_is_repairable_and_safe() -> None:
         ),
         (
             '{"schema_version":2,"content":"ok"}',
-            "unsupported_schema_version",
+            "invalid_schema_version",
             "/schema_version",
         ),
         (

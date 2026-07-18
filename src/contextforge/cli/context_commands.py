@@ -50,6 +50,7 @@ from contextforge.intelligence import IndexManifestReadError, IndexStorageError
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
     ProjectConfigError,
+    configuration_resolution,
     create_model_provider,
     load_project_configuration,
     resolve_provider_configuration,
@@ -115,7 +116,7 @@ def suggest_context(
     ] = None,
     json_repair_attempts: Annotated[
         int | None,
-        typer.Option("--json-repair-attempts", min=0, max=10),
+        typer.Option("--json-repair-attempts", min=0, max=5),
     ] = None,
     includes: Annotated[
         list[str] | None,
@@ -140,6 +141,13 @@ def suggest_context(
     explain: Annotated[
         bool,
         typer.Option("--explain", help="Include detailed selection provenance."),
+    ] = False,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Fail when model response repairs are exhausted; disable fallback.",
+        ),
     ] = False,
     output: Annotated[
         Path | None,
@@ -166,11 +174,22 @@ def suggest_context(
         if not task.strip():
             raise ValueError("--task must be non-empty")
         project = load_project_configuration(path, config_path=config)
+        configured_repairs = project.models.structured_response.max_repair_attempts
+        repair_source = configuration_resolution(project)["sources"].get(
+            "models.structured_response.max_repair_attempts", "built-in default"
+        )
+        effective_repairs = (
+            min(json_repair_attempts, 5)
+            if json_repair_attempts is not None
+            else 1
+            if repair_source == "built-in default"
+            else min(configured_repairs, 5)
+        )
         provider_configuration = resolve_provider_configuration(
             project,
             provider=provider_name,
             model=model,
-            json_repair_attempts=json_repair_attempts,
+            json_repair_attempts=effective_repairs,
         )
         if provider_configuration is None:
             raise ValueError("context suggestion requires a model provider")
@@ -182,6 +201,7 @@ def suggest_context(
             excludes=tuple(excludes or ()),
             max_files=max_files,
             max_context_bytes=max_context_bytes,
+            strict=strict,
         )
         run = asyncio.run(
             suggest_repository_context(

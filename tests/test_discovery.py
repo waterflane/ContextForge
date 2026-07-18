@@ -48,6 +48,7 @@ from contextforge.intelligence import (
     extract_code_maps,
     load_manifest,
 )
+from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
@@ -171,6 +172,7 @@ def test_discovery_models_and_all_tool_schemas_are_closed_and_typed() -> None:
         "read_lines",
         "get_git_diff",
         "add_to_context",
+        "select_candidates",
         "remove_from_context",
         "get_context_budget",
         "finalize_context",
@@ -215,22 +217,37 @@ def test_fresh_discovery_full_file_is_deterministic_and_uses_no_index(
 def test_indexed_success_searches_facts_and_verifies_source(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"service.py": "def serve():\n    return 1\n"})
     _index(snapshot)
-    result = _run(
-        snapshot,
-        _batch(
-            _call("search", "search_index", {"query": "serve"}),
-            _call(
-                "add", "add_to_context", {"path": "service.py", "reason": "indexed hit"}
-            ),
-            _call("read", "read_file", {"path": "service.py"}),
-            _finalize(),
-        ),
-        request=DiscoveryRequest(task="Find serving", mode="indexed"),
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "service.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the indexed service implementation.",
+            }
+        )
+
+    provider = FakeModelProvider(_configuration(), responder=responder)
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(task="Find serving", mode="indexed"),
+        )
     )
     assert result.status == "complete"
     assert result.index_generation_id == load_manifest(tmp_path).generation_id
-    assert result.budget_usage.files_read >= 2
-    assert any(item.tool_name == "search_index" for item in result.observations)
+    assert result.budget_usage.files_read == 1
+    assert result.budget_usage.model_calls == 1
+    assert result.budget_usage.provider_http_calls == 1
+    assert any(item.tool_name == "select_candidates" for item in result.observations)
 
 
 def test_indexed_missing_and_entirely_stale_index_refuse_explicitly(
@@ -255,18 +272,41 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     _index(snapshot)
     _write(tmp_path, "b.py", "B = 2\n")
     current = scan_repository(tmp_path)
-    result = _run(
-        current,
-        _batch(
-            _call("add", "add_to_context", {"path": "a.py", "reason": "current"}),
-            _call("read", "read_file", {"path": "a.py"}),
-            _finalize(),
-        ),
-        _batch(_finalize("finish-after-review")),
-        request=DiscoveryRequest(task="x", mode="indexed"),
+    clear_recent_records()
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "a.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the current indexed record.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            current,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="x", mode="indexed"),
+        )
     )
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
+    assert result.final_selection is not None
+    assert result.final_selection.confidence == 0.3
+    verification = next(
+        item
+        for item in recent_records()
+        if item.event == "context_suggestion.source_verification_completed"
+    )
+    assert verification.data["stale_file_count"] == 1
 
 
 def test_hybrid_uses_index_then_leaves_initial_candidate_set(tmp_path: Path) -> None:
@@ -458,9 +498,7 @@ def test_every_path_tool_rejects_absolute_traversal_unc_and_drive_paths(
 
 def test_unknown_tool_and_malformed_action_are_typed(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"safe.py": "SAFE = 1\n"})
-    unknown_response = _batch(
-        _call("unknown", "run_shell", {"command": "dir"})
-    )
+    unknown_response = _batch(_call("unknown", "run_shell", {"command": "dir"}))
     with pytest.raises(DiscoveryProtocolError) as unknown:
         _run(
             snapshot,
@@ -468,6 +506,7 @@ def test_unknown_tool_and_malformed_action_are_typed(tmp_path: Path) -> None:
             request=DiscoveryRequest(
                 task="x",
                 mode="fresh",
+                strict=True,
                 budget=DiscoveryBudget(max_steps=1),
             ),
         )
@@ -477,6 +516,7 @@ def test_unknown_tool_and_malformed_action_are_typed(tmp_path: Path) -> None:
         _run(
             snapshot,
             *(['{"schema_version":1,"actions":[{"bad":true}]}'] * 6),
+            request=DiscoveryRequest(task="x", mode="fresh", strict=True),
         )
 
 

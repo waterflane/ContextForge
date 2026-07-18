@@ -50,6 +50,7 @@ class DiscoveryBudget(DiscoveryModel):
         default=1024 * 1024, ge=1, le=10 * 1024 * 1024, strict=True
     )
     max_context_files: int = Field(default=100, ge=1, le=1_000, strict=True)
+    max_preselected_candidates: int = Field(default=10, ge=0, le=100, strict=True)
     timeout_seconds: float = Field(default=300.0, gt=0.0, le=900.0)
     repeated_action_warning: int = Field(default=3, ge=2, le=4, strict=True)
     repeated_action_limit: int = Field(default=5, ge=3, le=10, strict=True)
@@ -73,6 +74,7 @@ class DiscoveryBudgetUsage(DiscoveryModel):
 
     steps: NonNegativeInt = 0
     model_calls: NonNegativeInt = 0
+    provider_http_calls: NonNegativeInt = 0
     files_read: NonNegativeInt = 0
     source_bytes: NonNegativeInt = 0
     tool_result_bytes: NonNegativeInt = 0
@@ -88,6 +90,7 @@ class DiscoveryRequest(DiscoveryModel):
     mode: DiscoveryMode = DiscoveryMode.HYBRID
     pinned_paths: tuple[str, ...] = ()
     excluded_paths: tuple[str, ...] = ()
+    strict: bool = False
     budget: DiscoveryBudget = Field(default_factory=DiscoveryBudget)
 
     @field_validator("mode", mode="before")
@@ -209,6 +212,29 @@ class DiscoveryCandidate(DiscoveryModel):
         return self
 
 
+class DiscoveryCandidateRecord(DiscoveryModel):
+    """Compact ranked candidate serialized into one provider request."""
+
+    candidate_id: str
+    path: str
+    language: str
+    rank: PositiveInt
+    score: float = Field(ge=0.0, allow_inf_nan=False)
+    ranking_signals: tuple[str, ...] = Field(min_length=1, max_length=10)
+
+    @field_validator("candidate_id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("candidate_id must be a bounded portable identifier")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def validate_record_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+
 class CompletenessWarning(DiscoveryModel):
     """Advisory missing-context or static-analysis limitation."""
 
@@ -278,12 +304,32 @@ class DiscoveryActionBatch(DiscoveryModel):
     schema_version: Literal[1] = DISCOVERY_SCHEMA_VERSION
     actions: tuple[DiscoveryAction, ...] = Field(min_length=1, max_length=10)
 
-    @model_validator(mode="after")
-    def validate_unique_actions(self) -> DiscoveryActionBatch:
-        identifiers = tuple(item.action_id for item in self.actions)
+    @field_validator("actions")
+    @classmethod
+    def validate_unique_actions(
+        cls, value: tuple[DiscoveryAction, ...]
+    ) -> tuple[DiscoveryAction, ...]:
+        identifiers = tuple(item.action_id for item in value)
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("action IDs must be unique within one response")
-        return self
+        return value
+
+
+class IndexedContextSelection(DiscoveryModel):
+    """Compact model-facing selection returned by indexed context suggestion."""
+
+    schema_version: Literal[1] = DISCOVERY_SCHEMA_VERSION
+    candidate_ids: tuple[str, ...] = Field(min_length=1, max_length=10)
+    summary: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def validate_candidate_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("candidate_ids must be unique")
+        if any(not _IDENTIFIER.fullmatch(item) for item in value):
+            raise ValueError("candidate_ids must contain portable identifiers")
+        return value
 
 
 class DiscoveryObservation(DiscoveryModel):
@@ -330,6 +376,7 @@ class FinalContextSelection(DiscoveryModel):
     confidence: ConfidenceValue
     budget_usage: DiscoveryBudgetUsage
     run_id: str
+    provenance: Literal["model", "deterministic_fallback"] = "model"
 
     @model_validator(mode="after")
     def validate_selection(self) -> FinalContextSelection:
@@ -377,12 +424,14 @@ __all__ = [
     "DiscoveryBudget",
     "DiscoveryBudgetUsage",
     "DiscoveryCandidate",
+    "DiscoveryCandidateRecord",
     "DiscoveryLineRange",
     "DiscoveryMode",
     "DiscoveryObservation",
     "DiscoveryRequest",
     "DiscoveryRunRecord",
     "DiscoveryState",
+    "IndexedContextSelection",
     "FinalContextSelection",
     "SelectionReason",
 ]

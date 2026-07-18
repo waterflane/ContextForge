@@ -391,7 +391,8 @@ def test_context_suggestion_reports_candidate_counts_and_failure_stage(
     failed = next(
         item for item in recent_records() if item.event == "context_suggestion.failed"
     )
-    assert failed.data["failing_stage"] == "provider_dispatch"
+    assert failed.data["failing_stage"] == "budget_validation"
+    assert failed.data["provider_request_dispatched"] is False
 
 
 def test_logging_cli_flags_preserve_json_stdout_and_precedence(tmp_path: Path) -> None:

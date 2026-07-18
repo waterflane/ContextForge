@@ -70,9 +70,9 @@ from contextforge.models import (
     ModelProviderError,
     ModelRequest,
     ProviderCancelledError,
+    SemanticConstraintFailedIssue,
     StructuredResponseError,
     UntrustedModelContext,
-    ValidationIssue,
     ensure_request_fits_context,
     estimate_request_context,
 )
@@ -967,12 +967,16 @@ def _scope_validator(expected_scope_id: str) -> Callable[[object], None]:
             raise StructuredResponseError(
                 "model returned a mismatched scope",
                 issues=(
-                    ValidationIssue(
-                        code="stale_record_reference",
+                    SemanticConstraintFailedIssue(
                         path="/scope_id",
-                        expected=expected_scope_id,
-                        actual=str(actual)[:200],
-                        message="response scope does not match the requested scope",
+                        constraint="requested_scope_id",
+                        expected_constraint="response scope matches the request scope",
+                        actual_value_kind=(
+                            "string"
+                            if isinstance(actual, str)
+                            else type(actual).__name__
+                        ),
+                        reason="response scope does not match the requested scope",
                     ),
                 ),
             )

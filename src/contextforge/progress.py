@@ -52,6 +52,7 @@ class ProgressEvent(BaseModel):
     total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     percentage: float = Field(ge=0, le=100, allow_inf_nan=False)
     status: ProgressStatus = ProgressStatus.RUNNING
+    top_level_operation_id: str | None = None
     parent_operation_id: str | None = None
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     sequence: int = Field(ge=0, strict=True)
@@ -139,7 +140,11 @@ class ProgressEvent(BaseModel):
         return values
 
     @field_validator(
-        "operation_id", "operation_type", "phase_id", "parent_operation_id"
+        "operation_id",
+        "operation_type",
+        "phase_id",
+        "top_level_operation_id",
+        "parent_operation_id",
     )
     @classmethod
     def validate_identifier(cls, value: str | None) -> str | None:
@@ -259,7 +264,6 @@ class ProgressEvent(BaseModel):
             raise ValueError("processed units cannot exceed planned units")
         terminal_units = (
             self.succeeded_units
-            + self.fallback_units
             + self.failed_units
             + self.skipped_units
             + self.reused_units
@@ -268,6 +272,8 @@ class ProgressEvent(BaseModel):
             self.planned_units or self.processed_units
         ) and terminal_units > self.processed_units:
             raise ValueError("semantic terminal counters cannot exceed processed units")
+        if self.fallback_units > self.succeeded_units:
+            raise ValueError("fallback units must be a subset of succeeded units")
         if (self.current_attempt is None) != (self.max_attempts is None):
             raise ValueError("attempt counters must be provided together")
         if (
@@ -312,6 +318,7 @@ class ProgressReporter:
         operation_type: str,
         *,
         observer: ProgressObserver | None = None,
+        top_level_operation_id: str | None = None,
         parent_operation_id: str | None = None,
         metadata: Mapping[str, JsonValue] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -319,6 +326,13 @@ class ProgressReporter:
         self._operation_id = operation_id
         self._operation_type = operation_type
         self._observer = observer or NO_OP_PROGRESS_OBSERVER
+        self._top_level_operation_id = (
+            top_level_operation_id
+            if top_level_operation_id is not None
+            else operation_id
+            if parent_operation_id is None
+            else None
+        )
         self._parent_operation_id = parent_operation_id
         self._metadata = dict(metadata or {})
         self._clock = clock
@@ -598,9 +612,15 @@ class ProgressReporter:
         message: str = "Operation failed.",
         *,
         metadata: Mapping[str, JsonValue] | None = None,
+        safe_error_code: str | None = None,
+        safe_error_message: str | None = None,
     ) -> ProgressEvent:
         """Emit an unsuccessful terminal event without claiming completion."""
 
+        if safe_error_code is not None:
+            self._last_safe_error_code = safe_error_code
+        if safe_error_message is not None:
+            self._last_safe_error_message = safe_error_message
         return self._terminal_event(
             ProgressStatus.FAILED, phase_id, message, metadata=metadata
         )
@@ -721,6 +741,7 @@ class ProgressReporter:
             total=total,
             percentage=percentage,
             status=status,
+            top_level_operation_id=self._top_level_operation_id,
             parent_operation_id=self._parent_operation_id,
             metadata=event_metadata,
             sequence=self._sequence,
@@ -802,10 +823,12 @@ class ProgressReporter:
                 "Operation started.",
                 level=LogLevel.INFO,
                 operation_id=event.operation_id,
+                top_level_operation_id=event.top_level_operation_id,
+                parent_operation_id=event.parent_operation_id,
                 operation_type=event.operation_type,
                 phase_id=event.phase_id,
                 status="running",
-                data={"parent_operation_id": event.parent_operation_id},
+                data={},
             )
         if event.status is not ProgressStatus.RUNNING:
             terminal_event = {
@@ -826,13 +849,23 @@ class ProgressReporter:
                 event.message,
                 level=terminal_level,
                 operation_id=event.operation_id,
+                top_level_operation_id=event.top_level_operation_id,
+                parent_operation_id=event.parent_operation_id,
                 operation_type=event.operation_type,
                 phase_id=event.phase_id,
                 duration_ms=round(event.operation_elapsed_seconds * 1_000),
                 status=event.status.value,
                 data={
-                    "safe_error_code": event.safe_error_code,
-                    "safe_error_message": event.safe_error_message,
+                    **(
+                        {"safe_error_code": event.safe_error_code}
+                        if event.safe_error_code is not None
+                        else {}
+                    ),
+                    **(
+                        {"safe_error_message": event.safe_error_message}
+                        if event.safe_error_message is not None
+                        else {}
+                    ),
                     "processed_units": event.processed_units,
                     "succeeded_units": event.succeeded_units,
                     "failed_units": event.failed_units,

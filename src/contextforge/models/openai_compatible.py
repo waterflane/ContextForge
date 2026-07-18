@@ -29,6 +29,7 @@ from contextforge.models.providers import (
     ProviderTimeoutError,
     ProviderTransportResponse,
     ProviderUnavailableError,
+    StructuredOutputJsonObjectUnsupportedError,
     StructuredOutputSchemaUnsupportedError,
     redact_secrets,
 )
@@ -51,6 +52,19 @@ OpenAICompatibleTransport = Callable[
     [str, str, bytes | None, Mapping[str, str], int],
     Awaitable[OpenAICompatibleHTTPResponse],
 ]
+
+
+def _with_provider_http_calls(
+    response: ProviderTransportResponse, additional_calls: int
+) -> ProviderTransportResponse:
+    if additional_calls == 0:
+        return response
+    return ProviderTransportResponse(
+        text=response.text,
+        finish_reason=response.finish_reason,
+        usage=response.usage,
+        provider_http_calls=response.provider_http_calls + additional_calls,
+    )
 
 
 class OpenAICompatibleModelProvider:
@@ -76,7 +90,8 @@ class OpenAICompatibleModelProvider:
         self._model_verified = False
         self._model_verification_lock = asyncio.Lock()
         self._closed = False
-        self._structured_mode: str = "unknown"
+        self._schema_support: str = "unknown"
+        self._json_object_support: str = "unknown"
         self._structured_mode_lock = asyncio.Lock()
 
     @property
@@ -133,45 +148,103 @@ class OpenAICompatibleModelProvider:
     async def _complete_once(
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
-        await self._ensure_model_available(credential)
-        mode = self._structured_mode
-        if mode == "unknown":
-            async with self._structured_mode_lock:
-                mode = self._structured_mode
-                if mode == "unknown":
-                    try:
-                        response = await self._complete_in_mode(
-                            request, credential, mode="json_schema"
-                        )
-                    except StructuredOutputSchemaUnsupportedError:
-                        self._structured_mode = "json_object"
-                        emit(
-                            "schema",
-                            "synthesis.fallback.selected",
-                            "OpenAI-compatible server rejected JSON Schema; "
-                            "selected JSON object mode.",
-                            level=LogLevel.WARNING,
-                            request_id=request.operation_id,
-                            phase_id="structured_output_negotiation",
-                            fallback_selected=True,
-                            data={
-                                "trigger": "structured_output_schema_unsupported",
-                                "fallback": "json_object",
-                                "local_schema_validation_retained": True,
-                            },
-                        )
-                    else:
-                        self._structured_mode = "json_schema"
-                        return response
-                    mode = self._structured_mode
+        verification_calls = await self._ensure_model_available(credential)
+        if request.schema_mode == "json_object":
+            response = await self._complete_json_object_or_plain(request, credential)
+            return _with_provider_http_calls(response, verification_calls)
+        if request.schema_mode == "plain_json":
+            mode = (
+                "json_object"
+                if self._json_object_support == "supported"
+                else "plain_json"
+            )
+            response = await self._complete_in_mode(request, credential, mode=mode)
+            return _with_provider_http_calls(response, verification_calls)
+        if self._schema_support == "unsupported":
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return _with_provider_http_calls(response, verification_calls)
         try:
-            return await self._complete_in_mode(request, credential, mode=mode)
-        except StructuredOutputSchemaUnsupportedError:
-            if mode != "json_schema":
-                raise
+            response = await self._complete_in_mode(
+                request, credential, mode="json_schema"
+            )
+        except StructuredOutputSchemaUnsupportedError as exc:
             async with self._structured_mode_lock:
-                self._structured_mode = "json_object"
-            return await self._complete_in_mode(request, credential, mode="json_object")
+                self._schema_support = "unsupported"
+            self._emit_mode_rejection(request, exc, fallback="plain_json")
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return _with_provider_http_calls(
+                response, verification_calls + 1
+            )
+        async with self._structured_mode_lock:
+            self._schema_support = "supported"
+        return _with_provider_http_calls(response, verification_calls)
+
+    async def _complete_json_object_or_plain(
+        self, request: ModelRequest, credential: SecretStr | None
+    ) -> ProviderTransportResponse:
+        """Honor an explicit JSON-object request, caching safe capability state."""
+
+        if self._json_object_support == "unsupported":
+            return await self._complete_in_mode(request, credential, mode="plain_json")
+        try:
+            response = await self._complete_in_mode(
+                request, credential, mode="json_object"
+            )
+        except StructuredOutputJsonObjectUnsupportedError as exc:
+            async with self._structured_mode_lock:
+                self._json_object_support = "unsupported"
+            self._emit_mode_rejection(request, exc, fallback="plain_json")
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return ProviderTransportResponse(
+                text=response.text,
+                finish_reason=response.finish_reason,
+                usage=response.usage,
+                provider_http_calls=response.provider_http_calls + 1,
+            )
+        async with self._structured_mode_lock:
+            self._json_object_support = "supported"
+        return response
+
+    def _emit_mode_rejection(
+        self,
+        request: ModelRequest,
+        error: StructuredOutputSchemaUnsupportedError
+        | StructuredOutputJsonObjectUnsupportedError,
+        *,
+        fallback: str,
+    ) -> None:
+        error_code = (
+            "structured_output_schema_unsupported"
+            if isinstance(error, StructuredOutputSchemaUnsupportedError)
+            else "structured_output_json_object_unsupported"
+        )
+        emit(
+            "provider",
+            "provider.structured_output_mode.rejected",
+            "Provider rejected a structured-output mode; continuing safely.",
+            level=LogLevel.WARNING,
+            request_id=request.operation_id,
+            top_level_operation_id=request.top_level_operation_id,
+            parent_operation_id=request.parent_operation_id,
+            phase_id="provider_http_response",
+            error=error,
+            error_code=error_code,
+            fallback_selected=True,
+            data={
+                "rejected_parameter": error.rejected_parameter,
+                "rejected_value": error.rejected_value,
+                "safe_error_code": error_code,
+                "fallback": fallback,
+                "local_schema_validation_retained": True,
+                "completed_json_response": False,
+            },
+        )
 
     async def _complete_in_mode(
         self,
@@ -183,27 +256,26 @@ class OpenAICompatibleModelProvider:
         messages = [
             message.model_dump(mode="json")
             for message in request.messages(
-                include_response_schema=mode == "json_object"
+                include_response_schema=mode != "json_schema"
             )
         ]
         payload: dict[str, Any] = {
             "messages": messages,
             "model": self.configuration.model_id,
-            "response_format": (
-                {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": request.operation_id,
-                        "schema": request.response_schema,
-                        "strict": True,
-                    },
-                }
-                if mode == "json_schema"
-                else {"type": "json_object"}
-            ),
             "stream": False,
             "temperature": request.temperature,
         }
+        if mode == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.operation_id,
+                    "schema": request.response_schema,
+                    "strict": True,
+                },
+            }
+        elif mode == "json_object":
+            payload["response_format"] = {"type": "json_object"}
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
         response = await self._request(
@@ -214,10 +286,9 @@ class OpenAICompatibleModelProvider:
         )
         _raise_for_status(
             response,
-            operation=(
-                "chat completion" if mode == "json_schema" else "chat completion JSON"
-            ),
+            operation="chat completion",
             model_id=self.configuration.model_id,
+            structured_mode=mode,
         )
         return _parse_chat_completion(response.body)
 
@@ -239,10 +310,10 @@ class OpenAICompatibleModelProvider:
             read_timeout=self.configuration.read_timeout_seconds,
         )
 
-    async def _ensure_model_available(self, credential: SecretStr | None) -> None:
+    async def _ensure_model_available(self, credential: SecretStr | None) -> int:
         async with self._model_verification_lock:
             if self._model_verified:
-                return
+                return 0
             models = await self._list_models_once(credential)
             if self.configuration.model_id not in models:
                 raise ProviderRequestError(
@@ -250,6 +321,7 @@ class OpenAICompatibleModelProvider:
                     "GET /v1/models; select an exact returned ID"
                 )
             self._model_verified = True
+            return 1
 
     async def _list_models_once(self, credential: SecretStr | None) -> tuple[str, ...]:
         response = await self._request(
@@ -322,6 +394,7 @@ class OpenAICompatibleModelProvider:
             ProviderRequestError,
             ProviderUnavailableError,
             ProviderTimeoutError,
+            StructuredOutputJsonObjectUnsupportedError,
             StructuredOutputSchemaUnsupportedError,
             ContextWindowExceededError,
         ):
@@ -491,6 +564,7 @@ def _raise_for_status(
     *,
     operation: str,
     model_id: str,
+    structured_mode: str | None = None,
 ) -> None:
     status = response.status
     if 200 <= status < 300:
@@ -521,24 +595,28 @@ def _raise_for_status(
         )
     ):
         raise ContextWindowExceededError()
-    if (
-        status in {400, 422}
-        and operation == "chat completion"
-        and any(
-            marker in lowered
-            for marker in (
-                "grammar",
-                "json schema",
-                "json_schema",
-                "response_format",
-                "structured output",
-                "sane defaults",
+    structured_mode_rejected = status in {400, 422} and any(
+        marker in lowered
+        for marker in (
+            "grammar",
+            "json schema",
+            "json_schema",
+            "json object",
+            "json_object",
+            "response_format",
+            "structured output",
+            "sane defaults",
+        )
+    )
+    if operation == "chat completion" and structured_mode_rejected:
+        if structured_mode == "json_object":
+            raise StructuredOutputJsonObjectUnsupportedError(
+                "OpenAI-compatible server rejected JSON object mode"
             )
-        )
-    ):
-        raise StructuredOutputSchemaUnsupportedError(
-            "OpenAI-compatible server rejected the structured output schema"
-        )
+        if structured_mode == "json_schema":
+            raise StructuredOutputSchemaUnsupportedError(
+                "OpenAI-compatible server rejected the structured output schema"
+            )
     if status in {400, 422} and operation == "chat completion":
         raise ProviderRequestError(
             f"OpenAI-compatible server rejected the request (HTTP {status}){suffix}"

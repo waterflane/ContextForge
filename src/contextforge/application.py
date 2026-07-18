@@ -1156,6 +1156,7 @@ def build_discovery_request(
     excludes: tuple[str, ...] = (),
     max_files: int = 100,
     max_context_bytes: int = 1_000_000,
+    strict: bool = False,
 ) -> DiscoveryRequest:
     """Translate public CLI limits into the closed discovery request contract."""
 
@@ -1164,6 +1165,7 @@ def build_discovery_request(
         mode=DiscoveryMode(mode),
         pinned_paths=tuple(sorted(set(includes))),
         excluded_paths=tuple(sorted(set(excludes))),
+        strict=strict,
         budget=DiscoveryBudget(
             max_context_files=max_files,
             max_files_read=min(1_000, max_files * 2),
@@ -1322,7 +1324,17 @@ def _report_terminal_exception(
     ):
         reporter.cancel(metadata=metadata)
     else:
-        reporter.fail(metadata=metadata)
+        code = _diagnostic_error_code(error) or "internal_error"
+        message = (
+            provider_error_details(error)[1]
+            if isinstance(error, ModelProviderError)
+            else str(error)[:1_000] or code.replace("_", " ")
+        )
+        reporter.fail(
+            metadata=metadata,
+            safe_error_code=code,
+            safe_error_message=message,
+        )
 
 
 def _last_diagnostic_sequence() -> int:

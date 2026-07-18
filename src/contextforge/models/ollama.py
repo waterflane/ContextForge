@@ -90,7 +90,11 @@ class OllamaModelProvider:
                 "model": self.configuration.model_id,
                 "messages": messages,
                 "stream": False,
-                "format": request.response_schema,
+                "format": (
+                    request.response_schema
+                    if request.schema_mode == "json_schema"
+                    else "json"
+                ),
                 "options": options,
             },
             ensure_ascii=False,

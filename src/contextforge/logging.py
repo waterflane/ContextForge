@@ -123,6 +123,8 @@ class DiagnosticContext:
     """Correlation identifiers inherited by nested diagnostic events."""
 
     operation_id: str | None = None
+    top_level_operation_id: str | None = None
+    parent_operation_id: str | None = None
     operation_type: str | None = None
     generation_id: str | None = None
     phase_id: str | None = None
@@ -174,6 +176,8 @@ class DiagnosticRecord:
     event: str
     message: str
     operation_id: str | None = None
+    top_level_operation_id: str | None = None
+    parent_operation_id: str | None = None
     operation_type: str | None = None
     generation_id: str | None = None
     phase_id: str | None = None
@@ -198,6 +202,8 @@ class DiagnosticRecord:
             "event": self.event,
             "message": self.message,
             "operation_id": self.operation_id,
+            "top_level_operation_id": self.top_level_operation_id,
+            "parent_operation_id": self.parent_operation_id,
             "operation_type": self.operation_type,
             "generation_id": self.generation_id,
             "phase_id": self.phase_id,
@@ -393,6 +399,8 @@ def emit(
     duration_ms: int | None = None,
     status: str | None = None,
     operation_id: str | None = None,
+    top_level_operation_id: str | None = None,
+    parent_operation_id: str | None = None,
     operation_type: str | None = None,
     generation_id: str | None = None,
     phase_id: str | None = None,
@@ -438,6 +446,10 @@ def emit(
             event=event,
             message=_safe_text(message),
             operation_id=operation_id or context.operation_id,
+            top_level_operation_id=(
+                top_level_operation_id or context.top_level_operation_id
+            ),
+            parent_operation_id=parent_operation_id or context.parent_operation_id,
             operation_type=operation_type or context.operation_type,
             generation_id=generation_id or context.generation_id,
             phase_id=phase_id or context.phase_id,
@@ -610,6 +622,12 @@ def sanitize_url(value: str, *, include_path: bool = True) -> str:
 
 
 def _redact_value(value: Any, *, key: str, depth: int) -> Any:
+    if (
+        key.endswith("_fingerprint")
+        and isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{64}", value)
+    ):
+        return value
     if _PROHIBITED_CONTENT_KEY.search(key):
         return "[OMITTED]"
     safe_numeric_token_metric = key.endswith(

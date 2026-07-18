@@ -45,6 +45,8 @@ MAX_UNTRUSTED_SOURCE_BYTES = 1_000_000
 MAX_REQUEST_SOURCE_BYTES = 4_000_000
 MAX_UNTRUSTED_CONTEXT_BYTES = 4_000_000
 MAX_TRUSTED_FACT_BYTES = 4_000_000
+MAX_PREVIOUS_RESPONSE_BYTES = 4_096
+MAX_PREVIOUS_RESPONSE_TOKENS = 1_024
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -380,6 +382,7 @@ class ModelRequest:
     untrusted_sources: tuple[UntrustedSource, ...]
     response_model: type[BaseModel]
     response_schema_version: int = SUPPORTED_RESPONSE_SCHEMA_VERSION
+    schema_mode: Literal["json_schema", "json_object", "plain_json"] = "json_schema"
     max_output_tokens: int | None = None
     temperature: float = 0.0
     max_response_bytes: int | None = None
@@ -387,6 +390,9 @@ class ModelRequest:
     allowed_response_paths: frozenset[str] = frozenset()
     response_path_pointers: tuple[str, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
+    top_level_operation_id: str | None = None
+    parent_operation_id: str | None = None
+    phase_id: str | None = None
     untrusted_contexts: tuple[UntrustedModelContext, ...] = ()
     progress: ProgressObserver | None = field(default=None, repr=False, compare=False)
     response_validator: Callable[[BaseModel], None] | None = field(
@@ -413,6 +419,10 @@ class ModelRequest:
             or self.response_schema_version != SUPPORTED_RESPONSE_SCHEMA_VERSION
         ):
             raise UnsupportedResponseSchemaError(self.response_schema_version)
+        if self.schema_mode not in {"json_schema", "json_object", "plain_json"}:
+            raise ValueError(
+                "schema_mode must be json_schema, json_object, or plain_json"
+            )
         if not isinstance(self.response_model, type) or not issubclass(
             self.response_model, BaseModel
         ):
@@ -489,6 +499,15 @@ class ModelRequest:
                 or (_SENSITIVE_METADATA.search(key) and key not in _SAFE_TOKEN_METADATA)
             ):
                 raise ValueError("metadata must be bounded text and contain no secrets")
+        for label, correlation_value in (
+            ("top_level_operation_id", self.top_level_operation_id),
+            ("parent_operation_id", self.parent_operation_id),
+            ("phase_id", self.phase_id),
+        ):
+            if correlation_value is not None and not _IDENTIFIER.fullmatch(
+                correlation_value
+            ):
+                raise ValueError(f"{label} must be a bounded portable identifier")
         if self.response_validator is not None and not callable(
             self.response_validator
         ):
@@ -557,6 +576,11 @@ class ProviderTransportResponse:
     text: str | bytes
     finish_reason: str | None = None
     usage: ModelUsage | None = None
+    provider_http_calls: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.provider_http_calls) is not int or self.provider_http_calls < 1:
+            raise ValueError("provider_http_calls must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -573,13 +597,120 @@ class ModelResponse:
 
 
 class ValidationIssue(ProviderModel):
-    """One safe field-level structured-response diagnostic."""
+    """Safe common fields retained across every diagnostic translation layer."""
 
     code: str
-    path: str
-    expected: str | None = None
-    actual: str | None = None
-    message: str
+    path: str | None
+    reason: str
+
+    @field_validator("path")
+    @classmethod
+    def validate_issue_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.startswith("/") or "\x00" in value:
+            raise ValueError("validation issue paths must be JSON pointers")
+        return value
+
+    @property
+    def expected(self) -> str | None:
+        """Compatibility accessor for older diagnostic consumers."""
+
+        return None
+
+    @property
+    def actual(self) -> str | None:
+        """Compatibility accessor for older diagnostic consumers."""
+
+        return None
+
+    @property
+    def message(self) -> str:
+        """Compatibility accessor for older diagnostic consumers."""
+
+        return self.reason
+
+
+class WrongFieldTypeIssue(ValidationIssue):
+    """A JSON type mismatch; equal types are forbidden by construction."""
+
+    code: Literal["wrong_field_type"] = "wrong_field_type"
+    expected_type: str
+    actual_type: str
+
+    @model_validator(mode="after")
+    def validate_distinct_types(self) -> WrongFieldTypeIssue:
+        if self.expected_type == self.actual_type:
+            raise ValueError("wrong_field_type requires distinct JSON types")
+        return self
+
+    @property
+    def expected(self) -> str:
+        return self.expected_type
+
+    @property
+    def actual(self) -> str:
+        return self.actual_type
+
+
+class ConstraintValidationIssue(ValidationIssue):
+    """A non-type constraint failure without unsafe actual-value disclosure."""
+
+    constraint: str
+    expected_constraint: str
+    actual_value_kind: str
+
+    @property
+    def expected(self) -> str:
+        return self.expected_constraint
+
+    @property
+    def actual(self) -> str:
+        return self.actual_value_kind
+
+
+class InvalidFieldValueIssue(ConstraintValidationIssue):
+    code: Literal["invalid_field_value"] = "invalid_field_value"
+
+
+class MissingRequiredFieldIssue(ConstraintValidationIssue):
+    code: Literal["missing_required_field"] = "missing_required_field"
+
+
+class UnknownCandidateIdIssue(ConstraintValidationIssue):
+    code: Literal["unknown_candidate_id"] = "unknown_candidate_id"
+
+
+class DuplicateCandidateIdIssue(ConstraintValidationIssue):
+    code: Literal["duplicate_candidate_id"] = "duplicate_candidate_id"
+
+
+class InvalidRepositoryPathIssue(ConstraintValidationIssue):
+    code: Literal["invalid_repository_path"] = "invalid_repository_path"
+
+
+class AdditionalPropertyIssue(ConstraintValidationIssue):
+    code: Literal["additional_property"] = "additional_property"
+
+
+class InvalidSchemaVersionIssue(ConstraintValidationIssue):
+    code: Literal["invalid_schema_version"] = "invalid_schema_version"
+
+
+class ArrayLimitExceededIssue(ConstraintValidationIssue):
+    code: Literal["array_limit_exceeded"] = "array_limit_exceeded"
+
+
+class StringLimitExceededIssue(ConstraintValidationIssue):
+    code: Literal["string_limit_exceeded"] = "string_limit_exceeded"
+
+
+class SemanticConstraintFailedIssue(ConstraintValidationIssue):
+    code: Literal["semantic_constraint_failed"] = "semantic_constraint_failed"
+
+
+class GenericValidationIssue(ConstraintValidationIssue):
+    """Typed fallback for transport/parse codes outside field validation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +720,18 @@ class StructuredValidationResult:
     value: BaseModel
     normalized_json: str
     normalization_actions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RepairRequestPlan:
+    """One auditable repair request without prompt or response disclosure."""
+
+    request: ModelRequest
+    strategy: str
+    previous_response_included: bool
+    previous_response_bytes: int
+    omission_reason: str | None
+    prompt_fingerprint: str
 
 
 class RetryClassification(StrEnum):
@@ -687,6 +830,16 @@ class ContextWindowExceededError(ModelProviderError):
 
 class StructuredOutputSchemaUnsupportedError(ModelProviderError):
     """Raised when a provider rejects construction of a structured grammar."""
+
+    rejected_parameter = "response_format.type"
+    rejected_value = "json_schema"
+
+
+class StructuredOutputJsonObjectUnsupportedError(ModelProviderError):
+    """Raised when a provider rejects OpenAI-compatible JSON object mode."""
+
+    rejected_parameter = "response_format.type"
+    rejected_value = "json_object"
 
 
 class ProviderTimeoutError(ModelProviderError):
@@ -864,7 +1017,11 @@ class ProviderRuntime:
         transport_attempt = 1
         repair_attempt = 0
         total_calls = 0
-        budget = estimate_request_context(request, self.configuration)
+        budget = estimate_request_context(
+            request,
+            self.configuration,
+            include_native_schema=request.schema_mode == "json_schema",
+        )
         request = replace(
             request,
             metadata={
@@ -879,6 +1036,8 @@ class ProviderRuntime:
         )
         active_request = request
         request_id = request.operation_id
+        last_response_issue_fingerprint: str | None = None
+
         def counter_data() -> dict[str, Any]:
             return {
                 "transport_attempt": transport_attempt,
@@ -886,7 +1045,12 @@ class ProviderRuntime:
                 "json_repair_attempt": repair_attempt,
                 "json_repair_max_attempts": repair_max,
                 "total_provider_calls": total_calls,
+                "repair_strategy": active_request.metadata.get(
+                    "repair_strategy", "initial"
+                ),
+                "schema_mode": active_request.schema_mode,
             }
+
         emit(
             "configuration",
             "config.value_resolved",
@@ -895,6 +1059,9 @@ class ProviderRuntime:
             operation_id=request.operation_id,
             operation_type="model.request",
             request_id=request_id,
+            top_level_operation_id=request.top_level_operation_id,
+            parent_operation_id=request.parent_operation_id,
+            phase_id=request.phase_id,
             data={
                 **_context_window_resolution_data(self.configuration),
                 "max_json_repair_attempts": repair_max,
@@ -911,12 +1078,17 @@ class ProviderRuntime:
             operation_id=request.operation_id,
             operation_type="model.request",
             request_id=request_id,
+            top_level_operation_id=request.top_level_operation_id,
+            parent_operation_id=request.parent_operation_id,
+            phase_id="budget_validation",
             data=budget_data,
         )
         progress = ProgressReporter(
             request.operation_id,
             "model.request",
             observer=request.progress,
+            top_level_operation_id=request.top_level_operation_id,
+            parent_operation_id=request.parent_operation_id,
             metadata={
                 "provider_id": self.configuration.provider_id,
                 "model_id": self.configuration.model_id,
@@ -948,6 +1120,9 @@ class ProviderRuntime:
                 operation_id=request.operation_id,
                 operation_type="model.request",
                 request_id=request_id,
+                top_level_operation_id=request.top_level_operation_id,
+                parent_operation_id=request.parent_operation_id,
+                phase_id="budget_validation",
                 status="rejected_locally",
                 error_code="model_request_exceeds_configured_context_window",
                 data={
@@ -991,6 +1166,17 @@ class ProviderRuntime:
 
         while True:
             validation: Literal["valid", "invalid", "not_received"] = "not_received"
+            active_budget = estimate_request_context(
+                active_request,
+                self.configuration,
+                include_native_schema=active_request.schema_mode == "json_schema",
+            )
+            active_budget_data = _budget_log_data(
+                active_request,
+                self.configuration,
+                active_budget,
+                request_dispatched=False,
+            )
             current_item = request.metadata.get("path")
             progress.report(
                 "provider_request",
@@ -1026,12 +1212,15 @@ class ProviderRuntime:
                 operation_id=request.operation_id,
                 operation_type="model.request",
                 request_id=request_id,
+                parent_operation_id=request.parent_operation_id,
+                top_level_operation_id=request.top_level_operation_id,
+                phase_id=request.phase_id,
                 parent_request_id=(request_id if repair_attempt else None),
                 attempt=transport_attempt,
                 max_attempts=transport_max,
                 status="dispatching",
                 data={
-                    **budget_data,
+                    **active_budget_data,
                     **counter_data(),
                     "request_dispatched": True,
                     "endpoint": sanitize_url(self.configuration.endpoint),
@@ -1051,6 +1240,7 @@ class ProviderRuntime:
                         cancellation=cancellation,
                         timeout=timeout,
                     )
+                    total_calls += raw.provider_http_calls - 1
                 finally:
                     self._semaphore.release()
                 response_size = _response_size(raw.text)
@@ -1062,6 +1252,9 @@ class ProviderRuntime:
                     operation_id=request.operation_id,
                     operation_type="model.request",
                     request_id=request_id,
+                    top_level_operation_id=request.top_level_operation_id,
+                    parent_operation_id=request.parent_operation_id,
+                    phase_id="provider_wait",
                     attempt=transport_attempt,
                     max_attempts=transport_max,
                     status="received",
@@ -1105,6 +1298,9 @@ class ProviderRuntime:
                         level=LogLevel.DEBUG,
                         operation_id=request.operation_id,
                         request_id=request_id,
+                        top_level_operation_id=request.top_level_operation_id,
+                        parent_operation_id=request.parent_operation_id,
+                        phase_id="response_validation",
                         data={
                             **counter_data(),
                             "normalization_actions": list(
@@ -1151,15 +1347,16 @@ class ProviderRuntime:
                     level=LogLevel.DEBUG,
                     operation_id=request.operation_id,
                     request_id=request_id,
+                    top_level_operation_id=request.top_level_operation_id,
+                    parent_operation_id=request.parent_operation_id,
+                    phase_id="response_validation",
                     status="valid",
                     data={
                         **counter_data(),
                         "json_parsing_result": "valid",
                         "validation_result": "valid",
                         "validation_issue_count": 0,
-                        "normalization_actions": list(
-                            accepted.normalization_actions
-                        ),
+                        "normalization_actions": list(accepted.normalization_actions),
                     },
                 )
                 progress.report(
@@ -1189,6 +1386,9 @@ class ProviderRuntime:
                     level=LogLevel.INFO,
                     operation_id=request.operation_id,
                     request_id=request_id,
+                    top_level_operation_id=request.top_level_operation_id,
+                    parent_operation_id=request.parent_operation_id,
+                    phase_id="final_output",
                     status="accepted",
                     data={
                         **counter_data(),
@@ -1242,6 +1442,19 @@ class ProviderRuntime:
             if isinstance(error, StructuredResponseError):
                 issues = error.issues
                 issue_data = _safe_issue_data(issues)
+                response_issue_fingerprint = _response_issue_fingerprint(
+                    issues, None if raw is None else raw.text
+                )
+                repeated_failure = (
+                    last_response_issue_fingerprint == response_issue_fingerprint
+                )
+                last_response_issue_fingerprint = response_issue_fingerprint
+                failure_fingerprint = _failure_fingerprint(
+                    issues,
+                    None if raw is None else raw.text,
+                    active_request.metadata.get("repair_strategy", "initial"),
+                    active_request.schema_mode,
+                )
                 emit(
                     "schema",
                     "response.validation.failed",
@@ -1249,6 +1462,9 @@ class ProviderRuntime:
                     level=LogLevel.WARNING,
                     operation_id=request.operation_id,
                     request_id=request_id,
+                    parent_operation_id=request.parent_operation_id,
+                    top_level_operation_id=request.top_level_operation_id,
+                    phase_id="response_validation",
                     status="invalid",
                     error_code=code,
                     data={
@@ -1257,24 +1473,32 @@ class ProviderRuntime:
                         "validation_result": "invalid",
                         "repair_scheduled": repair_attempt < repair_max,
                         "repair_reason": code,
+                        "failure_fingerprint": failure_fingerprint,
+                        "repeated_failure_detected": repeated_failure,
                     },
                 )
                 if repair_attempt < repair_max:
                     repair_attempt += 1
                     transport_attempt = 1
-                    active_request = _repair_request(
+                    plan = _repair_request(
                         request,
                         error,
+                        previous_response=None if raw is None else raw.text,
                         attempt=repair_attempt,
                         maximum=repair_max,
                     )
                     repair_budget = estimate_request_context(
-                        active_request, self.configuration
+                        plan.request,
+                        self.configuration,
+                        include_native_schema=(
+                            plan.request.schema_mode == "json_schema"
+                        ),
                     )
                     if not repair_budget.fits:
                         error = ContextWindowExceededError(repair_budget)
                         code, message = provider_error_details(error)
                     else:
+                        active_request = plan.request
                         emit(
                             "schema",
                             "response.repair.scheduled",
@@ -1282,11 +1506,24 @@ class ProviderRuntime:
                             level=LogLevel.WARNING,
                             operation_id=request.operation_id,
                             request_id=request_id,
+                            parent_operation_id=request.parent_operation_id,
+                            top_level_operation_id=request.top_level_operation_id,
+                            phase_id="response_repair",
                             retry_scheduled=True,
                             data={
                                 **counter_data(),
                                 "repair_reason": code,
-                                "previous_response_included": False,
+                                "repair_strategy": plan.strategy,
+                                "schema_mode": plan.request.schema_mode,
+                                "previous_response_included": (
+                                    plan.previous_response_included
+                                ),
+                                "previous_response_bytes": (
+                                    plan.previous_response_bytes
+                                ),
+                                "omission_reason": plan.omission_reason,
+                                "repair_prompt_fingerprint": (plan.prompt_fingerprint),
+                                "repeated_failure_detected": repeated_failure,
                             },
                         )
                         # Compatibility event retained; its structured flag separates
@@ -1298,6 +1535,9 @@ class ProviderRuntime:
                             level=LogLevel.WARNING,
                             operation_id=request.operation_id,
                             request_id=request_id,
+                            parent_operation_id=request.parent_operation_id,
+                            top_level_operation_id=request.top_level_operation_id,
+                            phase_id="response_repair",
                             retry_scheduled=True,
                             data={
                                 **counter_data(),
@@ -1416,6 +1656,9 @@ class ProviderRuntime:
                 level=LogLevel.ERROR,
                 operation_id=request.operation_id,
                 request_id=request_id,
+                top_level_operation_id=request.top_level_operation_id,
+                parent_operation_id=request.parent_operation_id,
+                phase_id=("response_validation" if exhausted else "provider_wait"),
                 status="failed",
                 error_code=code,
                 data={
@@ -1460,11 +1703,16 @@ def provider_error_details(error: BaseException) -> tuple[str, str]:
             "structured_output_schema_unsupported",
             "provider rejected the structured output schema",
         )
+    if isinstance(error, StructuredOutputJsonObjectUnsupportedError):
+        return (
+            "structured_output_json_object_unsupported",
+            "provider rejected JSON object structured output mode",
+        )
     if isinstance(error, MissingSchemaVersionError):
         return "missing_schema_version", "model response is missing schema_version"
     if isinstance(error, UnsupportedResponseSchemaError):
         return (
-            "unsupported_schema_version",
+            "invalid_schema_version",
             "model returned an unsupported schema_version",
         )
     if isinstance(error, WrongResponseShapeError):
@@ -1492,11 +1740,14 @@ def provider_error_details(error: BaseException) -> tuple[str, str]:
                 "string_limit_exceeded",
                 "missing_schema_version",
                 "unsupported_schema_version",
+                "invalid_schema_version",
                 "unknown_candidate_id",
                 "duplicate_candidate_id",
                 "invalid_repository_path",
                 "stale_record_reference",
                 "internal_conversion_failure",
+                "semantic_constraint_failed",
+                "validation_issue_details_missing",
             }
             if issue.code in safe_codes:
                 if issue.code == "internal_conversion_failure":
@@ -1581,7 +1832,10 @@ def validate_structured_response(
             ) from exc
     else:
         raise _structured_error(
-            "wrong_field_type", "/", "string or bytes", _json_type(data),
+            "wrong_field_type",
+            "/",
+            "string or bytes",
+            _json_type(data),
             "transport response content has the wrong type",
         )
     if len(raw) > max_response_bytes:
@@ -1652,12 +1906,12 @@ def validate_structured_response(
             "multiple top-level JSON values",
         )
     if not isinstance(parsed, dict):
-        issue = ValidationIssue(
-            code="wrong_top_level_type",
-            path="/",
+        issue = _validation_issue(
+            "wrong_top_level_type",
+            "/",
             expected="object",
             actual=_json_type(parsed),
-            message="model response root must be an object",
+            reason="model response root must be an object",
         )
         raise WrongResponseShapeError(
             "model response root must be an object", issues=(issue,)
@@ -1673,12 +1927,12 @@ def validate_structured_response(
         and not _matches_schema_type(parsed["summary"], summary_schema)
         and isinstance(parsed["summary"], dict)
     ):
-        issue = ValidationIssue(
-            code="wrong_field_type",
-            path="/summary",
+        issue = _validation_issue(
+            "wrong_field_type",
+            "/summary",
             expected="string",
             actual="object",
-            message="summary must be text",
+            reason="summary must be text",
         )
         raise WrongResponseShapeError(
             "model response nested an object where summary text was required",
@@ -1694,12 +1948,12 @@ def validate_structured_response(
     )
     if wrong_types:
         issues = tuple(
-            ValidationIssue(
-                code="wrong_field_type",
-                path=_json_pointer((field,)),
+            _validation_issue(
+                "wrong_field_type",
+                _json_pointer((field,)),
                 expected=_schema_type(properties.get(field)),
                 actual=_json_type(parsed[field]),
-                message="field has the wrong JSON type",
+                reason="field has the wrong JSON type",
             )
             for field in wrong_types
         )
@@ -1711,12 +1965,13 @@ def validate_structured_response(
     )
     if missing:
         issues = tuple(
-            ValidationIssue(
-                code="missing_required_field",
-                path=_json_pointer((field,)),
-                expected=_schema_type(properties.get(field)),
+            _validation_issue(
+                "missing_required_field",
+                _json_pointer((field,)),
+                expected=f"required {_schema_type(properties.get(field))} field",
                 actual="missing",
-                message="required field is missing",
+                reason="required field is missing",
+                constraint="required",
             )
             for field in missing
         )
@@ -1727,16 +1982,17 @@ def validate_structured_response(
         parsed = {**parsed, "schema_version": request.response_schema_version}
         actions.append("insert_constant_schema_version")
     elif type(version) is not int or version != request.response_schema_version:
-        issue = ValidationIssue(
-            code=(
-                "unsupported_schema_version"
-                if type(version) is int
-                else "wrong_field_type"
+        issue = _validation_issue(
+            "invalid_schema_version" if type(version) is int else "wrong_field_type",
+            "/schema_version",
+            expected=(
+                "integer"
+                if type(version) is not int
+                else str(request.response_schema_version)
             ),
-            path="/schema_version",
-            expected=str(request.response_schema_version),
-            actual=_json_type(version) if type(version) is not int else str(version),
-            message="schema_version is unsupported",
+            actual=_json_type(version),
+            reason="schema_version is unsupported",
+            constraint="supported_schema_version",
         )
         error = UnsupportedResponseSchemaError(version)
         error.issues = (issue,)
@@ -1760,23 +2016,30 @@ def validate_structured_response(
             _pydantic_issue(item, request.response_schema) for item in errors
         )
         missing_fields = tuple(
-            item.path for item in issues if item.code == "missing_required_field"
+            item.path
+            for item in issues
+            if item.code == "missing_required_field" and item.path is not None
         )
         if missing_fields:
-            raise MissingRequiredFieldError(
-                missing_fields, issues=issues
-            ) from exc
+            raise MissingRequiredFieldError(missing_fields, issues=issues) from exc
         typed_fields = tuple(
-            item.path for item in issues if item.code == "wrong_field_type"
+            item.path
+            for item in issues
+            if item.code == "wrong_field_type" and item.path is not None
         )
         if typed_fields:
             raise WrongFieldTypeError(typed_fields, issues=issues) from exc
-        first = issues[0] if issues else ValidationIssue(
-            code="internal_conversion_failure",
-            path="/",
-            expected="validated internal model",
-            actual="conversion error",
-            message="validation_issue_details_missing",
+        first = (
+            issues[0]
+            if issues
+            else _validation_issue(
+                "validation_issue_details_missing",
+                None,
+                expected="field-level validation details",
+                actual="missing",
+                reason="validation_issue_details_missing",
+                constraint="diagnostic_details_available",
+            )
         )
         raise StructuredResponseError(
             f"{first.message} at {first.path}", issues=issues or (first,)
@@ -1787,13 +2050,31 @@ def validate_structured_response(
         except StructuredResponseError:
             raise
         except Exception as exc:
+            from pydantic import ValidationError
+
+            if isinstance(exc, ValidationError):
+                translated = tuple(
+                    _pydantic_issue(item, request.response_schema)
+                    for item in exc.errors(
+                        include_url=False,
+                        include_context=False,
+                        include_input=True,
+                    )
+                )
+            else:
+                translated = ()
             detail = str(exc).replace("\r", " ").replace("\n", " ")[:500]
-            raise _structured_error(
-                "internal_conversion_failure",
-                "/",
-                "task-specific validated internal result",
-                "conversion failure",
+            missing_detail = _validation_issue(
+                "validation_issue_details_missing",
+                None,
+                expected="task validator field path and failed constraint",
+                actual="exception without field details",
+                reason="validation_issue_details_missing",
+                constraint="diagnostic_details_available",
+            )
+            raise StructuredResponseError(
                 detail or "result conversion into the internal model failed",
+                issues=translated or (missing_detail,),
             ) from exc
     dumped = value.model_dump(mode="json")
     actions.extend(_numeric_normalization_actions(parsed, dumped))
@@ -1845,22 +2126,85 @@ def _structured_error(
     actual: str | None,
     message: str,
 ) -> StructuredResponseError:
-    issue = ValidationIssue(
-        code=code,
-        path=path,
+    issue = _validation_issue(
+        code,
+        path,
         expected=expected,
         actual=actual,
-        message=message,
+        reason=message,
     )
     return StructuredResponseError(message, issues=(issue,))
 
 
+def _validation_issue(
+    code: str,
+    path: str | None,
+    *,
+    expected: str | None,
+    actual: str | None,
+    reason: str,
+    constraint: str | None = None,
+) -> ValidationIssue:
+    """Build one code-specific safe issue without carrying the actual value."""
+
+    if code == "wrong_field_type":
+        expected_type = expected or "schema-defined type"
+        actual_type = actual or "unknown type"
+        if expected_type == actual_type:
+            return InvalidFieldValueIssue(
+                path=path,
+                constraint=constraint or "schema_constraint",
+                expected_constraint="value satisfying the field schema",
+                actual_value_kind=actual_type,
+                reason=reason,
+            )
+        return WrongFieldTypeIssue(
+            path=path,
+            expected_type=expected_type,
+            actual_type=actual_type,
+            reason=reason,
+        )
+    issue_types: dict[str, type[ConstraintValidationIssue]] = {
+        "invalid_field_value": InvalidFieldValueIssue,
+        "missing_required_field": MissingRequiredFieldIssue,
+        "unknown_candidate_id": UnknownCandidateIdIssue,
+        "duplicate_candidate_id": DuplicateCandidateIdIssue,
+        "invalid_repository_path": InvalidRepositoryPathIssue,
+        "additional_property": AdditionalPropertyIssue,
+        "invalid_schema_version": InvalidSchemaVersionIssue,
+        "array_limit_exceeded": ArrayLimitExceededIssue,
+        "string_limit_exceeded": StringLimitExceededIssue,
+        "semantic_constraint_failed": SemanticConstraintFailedIssue,
+    }
+    issue_type = issue_types.get(code, GenericValidationIssue)
+    return issue_type(
+        code=code,
+        path=path,
+        constraint=constraint or code,
+        expected_constraint=expected or "value satisfying the response contract",
+        actual_value_kind=actual or "unknown",
+        reason=reason,
+    )
+
+
 def _format_issue(issue: ValidationIssue) -> str:
+    if issue.path is None:
+        return "validation_issue_details_missing"
     details = [issue.path]
-    if issue.expected is not None:
-        details.append(f"expected={issue.expected}")
-    if issue.actual is not None:
-        details.append(f"actual={issue.actual}")
+    if isinstance(issue, WrongFieldTypeIssue):
+        details.extend(
+            (
+                f"expected_type={issue.expected_type}",
+                f"actual_type={issue.actual_type}",
+            )
+        )
+    elif isinstance(issue, ConstraintValidationIssue):
+        details.extend(
+            (
+                f"constraint={issue.constraint}",
+                f"reason={issue.reason}",
+            )
+        )
     return " ".join(details)
 
 
@@ -1886,9 +2230,7 @@ def _numeric_normalization_actions(
             for index, (left, right) in enumerate(
                 zip(original, converted, strict=False)
             )
-            for action in _numeric_normalization_actions(
-                left, right, (*path, index)
-            )
+            for action in _numeric_normalization_actions(left, right, (*path, index))
         )
     return ()
 
@@ -1949,9 +2291,7 @@ def _schema_at_location(schema: dict[str, Any], location: Sequence[object]) -> o
         else:
             properties = current.get("properties", {})
             current = (
-                properties.get(str(part), {})
-                if isinstance(properties, dict)
-                else {}
+                properties.get(str(part), {}) if isinstance(properties, dict) else {}
             )
     if isinstance(current, dict):
         reference = current.get("$ref")
@@ -1967,20 +2307,41 @@ def _pydantic_issue(
     error_type = str(error.get("type", "validation_error"))
     actual_value = error.get("input")
     field_schema = _schema_at_location(schema, location)
+    path = _json_pointer(location) if location else None
+    reason = str(error.get("msg", "structured response validation failed"))[:500]
     if error_type == "missing":
-        code = "missing_required_field"
-        actual = "missing"
-    elif error_type == "extra_forbidden":
-        code = "additional_property"
-        actual = _json_type(actual_value)
-    elif "too_long" in error_type:
+        return _validation_issue(
+            "missing_required_field",
+            path,
+            expected=f"required {_schema_type(field_schema)} field",
+            actual="missing",
+            reason=reason,
+            constraint="required",
+        )
+    if error_type == "extra_forbidden":
+        return _validation_issue(
+            "additional_property",
+            path,
+            expected="property declared by the closed response schema",
+            actual=_json_type(actual_value),
+            reason=reason,
+            constraint="additional_properties_forbidden",
+        )
+    if "too_long" in error_type:
         code = (
             "array_limit_exceeded"
             if isinstance(actual_value, (list, tuple))
             else "string_limit_exceeded"
         )
-        actual = _json_type(actual_value)
-    elif any(
+        return _validation_issue(
+            code,
+            path,
+            expected=_schema_constraint(field_schema, code),
+            actual=_json_type(actual_value),
+            reason=reason,
+            constraint="max_items" if code.startswith("array") else "max_length",
+        )
+    type_error = any(
         marker in error_type
         for marker in (
             "_type",
@@ -1992,19 +2353,60 @@ def _pydantic_issue(
             "float_",
             "bool_",
         )
-    ):
-        code = "wrong_field_type"
-        actual = _json_type(actual_value)
-    else:
-        code = "invalid_field_value"
-        actual = _json_type(actual_value)
-    return ValidationIssue(
-        code=code,
-        path=_json_pointer(location),
-        expected=_schema_type(field_schema),
-        actual=actual,
-        message=str(error.get("msg", "structured response validation failed"))[:500],
     )
+    expected_type = _schema_type(field_schema)
+    actual_type = _json_type(actual_value)
+    if type_error and expected_type != actual_type:
+        return _validation_issue(
+            "wrong_field_type",
+            path,
+            expected=expected_type,
+            actual=actual_type,
+            reason=reason,
+        )
+    if path is None:
+        return _validation_issue(
+            "validation_issue_details_missing",
+            None,
+            expected="validator-provided field path and constraint",
+            actual=actual_type,
+            reason="validation_issue_details_missing",
+            constraint="diagnostic_details_available",
+        )
+    return _validation_issue(
+        "invalid_field_value",
+        path,
+        expected=_schema_constraint(field_schema, error_type),
+        actual=actual_type,
+        reason=reason,
+        constraint=_safe_constraint_name(error_type),
+    )
+
+
+def _schema_constraint(schema: object, fallback: str) -> str:
+    if not isinstance(schema, dict):
+        return fallback
+    fields = tuple(
+        f"{key}={schema[key]}"
+        for key in (
+            "const",
+            "enum",
+            "minimum",
+            "maximum",
+            "minLength",
+            "maxLength",
+            "minItems",
+            "maxItems",
+            "pattern",
+        )
+        if key in schema
+    )
+    return ",".join(fields) if fields else fallback
+
+
+def _safe_constraint_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", value.casefold()).strip("_")
+    return (normalized or "schema_constraint")[:100]
 
 
 def _safe_issue_data(issues: Sequence[ValidationIssue]) -> dict[str, Any]:
@@ -2015,14 +2417,36 @@ def _safe_issue_data(issues: Sequence[ValidationIssue]) -> dict[str, Any]:
             "validation_issue_paths": [],
             "expected_types": [],
             "actual_json_types": [],
+            "failed_constraints": [],
+            "safe_reasons": [],
         }
-    return {
+    result: dict[str, Any] = {
         "validation_issue_count": len(issues),
         "validation_issue_paths": [item.path for item in issues],
         "validation_issue_codes": [item.code for item in issues],
-        "expected_types": [item.expected for item in issues],
-        "actual_json_types": [item.actual for item in issues],
+        "expected_types": [
+            item.expected_type
+            for item in issues
+            if isinstance(item, WrongFieldTypeIssue)
+        ],
+        "actual_json_types": [
+            item.actual_type for item in issues if isinstance(item, WrongFieldTypeIssue)
+        ],
+        "failed_constraints": [
+            item.constraint
+            for item in issues
+            if isinstance(item, ConstraintValidationIssue)
+        ],
+        "actual_value_kinds": [
+            item.actual_value_kind
+            for item in issues
+            if isinstance(item, ConstraintValidationIssue)
+        ],
+        "safe_reasons": [item.reason for item in issues],
     }
+    if any(item.path is None for item in issues):
+        result["validation_issue_details_missing"] = True
+    return result
 
 
 def _response_size(value: object) -> int:
@@ -2067,51 +2491,323 @@ def _repair_request(
     original: ModelRequest,
     error: StructuredResponseError,
     *,
+    previous_response: str | bytes | None,
     attempt: int,
     maximum: int,
-) -> ModelRequest:
+) -> RepairRequestPlan:
     issues = error.issues or (
-        ValidationIssue(
-            code="internal_conversion_failure",
-            path="/",
+        _validation_issue(
+            "validation_issue_details_missing",
+            None,
             expected="field-level diagnostics",
             actual="missing",
-            message="validation_issue_details_missing",
+            reason="validation_issue_details_missing",
+            constraint="diagnostic_details_available",
         ),
     )
-    issue_lines = "\n".join(
-        f"- code={item.code} path={item.path} "
-        f"expected={item.expected or 'schema-defined'} "
-        f"actual={item.actual or 'unknown'}"
-        for item in issues[:50]
+    issue_lines = "\n".join(_compact_issue_line(item) for item in issues[:50])
+    strategy, instruction = {
+        1: (
+            "exact_paths_and_schema",
+            "Correct every listed validation path using the exact compact schema.",
+        ),
+        2: (
+            "correct_previous_full_object",
+            "Correct the private previous JSON and return the complete object.",
+        ),
+        3: (
+            "allowed_ids_required_template",
+            "Use only allowed candidate IDs and follow the required-field template.",
+        ),
+        4: (
+            "plain_json_local_validation",
+            (
+                "Return a plain JSON object; strict local validation remains "
+                "authoritative."
+            ),
+        ),
+        5: (
+            "smallest_task_valid_object",
+            "Return the smallest task-valid object containing required fields only.",
+        ),
+    }.get(
+        attempt,
+        (
+            "smallest_task_valid_object",
+            "Return the smallest task-valid object containing required fields only.",
+        ),
     )
-    progression = {
-        1: "Use the exact field names and JSON types from the supplied schema.",
-        2: "Regenerate the complete compact object using exact field names only.",
-        3: "Prefer required fields and omit optional fields that are not needed.",
-        4: "Return a plain JSON object compatible with local schema validation.",
-        5: "Return the minimum complete valid object without inventing unknown data.",
-    }.get(attempt, "Return the minimum complete valid object.")
+    schema = original.response_schema
+    compact_schema = _compact_response_schema(schema)
+    allowed_ids = _allowed_candidate_ids(original.trusted_code_map_facts)
+    required_fields = _required_field_paths(schema)
+    allowed_enums = _allowed_enum_values(schema)
+    template = _minimal_required_template(schema)
+    previous = _previous_response_policy(
+        previous_response,
+        include=attempt == 2,
+    )
     contract = (
-        f"\n\n<STRUCTURED_RESPONSE_REPAIR attempt={attempt} maximum={maximum}>\n"
-        "Correction: the previous provider response was rejected. Preserve only "
-        "valid information "
-        "and regenerate the complete corrected object, not a patch.\n"
-        f"{progression}\nValidation issues:\n{issue_lines}\n"
-        "Return one JSON object only. Do not return Markdown fences. Do not explain "
-        "the correction. Do not include reasoning. Do not quote the schema or source "
-        "contents. Do not add fields outside the schema.\n"
+        f"<STRUCTURED_RESPONSE_REPAIR attempt={attempt} maximum={maximum} "
+        f"strategy={strategy}>\n"
+        "Correction: the previous provider response was rejected.\n"
+        f"{instruction}\n"
+        f"Compact original task:\n{original.analysis_task[:4_000]}\n"
+        f"Validation issues:\n{issue_lines}\n"
+        "Exact compact response schema:\n"
+        f"{_canonical_json(compact_schema)}\n"
+        f"Required fields: {_canonical_json(required_fields)}\n"
+        f"Allowed enum values: {_canonical_json(allowed_enums)}\n"
+        f"Allowed candidate IDs: {_canonical_json(allowed_ids)}\n"
+        f"Minimal required-field template: {_canonical_json(template)}\n"
+        "Return one corrected full JSON object only. Do not return a patch, Markdown, "
+        "reasoning, repository records, paths in place of candidate IDs, or fields "
+        "outside the schema.\n"
         "</STRUCTURED_RESPONSE_REPAIR>"
     )
-    return replace(
+    contexts = (
+        (UntrustedModelContext.from_text("previous-invalid-response", previous.text),)
+        if previous.included and previous.text is not None
+        else ()
+    )
+    schema_mode: Literal["json_schema", "json_object", "plain_json"] = (
+        "plain_json" if attempt >= 4 else "json_schema"
+    )
+    request = replace(
         original,
-        analysis_task=original.analysis_task + contract,
+        analysis_task=contract,
+        trusted_code_map_facts={"repair_attempt": attempt},
+        untrusted_sources=(),
+        untrusted_contexts=contexts,
+        schema_mode=schema_mode,
         metadata={
             **original.metadata,
             "json_repair_attempt": str(attempt),
             "json_repair_max_attempts": str(maximum),
+            "repair_strategy": strategy,
+            "schema_mode": schema_mode,
         },
     )
+    fingerprint_material = "\n".join(
+        message.content for message in request.messages(include_response_schema=True)
+    )
+    return RepairRequestPlan(
+        request=request,
+        strategy=strategy,
+        previous_response_included=previous.included,
+        previous_response_bytes=previous.byte_count,
+        omission_reason=previous.omission_reason,
+        prompt_fingerprint=hashlib.sha256(
+            fingerprint_material.encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PreviousResponsePolicy:
+    included: bool
+    byte_count: int
+    omission_reason: str | None
+    text: str | None = None
+
+
+def _previous_response_policy(
+    value: str | bytes | None, *, include: bool
+) -> _PreviousResponsePolicy:
+    if value is None:
+        return _PreviousResponsePolicy(False, 0, "response_unavailable")
+    if isinstance(value, bytes):
+        byte_count = len(value)
+        try:
+            text = value.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return _PreviousResponsePolicy(False, byte_count, "invalid_utf8")
+    else:
+        text = value
+        byte_count = len(text.encode("utf-8", errors="replace"))
+    if not include:
+        return _PreviousResponsePolicy(False, byte_count, "strategy_omits_response")
+    if byte_count > MAX_PREVIOUS_RESPONSE_BYTES:
+        return _PreviousResponsePolicy(False, byte_count, "byte_limit_exceeded")
+    if _estimate_tokens(byte_count) > MAX_PREVIOUS_RESPONSE_TOKENS:
+        return _PreviousResponsePolicy(False, byte_count, "token_limit_exceeded")
+    try:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, _InvalidJsonError):
+        return _PreviousResponsePolicy(False, byte_count, "malformed_json")
+    if not isinstance(parsed, dict):
+        return _PreviousResponsePolicy(False, byte_count, "irrelevant_response_shape")
+    if any(marker in text for marker in ("<UNTRUSTED_SOURCE_", "<ANALYSIS_TASK>")):
+        return _PreviousResponsePolicy(False, byte_count, "unsafe_provider_material")
+    redacted = _redact_sensitive_json(parsed)
+    safe_text = _canonical_json(redacted)
+    return _PreviousResponsePolicy(True, byte_count, None, safe_text)
+
+
+def _redact_sensitive_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]"
+                if _SENSITIVE_METADATA.search(str(key))
+                else _redact_sensitive_json(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_json(item) for item in value]
+    return value
+
+
+def _compact_issue_line(issue: ValidationIssue) -> str:
+    path = issue.path or "validation_issue_details_missing"
+    if isinstance(issue, WrongFieldTypeIssue):
+        return (
+            f"- code={issue.code} path={path} expected_type={issue.expected_type} "
+            f"actual_type={issue.actual_type} reason={issue.reason}"
+        )
+    if isinstance(issue, ConstraintValidationIssue):
+        return (
+            f"- code={issue.code} path={path} constraint={issue.constraint} "
+            f"expected_constraint={issue.expected_constraint} "
+            f"actual_value_kind={issue.actual_value_kind} reason={issue.reason}"
+        )
+    return f"- code={issue.code} path={path} reason={issue.reason}"
+
+
+def _allowed_candidate_ids(facts: Mapping[str, Any]) -> list[str]:
+    direct = facts.get("allowed_candidate_ids")
+    if isinstance(direct, (list, tuple)):
+        return sorted({item for item in direct if isinstance(item, str)})[:100]
+    candidates = facts.get("candidates")
+    if not isinstance(candidates, (list, tuple)):
+        return []
+    return sorted(
+        {
+            item["candidate_id"]
+            for item in candidates
+            if isinstance(item, dict) and isinstance(item.get("candidate_id"), str)
+        }
+    )[:100]
+
+
+def _required_field_paths(schema: dict[str, Any]) -> list[str]:
+    required = schema.get("required", [])
+    return [f"/{item}" for item in required if isinstance(item, str)]
+
+
+def _compact_response_schema(value: Any) -> Any:
+    """Remove annotation-only schema keys while retaining every constraint."""
+
+    if isinstance(value, dict):
+        annotation_keys = {"title", "description", "default", "examples"}
+        return {
+            key: _compact_response_schema(item)
+            for key, item in value.items()
+            if key not in annotation_keys
+        }
+    if isinstance(value, list):
+        return [_compact_response_schema(item) for item in value]
+    return value
+
+
+def _allowed_enum_values(schema: Any, path: str = "") -> dict[str, list[Any]]:
+    if not isinstance(schema, dict):
+        return {}
+    result: dict[str, list[Any]] = {}
+    enum = schema.get("enum")
+    if isinstance(enum, list):
+        result[path or "/"] = enum[:50]
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for key, nested in properties.items():
+            result.update(_allowed_enum_values(nested, f"{path}/{key}"))
+    items = schema.get("items")
+    if isinstance(items, dict):
+        result.update(_allowed_enum_values(items, f"{path}/*"))
+    return result
+
+
+def _minimal_required_template(schema: Any) -> Any:
+    if not isinstance(schema, dict):
+        return None
+    if "const" in schema:
+        return schema["const"]
+    required = schema.get("required")
+    properties = schema.get("properties")
+    if isinstance(required, list) and isinstance(properties, dict):
+        return {
+            key: _minimal_required_template(properties.get(key, {}))
+            for key in required
+            if isinstance(key, str)
+        }
+    value_type = schema.get("type")
+    if not isinstance(value_type, str):
+        return None
+    return {
+        "array": [],
+        "object": {},
+        "string": "",
+        "integer": 0,
+        "number": 0,
+        "boolean": False,
+        "null": None,
+    }.get(value_type)
+
+
+def _response_issue_fingerprint(
+    issues: Sequence[ValidationIssue], response: str | bytes | None
+) -> str:
+    material = {
+        "issues": sorted(_normalized_issue(item) for item in issues),
+        "response_shape": _normalized_response_shape(response),
+    }
+    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+
+
+def _failure_fingerprint(
+    issues: Sequence[ValidationIssue],
+    response: str | bytes | None,
+    strategy: str,
+    schema_mode: str,
+) -> str:
+    material = {
+        "response_issue": _response_issue_fingerprint(issues, response),
+        "repair_strategy": strategy,
+        "schema_mode": schema_mode,
+    }
+    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+
+
+def _normalized_issue(issue: ValidationIssue) -> str:
+    return _canonical_json(issue.model_dump(mode="json"))
+
+
+def _normalized_response_shape(value: str | bytes | None) -> Any:
+    if value is None:
+        return "unavailable"
+    try:
+        text = (
+            value.decode("utf-8", errors="strict")
+            if isinstance(value, bytes)
+            else value
+        )
+        parsed = json.loads(text)
+    except (UnicodeError, json.JSONDecodeError):
+        return "malformed"
+    return _json_shape(parsed)
+
+
+def _json_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_shape(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [_json_shape(item) for item in value[:20]]
+    return _json_type(value)
 
 
 def redact_secrets(text: str, secrets: Sequence[str]) -> str:
@@ -2535,10 +3231,14 @@ def _redacted_provider_error(
     message = redact_secrets(str(error), secrets)
     if message == str(error):
         return error
+    if isinstance(error, StructuredResponseError):
+        return StructuredResponseError(message, issues=error.issues)
     return type(error)(message)
 
 
 __all__ = [
+    "AdditionalPropertyIssue",
+    "ArrayLimitExceededIssue",
     "DEFAULT_MAX_JSON_REPAIR_ATTEMPTS",
     "DEFAULT_MAX_RESPONSE_BYTES",
     "MAX_JSON_REPAIR_ATTEMPTS",
@@ -2549,12 +3249,17 @@ __all__ = [
     "MAX_TRUSTED_FACT_BYTES",
     "MAX_UNTRUSTED_CONTEXT_BYTES",
     "MAX_UNTRUSTED_SOURCE_BYTES",
+    "DuplicateCandidateIdIssue",
+    "InvalidFieldValueIssue",
+    "InvalidRepositoryPathIssue",
+    "InvalidSchemaVersionIssue",
     "ModelMessage",
     "ModelProvider",
     "ModelProviderError",
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
+    "MissingRequiredFieldIssue",
     "ProviderCancelledError",
     "ProviderCapabilities",
     "ProviderConfiguration",
@@ -2567,12 +3272,17 @@ __all__ = [
     "ProviderUnavailableError",
     "RetryClassification",
     "StructuredResponseError",
+    "StructuredOutputJsonObjectUnsupportedError",
     "StructuredTextResponse",
     "StructuredValidationResult",
+    "SemanticConstraintFailedIssue",
+    "StringLimitExceededIssue",
     "UntrustedSource",
     "UntrustedModelContext",
     "UnsupportedResponseSchemaError",
     "ValidationIssue",
+    "UnknownCandidateIdIssue",
+    "WrongFieldTypeIssue",
     "classify_retry",
     "parse_structured_response",
     "validate_structured_response",

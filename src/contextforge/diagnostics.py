@@ -161,7 +161,7 @@ def summarize_operation(
         provider_models=tuple(cast(dict[str, str], item) for item in providers),
         context_windows=tuple(context_windows),
         budget_breakdowns=tuple(unique_budgets),
-        request_count=sum(item.event == "provider.request.started" for item in ordered),
+        request_count=sum(item.event == "budget.calculated" for item in ordered),
         estimated_token_total=estimated_total,
         actual_input_tokens=_sum_metric(ordered, "provider_input_tokens"),
         actual_output_tokens=_sum_metric(ordered, "provider_output_tokens"),
@@ -195,8 +195,9 @@ def summarize_operation(
         json_repair_count=sum(
             item.event == "response.repair.scheduled" for item in ordered
         ),
-        total_provider_calls=sum(
-            item.event == "provider.request.started" for item in ordered
+        total_provider_calls=(
+            sum(item.event == "provider.http.dispatch" for item in ordered)
+            or sum(item.event == "provider.request.started" for item in ordered)
         ),
     )
 

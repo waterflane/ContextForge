@@ -414,9 +414,7 @@ def _apply_model_environment(
         structured = models.get("structured_response")
         structured_values = dict(structured) if isinstance(structured, dict) else {}
         try:
-            structured_values["max_repair_attempts"] = max(
-                0, min(10, int(raw_repairs))
-            )
+            structured_values["max_repair_attempts"] = max(0, min(10, int(raw_repairs)))
         except ValueError as exc:
             raise ProjectConfigError(
                 "environment variable CONTEXTFORGE_JSON_REPAIR_ATTEMPTS is invalid"
@@ -491,9 +489,7 @@ def _record_configuration_sources(
     project._value_sources["models.context_window"] = source
     project._value_candidates["models.context_window"] = candidates
 
-    shared_repairs = _nested_value(
-        shared_payload, "models", "structured_response"
-    )
+    shared_repairs = _nested_value(shared_payload, "models", "structured_response")
     local_repairs = _nested_value(local_payload, "models", "structured_response")
     shared_repair_value = (
         shared_repairs.get("max_repair_attempts")
@@ -602,9 +598,22 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
     purpose = request.purpose
     if purpose == "repository-discovery":
         selected = request.trusted_code_map_facts.get("selected", [])
+        candidates = request.trusted_code_map_facts.get("candidates", [])
         allowed = request.trusted_code_map_facts.get("all_allowed_paths", [])
         actions: list[dict[str, object]] = []
-        if not selected and isinstance(allowed, list) and allowed:
+        if not selected and isinstance(candidates, list) and candidates:
+            first = candidates[0]
+            if isinstance(first, dict) and isinstance(first.get("candidate_id"), str):
+                actions.append(
+                    {
+                        "schema_version": 1,
+                        "action_id": f"fixture-select-{call_index}",
+                        "kind": "call_tool",
+                        "tool_name": "select_candidates",
+                        "arguments": {"candidate_ids": [first["candidate_id"]]},
+                    }
+                )
+        elif not selected and isinstance(allowed, list) and allowed:
             actions.append(
                 {
                     "schema_version": 1,

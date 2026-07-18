@@ -68,6 +68,7 @@ from contextforge.models import (
     ModelProviderError,
     ModelRequest,
     ProviderCancelledError,
+    SemanticConstraintFailedIssue,
     StructuredResponseError,
     UntrustedModelContext,
     UntrustedSource,
@@ -1768,6 +1769,7 @@ def _validate_raw_file_claims(
         _raw_file_claims(raw),
         code_map,
         allowed_range,
+        issue_path="/file",
         source_line_bytes=source_line_bytes,
     )
 
@@ -1783,6 +1785,7 @@ def _validate_raw_symbol_claims(
         _raw_symbol_claims(raw),
         code_map,
         allowed_range,
+        issue_path="/symbols",
         source_line_bytes=source_line_bytes,
     )
 
@@ -1832,19 +1835,25 @@ def _validate_claims(
     code_map: FileCodeMap,
     allowed_range: SourceRange | None,
     *,
+    issue_path: str,
     source_line_bytes: tuple[int, ...] | None,
 ) -> None:
     known_facts = _known_fact_ids(code_map)
     for claim in claims:
         for evidence in claim.evidence:
             if any(fact_id not in known_facts for fact_id in evidence.fact_ids):
-                raise StructuredResponseError("semantic evidence names an unknown fact")
+                raise _semantic_constraint_error(
+                    issue_path,
+                    "known_fact_id",
+                    "semantic evidence names an unknown fact",
+                )
             if evidence.source_range is not None:
                 _validate_evidence_range(
                     evidence.source_range,
                     code_map,
                     allowed_range=allowed_range,
                     source_line_bytes=source_line_bytes,
+                    issue_path=issue_path,
                 )
 
 
@@ -1854,20 +1863,48 @@ def _validate_evidence_range(
     *,
     allowed_range: SourceRange | None,
     source_line_bytes: tuple[int, ...] | None,
+    issue_path: str,
 ) -> None:
     if source_range.start_line > max(
         code_map.line_count, 1
     ) or source_range.end_line > max(code_map.line_count, 1):
-        raise StructuredResponseError("semantic evidence range exceeds the source")
+        raise _semantic_constraint_error(
+            issue_path,
+            "evidence_range_within_source",
+            "semantic evidence range exceeds the source",
+        )
     if source_line_bytes is not None and (
         source_range.start_column > source_line_bytes[source_range.start_line - 1]
         or source_range.end_column > source_line_bytes[source_range.end_line - 1]
     ):
-        raise StructuredResponseError("semantic evidence column exceeds the source")
-    if allowed_range is not None and not _range_contains(allowed_range, source_range):
-        raise StructuredResponseError(
-            "semantic evidence range is outside the supplied source excerpt"
+        raise _semantic_constraint_error(
+            issue_path,
+            "evidence_column_within_source",
+            "semantic evidence column exceeds the source",
         )
+    if allowed_range is not None and not _range_contains(allowed_range, source_range):
+        raise _semantic_constraint_error(
+            issue_path,
+            "evidence_range_within_allowed_excerpt",
+            "semantic evidence range is outside the supplied source excerpt",
+        )
+
+
+def _semantic_constraint_error(
+    path: str, constraint: str, reason: str
+) -> StructuredResponseError:
+    return StructuredResponseError(
+        reason,
+        issues=(
+            SemanticConstraintFailedIssue(
+                path=path,
+                constraint=constraint,
+                expected_constraint="semantic evidence satisfies the request scope",
+                actual_value_kind="object",
+                reason=reason,
+            ),
+        ),
+    )
 
 
 def _deduplicate_claims(values: Iterable[_RawClaim]) -> tuple[_RawClaim, ...]:

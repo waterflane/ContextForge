@@ -9,6 +9,7 @@ from contextforge.discovery.models import (
     DiscoveryBudget,
     DiscoveryBudgetUsage,
     DiscoveryCandidate,
+    DiscoveryCandidateRecord,
     DiscoveryLineRange,
     DiscoveryMode,
     DiscoveryObservation,
@@ -16,6 +17,7 @@ from contextforge.discovery.models import (
     DiscoveryRunRecord,
     DiscoveryState,
     FinalContextSelection,
+    IndexedContextSelection,
     SelectionReason,
 )
 from contextforge.discovery.session import (
@@ -52,6 +54,7 @@ __all__ = [
     "DiscoveryBudgetUsage",
     "DiscoveryCancelledError",
     "DiscoveryCandidate",
+    "DiscoveryCandidateRecord",
     "DiscoveryError",
     "DiscoveryKnowledge",
     "DiscoveryLimitError",
@@ -67,6 +70,7 @@ __all__ = [
     "DiscoveryToolExecutor",
     "DiscoveryUnavailableError",
     "FinalContextSelection",
+    "IndexedContextSelection",
     "GitDiffProvider",
     "GitDiffResult",
     "SelectionReason",

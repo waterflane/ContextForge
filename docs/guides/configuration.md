@@ -50,6 +50,8 @@ Then `contextforge diagnostics config .` reports
 index build/update, repository-map synthesis, context suggestion, automatic
 context packaging, and prompt compilation workflows. A one-time
 `--context-window` option overrides one command only and is not persistent.
+ContextForge does not inherit the value from LM Studio's UI unless provider
+metadata discovery explicitly returns it; configure the TOML value otherwise.
 
 Structured-response repair precedence is CLI `--json-repair-attempts`,
 `CONTEXTFORGE_JSON_REPAIR_ATTEMPTS`, `config.local.toml`, `config.toml`, then

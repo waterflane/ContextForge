@@ -364,9 +364,14 @@ def test_invalid_model_outputs_are_failed_never_complete(
             store_module, "_replace_directory_for_publication", checked_publish
         )
 
+    invalid_response: str | None = None
+
     def invalid(request: ModelRequest, index: int) -> str:
+        nonlocal invalid_response
         if failure == "malformed":
             return "not json"
+        if invalid_response is not None:
+            return invalid_response
         payload = json.loads(_valid_response(request, index))
         if failure == "invalid_evidence":
             payload["file"]["primary_purpose"]["evidence"][0]["source_range"][
@@ -382,7 +387,8 @@ def test_invalid_model_outputs_are_failed_never_complete(
             ]
         else:
             payload["symbols"][0]["symbol_id"] = "symbol:unknown"
-        return json.dumps(payload)
+        invalid_response = json.dumps(payload)
+        return invalid_response
 
     result = _build_semantics(snapshot, _provider(responder=invalid))
 
@@ -762,14 +768,19 @@ def test_combined_response_rejects_symbol_evidence_outside_symbol(
         {"app.py": "def first():\n    return 1\n\ndef second():\n    return 2\n"},
     )
 
+    invalid_response: str | None = None
+
     def misplaced(request: ModelRequest, index: int) -> str:
-        payload = json.loads(_valid_response(request, index))
-        symbols = request.trusted_code_map_facts["symbols"]
-        assert isinstance(symbols, list)
-        payload["symbols"][0]["behavioral_purpose"]["evidence"][0]["source_range"] = (
-            symbols[1]["declaration_range"]
-        )
-        return json.dumps(payload)
+        nonlocal invalid_response
+        if invalid_response is None:
+            payload = json.loads(_valid_response(request, index))
+            symbols = request.trusted_code_map_facts["symbols"]
+            assert isinstance(symbols, list)
+            payload["symbols"][0]["behavioral_purpose"]["evidence"][0][
+                "source_range"
+            ] = symbols[1]["declaration_range"]
+            invalid_response = json.dumps(payload)
+        return invalid_response
 
     result = _build_semantics(snapshot, _provider(responder=misplaced))
 
