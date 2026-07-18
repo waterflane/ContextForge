@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from contextforge.models import (
+    DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
     DEFAULT_OLLAMA_ENDPOINT,
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    DEFAULT_OPERATION_TIMEOUT_SECONDS,
+    DEFAULT_READ_TIMEOUT_SECONDS,
     OPENAI_COMPATIBLE_PROVIDER_ID,
     FakeModelProvider,
     ModelProvider,
@@ -42,7 +49,22 @@ class ProjectModelSettings(_ConfigModel):
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT
     base_url: str | None = None
     model_id: str = Field(default=DEFAULT_MODEL_ID, alias="model")
-    timeout_seconds: float = 90.0
+    timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS
+    connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    read_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
+    operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS
+    context_window: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        ge=1_024,
+        le=2_000_000,
+        strict=True,
+    )
+    context_safety_margin: int = Field(
+        default=DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
+        ge=64,
+        le=16_384,
+        strict=True,
+    )
     max_response_bytes: int = 1_000_000
     concurrency_limit: int = 2
     retry_limit: int = 2
@@ -74,6 +96,7 @@ def load_project_configuration(
     *,
     config_path: Path | None = None,
     require_file: bool = False,
+    environment: Mapping[str, str] | None = None,
 ) -> ProjectConfiguration:
     """Load bounded TOML without creating or rewriting project configuration."""
 
@@ -85,23 +108,18 @@ def load_project_configuration(
     )
     if not requested.is_absolute():
         requested = Path.cwd() / requested
+    payload = _read_toml(requested, required=require_file or config_path is not None)
+    if config_path is None:
+        local_payload = _read_toml(
+            root / ".contextforge" / "config.local.toml", required=False
+        )
+        payload = _merge_config(payload, local_payload)
+    payload = _apply_model_environment(
+        payload, os.environ if environment is None else environment
+    )
     try:
-        data = requested.read_bytes()
-    except FileNotFoundError:
-        if require_file or config_path is not None:
-            raise ProjectConfigError(
-                f"configuration file does not exist: {requested}"
-            ) from None
-        return ProjectConfiguration()
-    except OSError as exc:
-        raise ProjectConfigError("unable to read project configuration") from exc
-    if len(data) > MAX_CONFIG_BYTES:
-        raise ProjectConfigError("project configuration exceeds its byte limit")
-    try:
-        decoded = data.decode("utf-8", errors="strict")
-        payload = tomllib.loads(decoded)
         return ProjectConfiguration.model_validate(payload)
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValidationError) as exc:
+    except ValidationError as exc:
         raise ProjectConfigError("project configuration is invalid") from exc
 
 
@@ -113,6 +131,10 @@ def resolve_provider_configuration(
     base_url: str | None = None,
     concurrency: int | None = None,
     timeout_seconds: float | None = None,
+    context_window: int | None = None,
+    connect_timeout_seconds: float | None = None,
+    read_timeout_seconds: float | None = None,
+    operation_timeout_seconds: float | None = None,
     local_only: bool | None = None,
 ) -> ProviderConfiguration | None:
     """Apply command overrides and return a secret-free provider configuration."""
@@ -150,6 +172,25 @@ def resolve_provider_configuration(
         "timeout_seconds": (
             settings.timeout_seconds if timeout_seconds is None else timeout_seconds
         ),
+        "connect_timeout_seconds": (
+            settings.connect_timeout_seconds
+            if connect_timeout_seconds is None
+            else connect_timeout_seconds
+        ),
+        "read_timeout_seconds": (
+            settings.read_timeout_seconds
+            if read_timeout_seconds is None
+            else read_timeout_seconds
+        ),
+        "operation_timeout_seconds": (
+            settings.operation_timeout_seconds
+            if operation_timeout_seconds is None
+            else operation_timeout_seconds
+        ),
+        "context_window": (
+            settings.context_window if context_window is None else context_window
+        ),
+        "context_safety_margin": settings.context_safety_margin,
         "max_response_bytes": settings.max_response_bytes,
         "concurrency_limit": (
             settings.concurrency_limit if concurrency is None else concurrency
@@ -166,6 +207,65 @@ def resolve_provider_configuration(
         return ProviderConfiguration.model_validate(values)
     except ValidationError as exc:
         raise ProjectConfigError("provider configuration is invalid") from exc
+
+
+def _read_toml(path: Path, *, required: bool) -> dict[str, object]:
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        if required:
+            raise ProjectConfigError(
+                f"configuration file does not exist: {path}"
+            ) from None
+        return {}
+    except OSError as exc:
+        raise ProjectConfigError("unable to read project configuration") from exc
+    if len(data) > MAX_CONFIG_BYTES:
+        raise ProjectConfigError("project configuration exceeds its byte limit")
+    try:
+        value = tomllib.loads(data.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ProjectConfigError("project configuration is invalid") from exc
+    return dict(value)
+
+
+def _merge_config(
+    base: Mapping[str, object], override: Mapping[str, object]
+) -> dict[str, object]:
+    result = dict(base)
+    for key, value in override.items():
+        existing = result.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            result[key] = _merge_config(existing, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _apply_model_environment(
+    payload: Mapping[str, object], environment: Mapping[str, str]
+) -> dict[str, object]:
+    result = dict(payload)
+    raw_models = result.get("models")
+    models: dict[str, object] = dict(raw_models) if isinstance(raw_models, dict) else {}
+    numeric: tuple[tuple[str, str, type[int] | type[float]], ...] = (
+        ("CONTEXTFORGE_MODEL_CONTEXT_WINDOW", "context_window", int),
+        ("CONTEXTFORGE_MODEL_CONNECT_TIMEOUT", "connect_timeout_seconds", float),
+        ("CONTEXTFORGE_MODEL_READ_TIMEOUT", "read_timeout_seconds", float),
+        ("CONTEXTFORGE_MODEL_OPERATION_TIMEOUT", "operation_timeout_seconds", float),
+    )
+    for environment_name, field_name, converter in numeric:
+        raw = environment.get(environment_name)
+        if raw is None:
+            continue
+        try:
+            models[field_name] = converter(raw)
+        except ValueError as exc:
+            raise ProjectConfigError(
+                f"environment variable {environment_name} is invalid"
+            ) from exc
+    result["models"] = models
+    return result
 
 
 def create_model_provider(configuration: ProviderConfiguration) -> ModelProvider:
@@ -273,17 +373,15 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
                 "confidence": {"value": 0.5, "rationale": "Offline fixture."},
             }
         )
-    if purpose == "repository-architecture":
+    if purpose in {"repository-architecture", "repository-features"}:
+        match = re.search(r"Return scope_id '([^']+)' exactly", request.analysis_task)
+        scope_id = match.group(1) if match is not None else "fixture-repository"
         return json.dumps(
             {
                 "schema_version": 1,
-                "confidence": {"value": 0.5, "rationale": "Offline fixture."},
-            }
-        )
-    if purpose == "repository-features":
-        return json.dumps(
-            {
-                "schema_version": 1,
+                "scope_id": scope_id,
+                "title": "Offline fixture repository map",
+                "summary": "Deterministic offline repository overview.",
                 "confidence": {"value": 0.5, "rationale": "Offline fixture."},
             }
         )

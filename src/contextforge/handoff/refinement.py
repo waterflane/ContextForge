@@ -62,7 +62,7 @@ async def refine_task(
         },
         untrusted_sources=(),
         response_model=TaskRefinementResponse,
-        max_output_tokens=4_096,
+        max_output_tokens=512,
         max_response_bytes=256 * 1024,
         temperature=0.0,
         metadata={"prompt_version": TASK_REFINEMENT_PROMPT_VERSION},

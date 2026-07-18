@@ -70,6 +70,7 @@ from contextforge.models import (
     StructuredResponseError,
     UntrustedModelContext,
     UntrustedSource,
+    estimate_request_context,
     provider_error_details,
 )
 from contextforge.progress import (
@@ -1041,9 +1042,6 @@ async def analyze_file_semantics(
         ),
     )
     source = selected.blocks[0].text
-    excerpt, excerpt_ranges, input_truncated = _bounded_source_excerpt(
-        source, code_map, options.max_source_bytes_per_request
-    )
     category = _semantic_category(project_file)
     response_model = _response_model(category, analysis_route)
     output_budget = _output_token_budget(
@@ -1053,24 +1051,51 @@ async def analyze_file_semantics(
         analysis_route=analysis_route,
         ceiling=options.max_output_tokens,
     )
-    trusted_facts = _compact_codemap_facts(
-        code_map,
-        excerpt_ranges=excerpt_ranges,
-        category=category,
-        known_license=_detect_known_license(source) if category == "license" else None,
-    )
-    request = _request(
-        code_map,
-        purpose="file-semantics",
-        analysis_task=_compact_file_task(code_map.path, category, analysis_route),
-        trusted_facts=trusted_facts,
-        source=excerpt,
-        response_model=response_model,
-        options=options,
-        analyzer_kind=analyzer.analyzer_id,
-        output_token_budget=output_budget,
-        input_truncated=input_truncated,
-    )
+    excerpt_limit = options.max_source_bytes_per_request
+    max_fact_items = 100
+    while True:
+        excerpt, excerpt_ranges, input_truncated = _bounded_source_excerpt(
+            source, code_map, excerpt_limit
+        )
+        trusted_facts = _compact_codemap_facts(
+            code_map,
+            excerpt_ranges=excerpt_ranges,
+            category=category,
+            known_license=(
+                _detect_known_license(source) if category == "license" else None
+            ),
+            max_fact_items=max_fact_items,
+        )
+        request = _request(
+            code_map,
+            purpose="file-semantics",
+            analysis_task=_compact_file_task(code_map.path, category, analysis_route),
+            trusted_facts=trusted_facts,
+            source=excerpt,
+            response_model=response_model,
+            options=options,
+            analyzer_kind=analyzer.analyzer_id,
+            output_token_budget=output_budget,
+            input_truncated=input_truncated or max_fact_items < 100,
+        )
+        budget = estimate_request_context(request, provider.configuration)
+        if budget.fits:
+            request = replace(
+                request,
+                metadata={
+                    **request.metadata,
+                    "configured_context_window": str(budget.configured_context_window),
+                    "schema_overhead_tokens": str(budget.schema_overhead_tokens),
+                    "safety_margin_tokens": str(budget.safety_margin_tokens),
+                    "estimated_total_tokens": str(budget.estimated_total_tokens),
+                },
+            )
+            break
+        if excerpt_limit <= 64 and max_fact_items == 0:
+            # The shared runtime emits the final deterministic typed diagnostic.
+            break
+        excerpt_limit = max(64, excerpt_limit // 2)
+        max_fact_items = max(0, max_fact_items // 2)
     response = await provider.complete_structured(request, cancellation=cancellation)
     _validate_response_identity(response.provider_id, response.model_id, analyzer)
     raw, symbols = _compact_response_to_raw(
@@ -1276,10 +1301,11 @@ def _compact_codemap_facts(
     excerpt_ranges: tuple[SourceRange, ...],
     category: SemanticCategory,
     known_license: str | None,
+    max_fact_items: int = 100,
 ) -> dict[str, object]:
-    symbols = code_map.symbols[:100]
-    imports = code_map.imports[:50]
-    exports = code_map.exports[:50]
+    symbols = code_map.symbols[:max_fact_items]
+    imports = code_map.imports[: min(max_fact_items, 50)]
+    exports = code_map.exports[: min(max_fact_items, 50)]
     return {
         "path": code_map.path,
         "language": code_map.language,

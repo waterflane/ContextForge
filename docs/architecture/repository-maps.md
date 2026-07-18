@@ -21,18 +21,15 @@ relationship graph. It contains no model-written architectural description.
 
 `ArchitectureMap` is a model interpretation bound to the source snapshot,
 CodeMap facts digest, file-interpretation digest, global analyzer identity,
-prompt version, and analysis-options digest. Its typed entries are `ModuleRole`,
-`EntryPoint`, `DataFlow`, and `ExternalBoundary`. It also carries explicit test
-relationships from the deterministic overview, model-inferred relationships,
-diagnostics, evidence, confidence, and coverage.
+prompt version, and analysis-options digest. The provider-facing DTO is smaller
+than this internal model: validated concise signals become attributed internal
+diagnostics while deterministic relationships and test links are enriched from
+the verified overview. The model is not asked to reproduce source ranges.
 
-`FeatureMap` is a behavior-based model grouping. Every `FeatureArea` has a
-generated stable ID derived from the model's stable key and its canonical file
-and symbol membership, a title and description, participating files and
-symbols, related tests, evidence, confidence, and unresolved questions. It can
-therefore group poorly named files when their bounded structural and semantic
-summaries describe related behavior. A generated ID is practical provenance,
-not a promise that a materially changed feature keeps the same identity.
+`FeatureMap` derives bounded `FeatureArea` records from validated feature
+signals and cited paths. IDs and test membership are added deterministically.
+A generated ID is practical provenance, not a promise that a materially changed
+feature keeps the same identity.
 
 `RepositoryDiagnostic` labels deterministic limitations, model uncertainties,
 or operational failures by provenance. A valid map response proves only schema
@@ -59,10 +56,19 @@ target was outside the scanned snapshot.
 
 Global analysis never sends the full repository source in one request. It uses:
 
-1. deterministic package/module shards containing bounded CodeMap projections
+1. deterministic package/module shards of at most two files containing compact
+   CodeMap projections
    and, when available, bounded file and symbol semantic summaries;
 2. one or more strictly validated group-synthesis levels; and
 3. separate strictly validated repository architecture and feature passes.
+
+Every level is preflighted against the configured context window. Prior-summary
+context is shortened deterministically before dispatch if necessary. The
+model-facing schema requires version 1, a short scope ID, 160-character title,
+600-character summary, 240-character confidence rationale, no more than eight
+architecture/behavior/feature signals, six questions, and twelve compact
+evidence records. Each request allows at most 512 output tokens. This avoids the
+previous nested 50-100 item grammar and its optional source-range unions.
 
 Source text is absent from global requests. Prior file analyses and hierarchy
 outputs are framed as untrusted model context. Repository text and prior model
@@ -87,12 +93,15 @@ the previous global records, so repository maps must be synthesized again and
 deleted paths cannot survive in membership. A global prompt-version change also
 invalidates both semantic maps.
 
-The two final map passes fail independently. With no prior map, a valid map may
-be published while the malformed/failed sibling remains explicitly absent. If
+The two final map passes fail independently. In non-strict mode, a failed map or
+hierarchy is replaced by a valid deterministic degraded map containing verified
+overview relationships and an operational diagnostic; accepted per-file
+semantics remain in the published generation. If
 a complete previous map for the same facts exists and recovery is enabled, any
 failed replacement leaves that previous generation active and returns it with
 `recovered` status; it is never relabeled as output from the requested new
-prompt. Strict mode publishes nothing after any global-map failure.
+prompt. Strict mode publishes nothing after any global-map failure and restores
+the prior active generation.
 
 ## Limitations
 

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import SecretStr
 
 from contextforge.models.providers import (
+    ContextWindowExceededError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -26,6 +27,7 @@ from contextforge.models.providers import (
     ProviderTimeoutError,
     ProviderTransportResponse,
     ProviderUnavailableError,
+    StructuredOutputSchemaUnsupportedError,
     redact_secrets,
 )
 
@@ -66,12 +68,14 @@ class OpenAICompatibleModelProvider:
             )
         _validate_base_url(configuration)
         self.configuration = configuration
-        self._transport = transport or _request_json
+        self._transport = transport or self._default_transport
         self._environment = environment
         self._runtime = ProviderRuntime(configuration, environment=environment)
         self._model_verified = False
         self._model_verification_lock = asyncio.Lock()
         self._closed = False
+        self._structured_mode: str = "unknown"
+        self._structured_mode_lock = asyncio.Lock()
 
     @property
     def provider_id(self) -> str:
@@ -128,21 +132,58 @@ class OpenAICompatibleModelProvider:
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
         await self._ensure_model_available(credential)
+        mode = self._structured_mode
+        if mode == "unknown":
+            async with self._structured_mode_lock:
+                mode = self._structured_mode
+                if mode == "unknown":
+                    try:
+                        response = await self._complete_in_mode(
+                            request, credential, mode="json_schema"
+                        )
+                    except StructuredOutputSchemaUnsupportedError:
+                        self._structured_mode = "json_object"
+                    else:
+                        self._structured_mode = "json_schema"
+                        return response
+                    mode = self._structured_mode
+        try:
+            return await self._complete_in_mode(request, credential, mode=mode)
+        except StructuredOutputSchemaUnsupportedError:
+            if mode != "json_schema":
+                raise
+            async with self._structured_mode_lock:
+                self._structured_mode = "json_object"
+            return await self._complete_in_mode(request, credential, mode="json_object")
+
+    async def _complete_in_mode(
+        self,
+        request: ModelRequest,
+        credential: SecretStr | None,
+        *,
+        mode: str,
+    ) -> ProviderTransportResponse:
         messages = [
             message.model_dump(mode="json")
-            for message in request.messages(include_response_schema=False)
+            for message in request.messages(
+                include_response_schema=mode == "json_object"
+            )
         ]
         payload: dict[str, Any] = {
             "messages": messages,
             "model": self.configuration.model_id,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": request.operation_id,
-                    "schema": request.response_schema,
-                    "strict": True,
-                },
-            },
+            "response_format": (
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": request.operation_id,
+                        "schema": request.response_schema,
+                        "strict": True,
+                    },
+                }
+                if mode == "json_schema"
+                else {"type": "json_object"}
+            ),
             "stream": False,
             "temperature": request.temperature,
         }
@@ -156,10 +197,30 @@ class OpenAICompatibleModelProvider:
         )
         _raise_for_status(
             response,
-            operation="chat completion",
+            operation=(
+                "chat completion" if mode == "json_schema" else "chat completion JSON"
+            ),
             model_id=self.configuration.model_id,
         )
         return _parse_chat_completion(response.body)
+
+    async def _default_transport(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        max_response_bytes: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        return await _request_json(
+            method,
+            url,
+            body,
+            headers,
+            max_response_bytes,
+            connect_timeout=self.configuration.connect_timeout_seconds,
+            read_timeout=self.configuration.read_timeout_seconds,
+        )
 
     async def _ensure_model_available(self, credential: SecretStr | None) -> None:
         async with self._model_verification_lock:
@@ -202,7 +263,13 @@ class OpenAICompatibleModelProvider:
         limit = self.configuration.max_response_bytes + MAX_HTTP_HEADER_BYTES
         try:
             return await self._transport(method, url, body, headers, limit)
-        except (ProviderRequestError, ProviderUnavailableError):
+        except (
+            ProviderRequestError,
+            ProviderUnavailableError,
+            ProviderTimeoutError,
+            StructuredOutputSchemaUnsupportedError,
+            ContextWindowExceededError,
+        ):
             raise
         except Exception as exc:
             raise ProviderUnavailableError(
@@ -362,6 +429,7 @@ def _raise_for_status(
     if 200 <= status < 300:
         return
     detail = _safe_error_detail(response.body)
+    lowered = "" if detail is None else detail.casefold()
     suffix = "" if detail is None else f": {detail}"
     if status in {401, 403}:
         raise ProviderRequestError(
@@ -371,10 +439,42 @@ def _raise_for_status(
         raise ProviderRequestError(
             f"model ID {model_id!r} was not found (HTTP 404){suffix}"
         )
+    if (
+        status in {400, 422}
+        and operation == "chat completion"
+        and any(
+            marker in lowered
+            for marker in (
+                "context size",
+                "context length",
+                "context window",
+                "maximum context",
+                "too many tokens",
+            )
+        )
+    ):
+        raise ContextWindowExceededError()
+    if (
+        status in {400, 422}
+        and operation == "chat completion"
+        and any(
+            marker in lowered
+            for marker in (
+                "grammar",
+                "json schema",
+                "json_schema",
+                "response_format",
+                "structured output",
+                "sane defaults",
+            )
+        )
+    ):
+        raise StructuredOutputSchemaUnsupportedError(
+            "OpenAI-compatible server rejected the structured output schema"
+        )
     if status in {400, 422} and operation == "chat completion":
         raise ProviderRequestError(
-            f"OpenAI-compatible server rejected structured output "
-            f"(HTTP {status}){suffix}"
+            f"OpenAI-compatible server rejected the request (HTTP {status}){suffix}"
         )
     if status in {408, 429} or 500 <= status < 600:
         raise ProviderUnavailableError(
@@ -461,52 +561,63 @@ async def _request_json(
     body: bytes | None,
     headers: Mapping[str, str],
     max_response_bytes: int,
+    *,
+    connect_timeout: float = 10.0,
+    read_timeout: float = 300.0,
 ) -> OpenAICompatibleHTTPResponse:
     parsed = urlsplit(url)
     assert parsed.hostname is not None
     secure = parsed.scheme == "https"
     port = parsed.port or (443 if secure else 80)
     ssl_context = ssl.create_default_context() if secure else None
-    reader, writer = await asyncio.open_connection(
-        parsed.hostname,
-        port,
-        ssl=ssl_context,
-        server_hostname=parsed.hostname if secure else None,
-    )
     try:
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
-        host = parsed.hostname
-        if parsed.port is not None:
-            host += f":{parsed.port}"
-        request_headers = {
-            "Host": host,
-            "Connection": "close",
-            **headers,
-        }
-        if body is not None:
-            request_headers["Content-Length"] = str(len(body))
-        head = (
-            f"{method} {path} HTTP/1.1\r\n"
-            + "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
-            + "\r\n"
-        ).encode("ascii")
-        writer.write(head + (body or b""))
-        await writer.drain()
-        raw_headers = await reader.readuntil(b"\r\n\r\n")
-        if len(raw_headers) > MAX_HTTP_HEADER_BYTES:
-            raise ProviderUnavailableError(
-                "OpenAI-compatible response headers are too large"
-            )
-        status, response_headers = _parse_http_headers(raw_headers)
-        if response_headers.get("transfer-encoding", "").lower() == "chunked":
-            response_body = await _read_chunked(reader, max_response_bytes)
-        else:
-            response_body = await _read_body(
-                reader, response_headers, max_response_bytes
-            )
-        return OpenAICompatibleHTTPResponse(status=status, body=response_body)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                parsed.hostname,
+                port,
+                ssl=ssl_context,
+                server_hostname=parsed.hostname if secure else None,
+            ),
+            timeout=connect_timeout,
+        )
+    except TimeoutError as exc:
+        raise ProviderTimeoutError("provider connection timed out") from exc
+    try:
+        try:
+            async with asyncio.timeout(read_timeout):
+                path = parsed.path or "/"
+                if parsed.query:
+                    path += "?" + parsed.query
+                host = parsed.hostname
+                if parsed.port is not None:
+                    host += f":{parsed.port}"
+                request_headers = {"Host": host, "Connection": "close", **headers}
+                if body is not None:
+                    request_headers["Content-Length"] = str(len(body))
+                head = (
+                    f"{method} {path} HTTP/1.1\r\n"
+                    + "".join(
+                        f"{key}: {value}\r\n" for key, value in request_headers.items()
+                    )
+                    + "\r\n"
+                ).encode("ascii")
+                writer.write(head + (body or b""))
+                await writer.drain()
+                raw_headers = await reader.readuntil(b"\r\n\r\n")
+                if len(raw_headers) > MAX_HTTP_HEADER_BYTES:
+                    raise ProviderUnavailableError(
+                        "OpenAI-compatible response headers are too large"
+                    )
+                status, response_headers = _parse_http_headers(raw_headers)
+                if response_headers.get("transfer-encoding", "").lower() == "chunked":
+                    response_body = await _read_chunked(reader, max_response_bytes)
+                else:
+                    response_body = await _read_body(
+                        reader, response_headers, max_response_bytes
+                    )
+                return OpenAICompatibleHTTPResponse(status=status, body=response_body)
+        except TimeoutError as exc:
+            raise ProviderTimeoutError("provider response read timed out") from exc
     finally:
         writer.close()
         with suppress(OSError):

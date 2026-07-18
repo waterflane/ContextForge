@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from contextforge.intelligence import initialize_index
 from contextforge.models import (
+    ContextWindowExceededError,
     FakeModelProvider,
     FakeScript,
     ModelRequest,
@@ -29,7 +30,9 @@ from contextforge.models import (
     UnsupportedResponseSchemaError,
     UntrustedModelContext,
     UntrustedSource,
+    WrongResponseShapeError,
     classify_retry,
+    estimate_request_context,
     parse_structured_response,
 )
 from contextforge.progress import ProgressEvent, ProgressStatus
@@ -62,6 +65,19 @@ class _OpenEvidence(BaseModel):
 class _NestedOpenAnalysis(_ClosedModel):
     schema_version: Literal[1]
     evidence: tuple[_OpenEvidence, ...]
+
+
+class _DefaultedAnalysis(_ClosedModel):
+    schema_version: Literal[1] = 1
+    summary: str
+
+
+class _MapShape(_ClosedModel):
+    schema_version: Literal[1] = 1
+    scope_id: str
+    title: str
+    summary: str
+    confidence: str
 
 
 def _configuration(
@@ -258,6 +274,76 @@ def test_unknown_and_unsupported_response_schema_are_rejected() -> None:
         )
 
 
+def test_schema_version_is_required_and_safe_constant_omission_is_normalized() -> None:
+    request = replace(_request(), response_model=_DefaultedAnalysis)
+
+    assert "schema_version" in request.response_schema["required"]
+    value, normalized = parse_structured_response(
+        '{"summary":"compact"}', request=request, max_response_bytes=500
+    )
+
+    assert value.schema_version == 1
+    assert '"schema_version":1' in normalized
+
+
+def test_nested_summary_shape_precedes_missing_schema_version_diagnostic() -> None:
+    request = replace(_request(), response_model=_MapShape)
+    response = json.dumps(
+        {
+            "scope_id": "repository",
+            "summary": {"architectural_signals": []},
+        }
+    )
+
+    with pytest.raises(WrongResponseShapeError, match="nested"):
+        parse_structured_response(response, request=request, max_response_bytes=500)
+
+
+def test_context_preflight_blocks_oversized_request_and_larger_window_permits_it() -> (
+    None
+):
+    request = replace(_request(source_text="x" * 12_500), max_output_tokens=512)
+    small = _configuration()
+    budget = estimate_request_context(request, small)
+    assert budget.estimated_total_tokens > small.context_window
+    assert budget.estimated_total_tokens == (
+        budget.estimated_input_tokens
+        + budget.schema_overhead_tokens
+        + budget.output_token_budget
+        + budget.protocol_overhead_tokens
+        + budget.safety_margin_tokens
+    )
+    blocked = FakeModelProvider(small, scripts=[_valid_json()])
+
+    with pytest.raises(ContextWindowExceededError):
+        asyncio.run(blocked.complete_structured(request))
+
+    assert blocked.call_count == 0
+    large = FakeModelProvider(
+        small.model_copy(update={"context_window": 8_192}),
+        scripts=[_valid_json()],
+    )
+    asyncio.run(large.complete_structured(request))
+    assert large.call_count == 1
+
+
+def test_structured_repair_retry_changes_the_payload_once() -> None:
+    tasks: list[str] = []
+
+    def responder(request: ModelRequest, index: int) -> str:
+        tasks.append(request.analysis_task)
+        return "malformed" if index == 0 else _valid_json()
+
+    provider = FakeModelProvider(
+        _configuration(retry_limit=2), responder=responder, retry_delays=(0, 0)
+    )
+    asyncio.run(provider.complete_structured(_request()))
+
+    assert provider.call_count == 2
+    assert tasks[0] != tasks[1]
+    assert "Correction:" in tasks[1]
+
+
 def test_oversized_response_is_rejected_before_json_parsing() -> None:
     response = _valid_json("x" * 300)
 
@@ -375,7 +461,8 @@ def test_provider_attempts_emit_shared_progress_without_artificial_completion() 
     assert [event.current_attempt for event in waiting] == [1, 2]
     assert all(event.percentage == 0 for event in waiting)
     assert all(event.analyzer_kind == "generic-text-semantic" for event in waiting)
-    assert all(event.estimated_input_tokens == 42 for event in waiting)
+    assert all(event.estimated_input_tokens is not None for event in waiting)
+    assert all(event.configured_context_window == 4096 for event in waiting)
     assert all(event.output_token_budget == 128 for event in waiting)
     assert all(event.input_truncated is True for event in waiting)
     assert events[-1].status is ProgressStatus.FAILED
@@ -415,7 +502,10 @@ def test_debug_request_metrics_are_safe(
     output = caplog.text
     assert "path=src/app.py" in output
     assert "analyzer=generic-text-semantic" in output
-    assert "estimated_input_tokens=37" in output
+    assert "estimated_input_tokens=" in output
+    assert "context_window=4096" in output
+    assert "schema_overhead_tokens=" in output
+    assert "safety_margin_tokens=256" in output
     assert "output_token_limit=128" in output
     assert "response_tokens=12" in output
     assert "response_validation=valid" in output

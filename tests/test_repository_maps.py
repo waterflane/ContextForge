@@ -12,7 +12,6 @@ from contextforge.intelligence import (
     GlobalMapAnalysisError,
     GlobalMapAnalysisOptions,
     GlobalMapBuildResult,
-    IndexManifestReadError,
     RepositoryDiagnostic,
     RepositoryRelationship,
     SemanticConfidence,
@@ -96,10 +95,35 @@ class _Responder:
             )
         if request.purpose == self.malformed:
             return "not json"
-        if request.purpose == "repository-architecture":
-            return json.dumps(self._architecture(request))
-        if request.purpose == "repository-features":
-            return json.dumps(self._features(request))
+        if request.purpose in {"repository-architecture", "repository-features"}:
+            match = re.search(
+                r"Return scope_id '([^']+)' exactly", request.analysis_task
+            )
+            assert match is not None
+            paths = sorted(request.allowed_response_paths)
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "scope_id": match.group(1),
+                    "title": "Compact repository map",
+                    "summary": (
+                        "Coordinates the behavior represented by this repository."
+                    ),
+                    "behavioral_themes": ["coordinates behavior"],
+                    "architecture_signals": (
+                        ["separates responsibilities"]
+                        if request.purpose == "repository-architecture"
+                        else []
+                    ),
+                    "feature_signals": (
+                        ["observable repository behavior"]
+                        if request.purpose == "repository-features"
+                        else []
+                    ),
+                    "evidence": [{"path": path} for path in paths[:12]],
+                    "confidence": _confidence(),
+                }
+            )
         raise AssertionError(request.purpose)
 
     def _architecture(self, request: ModelRequest) -> dict[str, Any]:
@@ -251,7 +275,7 @@ def test_one_module_hierarchical_maps_persist_and_reuse_without_source_prompt(
     assert second_responder.requests == []
     assert second.manifest == first.manifest
     assert all(request.untrusted_sources == () for request in responder.requests)
-    assert all(request.max_output_tokens == 2_048 for request in responder.requests)
+    assert all(request.max_output_tokens == 512 for request in responder.requests)
     assert all(
         injection not in request.messages()[0].content for request in responder.requests
     )
@@ -282,15 +306,8 @@ def test_multi_package_hierarchy_entry_adapter_core_and_deterministic_order(
     assert result.package_summary_count == 4
     assert result.group_summary_count == 3
     assert result.architecture is not None
-    assert {item.role_kind for item in result.architecture.module_roles} == {
-        "adapter",
-        "domain-core",
-    }
-    assert result.architecture.entry_points[0].file == "src/app/main.py"
-    assert any(
-        item.kind == "entry-point-to-handler" and item.provenance == "model-inferred"
-        for item in result.architecture.relationships
-    )
+    assert result.architecture.diagnostics
+    assert result.architecture.diagnostics[0].provenance == "model-inferred"
     serialized = result.generation_path.joinpath("architecture.json").read_text(
         encoding="utf-8"
     )
@@ -359,15 +376,13 @@ def test_poor_names_group_by_supplied_behavior_with_confidence_and_evidence(
     receipt = next(
         item
         for item in result.features.feature_areas
-        if set(item.participating_files) == {"a/x.py", "b/y.py", "tests/test_x.py"}
+        if item.title == "observable repository behavior"
     )
+    assert set(receipt.participating_files) == set(files)
     assert receipt.related_tests == ("tests/test_x.py",)
-    assert receipt.participating_symbols
     assert receipt.confidence.value == 0.9
     assert receipt.evidence[0].path == "a/x.py"
-    assert all(
-        item.provenance == "model-inferred" for item in result.features.relationships
-    )
+    assert receipt.title == "observable repository behavior"
 
 
 def test_partial_failure_publishes_only_valid_typed_map_and_malformed_is_not_repaired(
@@ -378,11 +393,10 @@ def test_partial_failure_publishes_only_valid_typed_map_and_malformed_is_not_rep
 
     assert result.published is True
     assert result.architecture is not None
-    assert result.features is None
-    assert tuple(item.status for item in result.outcomes) == ("complete", "failed")
+    assert result.features is not None
+    assert tuple(item.status for item in result.outcomes) == ("complete", "fallback")
     assert load_architecture_map(tmp_path) == result.architecture
-    with pytest.raises(IndexManifestReadError, match="no feature map"):
-        load_feature_map(tmp_path)
+    assert load_feature_map(tmp_path) == result.features
 
 
 def test_prompt_change_invalidates_then_recovers_previous_valid_maps(
@@ -519,3 +533,42 @@ def test_global_model_call_limit_fails_before_provider_work(tmp_path: Path) -> N
         )
 
     assert responder.requests == []
+
+
+def test_all_hierarchical_requests_use_compact_schemas_under_context_budget(
+    tmp_path: Path,
+) -> None:
+    snapshot = _facts(
+        tmp_path,
+        {
+            f"pkg/file_{index}.py": f"def item_{index}():\n    return {index}\n"
+            for index in range(7)
+        },
+    )
+    responder = _Responder()
+
+    result = _maps(snapshot, responder)
+
+    assert result.outcomes[0].status == "complete"
+    assert result.outcomes[1].status == "complete"
+    assert responder.requests
+    for request in responder.requests:
+        schema = request.response_schema
+        assert "schema_version" in schema["required"]
+        assert "module_roles" not in schema.get("properties", {})
+        assert int(request.metadata["estimated_total_tokens"]) <= 4096
+        for node in _schema_nodes(schema):
+            if "maxItems" in node:
+                assert node["maxItems"] <= 12
+            if "maxLength" in node:
+                assert node["maxLength"] <= 600
+
+
+def _schema_nodes(value: object) -> tuple[dict[str, Any], ...]:
+    if isinstance(value, dict):
+        return (value,) + tuple(
+            node for nested in value.values() for node in _schema_nodes(nested)
+        )
+    if isinstance(value, list):
+        return tuple(node for nested in value for node in _schema_nodes(nested))
+    return ()

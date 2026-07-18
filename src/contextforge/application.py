@@ -487,15 +487,30 @@ async def _build_repository_index(
                     snapshot,
                     lock,
                     provider,
-                    options=GlobalMapAnalysisOptions(fail_on_error=fail_on_error),
+                    options=GlobalMapAnalysisOptions(
+                        fail_on_error=fail_on_error,
+                        progress=progress.scaled_observer(
+                            maps_start, 93.0, phase_prefix="repository_maps"
+                        ),
+                    ),
                 )
+                map_fallback = any(item.status == "fallback" for item in maps.outcomes)
                 progress.report(
                     "repository_maps",
-                    "Repository maps were validated and published.",
+                    (
+                        "Deterministic repository-map fallback was validated "
+                        "and published."
+                        if map_fallback
+                        else "Repository maps were validated and published."
+                    ),
                     percentage=94,
                     phase_label="Semantic repository maps",
                     phase_percent=100,
                     phase_weight=94 - maps_start,
+                    lifecycle_state="fallback" if map_fallback else "published",
+                    safe_error_code=(
+                        "repository_map_fallback" if map_fallback else None
+                    ),
                     metadata={
                         "outcomes": {
                             item.map_kind: item.status for item in maps.outcomes

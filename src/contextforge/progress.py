@@ -87,6 +87,10 @@ class ProgressEvent(BaseModel):
     estimated_input_tokens: int | None = Field(default=None, ge=0, strict=True)
     output_token_budget: int | None = Field(default=None, ge=1, strict=True)
     input_truncated: bool = False
+    configured_context_window: int | None = Field(default=None, ge=1_024, strict=True)
+    schema_overhead_tokens: int | None = Field(default=None, ge=0, strict=True)
+    safety_margin_tokens: int | None = Field(default=None, ge=0, strict=True)
+    estimated_total_tokens: int | None = Field(default=None, ge=0, strict=True)
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -103,6 +107,17 @@ class ProgressEvent(BaseModel):
         total = values.get("total", 100)
         message = values.get("message", "Progress")
         active_items = values.get("active_items", ())
+        metadata = values.get("metadata", {})
+        if isinstance(metadata, Mapping):
+            for field in (
+                "configured_context_window",
+                "schema_overhead_tokens",
+                "safety_margin_tokens",
+                "estimated_total_tokens",
+            ):
+                raw = metadata.get(field)
+                if type(raw) is int:
+                    values.setdefault(field, raw)
         values.setdefault("overall_percent", percentage)
         values.setdefault("phase_label", str(message).rstrip(".") or str(message))
         values.setdefault("phase_percent", percentage)

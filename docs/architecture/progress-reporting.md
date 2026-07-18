@@ -60,10 +60,18 @@ Schema version 3 makes semantic accounting and provider lifecycle explicit:
   in-memory acceptance, durable staging, retry, failure, and publication;
 - `safe_error_code` and `safe_error_message` provide bounded diagnostics;
 - `request_elapsed_seconds` resets for each attempt; and
-- `operation_elapsed_seconds` measures the whole operation.
+- `operation_elapsed_seconds` measures the whole operation;
 - `analyzer_kind`, `estimated_input_tokens`, `output_token_budget`, and
   `input_truncated` expose safe request planning metrics without prompt or source
-  material.
+  material; and
+- `configured_context_window`, `schema_overhead_tokens`,
+  `safety_margin_tokens`, and `estimated_total_tokens` expose the complete safe
+  preflight accounting.
+
+Map requests use the same event stream and renderer. Lifecycle messages can
+identify context reduction, schema rejection, JSON-object fallback, validation,
+or deterministic map fallback. Error codes remain bounded and never include raw
+provider output.
 
 These fields are sufficient for an HTTP API, SSE/WebSocket stream, or GUI to
 reproduce terminal state without parsing `message` or any CLI output. Provider

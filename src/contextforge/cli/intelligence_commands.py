@@ -56,6 +56,7 @@ def _index_operation(
     config: Path | None,
     concurrency: int | None,
     request_timeout: float | None,
+    context_window: int | None,
     max_output_tokens: int | None,
     fail_on_error: bool,
     force_reanalyze: bool,
@@ -76,6 +77,8 @@ def _index_operation(
             base_url=base_url,
             concurrency=concurrency,
             timeout_seconds=request_timeout,
+            operation_timeout_seconds=request_timeout,
+            context_window=context_window,
             local_only=True if local_only else None,
         )
         if provider_configuration is not None:
@@ -166,6 +169,15 @@ def build_index(
             help="Per-attempt model request timeout in seconds.",
         ),
     ] = None,
+    context_window: Annotated[
+        int | None,
+        typer.Option(
+            "--context-window",
+            min=1_024,
+            max=2_000_000,
+            help="Configured model context window in tokens.",
+        ),
+    ] = None,
     max_output_tokens: Annotated[
         int | None,
         typer.Option(
@@ -235,6 +247,7 @@ def build_index(
         config=config,
         concurrency=concurrency,
         request_timeout=request_timeout,
+        context_window=context_window,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,
@@ -272,6 +285,10 @@ def update_index(
         float | None,
         typer.Option("--request-timeout", min=1.0, max=600.0),
     ] = None,
+    context_window: Annotated[
+        int | None,
+        typer.Option("--context-window", min=1_024, max=2_000_000),
+    ] = None,
     max_output_tokens: Annotated[
         int | None,
         typer.Option("--max-output-tokens", min=96, max=32_768),
@@ -304,6 +321,7 @@ def update_index(
         config=config,
         concurrency=concurrency,
         request_timeout=request_timeout,
+        context_window=context_window,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
         force_reanalyze=force_reanalyze,

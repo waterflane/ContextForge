@@ -180,9 +180,10 @@ values. `index clean` removes only generated index truth; it preserves
 
 ### Provider configuration
 
-Project configuration is read from `.contextforge/config.toml` or an explicit
-`--config PATH`. Command-line provider/model/concurrency choices override the
-file for one operation. The default is local Ollama:
+Project configuration is read from `.contextforge/config.toml`, with optional
+machine-local overrides in `.contextforge/config.local.toml`, or from an
+explicit `--config PATH`. CLI and supported environment settings take
+precedence. The default is local Ollama:
 
 ```toml
 config_version = 1
@@ -191,7 +192,12 @@ config_version = 1
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 90.0
+timeout_seconds = 360.0
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 300.0
+operation_timeout_seconds = 360.0
+context_window = 4096
+context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
@@ -221,15 +227,17 @@ provider = "openai-compatible"
 model = "<MODEL_ID>"
 base_url = "http://localhost:1234/v1"
 concurrency_limit = 2
+context_window = 4096
 # credential_env = "LM_STUDIO_API_KEY"
 ```
 
 The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
 Schema output and checks the exact configured ID through `GET /v1/models`.
-CLI `--model`, `--base-url`, `--concurrency`, `--request-timeout`, and
-`--max-output-tokens` values override this section. Each provider attempt has a
-90-second default deadline and the existing retry policy permits two retries
-(three attempts total).
+CLI `--model`, `--base-url`, `--concurrency`, `--request-timeout`,
+`--context-window`, and `--max-output-tokens` values override this section.
+Defaults are 10 seconds for connection, 300 seconds for response read, and 360
+seconds for the complete operation. Transient failures retain bounded retries;
+context overflow and rejected schemas are never resent unchanged.
 
 Remote endpoints are fail-closed unless configuration explicitly sets both
 `local_only = false` and `external_data_policy = "allow_repository"`.

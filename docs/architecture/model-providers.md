@@ -48,7 +48,12 @@ policy:
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 90
+timeout_seconds = 360
+connect_timeout_seconds = 10
+read_timeout_seconds = 300
+operation_timeout_seconds = 360
+context_window = 4096
+context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
@@ -59,8 +64,16 @@ store_raw_prompts = false
 store_raw_responses = false
 ```
 
-`ProviderConfiguration` enforces a timeout in `(0, 600]`, with a 90-second
-default per attempt, a response cap in
+Generic OpenAI-compatible APIs do not standardize context-window discovery.
+ContextForge therefore uses a conservative 4,096-token default unless
+`context_window` or CLI `--context-window` supplies the actual loaded-model
+limit. Precedence is CLI, supported `CONTEXTFORGE_MODEL_*` environment values,
+`config.local.toml`, `config.toml`, then defaults. Increasing a compatible
+window alone does not invalidate semantic records.
+
+Connection, response-read, and complete-operation defaults are 10, 300, and
+360 seconds. The retained `timeout_seconds` value is a compatibility operation
+ceiling. `ProviderConfiguration` also enforces a response cap in
 `[1, 16,000,000]`, concurrency in `[1, 8]`, and at most two retries after the
 first attempt. An individual request may lower its response cap. Ollama's
 `local_only=true` policy accepts only `127.0.0.1`, `::1`, or `localhost`.
@@ -87,10 +100,15 @@ support native structured output. ContextForge then independently:
 1. applies the raw UTF-8 byte cap;
 2. optionally extracts one exact whole-response JSON fence;
 3. parses JSON while rejecting duplicate keys and non-finite numbers;
-4. requires an object root and supported integer schema version;
-5. checks declared response path pointers against the request allowlist;
-6. performs strict closed-model validation; and
-7. emits sorted-key, compact UTF-8 JSON with one final LF.
+4. validates object shape, required fields, and field types;
+5. inserts a missing constant version only if all other fields validate;
+6. validates the supported integer schema version;
+7. checks declared response path pointers against the request allowlist;
+8. performs strict closed-model validation; and
+9. emits sorted-key, compact UTF-8 JSON with one final LF.
+
+Every model-facing schema requires `schema_version`; a default and `const`
+alone are not considered sufficient provider instructions.
 
 Fenced extraction is off by default. When explicitly enabled, the complete
 response may contain exactly one ` ``` ` or lowercase ` ```json ` fence, with
@@ -106,10 +124,12 @@ failures. ContextForge never guesses a path or silently repairs model prose.
 
 Retry classification is explicit on typed failures:
 
-- transient unavailability, timeout, and invalid structured output are
-  retryable;
-- cancellation, local configuration failure, and invalid request failure are
-  not retryable.
+- connection reset, timeout, HTTP 429, and selected 5xx failures are transient;
+- context overflow, model-not-found, invalid request schemas, rejected grammar,
+  wrong response shapes, and unsupported versions are deterministic until the
+  request changes;
+- malformed or schema-invalid output receives at most one compact repair retry,
+  whose correction instruction changes the payload.
 
 The configured retry limit includes zero to two retries after the first call.
 Default deterministic backoff is 250 ms, then 1 second. Every provider attempt,
@@ -127,8 +147,16 @@ failure. The event exposes attempt counts and safe error codes such as
 raw responses. Semantic requests select an adaptive `max_output_tokens` from
 128 through 512 according to category, size, and structural complexity. The
 configured `semantic_max_output_tokens` or CLI `--max-output-tokens` is a
-ceiling, not a target. Global repository maps use a separate 2048-token bound.
+ceiling, not a target. Global repository maps use a separate 512-token bound.
 OpenAI-compatible requests transmit the selected limit as `max_tokens`.
+
+Before dispatch, ContextForge adds conservative message/input tokens, native
+schema grammar cost, requested output, provider-wrapper overhead, and a
+256-token reserve. With no exact tokenizer, code and JSON are estimated at one
+token per three UTF-8 bytes. A known overflow fails locally as
+`context_window_exceeded`; source, structural metadata, or prior summaries are
+reduced deterministically before that final guard. Debug metrics include each
+cost and the total without prompts or source.
 
 Debug logs contain only source path, analyzer kind, estimated input tokens,
 selected output limit, attempt, provider-reported response tokens, duration,
@@ -187,7 +215,11 @@ this foundation adds no provider SDK dependency.
 an alias for the canonical persisted provider ID `openai-compatible`. It first
 checks the configured model against the exact IDs in `GET /v1/models`, then
 sends non-streaming `POST /v1/chat/completions` requests with
-`response_format.type=json_schema`. No model name is supplied by default.
+`response_format.type=json_schema`. If grammar construction is explicitly
+rejected, it retries once using `json_object`, validates locally against the
+same model, and caches the capability for that provider/model/base-URL adapter
+identity. Arbitrary parsed JSON is never accepted. No model name is supplied by
+default.
 
 The base URL is configurable with `[models].base_url` or CLI `--base-url`.
 Changing it changes the credential-free SHA-256 suffix on semantic and
@@ -199,3 +231,20 @@ missing model IDs, malformed envelopes, structured-output rejection,
 unavailability, timeout, and cancellation are translated to the shared typed
 provider errors. The adapter uses the same bounded retry runtime as Ollama and
 accepts an injectable async HTTP transport for offline tests.
+
+## Troubleshooting local structured providers
+
+`request exceeds the available context size` means the configured window is
+larger than the model actually loaded by LM Studio, or an older client sent the
+request without preflight. Set, for example, `context_window = 4096` under
+`[models]` (or pass `--context-window 4096`) to match LM Studio. Current builds
+reduce file excerpts and hierarchy context before dispatch and report
+`context_window_exceeded` without spending transient retries.
+
+`structured output grammar rejected` means the server could not compile the
+strict schema. Current repository-map schemas are compact. The OpenAI-compatible
+adapter also tries JSON-object mode once, validates the result locally, and
+caches that capability for the current provider/model/base URL. If the fallback
+still omits `title`, uses a nested `summary`, or returns the wrong version,
+ContextForge rejects it with the corresponding shape, field, or version code;
+normal output never prints the raw response.

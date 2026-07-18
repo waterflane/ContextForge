@@ -381,7 +381,9 @@ def test_auth_error_redacts_loaded_credential_and_keeps_safe_body() -> None:
     asyncio.run(exercise())
 
 
-def test_structured_output_rejection_is_non_retryable_and_includes_detail() -> None:
+def test_structured_output_rejection_falls_back_once_and_caches_capability() -> None:
+    response_modes: list[str] = []
+
     async def transport(
         method: str,
         url: str,
@@ -389,24 +391,28 @@ def test_structured_output_rejection_is_non_retryable_and_includes_detail() -> N
         headers: Mapping[str, str],
         limit: int,
     ) -> OpenAICompatibleHTTPResponse:
-        del url, body, headers, limit
+        del url, headers, limit
         if method == "GET":
             return _models("publisher/exact-model-id")
-        return OpenAICompatibleHTTPResponse(
-            status=400,
-            body=b'{"error":{"message":"json_schema is unsupported"}}',
-        )
+        assert body is not None
+        mode = json.loads(body)["response_format"]["type"]
+        response_modes.append(mode)
+        if mode == "json_schema":
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"json_schema grammar is unsupported"}}',
+            )
+        return _completion()
 
     async def exercise() -> None:
         provider = OpenAICompatibleModelProvider(
             _configuration(retry_limit=2), transport=transport
         )
-        with pytest.raises(
-            ProviderRequestError, match="structured output.*json_schema is unsupported"
-        ):
-            await provider.complete_structured(_request())
+        await provider.complete_structured(_request())
+        await provider.complete_structured(_request())
 
     asyncio.run(exercise())
+    assert response_modes == ["json_schema", "json_object", "json_object"]
 
 
 def test_project_configuration_and_cli_precedence_are_secret_free(
@@ -454,6 +460,50 @@ credential_env = "LM_STUDIO_API_KEY"
     assert isinstance(create_model_provider(overridden), OpenAICompatibleModelProvider)
 
 
+def test_context_window_precedence_is_cli_environment_local_project_default(
+    tmp_path: Path,
+) -> None:
+    config_directory = tmp_path / ".contextforge"
+    config_directory.mkdir()
+    (config_directory / "config.toml").write_text(
+        """config_version = 1
+[models]
+provider = "fake"
+context_window = 8192
+""",
+        encoding="utf-8",
+    )
+    (config_directory / "config.local.toml").write_text(
+        """[models]
+context_window = 16384
+read_timeout_seconds = 420
+""",
+        encoding="utf-8",
+    )
+
+    local = resolve_provider_configuration(
+        load_project_configuration(tmp_path, environment={})
+    )
+    environment = resolve_provider_configuration(
+        load_project_configuration(
+            tmp_path,
+            environment={"CONTEXTFORGE_MODEL_CONTEXT_WINDOW": "32768"},
+        )
+    )
+    cli = resolve_provider_configuration(
+        load_project_configuration(
+            tmp_path,
+            environment={"CONTEXTFORGE_MODEL_CONTEXT_WINDOW": "32768"},
+        ),
+        context_window=65536,
+    )
+
+    assert local is not None and local.context_window == 16384
+    assert local.read_timeout_seconds == 420
+    assert environment is not None and environment.context_window == 32768
+    assert cli is not None and cli.context_window == 65536
+
+
 def test_lmstudio_alias_uses_default_base_url_but_requires_an_exact_model() -> None:
     project = ProjectConfiguration()
     resolved = resolve_provider_configuration(
@@ -487,6 +537,7 @@ def test_cli_help_and_provider_selection_include_base_url(tmp_path: Path) -> Non
     assert help_result.exit_code == 0
     assert "--base-url" in help_result.output
     assert "--request-timeout" in help_result.output
+    assert "--context-window" in help_result.output
     assert "--max-output-tokens" in help_result.output
     assert selected.exit_code == 1
     assert "OpenAI-compatible base URL must be an HTTP URL" in selected.output
@@ -540,7 +591,7 @@ def test_provider_capabilities_close_and_configuration_policy() -> None:
         (408, "chat completion", ProviderUnavailableError, "HTTP 408"),
         (429, "chat completion", ProviderUnavailableError, "HTTP 429"),
         (500, "chat completion", ProviderUnavailableError, "HTTP 500"),
-        (422, "chat completion", ProviderRequestError, "structured output"),
+        (422, "chat completion", ProviderRequestError, "request"),
     ],
 )
 def test_http_status_classification(

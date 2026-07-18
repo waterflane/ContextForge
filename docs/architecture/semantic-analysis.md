@@ -20,7 +20,12 @@ the loopback interface:
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 90
+timeout_seconds = 360
+connect_timeout_seconds = 10
+read_timeout_seconds = 300
+operation_timeout_seconds = 360
+context_window = 4096
+context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
@@ -43,6 +48,7 @@ Provider limits may be stricter than analysis limits.
 
 `--request-timeout` overrides the per-attempt deadline for one index command;
 `--max-output-tokens` overrides the bounded semantic response budget. The
+`--context-window` option overrides the configured loaded-model limit. The
 default retry limit is two retries after the first attempt. Attempt elapsed time
 resets on retry, while total operation elapsed time remains monotonic.
 
@@ -78,12 +84,15 @@ path, language and category, bounded source or excerpt, minimal file-local
 facts, and a compact closed response schema. It never contains the repository
 tree, global maps, feature maps, unrelated files, or prior responses.
 
-The default maximum excerpt is 65,536 UTF-8 bytes. Smaller files are sent
-completely. Larger files use a deterministic line-preserving selection weighted
+The maximum candidate excerpt is 65,536 UTF-8 bytes, but it is not a dispatch
+target. Smaller files are sent completely only when the complete request fits.
+Larger or over-budget requests use a deterministic line-preserving selection weighted
 toward the beginning, verified declarations, and ending. Selection works on
 decoded text and whole encoded lines, with a codepoint-safe prefix fallback, so
-it cannot create invalid UTF-8. Progress records the input estimate and
-truncation state without exposing source.
+it cannot create invalid UTF-8. Structural metadata is reduced after source
+when necessary. Every resulting request must fit messages, schema, output,
+wrapper, and safety reserve within the configured model context. Progress
+records the cost breakdown and truncation state without exposing source.
 
 Each file makes at most one provider request. Adaptive output caps, also
 limited by the caller's lower ceiling, are:

@@ -299,7 +299,10 @@ def test_context_suggest_table_and_json_are_read_only(
         "json",
     )
 
-    assert table.exit_code == structured.exit_code == 0
+    assert table.exit_code == structured.exit_code == 0, (
+        table.output,
+        structured.output,
+    )
     assert "Discovery mode:" in _plain(table.stdout)
     assert "reason:" in _plain(table.stdout)
     assert "Suggesting context:" in _plain(structured.stderr)

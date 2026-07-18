@@ -450,7 +450,7 @@ def test_success_progress_increments_once_only_after_staging(
         options=SemanticAnalysisOptions(progress=observe),
     )
 
-    assert result.failed_paths == ()
+    assert result.failed_paths == (), result.outcomes
     transitions = [
         current
         for previous, current in zip(events, events[1:], strict=False)
@@ -654,7 +654,7 @@ def test_small_file_output_budgets_are_adaptive(
 
     result = _build_semantics(snapshot, _provider(responder=capture))
 
-    assert result.failed_paths == ()
+    assert result.failed_paths == (), result.outcomes
     assert requests[0].max_output_tokens == expected_budget
     assert requests[0].metadata["output_token_budget"] == str(expected_budget)
 
@@ -670,7 +670,7 @@ def test_large_complex_source_uses_bounded_maximum_budget(tmp_path: Path) -> Non
 
     result = _build_semantics(snapshot, _provider(responder=capture))
 
-    assert result.failed_paths == ()
+    assert result.failed_paths == (), result.outcomes
     assert requests[0].max_output_tokens == 512
     assert requests[0].metadata["input_truncated"] == "true"
 

@@ -11,7 +11,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, Protocol, cast
 
@@ -29,6 +29,11 @@ from contextforge.progress import ProgressActivity, ProgressObserver, ProgressRe
 
 SUPPORTED_RESPONSE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
+DEFAULT_CONTEXT_WINDOW_TOKENS = 4_096
+DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 256
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_READ_TIMEOUT_SECONDS = 300.0
+DEFAULT_OPERATION_TIMEOUT_SECONDS = 360.0
 MAX_PROVIDER_TIMEOUT_SECONDS = 600.0
 MAX_PROVIDER_CONCURRENCY = 8
 MAX_PROVIDER_RETRIES = 2
@@ -48,7 +53,16 @@ _SENSITIVE_METADATA = re.compile(
     r"(?:api[_-]?key|authorization|bearer|credential|password|secret|token)",
     re.IGNORECASE,
 )
-_SAFE_TOKEN_METADATA = frozenset({"estimated_input_tokens", "output_token_budget"})
+_SAFE_TOKEN_METADATA = frozenset(
+    {
+        "configured_context_window",
+        "estimated_input_tokens",
+        "estimated_total_tokens",
+        "output_token_budget",
+        "safety_margin_tokens",
+        "schema_overhead_tokens",
+    }
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -73,7 +87,22 @@ class ProviderConfiguration(ProviderModel):
     provider_id: str
     endpoint: str
     model_id: str
-    timeout_seconds: float = 90.0
+    timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS
+    connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    read_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
+    operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS
+    context_window: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        ge=1_024,
+        le=2_000_000,
+        strict=True,
+    )
+    context_safety_margin: int = Field(
+        default=DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
+        ge=64,
+        le=16_384,
+        strict=True,
+    )
     max_response_bytes: int = Field(
         default=DEFAULT_MAX_RESPONSE_BYTES, ge=1, le=16_000_000, strict=True
     )
@@ -107,7 +136,12 @@ class ProviderConfiguration(ProviderModel):
             raise ValueError("endpoint must be a bounded URL without credentials")
         return value
 
-    @field_validator("timeout_seconds")
+    @field_validator(
+        "timeout_seconds",
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "operation_timeout_seconds",
+    )
     @classmethod
     def validate_timeout(cls, value: float) -> float:
         if (
@@ -117,6 +151,14 @@ class ProviderConfiguration(ProviderModel):
         ):
             raise ValueError("timeout_seconds must be finite and between 0 and 600")
         return value
+
+    @model_validator(mode="after")
+    def validate_context_reserve(self) -> ProviderConfiguration:
+        if self.context_safety_margin >= self.context_window:
+            raise ValueError(
+                "context safety margin must be smaller than context window"
+            )
+        return self
 
     @field_validator("credential_env")
     @classmethod
@@ -158,6 +200,23 @@ class ProviderDiagnostic(ProviderModel):
     duration_ms: int | None = Field(default=None, ge=0, strict=True)
     response_validation: Literal["valid", "invalid", "not_received"]
     usage: ModelUsage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestContextBudget:
+    """Conservative provider-request accounting without prompt disclosure."""
+
+    configured_context_window: int
+    estimated_input_tokens: int
+    schema_overhead_tokens: int
+    output_token_budget: int
+    protocol_overhead_tokens: int
+    safety_margin_tokens: int
+    estimated_total_tokens: int
+
+    @property
+    def fits(self) -> bool:
+        return self.estimated_total_tokens <= self.configured_context_window
 
 
 class UntrustedSource(ProviderModel):
@@ -296,6 +355,7 @@ class ModelRequest:
         ):
             raise TypeError("response_model must be a Pydantic model class")
         schema = self.response_model.model_json_schema()
+        _require_constant_schema_versions(schema)
         _require_closed_response_schema(schema)
         if "schema_version" not in self.response_model.model_fields:
             raise ValueError("response_model must declare schema_version")
@@ -467,7 +527,29 @@ class ModelProviderError(RuntimeError):
 class StructuredResponseError(ModelProviderError):
     """Raised when provider output violates the bounded structured contract."""
 
-    retry_classification = RetryClassification.RETRYABLE
+
+class MissingSchemaVersionError(StructuredResponseError):
+    """Raised when a required schema version cannot be safely normalized."""
+
+
+class WrongResponseShapeError(StructuredResponseError):
+    """Raised when the response root has the wrong structural shape."""
+
+
+class MissingRequiredFieldError(StructuredResponseError):
+    """Raised with a safe bounded list of missing model-facing fields."""
+
+    def __init__(self, fields: Sequence[str]) -> None:
+        self.fields = tuple(fields)
+        super().__init__("missing required field(s): " + ", ".join(self.fields))
+
+
+class WrongFieldTypeError(StructuredResponseError):
+    """Raised with a safe bounded list of incorrectly typed fields."""
+
+    def __init__(self, fields: Sequence[str]) -> None:
+        self.fields = tuple(fields)
+        super().__init__("wrong field type(s): " + ", ".join(self.fields))
 
 
 class UnsupportedResponseSchemaError(StructuredResponseError):
@@ -476,6 +558,24 @@ class UnsupportedResponseSchemaError(StructuredResponseError):
     def __init__(self, schema_version: object) -> None:
         self.schema_version = schema_version
         super().__init__(f"unsupported model response schema version: {schema_version}")
+
+
+class ContextWindowExceededError(ModelProviderError):
+    """Raised locally when a known request cannot fit the configured context."""
+
+    def __init__(self, budget: RequestContextBudget | None = None) -> None:
+        self.budget = budget
+        message = "model request exceeds configured context window"
+        if budget is not None:
+            message += (
+                f" ({budget.estimated_total_tokens} > "
+                f"{budget.configured_context_window} tokens)"
+            )
+        super().__init__(message)
+
+
+class StructuredOutputSchemaUnsupportedError(ModelProviderError):
+    """Raised when a provider rejects construction of a structured grammar."""
 
 
 class ProviderTimeoutError(ModelProviderError):
@@ -505,6 +605,8 @@ class ProviderRequestError(ModelProviderError):
 class ModelProvider(Protocol):
     """Small extension point implemented by local and future external adapters."""
 
+    configuration: ProviderConfiguration
+
     @property
     def provider_id(self) -> str:
         """Return the stable adapter identifier."""
@@ -531,6 +633,59 @@ class ModelProvider(Protocol):
 ProviderCall = Callable[
     [ModelRequest, SecretStr | None], Awaitable[ProviderTransportResponse]
 ]
+
+
+def estimate_request_context(
+    request: ModelRequest,
+    configuration: ProviderConfiguration,
+    *,
+    include_native_schema: bool = True,
+) -> RequestContextBudget:
+    """Conservatively account for messages, schema, output, wrappers, and reserve."""
+
+    messages = request.messages(include_response_schema=False)
+    message_bytes = sum(len(item.content.encode("utf-8")) for item in messages)
+    estimated_input = _estimate_tokens(message_bytes)
+    schema_overhead = (
+        _estimate_tokens(len(_canonical_json(request.response_schema).encode("utf-8")))
+        + 32
+        if include_native_schema
+        else 0
+    )
+    protocol_overhead = 64 + 16 * len(messages)
+    output_budget = request.max_output_tokens or 0
+    total = (
+        estimated_input
+        + schema_overhead
+        + output_budget
+        + protocol_overhead
+        + configuration.context_safety_margin
+    )
+    return RequestContextBudget(
+        configured_context_window=configuration.context_window,
+        estimated_input_tokens=estimated_input,
+        schema_overhead_tokens=schema_overhead,
+        output_token_budget=output_budget,
+        protocol_overhead_tokens=protocol_overhead,
+        safety_margin_tokens=configuration.context_safety_margin,
+        estimated_total_tokens=total,
+    )
+
+
+def ensure_request_fits_context(
+    request: ModelRequest,
+    configuration: ProviderConfiguration,
+    *,
+    include_native_schema: bool = True,
+) -> RequestContextBudget:
+    """Return safe accounting or reject a known oversized payload before dispatch."""
+
+    budget = estimate_request_context(
+        request, configuration, include_native_schema=include_native_schema
+    )
+    if not budget.fits:
+        raise ContextWindowExceededError(budget)
+    return budget
 
 
 class ProviderRuntime:
@@ -577,7 +732,23 @@ class ProviderRuntime:
         started = self._clock()
         last_error: ModelProviderError | None = None
         attempts = self.configuration.retry_limit + 1
-        timeout = self.configuration.timeout_seconds
+        timeout = min(
+            self.configuration.timeout_seconds,
+            self.configuration.operation_timeout_seconds,
+        )
+        budget = estimate_request_context(request, self.configuration)
+        request = replace(
+            request,
+            metadata={
+                **request.metadata,
+                "configured_context_window": str(budget.configured_context_window),
+                "estimated_input_tokens": str(budget.estimated_input_tokens),
+                "schema_overhead_tokens": str(budget.schema_overhead_tokens),
+                "output_token_budget": str(budget.output_token_budget),
+                "safety_margin_tokens": str(budget.safety_margin_tokens),
+                "estimated_total_tokens": str(budget.estimated_total_tokens),
+            },
+        )
         progress = ProgressReporter(
             request.operation_id,
             "model.request",
@@ -586,15 +757,50 @@ class ProviderRuntime:
                 "provider_id": self.configuration.provider_id,
                 "model_id": self.configuration.model_id,
                 "purpose": request.purpose,
+                "configured_context_window": budget.configured_context_window,
+                "estimated_input_tokens": budget.estimated_input_tokens,
+                "schema_overhead_tokens": budget.schema_overhead_tokens,
+                "output_token_budget": budget.output_token_budget,
+                "protocol_overhead_tokens": budget.protocol_overhead_tokens,
+                "safety_margin_tokens": budget.safety_margin_tokens,
+                "estimated_total_tokens": budget.estimated_total_tokens,
             },
             clock=self._clock,
         )
         analyzer_kind = request.metadata.get("analyzer_kind")
-        estimated_input_tokens = _metadata_int(
-            request.metadata, "estimated_input_tokens"
-        )
+        estimated_input_tokens = budget.estimated_input_tokens
         output_token_budget = request.max_output_tokens
         input_truncated = request.metadata.get("input_truncated") == "true"
+        active_request = request
+        structured_repair_used = False
+
+        if not budget.fits:
+            error = ContextWindowExceededError(budget)
+            safe_code, safe_message = provider_error_details(error)
+            progress.report(
+                "provider_preflight",
+                safe_message,
+                percentage=0,
+                completed=1,
+                total=1,
+                phase_label="Request budgeting",
+                phase_percent=100,
+                completed_units=1,
+                total_units=1,
+                unit_type="requests",
+                planned_units=1,
+                processed_units=1,
+                failed_units=1,
+                lifecycle_state="failed",
+                safe_error_code=safe_code,
+                safe_error_message=safe_message,
+                analyzer_kind=analyzer_kind,
+                estimated_input_tokens=estimated_input_tokens,
+                output_token_budget=output_token_budget,
+                input_truncated=input_truncated,
+            )
+            progress.fail(message=safe_message)
+            raise error
 
         for attempt in range(attempts):
             attempt_started = self._clock()
@@ -632,7 +838,7 @@ class ProviderRuntime:
                 )
                 try:
                     raw = await _await_bounded(
-                        call(request, credential),
+                        call(active_request, credential),
                         cancellation=cancellation,
                         timeout=timeout,
                     )
@@ -641,7 +847,7 @@ class ProviderRuntime:
                 validation = "invalid"
                 value, normalized = parse_structured_response(
                     raw.text,
-                    request=request,
+                    request=active_request,
                     max_response_bytes=min(
                         self.configuration.max_response_bytes,
                         request.max_response_bytes
@@ -718,10 +924,16 @@ class ProviderRuntime:
 
             assert last_error is not None
             safe_code, safe_message = provider_error_details(last_error)
+            can_repair = (
+                isinstance(last_error, StructuredResponseError)
+                and not isinstance(last_error, UnsupportedResponseSchemaError)
+                and not structured_repair_used
+                and attempt + 1 < attempts
+            )
             if (
                 classify_retry(last_error) is RetryClassification.NON_RETRYABLE
-                or attempt + 1 >= attempts
-            ):
+                and not can_repair
+            ) or attempt + 1 >= attempts:
                 last_error.diagnostic = _diagnostic(
                     self.configuration,
                     request,
@@ -773,6 +985,21 @@ class ProviderRuntime:
                 )
                 progress.fail(message=safe_message)
                 raise last_error
+            if can_repair:
+                active_request = replace(
+                    request,
+                    analysis_task=(
+                        request.analysis_task
+                        + " Correction: return every required field with its exact "
+                        "JSON type."
+                    ),
+                )
+                structured_repair_used = True
+                repair_budget = estimate_request_context(
+                    active_request, self.configuration
+                )
+                if not repair_budget.fits:
+                    raise ContextWindowExceededError(repair_budget) from last_error
             delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
             progress.report(
                 "provider_retry",
@@ -849,6 +1076,29 @@ def provider_error_details(error: BaseException) -> tuple[str, str]:
         return "provider_timeout", "provider request timed out"
     if isinstance(error, ProviderCancelledError):
         return "cancelled", "provider request was cancelled"
+    if isinstance(error, ContextWindowExceededError):
+        return (
+            "context_window_exceeded",
+            "model request exceeds configured context window",
+        )
+    if isinstance(error, StructuredOutputSchemaUnsupportedError):
+        return (
+            "structured_output_schema_unsupported",
+            "provider rejected the structured output schema",
+        )
+    if isinstance(error, MissingSchemaVersionError):
+        return "missing_schema_version", "model response is missing schema_version"
+    if isinstance(error, UnsupportedResponseSchemaError):
+        return (
+            "unsupported_schema_version",
+            "model returned an unsupported schema_version",
+        )
+    if isinstance(error, WrongResponseShapeError):
+        return "wrong_response_shape", "model returned the wrong response shape"
+    if isinstance(error, MissingRequiredFieldError):
+        return "missing_required_field", str(error)
+    if isinstance(error, WrongFieldTypeError):
+        return "wrong_field_type", str(error)
     if isinstance(error, StructuredResponseError):
         if (
             "malformed json" in lowered
@@ -936,9 +1186,43 @@ def parse_structured_response(
             f"model response is malformed JSON at line {exc.lineno}, column {exc.colno}"
         ) from exc
     if not isinstance(parsed, dict):
-        raise StructuredResponseError("model response root must be an object")
+        raise WrongResponseShapeError("model response root must be an object")
+    schema = request.response_schema
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise ValueError("response schema root must be an object with required fields")
+    summary_schema = properties.get("summary")
+    if (
+        "summary" in parsed
+        and not _matches_schema_type(parsed["summary"], summary_schema)
+        and isinstance(parsed["summary"], dict)
+    ):
+        raise WrongResponseShapeError(
+            "model response nested an object where summary text was required"
+        )
+    wrong_types = tuple(
+        field
+        for field in required
+        if field != "schema_version"
+        and field in parsed
+        and isinstance(field, str)
+        and not _matches_schema_type(parsed[field], properties.get(field))
+    )
+    if wrong_types:
+        raise WrongFieldTypeError(wrong_types)
+    missing = tuple(
+        str(field)
+        for field in required
+        if field != "schema_version" and field not in parsed
+    )
+    if missing:
+        raise MissingRequiredFieldError(missing)
     version = parsed.get("schema_version")
-    if type(version) is not int or version != request.response_schema_version:
+    version_was_missing = "schema_version" not in parsed
+    if version_was_missing:
+        parsed = {**parsed, "schema_version": request.response_schema_version}
+    elif type(version) is not int or version != request.response_schema_version:
         raise UnsupportedResponseSchemaError(version)
     _validate_response_paths(parsed, request)
     try:
@@ -950,8 +1234,29 @@ def parse_structured_response(
 
         if not isinstance(exc, ValidationError):
             raise
-        first = exc.errors(include_url=False, include_context=False)[0]
+        errors = exc.errors(include_url=False, include_context=False)
+        first = errors[0]
         location = ".".join(str(part) for part in first["loc"]) or "response"
+        if version_was_missing and any(
+            tuple(item["loc"]) == ("schema_version",) for item in errors
+        ):
+            raise MissingSchemaVersionError(
+                "model response is missing schema_version"
+            ) from exc
+        missing_fields = tuple(
+            ".".join(str(part) for part in item["loc"])
+            for item in errors
+            if item["type"] == "missing"
+        )
+        if missing_fields:
+            raise MissingRequiredFieldError(missing_fields) from exc
+        typed_fields = tuple(
+            ".".join(str(part) for part in item["loc"])
+            for item in errors
+            if item["type"] != "missing"
+        )
+        if typed_fields:
+            raise WrongFieldTypeError(typed_fields) from exc
         raise StructuredResponseError(
             f"invalid structured response at {location}: {first['msg']}"
         ) from exc
@@ -996,6 +1301,51 @@ def _canonical_json(value: object) -> str:
         )
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise ValueError("value must be canonical JSON data") from exc
+
+
+def _estimate_tokens(utf8_bytes: int) -> int:
+    """Estimate conservatively for code/JSON when an exact tokenizer is unavailable."""
+
+    return (utf8_bytes + 2) // 3
+
+
+def _matches_schema_type(value: object, schema: object) -> bool:
+    if not isinstance(schema, dict):
+        return True
+    expected = schema.get("type")
+    if expected is None:
+        return True
+    expected_types = (expected,) if isinstance(expected, str) else tuple(expected)
+    checks = {
+        "object": lambda: isinstance(value, dict),
+        "array": lambda: isinstance(value, list),
+        "string": lambda: isinstance(value, str),
+        "integer": lambda: type(value) is int,
+        "number": lambda: type(value) in {int, float},
+        "boolean": lambda: type(value) is bool,
+        "null": lambda: value is None,
+    }
+    return any(kind in checks and checks[kind]() for kind in expected_types)
+
+
+def _require_constant_schema_versions(value: Any) -> None:
+    """Make constant schema versions provider-required instead of default-only."""
+
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            version = properties.get("schema_version")
+            if isinstance(version, dict) and version.get("const") == 1:
+                required = value.setdefault("required", [])
+                if not isinstance(required, list):
+                    raise ValueError("response schema required must be an array")
+                if "schema_version" not in required:
+                    required.append("schema_version")
+        for nested in value.values():
+            _require_constant_schema_versions(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _require_constant_schema_versions(nested)
 
 
 def _source_delimiter(operation_id: str, source: UntrustedSource) -> str:
@@ -1165,13 +1515,19 @@ def _log_request_metrics(
     """Log only bounded request metrics, never prompt or response material."""
 
     _LOGGER.debug(
-        "model request path=%s analyzer=%s estimated_input_tokens=%s "
-        "output_token_limit=%s attempt=%s response_tokens=%s total_duration_ms=%s "
+        "model request path=%s analyzer=%s context_window=%s "
+        "estimated_input_tokens=%s schema_overhead_tokens=%s "
+        "output_token_limit=%s safety_margin_tokens=%s estimated_total_tokens=%s "
+        "attempt=%s response_tokens=%s total_duration_ms=%s "
         "response_validation=%s input_truncated=%s",
         request.metadata.get("path", "(none)"),
         request.metadata.get("analyzer_kind", "(none)"),
+        request.metadata.get("configured_context_window", "(unknown)"),
         request.metadata.get("estimated_input_tokens", "(unknown)"),
+        request.metadata.get("schema_overhead_tokens", "(unknown)"),
         request.max_output_tokens,
+        request.metadata.get("safety_margin_tokens", "(unknown)"),
+        request.metadata.get("estimated_total_tokens", "(unknown)"),
         attempt,
         None if usage is None else usage.output_tokens,
         round(max(0.0, duration_seconds) * 1_000),

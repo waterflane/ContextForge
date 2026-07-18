@@ -64,7 +64,13 @@ endpoint = "http://127.0.0.1:11434/api/chat"
 # For provider = "openai-compatible" (or the CLI alias "lmstudio"):
 # base_url = "http://localhost:1234/v1"
 model = "qwen2.5-coder"
-timeout_seconds = 90
+timeout_seconds = 360
+connect_timeout_seconds = 10
+read_timeout_seconds = 300
+operation_timeout_seconds = 360
+# Set this to the actual loaded model/server context. Conservative default: 4096.
+context_window = 4096
+context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
