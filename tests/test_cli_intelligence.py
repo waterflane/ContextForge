@@ -312,7 +312,11 @@ def test_context_suggest_table_and_json_are_read_only(
     assert payload["selected"][0]["path"] == "app.py"
     assert payload["budget_usage"]["context_bytes"] > 0
     assert (tmp_path / "app.py").read_bytes() == before
-    assert not (tmp_path / ".contextforge").exists()
+    # Context suggestion remains source/index read-only while 0.4.1 records a
+    # compact safe operation summary in the existing local runs boundary.
+    state = tmp_path / ".contextforge"
+    assert not (state / "index").exists()
+    assert tuple((state / "runs").glob("diagnostic-*.json"))
 
 
 def test_context_suggest_indexed_missing_then_indexed_success(tmp_path: Path) -> None:

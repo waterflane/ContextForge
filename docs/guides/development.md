@@ -53,6 +53,8 @@ contextforge doctor
 contextforge index build . --provider fake
 contextforge index status . --format json
 contextforge context suggest . --task "Review this repository" --provider fake
+contextforge --log-level debug context suggest . --task "Review this repository" --provider fake
+contextforge diagnostics config . --format json
 ruff check .
 ruff format --check .
 mypy
@@ -86,6 +88,16 @@ Manual offline checks should cover structural/fake `index build`, no-op and
 changed-file `index update`, table/JSON status, clean confirmation/config
 preservation, all discovery modes, automatic and manual context creation,
 portable handoff review, and MCP initialize/list/call/resource exchange.
+Logging validation additionally covers stderr/stdout separation, one-object-
+per-line JSON, rotation retention, Rich live ownership, redirected non-ANSI
+output, secret redaction, local budget rejection without provider dispatch,
+and context-window values of 98,304 through resolution and budgeting.
+
+Tests must not assert on human log prose when a stable `event`, `error.code`, or
+structured `data` field exists. Use the in-process `recent_records()` API or
+JSON Lines. New application code emits diagnostic facts through
+`contextforge.logging.emit`; it must not add another progress abstraction or
+depend on Rich/Typer.
 
 ## Project provider configuration
 

@@ -67,6 +67,22 @@ does not claim complete secret detection.
 Credential values are resolved only at request time, redacted from typed
 errors, and forbidden from indexes, reviews, handoffs, prompts, and run data.
 
+Structured diagnostics apply centralized field-aware redaction recursively.
+Authorization and proxy-authorization values, bearer tokens, API keys,
+passwords, cookies, access/refresh tokens, credential fields, URL user-info,
+and sensitive query parameters are replaced before serialization. Endpoint
+diagnostics contain only a sanitized origin/path. Repository paths are
+normally portable repository-relative paths. Complete prompts, source
+contents, request bodies, raw model output, response bodies, and credential
+values are not diagnostic fields. Debug/trace file stack traces use the same
+redaction and bounded causal-chain policy.
+
+`.contextforge/logs/` and `.contextforge/runs/` are machine-local sensitive
+operational state and are covered by the protected/ignored `.contextforge/`
+root. Do not publish them without review. A logging or run-summary write
+failure degrades diagnostics and must not alter an active operation or index
+generation.
+
 The MCP server is local stdio and pins one validated repository snapshot/index
 generation per session. It delegates queries and reads to the same bounded
 discovery executor as in-process callers. It advertises only read-only tools

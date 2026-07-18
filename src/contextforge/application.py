@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
+from contextforge.diagnostics import persist_summary, summarize_operation
 from contextforge.discovery import (
     DiscoveryBudget,
     DiscoveryCancelledError,
@@ -67,10 +68,13 @@ from contextforge.intelligence import (
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
+from contextforge.logging import recent_records
 from contextforge.models import (
     ModelProvider,
+    ModelProviderError,
     ProviderCancelledError,
     ProviderConfiguration,
+    provider_error_details,
 )
 from contextforge.progress import (
     ProgressActivity,
@@ -210,6 +214,7 @@ async def build_repository_index(
             ),
         },
     )
+    diagnostic_start = _last_diagnostic_sequence()
     reporter.report(
         "initialize",
         "Initializing repository index.",
@@ -236,10 +241,26 @@ async def build_repository_index(
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            repository_root,
+            reporter,
+            diagnostic_start,
+            command="index update" if update_only else "index build",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
         raise
     reporter.complete(
         message="Repository index build completed.",
         metadata={"partial": report.partial},
+    )
+    _persist_application_diagnostic(
+        repository_root,
+        reporter,
+        diagnostic_start,
+        command="index update" if update_only else "index build",
+        outcome="completed",
+        generation_id=report.manifest.generation_id,
     )
     return report
 
@@ -795,6 +816,7 @@ async def suggest_repository_context(
         operation_id=operation_id,
         parent_operation_id=parent_operation_id,
     )
+    diagnostic_start = _last_diagnostic_sequence()
     reporter.report("scan", "Preparing repository snapshot.", percentage=0)
     try:
         active_snapshot = _workflow_snapshot(snapshot, reporter, end_percentage=10)
@@ -816,10 +838,26 @@ async def suggest_repository_context(
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            _snapshot_root(snapshot),
+            reporter,
+            diagnostic_start,
+            command="context suggest",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
         raise
     reporter.complete(
         message="Repository context discovery completed.",
         metadata={"run_id": result.run_id},
+    )
+    _persist_application_diagnostic(
+        active_snapshot.root,
+        reporter,
+        diagnostic_start,
+        command="context suggest",
+        outcome="completed",
+        generation_id=result.index_generation_id,
     )
     return result
 
@@ -843,6 +881,7 @@ async def create_automatic_handoff(
         operation_id=operation_id,
         parent_operation_id=parent_operation_id,
     )
+    diagnostic_start = _last_diagnostic_sequence()
     reporter.report(
         "repository_knowledge",
         "Loading repository knowledge.",
@@ -861,8 +900,24 @@ async def create_automatic_handoff(
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            _snapshot_root(snapshot),
+            reporter,
+            diagnostic_start,
+            command="context create --auto",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
         raise
     reporter.complete(message="Automatic context handoff completed.")
+    _persist_application_diagnostic(
+        active_snapshot.root,
+        reporter,
+        diagnostic_start,
+        command="context create --auto",
+        outcome="completed",
+        generation_id=result[0].discovery_run.index_generation_id,
+    )
     return result
 
 
@@ -1268,6 +1323,88 @@ def _report_terminal_exception(
         reporter.cancel(metadata=metadata)
     else:
         reporter.fail(metadata=metadata)
+
+
+def _last_diagnostic_sequence() -> int:
+    records = recent_records()
+    return records[-1].sequence if records else 0
+
+
+def _snapshot_root(source: object) -> Path | None:
+    if isinstance(source, ProjectSnapshot):
+        return source.root
+    if isinstance(source, (str, Path)):
+        return Path(source)
+    return None
+
+
+def _diagnostic_outcome(
+    error: BaseException,
+) -> Literal["failed", "cancelled"]:
+    if isinstance(
+        error,
+        (
+            asyncio.CancelledError,
+            DiscoveryCancelledError,
+            KeyboardInterrupt,
+            ProviderCancelledError,
+        ),
+    ):
+        return "cancelled"
+    return "failed"
+
+
+def _diagnostic_error_code(error: BaseException | None) -> str | None:
+    if error is None:
+        return None
+    if isinstance(error, ModelProviderError):
+        return provider_error_details(error)[0]
+    run_record = getattr(error, "run_record", None)
+    value = getattr(run_record, "failure_code", None)
+    if isinstance(value, str):
+        return value
+    if isinstance(error, OSError):
+        return "persistence_failure"
+    return "internal_error"
+
+
+def _persist_application_diagnostic(
+    repository_root: str | Path | None,
+    reporter: ProgressReporter,
+    start_sequence: int,
+    *,
+    command: str,
+    outcome: Literal["completed", "failed", "cancelled"],
+    error: BaseException | None = None,
+    generation_id: str | None = None,
+) -> None:
+    if repository_root is None:
+        return
+    terminal = reporter.last_event
+    if terminal is None:
+        return
+    records = tuple(item for item in recent_records() if item.sequence > start_sequence)
+    code = _diagnostic_error_code(error)
+    hints = (
+        (
+            "Inspect `contextforge diagnostics config .` for the effective "
+            "context window.",
+            "Increase ContextForge context_window or reduce request candidates.",
+        )
+        if code == "context_window_exceeded"
+        else ()
+    )
+    summary = summarize_operation(
+        terminal.operation_id,
+        command,
+        records,
+        operation_type=terminal.operation_type,
+        outcome=outcome,
+        generation_id=generation_id,
+        final_error_code=code,
+        remediation_hints=hints,
+    )
+    persist_summary(repository_root, summary)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

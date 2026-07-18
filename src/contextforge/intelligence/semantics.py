@@ -62,6 +62,7 @@ from contextforge.intelligence.store import (
     write_index_record,
     write_manifest,
 )
+from contextforge.logging import LogLevel, emit
 from contextforge.models import (
     ModelProvider,
     ModelProviderError,
@@ -883,6 +884,24 @@ async def build_semantic_index(
                 path=project_file.path,
             )
             tracker.fail(project_file.path, diagnostic)
+            emit(
+                "semantic",
+                "semantic.analysis.failed",
+                "Semantic analysis failed for one repository-relative file.",
+                level=LogLevel.WARNING,
+                phase_id="semantic_analysis",
+                status="failed",
+                error=exc,
+                error_code=code,
+                data={
+                    "path": project_file.path,
+                    "analysis_route": route,
+                    "retry_count": getattr(
+                        getattr(exc, "diagnostic", None), "retry_count", 0
+                    ),
+                    "previous_active_generation_intact": True,
+                },
+            )
             _emit_status(active_options, project_file.path, "failed")
             return project_file.path, None, diagnostic, False
 

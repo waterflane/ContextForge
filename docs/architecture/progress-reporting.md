@@ -13,6 +13,12 @@ and from asynchronous index build/update, indexed/fresh/hybrid discovery,
 automatic handoff materialization, and prompt compilation. Reporting remains
 phase-based, with bounded per-file updates where the work total is known.
 
+Progress is not logging. A progress event describes current operation state;
+the versioned structured records in `contextforge.logging` preserve diagnostic
+facts and decisions. Reporter creation/terminal state may produce one lifecycle
+log, but spinner refreshes and repeated live-panel paints never become log
+records. Application and domain code remain independent of Rich and Typer.
+
 ## Event schema
 
 `ProgressEvent` is a frozen Pydantic model with unknown fields forbidden. New
@@ -158,6 +164,12 @@ live console while it is active, then restored on the single stop path. This
 prints diagnostics above the panel instead of leaving a duplicate frame. All
 terminal outcomes and the final defensive close converge on exactly-once cursor
 restoration.
+
+The centralized structured stderr handler participates in this ownership
+mechanism. Pretty/JSON lines are printed above a live panel through Rich's file
+proxy, then handlers are restored. Redirected stderr receives discrete plain
+lines with no cursor movement. Logs do not render a second panel and progress
+metadata never carries prompts, source, responses, or credentials.
 
 The details layout reserves 16 characters for complete labels such as
 `Processed`, `Last failure`, and `Request elapsed`; values fold or wrap. Below

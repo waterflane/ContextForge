@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 from typer.rich_utils import _get_rich_console
 
+from contextforge.logging import color_enabled
 from contextforge.progress import ProgressActivity, ProgressEvent, ProgressStatus
 
 _OPERATION_LABELS = {
@@ -87,9 +89,15 @@ class CLIProgressRenderer:
     @staticmethod
     def _console_for(stream: TextIO | None) -> Console:
         if stream is None:
-            return _get_rich_console(stderr=True)
+            if color_enabled():
+                return _get_rich_console(stderr=True)
+            return Console(file=sys.stderr, color_system=None)
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
-        return Console(file=stream, force_terminal=is_tty, color_system="auto")
+        return Console(
+            file=stream,
+            force_terminal=is_tty,
+            color_system="auto" if color_enabled() else None,
+        )
 
     @staticmethod
     def _supports_unicode(encoding: str) -> bool:

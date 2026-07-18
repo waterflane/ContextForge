@@ -71,6 +71,13 @@ limit. Precedence is CLI, supported `CONTEXTFORGE_MODEL_*` environment values,
 `config.local.toml`, `config.toml`, then defaults. Increasing a compatible
 window alone does not invalidate semantic records.
 
+Context diagnostics retain every candidate separately: CLI, environment,
+local config, shared config, provider-reported value, model metadata, and the
+built-in default. The event also names the effective value and source. A
+provider/model value such as 98,304 is not silently substituted for a
+ContextForge `config.toml` value of 16,384; diagnostics show both and identify
+`config.toml` as the effective source.
+
 Connection, response-read, and complete-operation defaults are 10, 300, and
 360 seconds. The retained `timeout_seconds` value is a compatibility operation
 ceiling. `ProviderConfiguration` also enforces a response cap in
@@ -240,6 +247,12 @@ request without preflight. Set, for example, `context_window = 4096` under
 `[models]` (or pass `--context-window 4096`) to match LM Studio. Current builds
 reduce file excerpts and hierarchy context before dispatch and report
 `context_window_exceeded` without spending transient retries.
+
+The structured `budget.calculated` record splits input into system, user,
+source/prior-context, and selected-index tokens, then adds schema, requested
+output, protocol overhead, and safety margin. These components reproduce the
+total exactly. `budget.rejected` explicitly records
+`request_dispatched=false`; it never attributes a local rejection to LM Studio.
 
 `structured output grammar rejected` means the server could not compile the
 strict schema. Current repository-map schemas are compact. The OpenAI-compatible

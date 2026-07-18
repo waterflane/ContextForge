@@ -81,6 +81,20 @@ store_raw_prompts = false
 store_raw_responses = false
 # credential_env = "LM_STUDIO_API_KEY"
 
+[logging]
+level = "warning"
+format = "auto"
+file_enabled = false
+# Machine-specific file paths normally belong in config.local.toml.
+file = ".contextforge/logs/contextforge.log"
+rotation_bytes = 10000000
+retained_files = 5
+
+[logging.components]
+# provider = "debug"
+# budget = "trace"
+# synthesis = "debug"
+
 [retention]
 runs = 10
 index_generations = 2

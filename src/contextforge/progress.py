@@ -18,6 +18,8 @@ from pydantic import (
     model_validator,
 )
 
+from contextforge.logging import LogLevel, emit
+
 PROGRESS_SCHEMA_VERSION: Literal[3] = 3
 
 
@@ -793,6 +795,50 @@ class ProgressReporter:
         self._last_input_truncated = event.input_truncated
         self._terminal = event.status is not ProgressStatus.RUNNING
         self._last_event = event
+        if event.sequence == 0:
+            emit(
+                "progress",
+                "operation.started",
+                "Operation started.",
+                level=LogLevel.INFO,
+                operation_id=event.operation_id,
+                operation_type=event.operation_type,
+                phase_id=event.phase_id,
+                status="running",
+                data={"parent_operation_id": event.parent_operation_id},
+            )
+        if event.status is not ProgressStatus.RUNNING:
+            terminal_event = {
+                ProgressStatus.COMPLETED: "operation.completed",
+                ProgressStatus.FAILED: "operation.failed",
+                ProgressStatus.CANCELLED: "operation.cancelled",
+            }[event.status]
+            terminal_level = (
+                LogLevel.INFO
+                if event.status is ProgressStatus.COMPLETED
+                else LogLevel.ERROR
+                if event.status is ProgressStatus.FAILED
+                else LogLevel.WARNING
+            )
+            emit(
+                "progress",
+                terminal_event,
+                event.message,
+                level=terminal_level,
+                operation_id=event.operation_id,
+                operation_type=event.operation_type,
+                phase_id=event.phase_id,
+                duration_ms=round(event.operation_elapsed_seconds * 1_000),
+                status=event.status.value,
+                data={
+                    "safe_error_code": event.safe_error_code,
+                    "safe_error_message": event.safe_error_message,
+                    "processed_units": event.processed_units,
+                    "succeeded_units": event.succeeded_units,
+                    "failed_units": event.failed_units,
+                    "fallback_units": event.fallback_units,
+                },
+            )
         try:
             self._observer(event)
         except BaseException:  # Observers never control operation lifecycle.

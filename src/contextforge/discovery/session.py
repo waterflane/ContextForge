@@ -28,6 +28,7 @@ from contextforge.intelligence import (
     load_repository_overview,
     resolve_relationships,
 )
+from contextforge.logging import LogLevel, emit
 from contextforge.models import (
     ModelProvider,
     ModelProviderError,
@@ -169,6 +170,7 @@ class DiscoverySession:
         self._executor: DiscoveryToolExecutor | None = None
         self._repeat_counts: dict[str, int] = {}
         self._completeness_pass_requested = False
+        self._stage = "retrieval"
         self._progress = ProgressReporter(
             operation_id or uuid.uuid4().hex,
             "repository.context.discovery",
@@ -225,8 +227,40 @@ class DiscoverySession:
         )
         try:
             self._raise_if_cancelled()
+            self._stage = "retrieval"
             self.prepare_read_only_tools()
             knowledge = self._require_knowledge()
+            emit(
+                "retrieval",
+                "context_suggestion.candidates_discovered",
+                "Loaded bounded repository knowledge for context suggestion.",
+                level=LogLevel.DEBUG,
+                operation_id=self._progress.last_event.operation_id
+                if self._progress.last_event is not None
+                else None,
+                operation_type="repository.context.discovery",
+                phase_id="retrieval",
+                data={
+                    "requested_task_length": len(self.request.task),
+                    "discovery_mode": mode,
+                    "total_indexed_files": len(knowledge.code_maps),
+                    "total_semantic_records": len(knowledge.semantic_analyses),
+                    "initial_lexical_candidates": 0,
+                    "structural_candidates": len(knowledge.code_maps),
+                    "semantic_candidates": len(knowledge.semantic_analyses),
+                    "merged_candidate_count": len(
+                        set(knowledge.code_maps) | set(knowledge.semantic_analyses)
+                    ),
+                    "candidate_count_after_deduplication": len(
+                        set(knowledge.code_maps) | set(knowledge.semantic_analyses)
+                    ),
+                    "candidate_count_after_filtering": len(knowledge.code_maps),
+                    "candidate_count_after_ranking": len(knowledge.code_maps),
+                    "complete_index_considered_for_one_request": False,
+                    "synthesis_provider": self.provider.provider_id,
+                    "synthesis_mode": "provider",
+                },
+            )
             self._progress.report(
                 "knowledge",
                 f"Loaded {mode} repository knowledge.",
@@ -238,6 +272,7 @@ class DiscoverySession:
                 },
             )
             while True:
+                self._stage = "ranking"
                 self._check_limits_before_model()
                 percentage = 20 + 60 * max(
                     self.budget.steps / self.request.budget.max_steps,
@@ -255,6 +290,7 @@ class DiscoverySession:
                     },
                 )
                 actions = await self._request_actions()
+                self._stage = "context_assembly"
                 for action in actions:
                     self._raise_if_cancelled()
                     self._check_step_limit()
@@ -275,18 +311,57 @@ class DiscoverySession:
                         self._progress.complete(
                             message="Repository context discovery completed."
                         )
+                        selection = finalized.final_selection
+                        emit(
+                            "retrieval",
+                            "context_suggestion.selection_completed",
+                            "Completed verified context suggestion selection.",
+                            level=LogLevel.INFO,
+                            operation_id=self._progress.last_event.operation_id
+                            if self._progress.last_event is not None
+                            else None,
+                            operation_type="repository.context.discovery",
+                            phase_id="final_package_creation",
+                            status="completed",
+                            data={
+                                "discovery_mode": mode,
+                                "final_selected_records": (
+                                    []
+                                    if selection is None
+                                    else [
+                                        item.path
+                                        for item in selection.selected
+                                        if item.path is not None
+                                    ]
+                                ),
+                                "selected_record_count": (
+                                    0 if selection is None else len(selection.selected)
+                                ),
+                                "selected_source_token_total": (
+                                    self.budget.context_bytes + 2
+                                )
+                                // 3,
+                                "reduction_applied": False,
+                                "truncation_applied": False,
+                                "batching_applied": self.budget.model_calls > 1,
+                                "fallback_selected": False,
+                            },
+                        )
                         return finalized
         except DiscoveryError as exc:
             if isinstance(exc, DiscoveryCancelledError):
                 self._progress.cancel()
             else:
                 self._progress.fail(metadata={"error_type": type(exc).__name__})
+            self._log_failure(exc, exc.run_record.failure_code or "discovery_failed")
             raise
         except asyncio.CancelledError:
             self._progress.cancel()
+            self._log_failure(None, "cancelled")
             raise
         except ProviderCancelledError as exc:
             self._progress.cancel()
+            self._log_failure(exc, "cancelled")
             raise self._failure(
                 DiscoveryCancelledError,
                 "cancelled",
@@ -296,6 +371,7 @@ class DiscoverySession:
         except ModelProviderError as exc:
             error_code, error_message = provider_error_details(exc)
             self._progress.fail(metadata={"error_type": type(exc).__name__})
+            self._log_failure(exc, error_code)
             raise self._failure(
                 DiscoveryProtocolError,
                 error_code,
@@ -303,6 +379,7 @@ class DiscoverySession:
             ) from exc
         except ToolBudgetExceededError as exc:
             self._progress.fail(metadata={"error_type": type(exc).__name__})
+            self._log_failure(exc, "budget_exceeded")
             raise self._failure(
                 DiscoveryLimitError,
                 "budget_exceeded",
@@ -310,6 +387,7 @@ class DiscoverySession:
             ) from exc
         except (IndexManifestReadError, ValueError, OSError) as exc:
             self._progress.fail(metadata={"error_type": type(exc).__name__})
+            self._log_failure(exc, "source_or_index_changed")
             raise self._failure(
                 DiscoverySourceChangedError,
                 "source_or_index_changed",
@@ -516,6 +594,7 @@ class DiscoverySession:
         return _KnowledgeResult(knowledge, _unique_warnings(warnings))
 
     async def _request_actions(self) -> tuple[DiscoveryAction, ...]:
+        self._stage = "budget_calculation"
         self.budget.model_calls += 1
         observations = [
             item.model_dump(mode="json") for item in self.observations[-20:]
@@ -580,6 +659,47 @@ class DiscoverySession:
             metadata={"mode": self.request.mode.value, "run_id": self.run_id[:32]},
         )
         remaining = self._remaining_seconds()
+        emit(
+            "synthesis",
+            "context_suggestion.request_assembled",
+            "Assembled a bounded context-suggestion synthesis request.",
+            level=LogLevel.DEBUG,
+            operation_id=self._progress.last_event.operation_id
+            if self._progress.last_event is not None
+            else None,
+            operation_type="repository.context.discovery",
+            phase_id="context_assembly",
+            request_id=request.operation_id,
+            data={
+                "requested_task_length": len(self.request.task),
+                "discovery_mode": self.request.mode.value,
+                "total_indexed_files": len(knowledge.code_maps),
+                "total_semantic_records": len(knowledge.semantic_analyses),
+                "selected_record_count": len(self._require_executor().selected),
+                "selected_records": [
+                    item.path
+                    for item in self._require_executor().selected
+                    if item.path is not None
+                ],
+                "estimated_serialized_index_tokens": (
+                    len(
+                        json.dumps(
+                            trusted,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    )
+                    + 2
+                )
+                // 3,
+                "complete_index_considered_for_one_request": False,
+                "input_truncated": False,
+                "input_chunked": False,
+            },
+        )
+        self._stage = "provider_dispatch"
         try:
             async with asyncio.timeout(remaining):
                 response = await self.provider.complete_structured(
@@ -591,13 +711,43 @@ class DiscoverySession:
                 "total_timeout",
                 "discovery reached its total timeout",
             ) from exc
+        self._stage = "response_parsing"
         if not isinstance(response.value, DiscoveryActionBatch):
+            self._stage = "schema_validation"
             raise self._failure(
                 DiscoveryProtocolError,
                 "malformed_action",
                 "provider returned the wrong validated action model",
             )
         return response.value.actions
+
+    def _log_failure(self, error: BaseException | None, code: str) -> None:
+        emit(
+            "retrieval",
+            "context_suggestion.failed",
+            "Context suggestion failed at a specific application stage.",
+            level=LogLevel.ERROR,
+            operation_id=self._progress.last_event.operation_id
+            if self._progress.last_event is not None
+            else None,
+            operation_type="repository.context.discovery",
+            phase_id=self._stage,
+            status="failed",
+            error=error,
+            error_code=code,
+            data={
+                "failing_stage": self._stage,
+                "discovery_mode": self.request.mode.value,
+                "requested_task_length": len(self.request.task),
+                "provider_request_dispatched": self._stage
+                not in {
+                    "retrieval",
+                    "ranking",
+                    "context_assembly",
+                    "budget_calculation",
+                },
+            },
+        )
 
     def _execute_action(self, action: DiscoveryAction) -> DiscoveryRunRecord | None:
         executor = self._require_executor()

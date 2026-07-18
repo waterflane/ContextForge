@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
+from contextforge.logging import LogLevel, emit, sanitize_url
 from contextforge.models.providers import (
     ContextWindowExceededError,
     ModelRequest,
@@ -143,6 +145,21 @@ class OpenAICompatibleModelProvider:
                         )
                     except StructuredOutputSchemaUnsupportedError:
                         self._structured_mode = "json_object"
+                        emit(
+                            "schema",
+                            "synthesis.fallback.selected",
+                            "OpenAI-compatible server rejected JSON Schema; "
+                            "selected JSON object mode.",
+                            level=LogLevel.WARNING,
+                            request_id=request.operation_id,
+                            phase_id="structured_output_negotiation",
+                            fallback_selected=True,
+                            data={
+                                "trigger": "structured_output_schema_unsupported",
+                                "fallback": "json_object",
+                                "local_schema_validation_retained": True,
+                            },
+                        )
                     else:
                         self._structured_mode = "json_schema"
                         return response
@@ -261,8 +278,46 @@ class OpenAICompatibleModelProvider:
         if credential is not None:
             headers["Authorization"] = "Bearer " + credential.get_secret_value()
         limit = self.configuration.max_response_bytes + MAX_HTTP_HEADER_BYTES
+        started = time.monotonic()
+        emit(
+            "provider",
+            "provider.http.dispatch",
+            "Dispatching an OpenAI-compatible HTTP request.",
+            level=LogLevel.TRACE,
+            data={
+                "http_method": method,
+                "endpoint": sanitize_url(url),
+                "request_body_bytes": 0 if body is None else len(body),
+                "authorization_configured": credential is not None,
+            },
+        )
         try:
-            return await self._transport(method, url, body, headers, limit)
+            response = await self._transport(method, url, body, headers, limit)
+            duration = round((time.monotonic() - started) * 1_000)
+            emit(
+                "provider",
+                "provider.http.response_headers_received",
+                "Received OpenAI-compatible HTTP response status and headers.",
+                level=LogLevel.TRACE,
+                duration_ms=duration,
+                data={
+                    "http_method": method,
+                    "endpoint": sanitize_url(url),
+                    "status_code": response.status,
+                },
+            )
+            emit(
+                "provider",
+                "provider.http.response_body_received",
+                "Received complete bounded OpenAI-compatible response body.",
+                level=LogLevel.TRACE,
+                duration_ms=duration,
+                data={
+                    "status_code": response.status,
+                    "response_byte_length": len(response.body),
+                },
+            )
+            return response
         except (
             ProviderRequestError,
             ProviderUnavailableError,
@@ -272,6 +327,18 @@ class OpenAICompatibleModelProvider:
         ):
             raise
         except Exception as exc:
+            emit(
+                "provider",
+                "provider.http.failed",
+                "OpenAI-compatible HTTP transport failed.",
+                level=LogLevel.DEBUG,
+                duration_ms=round((time.monotonic() - started) * 1_000),
+                error=exc,
+                error_code="provider_connection_error",
+                transient=True,
+                retryable=True,
+                data={"http_method": method, "endpoint": sanitize_url(url)},
+            )
             raise ProviderUnavailableError(
                 "LM Studio/OpenAI-compatible server is unavailable"
             ) from exc

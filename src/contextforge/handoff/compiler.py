@@ -9,6 +9,7 @@ import uuid
 
 from contextforge.context import ContextFile, render_project_tree
 from contextforge.intelligence import serialize_code_map
+from contextforge.logging import LogLevel, emit
 from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.prompts import PromptPackage
 
@@ -50,6 +51,31 @@ def compile_prompt(
         raise
     except Exception as exc:
         reporter.fail(metadata={"error_type": type(exc).__name__})
+        emit(
+            "synthesis",
+            "prompt.compilation.failed",
+            "Prompt compilation failed during deterministic assembly or budgeting.",
+            level=LogLevel.ERROR,
+            operation_id=(
+                reporter.last_event.operation_id
+                if reporter.last_event is not None
+                else operation_id
+            ),
+            operation_type="repository.prompt.compile",
+            phase_id=(
+                reporter.last_event.phase_id
+                if reporter.last_event is not None
+                else "compile"
+            ),
+            status="failed",
+            error=exc,
+            error_code=(
+                "context_window_exceeded"
+                if isinstance(exc, PromptCompileError)
+                else "internal_error"
+            ),
+            data={"prompt_contents_logged": False},
+        )
         raise
     reporter.complete(message="Prompt compilation completed.")
     return compiled
@@ -163,6 +189,25 @@ def _compile_prompt(handoff: TaskHandoff, reporter: ProgressReporter) -> Compile
         git_diff_bytes=git_bytes,
         prompt_instruction_bytes=instruction_bytes,
         total_prompt_bytes=len(encoded),
+    )
+    emit(
+        "budget",
+        "prompt.budget_calculated",
+        "Calculated deterministic compiled-prompt byte budgets.",
+        level=LogLevel.DEBUG,
+        operation_id=(
+            reporter.last_event.operation_id
+            if reporter.last_event is not None
+            else None
+        ),
+        operation_type="repository.prompt.compile",
+        phase_id="validate",
+        data={
+            **usage.model_dump(mode="json"),
+            "selected_file_count": len(package.files),
+            "selected_paths": [item.path for item in package.files],
+            "prompt_contents_logged": False,
+        },
     )
     _validate_budget(handoff, usage)
     reporter.report("validate", "Validated compiled prompt budgets.", percentage=97)

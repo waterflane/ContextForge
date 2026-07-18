@@ -69,7 +69,10 @@ does not execute compiled prompts. The shared
 [application progress contract](progress-reporting.md) exposes structured,
 observer-isolated, weighted workflow phases without interface dependencies. One
 shared stderr-only Typer renderer adapts those events without contaminating
-structured stdout. Thin Typer commands expose index and context workflows,
+structured stdout. The separate
+[structured diagnostics contract](diagnostics.md) records safe facts,
+decisions, request budgets, and causal errors for CLI and future interfaces
+without turning progress refreshes into logs. Thin Typer commands expose index and context workflows,
 while a bounded read-only MCP
 adapter exposes the same core APIs without shell, source-write, Git-mutation,
 or index-mutation capabilities.

@@ -64,6 +64,7 @@ from contextforge.intelligence.store import (
     write_index_record,
     write_manifest,
 )
+from contextforge.logging import LogLevel, emit
 from contextforge.models import (
     ModelProvider,
     ModelProviderError,
@@ -408,6 +409,21 @@ async def build_repository_maps(
             source_interpretations_digest,
             _failure_diagnostic("repository-map-hierarchy-fallback", exc),
         )
+        emit(
+            "synthesis",
+            "synthesis.fallback.selected",
+            "Selected deterministic repository-map fallback after hierarchy failure.",
+            level=LogLevel.WARNING,
+            phase_id="repository_map_hierarchy",
+            error=exc,
+            error_code="repository_map_hierarchy_failed",
+            fallback_selected=True,
+            data={
+                "fallback": "deterministic_repository_map",
+                "trigger": type(exc).__name__,
+                "previous_active_generation_intact": True,
+            },
+        )
         generation = _publish_global_records(
             lock,
             current,
@@ -504,6 +520,19 @@ async def build_repository_maps(
             and old_architecture is not None
             and old_features is not None
         ):
+            emit(
+                "synthesis",
+                "synthesis.fallback.selected",
+                "Reused previous compatible repository maps after synthesis failure.",
+                level=LogLevel.WARNING,
+                phase_id="repository_map_recovery",
+                fallback_selected=True,
+                data={
+                    "fallback": "previous_compatible_generation",
+                    "failed_map_count": len(failures),
+                    "previous_active_generation_intact": True,
+                },
+            )
             recovered = tuple(
                 GlobalMapOutcome(
                     item.map_kind,
@@ -526,6 +555,22 @@ async def build_repository_maps(
                 published=False,
             )
     if failures:
+        emit(
+            "synthesis",
+            "synthesis.fallback.selected",
+            "Selected deterministic fallback for failed repository map synthesis.",
+            level=LogLevel.WARNING,
+            phase_id="repository_map_synthesis",
+            fallback_selected=True,
+            data={
+                "fallback": "deterministic_repository_map",
+                "failed_maps": [item.map_kind for item in failures],
+                "trigger_codes": [
+                    None if item.diagnostic is None else item.diagnostic.code
+                    for item in failures
+                ],
+            },
+        )
         fallback_architecture, fallback_features = _deterministic_map_fallback(
             current,
             overview,

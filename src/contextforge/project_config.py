@@ -8,10 +8,11 @@ import re
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from contextforge.logging import LogFormat, LoggingConfiguration, LogLevel
 from contextforge.models import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
@@ -83,12 +84,31 @@ class RetentionSettings(_ConfigModel):
     index_generations: int = Field(default=2, ge=1, le=1_000, strict=True)
 
 
+class LoggingSettings(_ConfigModel):
+    """Secret-free project logging policy."""
+
+    level: Literal["quiet", "error", "warning", "info", "debug", "trace"] = "warning"
+    format: Literal["auto", "pretty", "json"] = "auto"
+    file_enabled: bool = False
+    file: str = ".contextforge/logs/contextforge.log"
+    rotation_bytes: int = Field(default=10_000_000, ge=1_024, le=2_000_000_000)
+    retained_files: int = Field(default=5, ge=0, le=100)
+    components: dict[
+        str, Literal["quiet", "error", "warning", "info", "debug", "trace"]
+    ] = Field(default_factory=dict)
+
+
 class ProjectConfiguration(_ConfigModel):
     """Closed version-one project configuration."""
 
     config_version: Literal[1] = 1
     models: ProjectModelSettings = Field(default_factory=ProjectModelSettings)
     retention: RetentionSettings = Field(default_factory=RetentionSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    _value_sources: dict[str, str] = PrivateAttr(default_factory=dict)
+    _value_candidates: dict[str, dict[str, object | None]] = PrivateAttr(
+        default_factory=dict
+    )
 
 
 def load_project_configuration(
@@ -108,19 +128,31 @@ def load_project_configuration(
     )
     if not requested.is_absolute():
         requested = Path.cwd() / requested
-    payload = _read_toml(requested, required=require_file or config_path is not None)
+    shared_payload = _read_toml(
+        requested, required=require_file or config_path is not None
+    )
+    payload = shared_payload
+    local_payload: dict[str, object] = {}
     if config_path is None:
         local_payload = _read_toml(
             root / ".contextforge" / "config.local.toml", required=False
         )
         payload = _merge_config(payload, local_payload)
-    payload = _apply_model_environment(
-        payload, os.environ if environment is None else environment
-    )
+    active_environment = os.environ if environment is None else environment
+    payload = _apply_model_environment(payload, active_environment)
+    payload = _apply_logging_environment(payload, active_environment)
     try:
-        return ProjectConfiguration.model_validate(payload)
+        project = ProjectConfiguration.model_validate(payload)
     except ValidationError as exc:
         raise ProjectConfigError("project configuration is invalid") from exc
+    _record_configuration_sources(
+        project,
+        shared_payload=shared_payload,
+        local_payload=local_payload,
+        environment=active_environment,
+        shared_name=(requested.name if config_path is not None else "config.toml"),
+    )
+    return project
 
 
 def resolve_provider_configuration(
@@ -199,6 +231,22 @@ def resolve_provider_configuration(
         "local_only": settings.local_only if local_only is None else local_only,
         "external_data_policy": settings.external_data_policy,
         "credential_env": settings.credential_env,
+        "context_window_source": (
+            "CLI"
+            if context_window is not None
+            else project._value_sources.get("models.context_window", "built-in default")
+        ),
+        "cli_context_window": context_window,
+        "environment_context_window": project._value_candidates.get(
+            "models.context_window", {}
+        ).get("environment"),
+        "local_config_context_window": project._value_candidates.get(
+            "models.context_window", {}
+        ).get("config.local.toml"),
+        "shared_config_context_window": project._value_candidates.get(
+            "models.context_window", {}
+        ).get("config.toml"),
+        "default_context_window": DEFAULT_CONTEXT_WINDOW_TOKENS,
     }
     if provider_id == "fake":
         values["endpoint"] = "fake://offline"
@@ -207,6 +255,71 @@ def resolve_provider_configuration(
         return ProviderConfiguration.model_validate(values)
     except ValidationError as exc:
         raise ProjectConfigError("provider configuration is invalid") from exc
+
+
+def resolve_logging_configuration(
+    project: ProjectConfiguration,
+    repository_root: str | Path,
+    *,
+    level: str | None = None,
+    log_format: str | None = None,
+    log_file: Path | None = None,
+    component_filter: tuple[str, ...] = (),
+    no_log_file: bool = False,
+    no_color: bool = False,
+    verbosity: int = 0,
+) -> LoggingConfiguration:
+    """Apply CLI logging options after environment/project/default resolution."""
+
+    configured = project.logging
+    if level is not None:
+        effective_level = LogLevel(level.casefold())
+    elif verbosity >= 2:
+        effective_level = LogLevel.TRACE
+    elif verbosity == 1:
+        effective_level = _raise_verbosity(LogLevel(configured.level))
+    else:
+        effective_level = LogLevel(configured.level)
+    effective_format = LogFormat(
+        configured.format if log_format is None else log_format.casefold()
+    )
+    root = Path(repository_root).expanduser().resolve(strict=True)
+    file_value = Path(configured.file) if log_file is None else log_file
+    file_enabled = configured.file_enabled or log_file is not None
+    if no_log_file:
+        file_enabled = False
+    return LoggingConfiguration(
+        level=effective_level,
+        format=effective_format,
+        file_enabled=file_enabled,
+        file=file_value,
+        rotation_bytes=configured.rotation_bytes,
+        retained_files=configured.retained_files,
+        components={
+            key: LogLevel(value) for key, value in configured.components.items()
+        },
+        component_filter=frozenset(component_filter),
+        no_color=no_color,
+        repository_root=root,
+    )
+
+
+def configuration_resolution(project: ProjectConfiguration) -> dict[str, Any]:
+    """Return detached, safe precedence metadata for diagnostics and APIs."""
+
+    return {
+        "sources": dict(project._value_sources),
+        "candidates": {
+            key: dict(value) for key, value in project._value_candidates.items()
+        },
+        "precedence": [
+            "CLI",
+            "environment",
+            "config.local.toml",
+            "config.toml",
+            "built-in default",
+        ],
+    }
 
 
 def _read_toml(path: Path, *, required: bool) -> dict[str, object]:
@@ -266,6 +379,122 @@ def _apply_model_environment(
             ) from exc
     result["models"] = models
     return result
+
+
+def _apply_logging_environment(
+    payload: Mapping[str, object], environment: Mapping[str, str]
+) -> dict[str, object]:
+    result = dict(payload)
+    raw_logging = result.get("logging")
+    values: dict[str, object] = (
+        dict(raw_logging) if isinstance(raw_logging, dict) else {}
+    )
+    names = {
+        "CONTEXTFORGE_LOG_LEVEL": "level",
+        "CONTEXTFORGE_LOG_FORMAT": "format",
+        "CONTEXTFORGE_LOG_FILE": "file",
+    }
+    for environment_name, field_name in names.items():
+        raw = environment.get(environment_name)
+        if raw is not None:
+            values[field_name] = raw
+            if field_name == "file":
+                values["file_enabled"] = True
+    components = environment.get("CONTEXTFORGE_LOG_COMPONENTS")
+    if components is not None:
+        # Environment components are a focus allowlist, not per-component levels;
+        # the CLI resolver receives this value through the private candidates.
+        values.setdefault("components", {})
+    result["logging"] = values
+    return result
+
+
+def _record_configuration_sources(
+    project: ProjectConfiguration,
+    *,
+    shared_payload: Mapping[str, object],
+    local_payload: Mapping[str, object],
+    environment: Mapping[str, str],
+    shared_name: str,
+) -> None:
+    shared_context = _nested_value(shared_payload, "models", "context_window")
+    local_context = _nested_value(local_payload, "models", "context_window")
+    environment_context: int | None = None
+    raw_environment = environment.get("CONTEXTFORGE_MODEL_CONTEXT_WINDOW")
+    if raw_environment is not None:
+        try:
+            environment_context = int(raw_environment)
+        except ValueError:
+            environment_context = None
+    candidates: dict[str, object | None] = {
+        "CLI": None,
+        "environment": environment_context,
+        "config.local.toml": local_context,
+        "config.toml": shared_context,
+        "provider metadata": None,
+        "model metadata": None,
+        "built-in default": DEFAULT_CONTEXT_WINDOW_TOKENS,
+    }
+    if environment_context is not None:
+        source = "environment"
+    elif local_context is not None:
+        source = "config.local.toml"
+    elif shared_context is not None:
+        source = "config.toml" if shared_name == "config.toml" else shared_name
+    else:
+        source = "built-in default"
+    project._value_sources["models.context_window"] = source
+    project._value_candidates["models.context_window"] = candidates
+
+    logging_fields = ("level", "format", "file")
+    for field_name in logging_fields:
+        environment_name = f"CONTEXTFORGE_LOG_{field_name.upper()}"
+        environment_value = environment.get(environment_name)
+        local_value = _nested_value(local_payload, "logging", field_name)
+        shared_value = _nested_value(shared_payload, "logging", field_name)
+        default_value = getattr(LoggingSettings(), field_name)
+        if environment_value is not None:
+            value_source = "environment"
+        elif local_value is not None:
+            value_source = "config.local.toml"
+        elif shared_value is not None:
+            value_source = "config.toml"
+        else:
+            value_source = "built-in default"
+        key = f"logging.{field_name}"
+        project._value_sources[key] = value_source
+        project._value_candidates[key] = {
+            "CLI": None,
+            "environment": environment_value,
+            "config.local.toml": local_value,
+            "config.toml": shared_value,
+            "built-in default": default_value,
+        }
+    raw_components = environment.get("CONTEXTFORGE_LOG_COMPONENTS")
+    if raw_components is not None:
+        project._value_candidates["logging.component_filter"] = {
+            "environment": tuple(
+                item.strip() for item in raw_components.split(",") if item.strip()
+            )
+        }
+
+
+def _nested_value(
+    payload: Mapping[str, object], section: str, field_name: str
+) -> object | None:
+    value = payload.get(section)
+    return value.get(field_name) if isinstance(value, dict) else None
+
+
+def _raise_verbosity(level: LogLevel) -> LogLevel:
+    return {
+        LogLevel.QUIET: LogLevel.ERROR,
+        LogLevel.ERROR: LogLevel.WARNING,
+        LogLevel.WARNING: LogLevel.INFO,
+        LogLevel.INFO: LogLevel.DEBUG,
+        LogLevel.DEBUG: LogLevel.TRACE,
+        LogLevel.TRACE: LogLevel.TRACE,
+    }[level]
 
 
 def create_model_provider(configuration: ProviderConfiguration) -> ModelProvider:
@@ -395,8 +624,11 @@ __all__ = [
     "ProjectConfigError",
     "ProjectConfiguration",
     "ProjectModelSettings",
+    "LoggingSettings",
     "RetentionSettings",
+    "configuration_resolution",
     "create_model_provider",
     "load_project_configuration",
     "resolve_provider_configuration",
+    "resolve_logging_configuration",
 ]

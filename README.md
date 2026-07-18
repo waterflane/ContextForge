@@ -170,6 +170,36 @@ spinner ticks. Structured JSON and Markdown remain the only stdout content.
 Progress does not change exit codes; Ctrl+C still exits with 130 and restores
 the live display.
 
+### Logging and diagnostics
+
+ContextForge 0.4.1 has one structured diagnostic pipeline, separate from
+command results and from progress. Logs always use stderr; JSON, Markdown, and
+MCP protocol results remain isolated on stdout. Normal use needs no logging
+flags. The built-in console level is `warning`.
+
+```bash
+contextforge context suggest . --task "Audit parsing" --log-level debug
+contextforge context suggest . --task "Audit parsing" --log-format json
+contextforge diagnostics last .
+contextforge diagnostics config .
+contextforge diagnostics provider .
+```
+
+Global options are `--log-level quiet|error|warning|info|debug|trace`,
+`--log-format auto|pretty|json`, `--log-file PATH`, repeatable
+`--log-component COMPONENT`, `--no-log-file`, `--no-color`, `-v`, and `-vv`.
+One `-v` raises the configured level once; `-vv` selects trace. An explicit
+`--log-level` wins. Both `contextforge` and `ctxf` use the identical policy.
+
+Debug budget records decompose system, user, source, index, schema, output,
+protocol-overhead, and safety-margin tokens. They include the effective
+ContextForge context window and its source, whether dispatch occurred, and
+safe retry/fallback/error state, but never complete prompts, source contents,
+raw model responses, authorization data, or credentials. See the
+[CLI reference](docs/guides/cli.md),
+[configuration guide](docs/guides/configuration.md), and
+[diagnostics architecture](docs/architecture/diagnostics.md).
+
 ### Repository index
 
 ```bash
@@ -236,11 +266,30 @@ local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
+
+[logging]
+level = "warning"
+format = "auto"
+file_enabled = false
+file = ".contextforge/logs/contextforge.log"
+rotation_bytes = 10000000
+retained_files = 5
+
+[logging.components]
+# provider = "debug"
+# budget = "trace"
+# synthesis = "debug"
 ```
 
 Configuration is closed and secret-free. An optional `credential_env` stores
 only an environment-variable name; its value is resolved at request time and
 is never persisted in the index or handoff.
+
+Logging precedence is CLI, `CONTEXTFORGE_LOG_*` environment variables,
+`.contextforge/config.local.toml`, `.contextforge/config.toml`, then defaults.
+Machine-specific log paths normally belong in `config.local.toml`. File logs
+are opt-in rotating UTF-8 JSON Lines; the defaults are 10,000,000 bytes and
+five retained files.
 
 LM Studio is available through the `lmstudio` alias for the canonical
 `openai-compatible` provider. Select the model by copying its exact ID from

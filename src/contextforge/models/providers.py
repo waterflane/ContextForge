@@ -25,6 +25,7 @@ from pydantic import (
 )
 
 from contextforge.core.validation import Sha256, validate_portable_relative_path
+from contextforge.logging import LogLevel, emit, sanitize_url
 from contextforge.progress import ProgressActivity, ProgressObserver, ProgressReporter
 
 SUPPORTED_RESPONSE_SCHEMA_VERSION = 1
@@ -57,6 +58,10 @@ _SAFE_TOKEN_METADATA = frozenset(
     {
         "configured_context_window",
         "estimated_input_tokens",
+        "estimated_system_tokens",
+        "estimated_user_tokens",
+        "estimated_source_tokens",
+        "estimated_index_tokens",
         "estimated_total_tokens",
         "output_token_budget",
         "safety_margin_tokens",
@@ -113,6 +118,22 @@ class ProviderConfiguration(ProviderModel):
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     credential_env: str | None = None
+    context_window_source: str = "built-in default"
+    cli_context_window: int | None = Field(default=None, ge=1_024, le=2_000_000)
+    environment_context_window: int | None = Field(default=None, ge=1_024, le=2_000_000)
+    local_config_context_window: int | None = Field(
+        default=None, ge=1_024, le=2_000_000
+    )
+    shared_config_context_window: int | None = Field(
+        default=None, ge=1_024, le=2_000_000
+    )
+    provider_reported_context_window: int | None = Field(
+        default=None, ge=1_024, le=2_000_000
+    )
+    model_metadata_context_window: int | None = Field(
+        default=None, ge=1_024, le=2_000_000
+    )
+    default_context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=1_024)
 
     @field_validator("provider_id", "model_id")
     @classmethod
@@ -167,6 +188,13 @@ class ProviderConfiguration(ProviderModel):
             raise ValueError("credential_env must be an environment variable name")
         return value
 
+    @field_validator("context_window_source")
+    @classmethod
+    def validate_context_window_source(cls, value: str) -> str:
+        if not value or len(value) > 200 or any(ord(item) < 32 for item in value):
+            raise ValueError("context_window_source must be bounded printable text")
+        return value
+
     def load_credential(
         self, environment: Mapping[str, str] | None = None
     ) -> SecretStr | None:
@@ -207,6 +235,10 @@ class RequestContextBudget:
     """Conservative provider-request accounting without prompt disclosure."""
 
     configured_context_window: int
+    estimated_system_tokens: int
+    estimated_user_tokens: int
+    estimated_source_tokens: int
+    estimated_index_tokens: int
     estimated_input_tokens: int
     schema_overhead_tokens: int
     output_token_budget: int
@@ -217,6 +249,14 @@ class RequestContextBudget:
     @property
     def fits(self) -> bool:
         return self.estimated_total_tokens <= self.configured_context_window
+
+    @property
+    def remaining_tokens(self) -> int:
+        return self.configured_context_window - self.estimated_total_tokens
+
+    @property
+    def budget_ratio(self) -> float:
+        return self.estimated_total_tokens / self.configured_context_window
 
 
 class UntrustedSource(ProviderModel):
@@ -644,8 +684,18 @@ def estimate_request_context(
     """Conservatively account for messages, schema, output, wrappers, and reserve."""
 
     messages = request.messages(include_response_schema=False)
-    message_bytes = sum(len(item.content.encode("utf-8")) for item in messages)
-    estimated_input = _estimate_tokens(message_bytes)
+    system_tokens = _estimate_tokens(len(messages[0].content.encode("utf-8")))
+    total_user_tokens = _estimate_tokens(len(messages[1].content.encode("utf-8")))
+    source_tokens = sum(
+        _estimate_tokens(len(item.text.encode("utf-8")))
+        for item in request.untrusted_sources
+    ) + sum(
+        _estimate_tokens(len(item.text.encode("utf-8")))
+        for item in request.untrusted_contexts
+    )
+    index_tokens = _estimate_tokens(len(request._trusted_json.encode("utf-8")))
+    user_tokens = max(total_user_tokens - source_tokens - index_tokens, 0)
+    estimated_input = system_tokens + user_tokens + source_tokens + index_tokens
     schema_overhead = (
         _estimate_tokens(len(_canonical_json(request.response_schema).encode("utf-8")))
         + 32
@@ -663,6 +713,10 @@ def estimate_request_context(
     )
     return RequestContextBudget(
         configured_context_window=configuration.context_window,
+        estimated_system_tokens=system_tokens,
+        estimated_user_tokens=user_tokens,
+        estimated_source_tokens=source_tokens,
+        estimated_index_tokens=index_tokens,
         estimated_input_tokens=estimated_input,
         schema_overhead_tokens=schema_overhead,
         output_token_budget=output_budget,
@@ -743,11 +797,43 @@ class ProviderRuntime:
                 **request.metadata,
                 "configured_context_window": str(budget.configured_context_window),
                 "estimated_input_tokens": str(budget.estimated_input_tokens),
+                "estimated_system_tokens": str(budget.estimated_system_tokens),
+                "estimated_user_tokens": str(budget.estimated_user_tokens),
+                "estimated_source_tokens": str(budget.estimated_source_tokens),
+                "estimated_index_tokens": str(budget.estimated_index_tokens),
                 "schema_overhead_tokens": str(budget.schema_overhead_tokens),
                 "output_token_budget": str(budget.output_token_budget),
                 "safety_margin_tokens": str(budget.safety_margin_tokens),
                 "estimated_total_tokens": str(budget.estimated_total_tokens),
             },
+        )
+        request_id = request.operation_id
+        resolution_data = _context_window_resolution_data(self.configuration)
+        emit(
+            "configuration",
+            "config.value_resolved",
+            "Resolved the effective model context window.",
+            level=LogLevel.INFO,
+            operation_id=request.operation_id,
+            operation_type="model.request",
+            request_id=request_id,
+            data=resolution_data,
+        )
+        budget_data = _budget_log_data(
+            request,
+            self.configuration,
+            budget,
+            request_dispatched=False,
+        )
+        emit(
+            "budget",
+            "budget.calculated",
+            "Calculated the complete model request budget before dispatch.",
+            level=LogLevel.DEBUG,
+            operation_id=request.operation_id,
+            operation_type="model.request",
+            request_id=request_id,
+            data=budget_data,
         )
         progress = ProgressReporter(
             request.operation_id,
@@ -777,6 +863,31 @@ class ProviderRuntime:
         if not budget.fits:
             error = ContextWindowExceededError(budget)
             safe_code, safe_message = provider_error_details(error)
+            emit(
+                "budget",
+                "budget.rejected",
+                "Model request rejected locally before provider dispatch.",
+                level=LogLevel.ERROR,
+                operation_id=request.operation_id,
+                operation_type="model.request",
+                request_id=request_id,
+                status="rejected_locally",
+                error=error,
+                error_code="model_request_exceeds_configured_context_window",
+                data={
+                    **budget_data,
+                    "error_code": "model_request_exceeds_configured_context_window",
+                    "result": "rejected locally before provider dispatch",
+                    "request_dispatched": False,
+                    "remediation": [
+                        "increase the ContextForge context_window",
+                        "reduce candidate count",
+                        "enable hierarchical synthesis",
+                        "use a different synthesis provider",
+                        "inspect the value source using diagnostics",
+                    ],
+                },
+            )
             progress.report(
                 "provider_preflight",
                 safe_message,
@@ -830,6 +941,30 @@ class ProviderRuntime:
                 output_token_budget=output_token_budget,
                 input_truncated=input_truncated,
             )
+            emit(
+                "provider",
+                "provider.request.started",
+                "Dispatching a bounded structured model request.",
+                level=LogLevel.DEBUG,
+                operation_id=request.operation_id,
+                operation_type="model.request",
+                request_id=request_id,
+                attempt=attempt + 1,
+                max_attempts=attempts,
+                status="dispatching",
+                data={
+                    **budget_data,
+                    "request_dispatched": True,
+                    "http_method": "POST",
+                    "endpoint": sanitize_url(self.configuration.endpoint),
+                    "timeout_seconds": timeout,
+                    "connect_timeout_seconds": (
+                        self.configuration.connect_timeout_seconds
+                    ),
+                    "read_timeout_seconds": self.configuration.read_timeout_seconds,
+                    "structured_output_mode": "json_schema",
+                },
+            )
             try:
                 await _await_bounded(
                     self._semaphore.acquire(),
@@ -844,6 +979,34 @@ class ProviderRuntime:
                     )
                 finally:
                     self._semaphore.release()
+                response_size = (
+                    len(raw.text)
+                    if isinstance(raw.text, bytes)
+                    else len(raw.text.encode("utf-8"))
+                )
+                emit(
+                    "provider",
+                    "provider.response.received",
+                    "Complete bounded provider response body received.",
+                    level=LogLevel.DEBUG,
+                    operation_id=request.operation_id,
+                    operation_type="model.request",
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    duration_ms=round(max(0.0, self._clock() - attempt_started) * 1000),
+                    status="received",
+                    data={
+                        "response_byte_length": response_size,
+                        "finish_reason": raw.finish_reason,
+                        "provider_input_tokens": (
+                            None if raw.usage is None else raw.usage.input_tokens
+                        ),
+                        "provider_output_tokens": (
+                            None if raw.usage is None else raw.usage.output_tokens
+                        ),
+                    },
+                )
                 validation = "invalid"
                 value, normalized = parse_structured_response(
                     raw.text,
@@ -855,6 +1018,22 @@ class ProviderRuntime:
                     ),
                 )
                 validation = "valid"
+                emit(
+                    "schema",
+                    "response.parsed",
+                    "Provider response parsed and passed schema validation.",
+                    level=LogLevel.DEBUG,
+                    operation_id=request.operation_id,
+                    operation_type="model.request",
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    status="valid",
+                    data={
+                        "response_validation": "valid",
+                        "response_schema_version": request.response_schema_version,
+                    },
+                )
                 diagnostic = _diagnostic(
                     self.configuration,
                     request,
@@ -894,6 +1073,24 @@ class ProviderRuntime:
                     validation="valid",
                     usage=raw.usage,
                 )
+                emit(
+                    "provider",
+                    "provider.request.completed",
+                    "Structured model request completed and was accepted.",
+                    level=LogLevel.INFO,
+                    operation_id=request.operation_id,
+                    operation_type="model.request",
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    duration_ms=diagnostic.duration_ms,
+                    status="accepted",
+                    data={
+                        "finish_reason": raw.finish_reason,
+                        "response_validation": "valid",
+                        "retry_count": attempt,
+                    },
+                )
                 progress.complete(message="Provider request completed.")
                 return ModelResponse(
                     normalized_json=normalized,
@@ -924,6 +1121,23 @@ class ProviderRuntime:
 
             assert last_error is not None
             safe_code, safe_message = provider_error_details(last_error)
+            if isinstance(last_error, StructuredResponseError):
+                emit(
+                    "schema",
+                    "response.validation.failed",
+                    "Provider response failed structured validation.",
+                    level=LogLevel.WARNING,
+                    operation_id=request.operation_id,
+                    operation_type="model.request",
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    status="invalid",
+                    error=last_error,
+                    error_code=safe_code,
+                    retryable=(attempt + 1 < attempts),
+                    data={"response_validation": "invalid"},
+                )
             can_repair = (
                 isinstance(last_error, StructuredResponseError)
                 and not isinstance(last_error, UnsupportedResponseSchemaError)
@@ -983,6 +1197,27 @@ class ProviderRuntime:
                     ),
                     usage=None,
                 )
+                emit(
+                    "provider",
+                    "provider.request.failed",
+                    "Structured model request failed.",
+                    level=LogLevel.ERROR,
+                    operation_id=request.operation_id,
+                    operation_type="model.request",
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    duration_ms=round(max(0.0, self._clock() - started) * 1000),
+                    status="failed",
+                    error=last_error,
+                    error_code=safe_code,
+                    retryable=False,
+                    data={
+                        "request_dispatched": True,
+                        "response_validation": validation,
+                        "retry_count": attempt,
+                    },
+                )
                 progress.fail(message=safe_message)
                 raise last_error
             if can_repair:
@@ -1001,6 +1236,28 @@ class ProviderRuntime:
                 if not repair_budget.fits:
                     raise ContextWindowExceededError(repair_budget) from last_error
             delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
+            emit(
+                "provider",
+                "provider.retry.scheduled",
+                "Retry scheduled by the bounded provider policy.",
+                level=LogLevel.WARNING,
+                operation_id=request.operation_id,
+                operation_type="model.request",
+                request_id=request_id,
+                attempt=attempt + 1,
+                max_attempts=attempts,
+                status="retry_wait",
+                error=last_error,
+                error_code=safe_code,
+                retryable=True,
+                retry_scheduled=True,
+                data={
+                    "reason": safe_code,
+                    "delay_seconds": delay,
+                    "structured_repair": can_repair,
+                    "next_attempt": attempt + 2,
+                },
+            )
             progress.report(
                 "provider_retry",
                 f"{safe_message}; retrying.",
@@ -1504,6 +1761,80 @@ def _metadata_int(metadata: Mapping[str, str], key: str) -> int | None:
     return parsed if parsed >= 0 else None
 
 
+def _context_window_resolution_data(
+    configuration: ProviderConfiguration,
+) -> dict[str, object | None]:
+    """Expose every supported candidate source, including unavailable values."""
+
+    return {
+        "cli_context_window": configuration.cli_context_window,
+        "environment_context_window": configuration.environment_context_window,
+        "local_config_context_window": configuration.local_config_context_window,
+        "shared_config_context_window": configuration.shared_config_context_window,
+        "provider_reported_context_window": (
+            configuration.provider_reported_context_window
+        ),
+        "model_metadata_context_window": configuration.model_metadata_context_window,
+        "default_context_window": configuration.default_context_window,
+        "effective_context_window": configuration.context_window,
+        "effective_context_window_source": configuration.context_window_source,
+        "explicit": configuration.context_window_source != "built-in default",
+        "provider": configuration.provider_id,
+        "model": configuration.model_id,
+    }
+
+
+def _budget_log_data(
+    request: ModelRequest,
+    configuration: ProviderConfiguration,
+    budget: RequestContextBudget,
+    *,
+    request_dispatched: bool,
+) -> dict[str, object]:
+    source_paths = [item.path for item in request.untrusted_sources]
+    return {
+        "task_kind": request.purpose,
+        "provider": configuration.provider_id,
+        "model": configuration.model_id,
+        "endpoint": sanitize_url(configuration.endpoint),
+        "effective_context_window": budget.configured_context_window,
+        "effective_context_window_source": configuration.context_window_source,
+        "provider_reported_context_window": (
+            configuration.provider_reported_context_window
+        ),
+        "model_metadata_context_window": configuration.model_metadata_context_window,
+        "estimated_system_tokens": budget.estimated_system_tokens,
+        "estimated_user_tokens": budget.estimated_user_tokens,
+        "estimated_source_tokens": budget.estimated_source_tokens,
+        "estimated_index_tokens": budget.estimated_index_tokens,
+        "estimated_schema_tokens": budget.schema_overhead_tokens,
+        "estimated_input_tokens": budget.estimated_input_tokens,
+        "requested_output_tokens": budget.output_token_budget,
+        "protocol_overhead_tokens": budget.protocol_overhead_tokens,
+        "safety_margin_tokens": budget.safety_margin_tokens,
+        "estimated_total_tokens": budget.estimated_total_tokens,
+        "remaining_tokens": budget.remaining_tokens,
+        "budget_ratio": round(budget.budget_ratio, 6),
+        "input_truncated": request.metadata.get("input_truncated") == "true",
+        "input_chunked": request.metadata.get("input_chunked") == "true",
+        "chunk_index": _metadata_int(request.metadata, "chunk_index"),
+        "chunk_count": _metadata_int(request.metadata, "chunk_count"),
+        "request_dispatched": request_dispatched,
+        "selected_source_count": len(source_paths),
+        "selected_source_paths": source_paths,
+        "selected_index_record_count": _trusted_record_count(request),
+    }
+
+
+def _trusted_record_count(request: ModelRequest) -> int:
+    facts = request.trusted_code_map_facts
+    for key in ("records", "selected", "current_codemap_paths", "semantic_paths"):
+        value = facts.get(key)
+        if isinstance(value, (list, tuple)):
+            return len(value)
+    return 1 if facts else 0
+
+
 def _log_request_metrics(
     request: ModelRequest,
     *,
@@ -1514,6 +1845,41 @@ def _log_request_metrics(
 ) -> None:
     """Log only bounded request metrics, never prompt or response material."""
 
+    emit(
+        "provider",
+        "provider.request.metrics",
+        "Recorded safe provider request metrics.",
+        level=LogLevel.TRACE,
+        operation_id=request.operation_id,
+        operation_type="model.request",
+        request_id=request.operation_id,
+        attempt=attempt,
+        duration_ms=round(max(0.0, duration_seconds) * 1_000),
+        status=validation,
+        data={
+            "path": request.metadata.get("path"),
+            "analyzer_kind": request.metadata.get("analyzer_kind"),
+            "configured_context_window": _metadata_int(
+                request.metadata, "configured_context_window"
+            ),
+            "estimated_input_tokens": _metadata_int(
+                request.metadata, "estimated_input_tokens"
+            ),
+            "schema_overhead_tokens": _metadata_int(
+                request.metadata, "schema_overhead_tokens"
+            ),
+            "output_token_limit": request.max_output_tokens,
+            "safety_margin_tokens": _metadata_int(
+                request.metadata, "safety_margin_tokens"
+            ),
+            "estimated_total_tokens": _metadata_int(
+                request.metadata, "estimated_total_tokens"
+            ),
+            "response_tokens": None if usage is None else usage.output_tokens,
+            "response_validation": validation,
+            "input_truncated": request.metadata.get("input_truncated") == "true",
+        },
+    )
     _LOGGER.debug(
         "model request path=%s analyzer=%s context_window=%s "
         "estimated_input_tokens=%s schema_overhead_tokens=%s "
