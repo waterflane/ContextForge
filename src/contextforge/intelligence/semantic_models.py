@@ -153,10 +153,17 @@ class SymbolSemanticAnalysis(IndexModel):
 
 
 class FileSemanticAnalysis(IndexModel):
-    """Complete, separately persisted model interpretation of one source file."""
+    """Complete, separately persisted semantic interpretation of one source file."""
 
     schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
-    record_kind: Literal["model_file_interpretation"] = "model_file_interpretation"
+    record_kind: Literal[
+        "model_file_interpretation", "deterministic_metadata_interpretation"
+    ] = "model_file_interpretation"
+    analysis_route: Literal[
+        "rich_model_analysis",
+        "generic_model_analysis",
+        "deterministic_metadata_summary",
+    ] = "rich_model_analysis"
     path: str
     language: str | None
     source_sha256: Sha256

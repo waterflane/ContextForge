@@ -10,10 +10,11 @@ source selections, and produces reviewable handoffs and compiled prompts.
 
 ## Status
 
-The v0.4.0 milestone implements repository intelligence, model-provider
-adapters, architecture/feature maps, automatic context discovery, Git-aware
-handoffs, prompt compilation, thin CLI commands, and a local read-only stdio MCP
-foundation. Structural indexing works without a model. Model-assisted behavior
+Version 0.4.1 is a maintenance and usability release for the completed v0.4
+repository-intelligence milestone. It adds structured, percentage-based
+progress for long-running workflows, correct nested `.gitignore` handling,
+consistent version commands, the `ctxf` console alias, and structured
+diagnostics. Structural indexing works without a model. Model-assisted behavior
 uses a configured local Ollama provider by default; the deterministic fake is
 for offline tests and demonstrations.
 
@@ -57,6 +58,24 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+For an editable development command that remains available without activating
+the repository virtual environment, install it with `pipx` using an absolute
+repository path:
+
+```bash
+pipx install --editable /absolute/path/to/ContextForge
+```
+
+Console commands are generated during installation. After changing
+`[project.scripts]` in `pyproject.toml`, reinstall the package so additions or
+renames are reflected in the available commands:
+
+```bash
+python -m pip install -e ".[dev]"
+# Or refresh the standalone editable installation:
+pipx install --force --editable /absolute/path/to/ContextForge
+```
+
 On Windows PowerShell:
 
 ```powershell
@@ -70,7 +89,19 @@ python -m pip install -e ".[dev]"
 
 ```bash
 contextforge version
+contextforge --version
+python -m contextforge --version
 contextforge doctor
+```
+
+An installation also provides the short `ctxf` command. It invokes the same
+CLI application, so every command and option is interchangeable:
+
+```bash
+ctxf --version
+ctxf index status
+ctxf context suggest --help
+ctxf mcp serve --help
 ```
 
 ### Context packages
@@ -112,6 +143,64 @@ compiled prompt as Markdown. `--prompt-output` can publish the prompt as a
 separate atomic artifact. `context review` validates and displays a JSON
 handoff without the original repository.
 
+Long-running index and automatic context commands report weighted progress to
+stderr. `--progress auto` (the default) uses one compact Rich live panel when
+stderr is interactive and discrete records when stderr is redirected.
+`--progress never` suppresses terminal progress; `--progress always` requests
+the live display only when the actual stderr console can render it safely.
+Captured or redirected stdout does not disable an interactive stderr panel.
+
+During model analysis the live panel shows overall and phase bars,
+processed/planned, succeeded/failed/fallback/skipped/reused counters, current,
+last successful and last failed files, a safe failure reason, attempt count,
+request and total elapsed time, active concurrency, and provider/model. A
+semantic file transition is also fully available to programmatic observers:
+
+```text
+Indexing repository: 53% — Semantic analysis 9/26 processed · 35%; completed=src/app.py current=src/service.py failures=1 processed=9/26 succeeded=8
+```
+
+```bash
+contextforge context suggest . --task "Audit parsing" --format json > selection.json
+python -m json.tool selection.json
+```
+
+Interactive and redirected runs use the same structured phase events.
+Redirected stderr contains readable lines and no ANSI control sequences or
+spinner ticks. Structured JSON and Markdown remain the only stdout content.
+Progress does not change exit codes; Ctrl+C still exits with 130 and restores
+the live display.
+
+### Logging and diagnostics
+
+ContextForge 0.4.1 has one structured diagnostic pipeline, separate from
+command results and from progress. Logs always use stderr; JSON, Markdown, and
+MCP protocol results remain isolated on stdout. Normal use needs no logging
+flags. The built-in console level is `warning`.
+
+```bash
+contextforge context suggest . --task "Audit parsing" --log-level debug
+contextforge context suggest . --task "Audit parsing" --log-format json
+contextforge diagnostics last .
+contextforge diagnostics config .
+contextforge diagnostics provider .
+```
+
+Global options are `--log-level quiet|error|warning|info|debug|trace`,
+`--log-format auto|pretty|json`, `--log-file PATH`, repeatable
+`--log-component COMPONENT`, `--no-log-file`, `--no-color`, `-v`, and `-vv`.
+One `-v` raises the configured level once; `-vv` selects trace. An explicit
+`--log-level` wins. Both `contextforge` and `ctxf` use the identical policy.
+
+Debug budget records decompose system, user, source, index, schema, output,
+protocol-overhead, and safety-margin tokens. They include the effective
+ContextForge context window and its source, whether dispatch occurred, and
+safe retry/fallback/error state, but never complete prompts, source contents,
+raw model responses, authorization data, or credentials. See the
+[CLI reference](docs/guides/cli.md),
+[configuration guide](docs/guides/configuration.md), and
+[diagnostics architecture](docs/architecture/diagnostics.md).
+
 ### Repository index
 
 ```bash
@@ -124,11 +213,25 @@ contextforge index clean . --force
 ```
 
 `index build` and `index update` support `--provider`, `--model`, `--base-url`, `--config`,
-`--concurrency`, `--fail-on-error`, `--force-reanalyze`, `--max-files`, and
-`--local-only`. Use `--provider none` for deterministic structural-only
+`--concurrency`, `--request-timeout`, `--max-output-tokens`, `--fail-on-error`,
+`--force-reanalyze`, `--max-files`, and `--local-only`. Use `--provider none` for deterministic structural-only
 indexing. Updates reuse unchanged valid facts and interpretations, while new,
 changed, deleted, analyzer-stale, prompt-stale, and model-stale records are
 processed explicitly. A failed strict build restores the prior active pointer.
+For model-enabled builds, scan/planning occupy approximately 0–8%, structural
+extraction 8–18%, per-file semantic model work 18–82%, repository-map model work
+82–94%, deterministic finalization 94–97%, and validation/publication 97–100%.
+Structural-only builds redistribute the model ranges. The semantic phase bar is
+`processed_units / planned_units`, where failures and reuse are terminal work,
+not successes. Overall weighting gives deterministic metadata/reuse one unit and
+model files eight base units plus one unit per 32 KiB (source units capped at
+16). `.gitignore`, `.gitattributes`, `.editorconfig`, environment examples,
+lock files, `.gitkeep`, and empty files avoid provider calls; environment
+examples store variable names only. Meaningful non-Python text still uses
+generic model semantics through the separate `generic-text-semantic` identity.
+No `.contextforge` file enters structural or semantic routing. The sole successful 100% event
+is emitted only after generation validation and atomic active-pointer
+publication succeed.
 
 `index status` is read-only and reports schema, repository and generation
 identity, indexed/stale/failed/deleted files, provider/model and prompt
@@ -138,9 +241,10 @@ values. `index clean` removes only generated index truth; it preserves
 
 ### Provider configuration
 
-Project configuration is read from `.contextforge/config.toml` or an explicit
-`--config PATH`. Command-line provider/model/concurrency choices override the
-file for one operation. The default is local Ollama:
+Project configuration is read from `.contextforge/config.toml`, with optional
+machine-local overrides in `.contextforge/config.local.toml`, or from an
+explicit `--config PATH`. CLI and supported environment settings take
+precedence. The default is local Ollama:
 
 ```toml
 config_version = 1
@@ -149,19 +253,47 @@ config_version = 1
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
 model = "qwen2.5-coder"
-timeout_seconds = 120.0
+timeout_seconds = 360.0
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 300.0
+operation_timeout_seconds = 360.0
+context_window = 4096
+context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
+semantic_max_output_tokens = 512
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
 store_raw_responses = false
+
+[models.structured_response]
+max_repair_attempts = 5
+
+[logging]
+level = "warning"
+format = "auto"
+file_enabled = false
+file = ".contextforge/logs/contextforge.log"
+rotation_bytes = 10000000
+retained_files = 5
+
+[logging.components]
+# provider = "debug"
+# budget = "trace"
+# synthesis = "debug"
 ```
 
 Configuration is closed and secret-free. An optional `credential_env` stores
 only an environment-variable name; its value is resolved at request time and
 is never persisted in the index or handoff.
+
+Logging precedence is CLI, `CONTEXTFORGE_LOG_*` environment variables,
+`.contextforge/config.local.toml`, `.contextforge/config.toml`, then defaults.
+Machine-specific log paths normally belong in `config.local.toml`. File logs
+are opt-in rotating UTF-8 JSON Lines; the defaults are 10,000,000 bytes and
+five retained files.
 
 LM Studio is available through the `lmstudio` alias for the canonical
 `openai-compatible` provider. Select the model by copying its exact ID from
@@ -178,18 +310,25 @@ provider = "openai-compatible"
 model = "<MODEL_ID>"
 base_url = "http://localhost:1234/v1"
 concurrency_limit = 2
+context_window = 4096
 # credential_env = "LM_STUDIO_API_KEY"
 ```
 
 The adapter uses non-streaming `POST /v1/chat/completions` with strict JSON
 Schema output and checks the exact configured ID through `GET /v1/models`.
-CLI `--model`, `--base-url`, and `--concurrency` values override this section.
+CLI `--model`, `--base-url`, `--concurrency`, `--request-timeout`,
+`--context-window`, `--max-output-tokens`, and `--json-repair-attempts` values
+override this section. `CONTEXTFORGE_JSON_REPAIR_ATTEMPTS` is the corresponding
+environment override; the safe range is 0–10 and the default is five repairs.
+Defaults are 10 seconds for connection, 300 seconds for response read, and 360
+seconds for the complete operation. Transient failures retain bounded retries;
+context overflow and rejected schemas are never resent unchanged.
 
 Remote endpoints are fail-closed unless configuration explicitly sets both
 `local_only = false` and `external_data_policy = "allow_repository"`.
 `allow_selected` is reserved for a future path-level transmission policy and
-does not authorize a remote endpoint in v0.4.0. External repository-wide use
-can transmit any selectable snapshot content, so review ignore rules and
+does not authorize a remote endpoint in this release. External repository-wide
+use can transmit any selectable snapshot content, so review ignore rules and
 provider retention before enabling it.
 
 ### Read-only MCP
@@ -315,12 +454,14 @@ ignored. Common caches, including `.uv-cache/`, are excluded by default, while
 `uv.lock` remains scannable. Protected `.git`, `.hg`, and `.svn` roots are
 always pruned and cannot be re-included.
 
-The scanner reads ignore rules from the repository-root `.gitignore` and
-`.contextforgeignore`; nested ignore files are currently ordinary scanned files,
-not additional rule sources. Text detection accepts UTF-8 (including ASCII) and
-treats an initial sample containing invalid UTF-8, NUL bytes, or many control
-bytes as binary-like. Symbolic links and Windows directory junctions are
-reported but never followed.
+The scanner reads `.gitignore` rules throughout the repository, applying each
+file relative to its containing directory with inherited Git-style precedence.
+The repository-root `.contextforgeignore` remains the highest-precedence
+ordinary rule source. Ignore control files remain ordinary scanned files unless
+an active rule excludes them. Text detection accepts UTF-8 (including ASCII)
+and treats an initial sample containing invalid UTF-8, NUL bytes, or many
+control bytes as binary-like. Symbolic links and Windows directory junctions
+are reported but never followed.
 
 `discovered_count` counts file-like entries actually reached during traversal.
 `ignored_count` counts reached files or directory roots excluded by ordinary

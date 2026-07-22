@@ -46,10 +46,10 @@ missing. It never replaces an existing configuration. From that point the file
 is user-owned and may be committed. Index generations, saved contexts, and run
 diagnostics are generated data.
 
-The scanner treats only `.contextforge/index/`,
-`.contextforge/contexts/`, and `.contextforge/runs/` as non-negatable protected
-roots. It does not ignore `.contextforge/` as a whole, so
-`.contextforge/config.toml` remains ordinary selectable repository input.
+The scanner treats `.contextforge/` as one non-negatable protected root. The
+user-owned configuration remains readable by the configuration loader and is
+preserved by cleanup, but no file under `.contextforge/` can enter structural,
+generic, or rich semantic analysis.
 
 ## Public API
 

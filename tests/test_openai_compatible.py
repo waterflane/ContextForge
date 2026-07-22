@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,6 +11,7 @@ from typer.testing import CliRunner
 
 import contextforge.models.openai_compatible as openai_module
 from contextforge.cli.main import app
+from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
     ModelRequest,
@@ -134,6 +136,10 @@ def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
             "strict": True,
         },
     }
+    user_message = payload["messages"][1]["content"]
+    assert "EXPECTED_OUTPUT_SCHEMA" not in user_message
+    assert '"additionalProperties"' not in user_message
+    assert "Return JSON only" in user_message
     assert response.value == _Answer(answer="works")
     assert response.finish_reason == "stop"
     assert response.usage == ModelUsage(input_tokens=11, output_tokens=7)
@@ -377,7 +383,10 @@ def test_auth_error_redacts_loaded_credential_and_keeps_safe_body() -> None:
     asyncio.run(exercise())
 
 
-def test_structured_output_rejection_is_non_retryable_and_includes_detail() -> None:
+def test_structured_output_rejection_falls_back_once_and_caches_capability() -> None:
+    response_modes: list[str] = []
+    provider_call_counts: list[int] = []
+
     async def transport(
         method: str,
         url: str,
@@ -385,24 +394,118 @@ def test_structured_output_rejection_is_non_retryable_and_includes_detail() -> N
         headers: Mapping[str, str],
         limit: int,
     ) -> OpenAICompatibleHTTPResponse:
-        del url, body, headers, limit
+        del url, headers, limit
         if method == "GET":
             return _models("publisher/exact-model-id")
-        return OpenAICompatibleHTTPResponse(
-            status=400,
-            body=b'{"error":{"message":"json_schema is unsupported"}}',
-        )
+        assert body is not None
+        mode = json.loads(body).get("response_format", {}).get("type", "plain_json")
+        response_modes.append(mode)
+        if mode == "json_schema":
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"json_schema grammar is unsupported"}}',
+            )
+        return _completion()
 
     async def exercise() -> None:
         provider = OpenAICompatibleModelProvider(
             _configuration(retry_limit=2), transport=transport
         )
-        with pytest.raises(
-            ProviderRequestError, match="structured output.*json_schema is unsupported"
-        ):
-            await provider.complete_structured(_request())
+        for _ in range(2):
+            response = await provider.complete_structured(_request())
+            assert response.diagnostic is not None
+            provider_call_counts.append(response.diagnostic.total_provider_calls)
 
     asyncio.run(exercise())
+    assert response_modes == ["json_schema", "plain_json", "plain_json"]
+    assert provider_call_counts == [3, 1]
+
+
+def test_unsupported_explicit_json_object_continues_plain_without_repair_count() -> (
+    None
+):
+    response_modes: list[str] = []
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        mode = json.loads(body).get("response_format", {}).get("type", "plain_json")
+        response_modes.append(mode)
+        if mode == "json_object":
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"response_format json_object unsupported"}}',
+            )
+        if mode == "plain_json":
+            return _completion(answer=1)  # type: ignore[arg-type]
+        return _completion()
+
+    async def exercise() -> ModelResponse:
+        provider = OpenAICompatibleModelProvider(
+            _configuration(max_json_repair_attempts=1), transport=transport
+        )
+        return await provider.complete_structured(
+            replace(_request(), schema_mode="json_object")
+        )
+
+    clear_recent_records()
+    response = asyncio.run(exercise())
+    assert response.value == _Answer(answer="works")
+    assert response.diagnostic is not None
+    assert response.diagnostic.json_repair_attempt == 1
+    assert response.diagnostic.total_provider_calls == 4
+    assert response_modes == ["json_object", "plain_json", "json_schema"]
+    rejected = next(
+        item
+        for item in recent_records()
+        if item.event == "provider.structured_output_mode.rejected"
+    )
+    assert rejected.phase_id == "provider_http_response"
+    assert rejected.error is not None
+    assert rejected.error.code == "structured_output_json_object_unsupported"
+    assert rejected.data["rejected_parameter"] == "response_format.type"
+    assert rejected.data["rejected_value"] == "json_object"
+    assert rejected.data["completed_json_response"] is False
+
+
+def test_confirmed_json_object_is_reused_for_plain_json_requests() -> None:
+    response_modes: list[str] = []
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        response_modes.append(
+            json.loads(body).get("response_format", {}).get("type", "plain_json")
+        )
+        return _completion()
+
+    async def exercise() -> None:
+        provider = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        await provider.complete_structured(
+            replace(_request(), schema_mode="json_object")
+        )
+        await provider.complete_structured(
+            replace(_request(), schema_mode="plain_json")
+        )
+
+    asyncio.run(exercise())
+    assert response_modes == ["json_object", "json_object"]
 
 
 def test_project_configuration_and_cli_precedence_are_secret_free(
@@ -431,6 +534,7 @@ credential_env = "LM_STUDIO_API_KEY"
         model="cli/model",
         base_url="http://localhost:9999/v1",
         concurrency=5,
+        timeout_seconds=45,
     )
 
     assert configured is not None
@@ -443,9 +547,54 @@ credential_env = "LM_STUDIO_API_KEY"
     assert overridden.model_id == "cli/model"
     assert overridden.endpoint == "http://localhost:9999/v1"
     assert overridden.concurrency_limit == 5
+    assert overridden.timeout_seconds == 45
     assert "LM_STUDIO_API_KEY" in overridden.model_dump_json()
     assert "local-secret" not in overridden.model_dump_json()
     assert isinstance(create_model_provider(overridden), OpenAICompatibleModelProvider)
+
+
+def test_context_window_precedence_is_cli_environment_local_project_default(
+    tmp_path: Path,
+) -> None:
+    config_directory = tmp_path / ".contextforge"
+    config_directory.mkdir()
+    (config_directory / "config.toml").write_text(
+        """config_version = 1
+[models]
+provider = "fake"
+context_window = 8192
+""",
+        encoding="utf-8",
+    )
+    (config_directory / "config.local.toml").write_text(
+        """[models]
+context_window = 16384
+read_timeout_seconds = 420
+""",
+        encoding="utf-8",
+    )
+
+    local = resolve_provider_configuration(
+        load_project_configuration(tmp_path, environment={})
+    )
+    environment = resolve_provider_configuration(
+        load_project_configuration(
+            tmp_path,
+            environment={"CONTEXTFORGE_MODEL_CONTEXT_WINDOW": "32768"},
+        )
+    )
+    cli = resolve_provider_configuration(
+        load_project_configuration(
+            tmp_path,
+            environment={"CONTEXTFORGE_MODEL_CONTEXT_WINDOW": "32768"},
+        ),
+        context_window=65536,
+    )
+
+    assert local is not None and local.context_window == 16384
+    assert local.read_timeout_seconds == 420
+    assert environment is not None and environment.context_window == 32768
+    assert cli is not None and cli.context_window == 65536
 
 
 def test_lmstudio_alias_uses_default_base_url_but_requires_an_exact_model() -> None:
@@ -480,6 +629,9 @@ def test_cli_help_and_provider_selection_include_base_url(tmp_path: Path) -> Non
 
     assert help_result.exit_code == 0
     assert "--base-url" in help_result.output
+    assert "--request-timeout" in help_result.output
+    assert "--context-window" in help_result.output
+    assert "--max-output-tokens" in help_result.output
     assert selected.exit_code == 1
     assert "OpenAI-compatible base URL must be an HTTP URL" in selected.output
 
@@ -532,7 +684,7 @@ def test_provider_capabilities_close_and_configuration_policy() -> None:
         (408, "chat completion", ProviderUnavailableError, "HTTP 408"),
         (429, "chat completion", ProviderUnavailableError, "HTTP 429"),
         (500, "chat completion", ProviderUnavailableError, "HTTP 500"),
-        (422, "chat completion", ProviderRequestError, "structured output"),
+        (422, "chat completion", ProviderRequestError, "request"),
     ],
 )
 def test_http_status_classification(

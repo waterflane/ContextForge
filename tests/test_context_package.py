@@ -333,7 +333,7 @@ def test_order_statistics_unicode_and_empty_files_are_deterministic(
     )
     assert first.statistics.included_character_count == expected_characters
     assert first.statistics.included_content_bytes > expected_characters
-    assert first.statistics.languages == {"Markdown": 1, "Python": 1}
+    assert first.statistics.languages == {"Markdown": 1, "Python": 1, "Text": 1}
     assert first.statistics.item_count == 3
     assert first.statistics.total_source_bytes == sum(
         item.source_size_bytes for item in first.items

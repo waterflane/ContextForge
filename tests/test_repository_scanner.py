@@ -43,6 +43,7 @@ def test_empty_repository(tmp_path: Path) -> None:
         "discovered_count": 0,
         "protected_count": 0,
         "binary_count": 0,
+        "invalid_encoding_count": 0,
         "oversized_count": 0,
         "failed_count": 0,
         "symlink_count": 0,
@@ -565,7 +566,7 @@ def test_summary_counters_language_distribution_and_bytes(
     assert summary.unsupported_count == 0
     assert summary.skipped_count == 5
     assert summary.total_size_bytes == 4
-    assert summary.languages == {"Python": 1}
+    assert summary.languages == {"License": 1, "Python": 1}
     assert _paths(snapshot.ignored_files) == [".git", "build"]
     assert all(item.is_directory for item in snapshot.ignored_files)
 

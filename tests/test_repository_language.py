@@ -16,7 +16,7 @@ from contextforge.repositories.language import detect_language
         ("nested/MAKEFILE", "Makefile"),
         (".env", "Dotenv"),
         ("unknown.xyz", None),
-        ("LICENSE", None),
+        ("LICENSE", "License"),
         ("nested/файл", None),
     ],
 )

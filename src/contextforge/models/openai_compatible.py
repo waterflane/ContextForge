@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -13,7 +14,9 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
+from contextforge.logging import LogLevel, emit, sanitize_url
 from contextforge.models.providers import (
+    ContextWindowExceededError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -26,6 +29,8 @@ from contextforge.models.providers import (
     ProviderTimeoutError,
     ProviderTransportResponse,
     ProviderUnavailableError,
+    StructuredOutputJsonObjectUnsupportedError,
+    StructuredOutputSchemaUnsupportedError,
     redact_secrets,
 )
 
@@ -49,6 +54,19 @@ OpenAICompatibleTransport = Callable[
 ]
 
 
+def _with_provider_http_calls(
+    response: ProviderTransportResponse, additional_calls: int
+) -> ProviderTransportResponse:
+    if additional_calls == 0:
+        return response
+    return ProviderTransportResponse(
+        text=response.text,
+        finish_reason=response.finish_reason,
+        usage=response.usage,
+        provider_http_calls=response.provider_http_calls + additional_calls,
+    )
+
+
 class OpenAICompatibleModelProvider:
     """Non-streaming JSON Schema adapter for OpenAI-compatible local servers."""
 
@@ -66,12 +84,15 @@ class OpenAICompatibleModelProvider:
             )
         _validate_base_url(configuration)
         self.configuration = configuration
-        self._transport = transport or _request_json
+        self._transport = transport or self._default_transport
         self._environment = environment
         self._runtime = ProviderRuntime(configuration, environment=environment)
         self._model_verified = False
         self._model_verification_lock = asyncio.Lock()
         self._closed = False
+        self._schema_support: str = "unknown"
+        self._json_object_support: str = "unknown"
+        self._structured_mode_lock = asyncio.Lock()
 
     @property
     def provider_id(self) -> str:
@@ -127,22 +148,132 @@ class OpenAICompatibleModelProvider:
     async def _complete_once(
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
-        await self._ensure_model_available(credential)
-        messages = [message.model_dump(mode="json") for message in request.messages()]
+        verification_calls = await self._ensure_model_available(credential)
+        if request.schema_mode == "json_object":
+            response = await self._complete_json_object_or_plain(request, credential)
+            return _with_provider_http_calls(response, verification_calls)
+        if request.schema_mode == "plain_json":
+            mode = (
+                "json_object"
+                if self._json_object_support == "supported"
+                else "plain_json"
+            )
+            response = await self._complete_in_mode(request, credential, mode=mode)
+            return _with_provider_http_calls(response, verification_calls)
+        if self._schema_support == "unsupported":
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return _with_provider_http_calls(response, verification_calls)
+        try:
+            response = await self._complete_in_mode(
+                request, credential, mode="json_schema"
+            )
+        except StructuredOutputSchemaUnsupportedError as exc:
+            async with self._structured_mode_lock:
+                self._schema_support = "unsupported"
+            self._emit_mode_rejection(request, exc, fallback="plain_json")
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return _with_provider_http_calls(response, verification_calls + 1)
+        async with self._structured_mode_lock:
+            self._schema_support = "supported"
+        return _with_provider_http_calls(response, verification_calls)
+
+    async def _complete_json_object_or_plain(
+        self, request: ModelRequest, credential: SecretStr | None
+    ) -> ProviderTransportResponse:
+        """Honor an explicit JSON-object request, caching safe capability state."""
+
+        if self._json_object_support == "unsupported":
+            return await self._complete_in_mode(request, credential, mode="plain_json")
+        try:
+            response = await self._complete_in_mode(
+                request, credential, mode="json_object"
+            )
+        except StructuredOutputJsonObjectUnsupportedError as exc:
+            async with self._structured_mode_lock:
+                self._json_object_support = "unsupported"
+            self._emit_mode_rejection(request, exc, fallback="plain_json")
+            response = await self._complete_in_mode(
+                request, credential, mode="plain_json"
+            )
+            return ProviderTransportResponse(
+                text=response.text,
+                finish_reason=response.finish_reason,
+                usage=response.usage,
+                provider_http_calls=response.provider_http_calls + 1,
+            )
+        async with self._structured_mode_lock:
+            self._json_object_support = "supported"
+        return response
+
+    def _emit_mode_rejection(
+        self,
+        request: ModelRequest,
+        error: StructuredOutputSchemaUnsupportedError
+        | StructuredOutputJsonObjectUnsupportedError,
+        *,
+        fallback: str,
+    ) -> None:
+        error_code = (
+            "structured_output_schema_unsupported"
+            if isinstance(error, StructuredOutputSchemaUnsupportedError)
+            else "structured_output_json_object_unsupported"
+        )
+        emit(
+            "provider",
+            "provider.structured_output_mode.rejected",
+            "Provider rejected a structured-output mode; continuing safely.",
+            level=LogLevel.WARNING,
+            request_id=request.operation_id,
+            top_level_operation_id=request.top_level_operation_id,
+            parent_operation_id=request.parent_operation_id,
+            phase_id="provider_http_response",
+            error=error,
+            error_code=error_code,
+            fallback_selected=True,
+            data={
+                "rejected_parameter": error.rejected_parameter,
+                "rejected_value": error.rejected_value,
+                "safe_error_code": error_code,
+                "fallback": fallback,
+                "local_schema_validation_retained": True,
+                "completed_json_response": False,
+            },
+        )
+
+    async def _complete_in_mode(
+        self,
+        request: ModelRequest,
+        credential: SecretStr | None,
+        *,
+        mode: str,
+    ) -> ProviderTransportResponse:
+        messages = [
+            message.model_dump(mode="json")
+            for message in request.messages(
+                include_response_schema=mode != "json_schema"
+            )
+        ]
         payload: dict[str, Any] = {
             "messages": messages,
             "model": self.configuration.model_id,
-            "response_format": {
+            "stream": False,
+            "temperature": request.temperature,
+        }
+        if mode == "json_schema":
+            payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": request.operation_id,
                     "schema": request.response_schema,
                     "strict": True,
                 },
-            },
-            "stream": False,
-            "temperature": request.temperature,
-        }
+            }
+        elif mode == "json_object":
+            payload["response_format"] = {"type": "json_object"}
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
         response = await self._request(
@@ -155,13 +286,32 @@ class OpenAICompatibleModelProvider:
             response,
             operation="chat completion",
             model_id=self.configuration.model_id,
+            structured_mode=mode,
         )
         return _parse_chat_completion(response.body)
 
-    async def _ensure_model_available(self, credential: SecretStr | None) -> None:
+    async def _default_transport(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        max_response_bytes: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        return await _request_json(
+            method,
+            url,
+            body,
+            headers,
+            max_response_bytes,
+            connect_timeout=self.configuration.connect_timeout_seconds,
+            read_timeout=self.configuration.read_timeout_seconds,
+        )
+
+    async def _ensure_model_available(self, credential: SecretStr | None) -> int:
         async with self._model_verification_lock:
             if self._model_verified:
-                return
+                return 0
             models = await self._list_models_once(credential)
             if self.configuration.model_id not in models:
                 raise ProviderRequestError(
@@ -169,6 +319,7 @@ class OpenAICompatibleModelProvider:
                     "GET /v1/models; select an exact returned ID"
                 )
             self._model_verified = True
+            return 1
 
     async def _list_models_once(self, credential: SecretStr | None) -> tuple[str, ...]:
         response = await self._request(
@@ -197,11 +348,68 @@ class OpenAICompatibleModelProvider:
         if credential is not None:
             headers["Authorization"] = "Bearer " + credential.get_secret_value()
         limit = self.configuration.max_response_bytes + MAX_HTTP_HEADER_BYTES
+        started = time.monotonic()
+        emit(
+            "provider",
+            "provider.http.dispatch",
+            "Dispatching an OpenAI-compatible HTTP request.",
+            level=LogLevel.TRACE,
+            data={
+                "http_method": method,
+                "endpoint": sanitize_url(url),
+                "request_body_bytes": 0 if body is None else len(body),
+                "authorization_configured": credential is not None,
+            },
+        )
         try:
-            return await self._transport(method, url, body, headers, limit)
-        except (ProviderRequestError, ProviderUnavailableError):
+            response = await self._transport(method, url, body, headers, limit)
+            duration = round((time.monotonic() - started) * 1_000)
+            emit(
+                "provider",
+                "provider.http.response_headers_received",
+                "Received OpenAI-compatible HTTP response status and headers.",
+                level=LogLevel.TRACE,
+                duration_ms=duration,
+                data={
+                    "http_method": method,
+                    "endpoint": sanitize_url(url),
+                    "status_code": response.status,
+                },
+            )
+            emit(
+                "provider",
+                "provider.http.response_body_received",
+                "Received complete bounded OpenAI-compatible response body.",
+                level=LogLevel.TRACE,
+                duration_ms=duration,
+                data={
+                    "status_code": response.status,
+                    "response_byte_length": len(response.body),
+                },
+            )
+            return response
+        except (
+            ProviderRequestError,
+            ProviderUnavailableError,
+            ProviderTimeoutError,
+            StructuredOutputJsonObjectUnsupportedError,
+            StructuredOutputSchemaUnsupportedError,
+            ContextWindowExceededError,
+        ):
             raise
         except Exception as exc:
+            emit(
+                "provider",
+                "provider.http.failed",
+                "OpenAI-compatible HTTP transport failed.",
+                level=LogLevel.DEBUG,
+                duration_ms=round((time.monotonic() - started) * 1_000),
+                error=exc,
+                error_code="provider_connection_error",
+                transient=True,
+                retryable=True,
+                data={"http_method": method, "endpoint": sanitize_url(url)},
+            )
             raise ProviderUnavailableError(
                 "LM Studio/OpenAI-compatible server is unavailable"
             ) from exc
@@ -354,11 +562,13 @@ def _raise_for_status(
     *,
     operation: str,
     model_id: str,
+    structured_mode: str | None = None,
 ) -> None:
     status = response.status
     if 200 <= status < 300:
         return
     detail = _safe_error_detail(response.body)
+    lowered = "" if detail is None else detail.casefold()
     suffix = "" if detail is None else f": {detail}"
     if status in {401, 403}:
         raise ProviderRequestError(
@@ -368,10 +578,46 @@ def _raise_for_status(
         raise ProviderRequestError(
             f"model ID {model_id!r} was not found (HTTP 404){suffix}"
         )
+    if (
+        status in {400, 422}
+        and operation == "chat completion"
+        and any(
+            marker in lowered
+            for marker in (
+                "context size",
+                "context length",
+                "context window",
+                "maximum context",
+                "too many tokens",
+            )
+        )
+    ):
+        raise ContextWindowExceededError()
+    structured_mode_rejected = status in {400, 422} and any(
+        marker in lowered
+        for marker in (
+            "grammar",
+            "json schema",
+            "json_schema",
+            "json object",
+            "json_object",
+            "response_format",
+            "structured output",
+            "sane defaults",
+        )
+    )
+    if operation == "chat completion" and structured_mode_rejected:
+        if structured_mode == "json_object":
+            raise StructuredOutputJsonObjectUnsupportedError(
+                "OpenAI-compatible server rejected JSON object mode"
+            )
+        if structured_mode == "json_schema":
+            raise StructuredOutputSchemaUnsupportedError(
+                "OpenAI-compatible server rejected the structured output schema"
+            )
     if status in {400, 422} and operation == "chat completion":
         raise ProviderRequestError(
-            f"OpenAI-compatible server rejected structured output "
-            f"(HTTP {status}){suffix}"
+            f"OpenAI-compatible server rejected the request (HTTP {status}){suffix}"
         )
     if status in {408, 429} or 500 <= status < 600:
         raise ProviderUnavailableError(
@@ -458,52 +704,63 @@ async def _request_json(
     body: bytes | None,
     headers: Mapping[str, str],
     max_response_bytes: int,
+    *,
+    connect_timeout: float = 10.0,
+    read_timeout: float = 300.0,
 ) -> OpenAICompatibleHTTPResponse:
     parsed = urlsplit(url)
     assert parsed.hostname is not None
     secure = parsed.scheme == "https"
     port = parsed.port or (443 if secure else 80)
     ssl_context = ssl.create_default_context() if secure else None
-    reader, writer = await asyncio.open_connection(
-        parsed.hostname,
-        port,
-        ssl=ssl_context,
-        server_hostname=parsed.hostname if secure else None,
-    )
     try:
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
-        host = parsed.hostname
-        if parsed.port is not None:
-            host += f":{parsed.port}"
-        request_headers = {
-            "Host": host,
-            "Connection": "close",
-            **headers,
-        }
-        if body is not None:
-            request_headers["Content-Length"] = str(len(body))
-        head = (
-            f"{method} {path} HTTP/1.1\r\n"
-            + "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
-            + "\r\n"
-        ).encode("ascii")
-        writer.write(head + (body or b""))
-        await writer.drain()
-        raw_headers = await reader.readuntil(b"\r\n\r\n")
-        if len(raw_headers) > MAX_HTTP_HEADER_BYTES:
-            raise ProviderUnavailableError(
-                "OpenAI-compatible response headers are too large"
-            )
-        status, response_headers = _parse_http_headers(raw_headers)
-        if response_headers.get("transfer-encoding", "").lower() == "chunked":
-            response_body = await _read_chunked(reader, max_response_bytes)
-        else:
-            response_body = await _read_body(
-                reader, response_headers, max_response_bytes
-            )
-        return OpenAICompatibleHTTPResponse(status=status, body=response_body)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                parsed.hostname,
+                port,
+                ssl=ssl_context,
+                server_hostname=parsed.hostname if secure else None,
+            ),
+            timeout=connect_timeout,
+        )
+    except TimeoutError as exc:
+        raise ProviderTimeoutError("provider connection timed out") from exc
+    try:
+        try:
+            async with asyncio.timeout(read_timeout):
+                path = parsed.path or "/"
+                if parsed.query:
+                    path += "?" + parsed.query
+                host = parsed.hostname
+                if parsed.port is not None:
+                    host += f":{parsed.port}"
+                request_headers = {"Host": host, "Connection": "close", **headers}
+                if body is not None:
+                    request_headers["Content-Length"] = str(len(body))
+                head = (
+                    f"{method} {path} HTTP/1.1\r\n"
+                    + "".join(
+                        f"{key}: {value}\r\n" for key, value in request_headers.items()
+                    )
+                    + "\r\n"
+                ).encode("ascii")
+                writer.write(head + (body or b""))
+                await writer.drain()
+                raw_headers = await reader.readuntil(b"\r\n\r\n")
+                if len(raw_headers) > MAX_HTTP_HEADER_BYTES:
+                    raise ProviderUnavailableError(
+                        "OpenAI-compatible response headers are too large"
+                    )
+                status, response_headers = _parse_http_headers(raw_headers)
+                if response_headers.get("transfer-encoding", "").lower() == "chunked":
+                    response_body = await _read_chunked(reader, max_response_bytes)
+                else:
+                    response_body = await _read_body(
+                        reader, response_headers, max_response_bytes
+                    )
+                return OpenAICompatibleHTTPResponse(status=status, body=response_body)
+        except TimeoutError as exc:
+            raise ProviderTimeoutError("provider response read timed out") from exc
     finally:
         writer.close()
         with suppress(OSError):

@@ -21,6 +21,7 @@ from contextforge.application import (
     render_handoff_review,
     suggest_repository_context,
 )
+from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.context import (
     MAX_JSON_PACKAGE_BYTES,
@@ -49,11 +50,11 @@ from contextforge.intelligence import IndexManifestReadError, IndexStorageError
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
     ProjectConfigError,
+    configuration_resolution,
     create_model_provider,
     load_project_configuration,
     resolve_provider_configuration,
 )
-from contextforge.repositories import scan_repository
 from contextforge.repositories.ignore import IgnoreRulesError
 
 
@@ -113,6 +114,10 @@ def suggest_context(
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option("--json-repair-attempts", min=0, max=5),
+    ] = None,
     includes: Annotated[
         list[str] | None,
         typer.Option("--include", help="Pin one exact snapshot path; repeatable."),
@@ -137,6 +142,13 @@ def suggest_context(
         bool,
         typer.Option("--explain", help="Include detailed selection provenance."),
     ] = False,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Fail when model response repairs are exhausted; disable fallback.",
+        ),
+    ] = False,
     output: Annotated[
         Path | None,
         typer.Option("--output", help="Write output atomically to a file."),
@@ -145,21 +157,43 @@ def suggest_context(
         bool,
         typer.Option("--force", help="Atomically replace an existing output file."),
     ] = False,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering: auto, always when safe, or never.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Suggest reviewable task context without modifying repository source."""
 
     active_provider: ModelProvider | None = None
+    progress_renderer = CLIProgressRenderer(progress)
     try:
         if not task.strip():
             raise ValueError("--task must be non-empty")
         project = load_project_configuration(path, config_path=config)
+        configured_repairs = project.models.structured_response.max_repair_attempts
+        repair_source = configuration_resolution(project)["sources"].get(
+            "models.structured_response.max_repair_attempts", "built-in default"
+        )
+        effective_repairs = (
+            min(json_repair_attempts, 5)
+            if json_repair_attempts is not None
+            else 1
+            if repair_source == "built-in default"
+            else min(configured_repairs, 5)
+        )
         provider_configuration = resolve_provider_configuration(
-            project, provider=provider_name, model=model
+            project,
+            provider=provider_name,
+            model=model,
+            json_repair_attempts=effective_repairs,
         )
         if provider_configuration is None:
             raise ValueError("context suggestion requires a model provider")
         active_provider = create_model_provider(provider_configuration)
-        snapshot = scan_repository(path)
         request = build_discovery_request(
             task=task,
             mode=discovery.value,
@@ -167,9 +201,15 @@ def suggest_context(
             excludes=tuple(excludes or ()),
             max_files=max_files,
             max_context_bytes=max_context_bytes,
+            strict=strict,
         )
         run = asyncio.run(
-            suggest_repository_context(snapshot, active_provider, request)
+            suggest_repository_context(
+                path,
+                active_provider,
+                request,
+                progress=progress_renderer,
+            )
         )
         selection = run.final_selection
         if selection is None:
@@ -198,6 +238,7 @@ def suggest_context(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     finally:
+        progress_renderer.close()
         _close_provider(active_provider)
 
     _publish_or_echo(representation, output=output, force=force)
@@ -313,6 +354,10 @@ def create_context(
         Path | None,
         typer.Option("--config", help="Explicit project configuration TOML."),
     ] = None,
+    json_repair_attempts: Annotated[
+        int | None,
+        typer.Option("--json-repair-attempts", min=0, max=10),
+    ] = None,
     refine_task_option: Annotated[
         bool,
         typer.Option("--refine-task", help="Add a labelled optional task refinement."),
@@ -331,6 +376,14 @@ def create_context(
             "--prompt-output", help="Also write the compiled prompt atomically."
         ),
     ] = None,
+    progress: Annotated[
+        ProgressMode,
+        typer.Option(
+            "--progress",
+            help="Progress rendering for automatic discovery.",
+            case_sensitive=False,
+        ),
+    ] = ProgressMode.AUTO,
 ) -> None:
     """Build a manual package or an automatic reviewable compiled handoff."""
 
@@ -347,6 +400,7 @@ def create_context(
             provider_name=provider_name,
             model=model,
             config=config,
+            json_repair_attempts=json_repair_attempts,
             refine_task_option=refine_task_option,
             git_diff=git_diff,
             base=base,
@@ -356,6 +410,7 @@ def create_context(
             output=output,
             prompt_output=prompt_output,
             force=force,
+            progress_mode=progress,
         )
         return
 
@@ -365,6 +420,7 @@ def create_context(
             provider_name,
             model,
             config,
+            json_repair_attempts,
             refine_task_option,
             git_diff is not GitDiffChoice.none,
             base,
@@ -494,6 +550,7 @@ def _create_automatic_context(
     provider_name: str | None,
     model: str | None,
     config: Path | None,
+    json_repair_attempts: int | None,
     refine_task_option: bool,
     git_diff: GitDiffChoice,
     base: str | None,
@@ -503,8 +560,10 @@ def _create_automatic_context(
     output: Path | None,
     prompt_output: Path | None,
     force: bool,
+    progress_mode: ProgressMode,
 ) -> None:
     provider: ModelProvider | None = None
+    progress_renderer = CLIProgressRenderer(progress_mode)
     try:
         if task is None or not task.strip():
             raise ValueError("automatic context creation requires --task")
@@ -519,12 +578,14 @@ def _create_automatic_context(
             raise ValueError("--base is accepted only with --git-diff base")
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
-            project, provider=provider_name, model=model
+            project,
+            provider=provider_name,
+            model=model,
+            json_repair_attempts=json_repair_attempts,
         )
         if provider_configuration is None:
             raise ValueError("automatic context creation requires a model provider")
         provider = create_model_provider(provider_configuration)
-        snapshot = scan_repository(path)
         request = build_discovery_request(
             task=task,
             mode=discovery.value,
@@ -543,11 +604,12 @@ def _create_automatic_context(
         )
         result, compiled = asyncio.run(
             create_automatic_handoff(
-                snapshot,
+                path,
                 provider,
                 request,
                 refine_task=refine_task_option,
                 git_diff_request=git_request,
+                progress=progress_renderer,
             )
         )
         representation = (
@@ -583,6 +645,7 @@ def _create_automatic_context(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     finally:
+        progress_renderer.close()
         _close_provider(provider)
 
     _publish_or_echo(representation, output=output, force=force)

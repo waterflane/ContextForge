@@ -68,7 +68,11 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert built.exit_code == 0, built.output
     assert "Status: complete" in _plain(built.stdout)
     first = load_manifest(tmp_path)
-    assert all(item.semantic_status == "complete" for item in first.files)
+    assert all(
+        item.semantic_status
+        == ("skipped" if item.path.startswith(".contextforge/") else "complete")
+        for item in first.files
+    )
 
     unchanged = _invoke("index", "update", str(tmp_path), "--provider", "fake")
     assert unchanged.exit_code == 0, unchanged.output
@@ -85,7 +89,6 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert "CodeMaps extracted: 2" in _plain(updated.stdout)
     current = load_manifest(tmp_path)
     assert tuple(item.path for item in current.files) == (
-        ".contextforge/config.toml",
         "app.py",
         "new.py",
     )
@@ -94,9 +97,8 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert status.exit_code == 0
     assert status.stderr == ""
     payload = json.loads(status.stdout)
-    assert payload["indexed_files"] == 3
+    assert payload["indexed_files"] == 2
     assert payload["stale_files"] == [
-        ".contextforge/config.toml",
         "app.py",
         "new.py",
     ]
@@ -133,7 +135,7 @@ def test_index_update_requires_existing_index_and_status_handles_missing(
     assert status.exit_code == 0
     payload = json.loads(status.stdout)
     assert payload["active_generation_id"] is None
-    assert payload["added_files"] == [".contextforge/config.toml", "app.py"]
+    assert payload["added_files"] == ["app.py"]
 
 
 def test_index_cli_requires_explicit_confirmation_to_recover_unknown_lock(
@@ -180,7 +182,7 @@ def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> No
     assert forced.exit_code == 0
     assert "Semantic analyses completed: 1" in _plain(forced.stdout)
     manifest = load_manifest(tmp_path)
-    assert sum(item.semantic_status == "skipped" for item in manifest.files) == 2
+    assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
 
 
 def test_index_provider_failure_preserves_previous_active_generation(
@@ -231,6 +233,43 @@ def test_index_cancellation_maps_to_130(
     assert result.exit_code == 130
 
 
+def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    built = _invoke(
+        "--log-level",
+        "quiet",
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--progress",
+        "never",
+    )
+    suggested = _invoke(
+        "--log-level",
+        "quiet",
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "Review VALUE",
+        "--provider",
+        "fake",
+        "--format",
+        "json",
+        "--progress",
+        "never",
+    )
+
+    assert built.exit_code == suggested.exit_code == 0
+    assert built.stderr == ""
+    assert suggested.stderr == ""
+    assert json.loads(suggested.stdout)["mode"] == "hybrid"
+
+
 @pytest.mark.parametrize("mode", ["fresh", "hybrid"])
 def test_context_suggest_table_and_json_are_read_only(
     tmp_path: Path, mode: str
@@ -264,16 +303,24 @@ def test_context_suggest_table_and_json_are_read_only(
         "json",
     )
 
-    assert table.exit_code == structured.exit_code == 0
+    assert table.exit_code == structured.exit_code == 0, (
+        table.output,
+        structured.output,
+    )
     assert "Discovery mode:" in _plain(table.stdout)
     assert "reason:" in _plain(table.stdout)
-    assert structured.stderr == ""
+    assert "Suggesting context:" in _plain(structured.stderr)
+    assert "\x1b" not in structured.stderr
     payload = json.loads(structured.stdout)
     assert payload["mode"] == mode
     assert payload["selected"][0]["path"] == "app.py"
     assert payload["budget_usage"]["context_bytes"] > 0
     assert (tmp_path / "app.py").read_bytes() == before
-    assert not (tmp_path / ".contextforge").exists()
+    # Context suggestion remains source/index read-only while 0.4.1 records a
+    # compact safe operation summary in the existing local runs boundary.
+    state = tmp_path / ".contextforge"
+    assert not (state / "index").exists()
+    assert tuple((state / "runs").glob("diagnostic-*.json"))
 
 
 def test_context_suggest_indexed_missing_then_indexed_success(tmp_path: Path) -> None:
@@ -398,6 +445,9 @@ def test_context_create_automatic_json_prompt_and_portable_review(
     )
 
     assert created.exit_code == 0, created.output
+    assert "Creating automatic context: 0%" in _plain(created.stderr)
+    assert "Creating automatic context: 100%" in _plain(created.stderr)
+    assert "\x1b" not in created.stderr
     payload = cast(dict[str, Any], json.loads(handoff_path.read_text(encoding="utf-8")))
     assert payload["original_task"] == "Implement behavior"
     assert payload["review"]["discovery"]["mode"] == "fresh"

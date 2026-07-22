@@ -14,6 +14,25 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+The contributor virtual environment above provides the CLI while it is
+activated. To keep an editable development command available independently of
+that environment and the current working directory, use an absolute path with
+`pipx`:
+
+```bash
+pipx install --editable /absolute/path/to/ContextForge
+```
+
+Entry-point launchers are generated from `[project.scripts]` at installation
+time. Merely editing `pyproject.toml` does not create, rename, or remove an
+installed command. Reinstall after every entry-point change:
+
+```bash
+python -m pip install -e ".[dev]"
+# For the standalone pipx installation:
+pipx install --force --editable /absolute/path/to/ContextForge
+```
+
 On Windows PowerShell:
 
 ```powershell
@@ -27,16 +46,43 @@ python -m pip install -e ".[dev]"
 
 ```bash
 contextforge version
+contextforge --version
+python -m contextforge --version
+ctxf --version
 contextforge doctor
 contextforge index build . --provider fake
 contextforge index status . --format json
 contextforge context suggest . --task "Review this repository" --provider fake
+contextforge --log-level debug context suggest . --task "Review this repository" --provider fake
+contextforge diagnostics config . --format json
 ruff check .
 ruff format --check .
 mypy
 pytest
 git diff --check
 ```
+
+For a release candidate, also run the full branch-coverage suite, exercise both
+installed console entry points and module execution, and verify the wheel and
+source distribution:
+
+```bash
+pytest --cov=contextforge --cov-branch --cov-report=term-missing
+contextforge version
+contextforge --version
+ctxf version
+ctxf --version
+python -m contextforge --version
+python -m build
+```
+
+Release smoke checks use temporary repositories for non-Git operation, nested
+`.gitignore` behavior, table/JSON progress separation, and cancellation. They
+must not write generated index/runs/staging data into the source checkout.
+
+Both editable and regular package installations create `contextforge` and its
+short alias, `ctxf`. They invoke the same CLI application; `ctxf` does not have
+a separate command tree or behavior.
 
 The deterministic `fake` provider is intended for normal tests and offline
 smoke checks. It returns schema-valid fixture interpretations and a stable
@@ -60,6 +106,16 @@ Manual offline checks should cover structural/fake `index build`, no-op and
 changed-file `index update`, table/JSON status, clean confirmation/config
 preservation, all discovery modes, automatic and manual context creation,
 portable handoff review, and MCP initialize/list/call/resource exchange.
+Logging validation additionally covers stderr/stdout separation, one-object-
+per-line JSON, rotation retention, Rich live ownership, redirected non-ANSI
+output, secret redaction, local budget rejection without provider dispatch,
+and context-window values of 98,304 through resolution and budgeting.
+
+Tests must not assert on human log prose when a stable `event`, `error.code`, or
+structured `data` field exists. Use the in-process `recent_records()` API or
+JSON Lines. New application code emits diagnostic facts through
+`contextforge.logging.emit`; it must not add another progress abstraction or
+depend on Rich/Typer.
 
 ## Project provider configuration
 

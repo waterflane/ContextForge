@@ -8,6 +8,7 @@ from typer.testing import CliRunner, Result
 
 import contextforge.cli.main as cli_module
 import contextforge.repositories.scanner as scanner_module
+from contextforge import __version__
 from contextforge.cli.main import app
 from contextforge.repositories.files import FileInspection
 from contextforge.repositories.files import inspect_file as file_inspector
@@ -458,6 +459,6 @@ def test_root_help_version_and_doctor_remain_available() -> None:
     assert help_result.exit_code == 0
     assert "scan" in help_output
     assert version_result.exit_code == 0
-    assert "ContextForge 0.4.0" in version_output
+    assert f"ContextForge {__version__}" in version_output
     assert doctor_result.exit_code == 0
     assert "ContextForge is installed." in doctor_output

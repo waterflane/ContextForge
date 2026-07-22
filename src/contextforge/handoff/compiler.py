@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 
 from contextforge.context import ContextFile, render_project_tree
 from contextforge.intelligence import serialize_code_map
+from contextforge.logging import LogLevel, emit
+from contextforge.models import validate_structured_text_content
+from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.prompts import PromptPackage
 
 from .models import (
@@ -25,8 +29,61 @@ class PromptCompileError(ValueError):
     """Raised when a validated handoff cannot fit its approved prompt budget."""
 
 
-def compile_prompt(handoff: TaskHandoff) -> CompiledPrompt:
+def compile_prompt(
+    handoff: TaskHandoff,
+    *,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
+) -> CompiledPrompt:
     """Compile fixed-order Markdown without model calls, reads, or source changes."""
+
+    reporter = ProgressReporter(
+        operation_id or uuid.uuid4().hex,
+        "repository.prompt.compile",
+        observer=progress,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report("instructions", "Compiling prompt instructions.", percentage=0)
+    try:
+        compiled = _compile_prompt(handoff, reporter)
+    except KeyboardInterrupt:
+        reporter.cancel()
+        raise
+    except Exception as exc:
+        reporter.fail(metadata={"error_type": type(exc).__name__})
+        emit(
+            "synthesis",
+            "prompt.compilation.failed",
+            "Prompt compilation failed during deterministic assembly or budgeting.",
+            level=LogLevel.ERROR,
+            operation_id=(
+                reporter.last_event.operation_id
+                if reporter.last_event is not None
+                else operation_id
+            ),
+            operation_type="repository.prompt.compile",
+            phase_id=(
+                reporter.last_event.phase_id
+                if reporter.last_event is not None
+                else "compile"
+            ),
+            status="failed",
+            error=exc,
+            error_code=(
+                "context_window_exceeded"
+                if isinstance(exc, PromptCompileError)
+                else "internal_error"
+            ),
+            data={"prompt_contents_logged": False},
+        )
+        raise
+    reporter.complete(message="Prompt compilation completed.")
+    return compiled
+
+
+def _compile_prompt(handoff: TaskHandoff, reporter: ProgressReporter) -> CompiledPrompt:
+    """Implement compilation under the public progress boundary."""
 
     if not isinstance(handoff, TaskHandoff):
         raise PromptCompileError("expected a TaskHandoff")
@@ -47,6 +104,7 @@ def compile_prompt(handoff: TaskHandoff) -> CompiledPrompt:
     sections.append(
         _section("Acceptance criteria", _bullet_list(handoff.acceptance_criteria))
     )
+    reporter.report("instructions", "Compiled task instructions.", percentage=15)
 
     package = handoff.context_package
     statistics = package.statistics
@@ -73,6 +131,11 @@ def compile_prompt(handoff: TaskHandoff) -> CompiledPrompt:
         )
     )
     sections.append(_section("Selected CodeMaps", _codemaps(handoff)))
+    reporter.report(
+        "repository_context",
+        "Compiled repository overview, maps, tree, and CodeMaps.",
+        percentage=45,
+    )
 
     implementation = tuple(
         item for item in package.files if not _looks_like_test(item.path)
@@ -101,9 +164,20 @@ def compile_prompt(handoff: TaskHandoff) -> CompiledPrompt:
             _fenced(handoff.expected_response_format, "text"),
         )
     )
+    reporter.report(
+        "source_context",
+        "Compiled selected source, tests, Git context, and constraints.",
+        percentage=75,
+    )
 
     body = "\n\n".join(sections).rstrip("\n") + "\n"
+    body = validate_structured_text_content(
+        body,
+        operation_id="prompt-compilation",
+        purpose="prompt-compilation",
+    )
     encoded = body.encode("utf-8")
+    reporter.report("serialize", "Serialized the compiled prompt.", percentage=88)
     source_bytes = sum(
         block.size_bytes for item in package.files for block in item.blocks
     )
@@ -122,7 +196,27 @@ def compile_prompt(handoff: TaskHandoff) -> CompiledPrompt:
         prompt_instruction_bytes=instruction_bytes,
         total_prompt_bytes=len(encoded),
     )
+    emit(
+        "budget",
+        "prompt.budget_calculated",
+        "Calculated deterministic compiled-prompt byte budgets.",
+        level=LogLevel.DEBUG,
+        operation_id=(
+            reporter.last_event.operation_id
+            if reporter.last_event is not None
+            else None
+        ),
+        operation_type="repository.prompt.compile",
+        phase_id="validate",
+        data={
+            **usage.model_dump(mode="json"),
+            "selected_file_count": len(package.files),
+            "selected_paths": [item.path for item in package.files],
+            "prompt_contents_logged": False,
+        },
+    )
     _validate_budget(handoff, usage)
+    reporter.report("validate", "Validated compiled prompt budgets.", percentage=97)
     metadata = CompiledPromptMetadata(
         source_handoff_identity=calculate_handoff_identity(handoff),
         prompt_sha256=hashlib.sha256(encoded).hexdigest(),

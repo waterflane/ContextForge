@@ -36,6 +36,7 @@ from .models import (
     DiscoveryBudget,
     DiscoveryBudgetUsage,
     DiscoveryCandidate,
+    DiscoveryCandidateRecord,
     DiscoveryLineRange,
     DiscoveryMode,
     DiscoveryObservation,
@@ -136,6 +137,10 @@ class AddContextInput(ToolInput):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
 
 
+class SelectCandidatesInput(ToolInput):
+    candidate_ids: tuple[str, ...] = Field(min_length=1, max_length=10)
+
+
 class RemoveContextInput(ToolInput):
     path: str
     reason: str = Field(min_length=1, max_length=2_000)
@@ -165,6 +170,7 @@ TOOL_INPUT_MODELS: dict[str, type[ToolInput]] = {
     "read_lines": ReadLinesInput,
     "get_git_diff": GitDiffInput,
     "add_to_context": AddContextInput,
+    "select_candidates": SelectCandidatesInput,
     "remove_from_context": RemoveContextInput,
     "get_context_budget": EmptyInput,
     "finalize_context": FinalizeContextInput,
@@ -225,6 +231,7 @@ class ToolBudgetTracker:
     limits: DiscoveryBudget
     steps: int = 0
     model_calls: int = 0
+    provider_http_calls: int = 0
     files_read: int = 0
     source_bytes: int = 0
     tool_result_bytes: int = 0
@@ -235,6 +242,7 @@ class ToolBudgetTracker:
         return DiscoveryBudgetUsage(
             steps=self.steps,
             model_calls=self.model_calls,
+            provider_http_calls=self.provider_http_calls,
             files_read=self.files_read,
             source_bytes=self.source_bytes,
             tool_result_bytes=self.tool_result_bytes,
@@ -276,6 +284,7 @@ class DiscoveryToolExecutor:
         pinned_paths: tuple[str, ...] = (),
         excluded_paths: tuple[str, ...] = (),
         git_diff_provider: GitDiffProvider | None = None,
+        candidate_records: Mapping[str, DiscoveryCandidateRecord] | None = None,
     ) -> None:
         self.knowledge = knowledge
         self.budget = budget
@@ -285,7 +294,11 @@ class DiscoveryToolExecutor:
         self._selected: dict[str, DiscoveryCandidate] = {}
         self._removed: dict[str, str] = {}
         self._git_diff_provider = git_diff_provider
+        self._candidate_records = dict(candidate_records or {})
         self.read_paths: set[str] = set()
+        self._source_cache: dict[
+            tuple[str, tuple[tuple[int, int], ...]], SelectedTextFile
+        ] = {}
         self._cursors: dict[str, tuple[str, int]] = {}
         self._consumed_cursors: set[str] = set()
         self.last_git_diff: GitDiffResult | None = None
@@ -308,6 +321,25 @@ class DiscoveryToolExecutor:
     @property
     def removed(self) -> Mapping[str, str]:
         return dict(self._removed)
+
+    def mark_coverage_added(self, paths: tuple[str, ...]) -> None:
+        """Label engine-selected candidates without changing the public schema."""
+
+        for path in paths:
+            candidate = self._selected.get(path)
+            if candidate is None:
+                continue
+            self._selected[path] = candidate.model_copy(
+                update={
+                    "reason": SelectionReason(
+                        summary="Added deterministically to cover a task intent facet.",
+                        discovery_source="deterministic-facet-coverage",
+                        evidence=candidate.reason.evidence,
+                    ),
+                    "model_selected": False,
+                    "added_by_completeness": True,
+                }
+            )
 
     def execute(
         self,
@@ -366,6 +398,7 @@ class DiscoveryToolExecutor:
             "read_lines": self._read_lines,
             "get_git_diff": self._git_diff,
             "add_to_context": self._add_context,
+            "select_candidates": self._select_candidates,
             "remove_from_context": self._remove_context,
             "get_context_budget": self._context_budget,
             "finalize_context": self._finalize_marker,
@@ -761,17 +794,10 @@ class DiscoveryToolExecutor:
                 ok=False,
             )
         project_file = self._require_path(value.path)
-        self.budget.charge_read(project_file.size_bytes)
-        self.read_paths.add(project_file.path)
-        selected = read_selected_text_file(
-            self.knowledge.snapshot,
+        selected = self.read_selected(
             project_file,
             line_ranges=(LineRange(value.start_line, value.end_line),),
-            limits=ReaderLimits(
-                max_files=1,
-                max_source_bytes=max(project_file.size_bytes, 1),
-                max_content_bytes=MAX_READ_LINES_BYTES,
-            ),
+            max_content_bytes=MAX_READ_LINES_BYTES,
         )
         block = selected.blocks[0]
         return _ToolResult(
@@ -893,6 +919,49 @@ class DiscoveryToolExecutor:
             made_progress=changed,
         )
 
+    def _select_candidates(self, raw: ToolInput) -> _ToolResult:
+        value = _as(raw, SelectCandidatesInput)
+        if len(value.candidate_ids) != len(set(value.candidate_ids)):
+            raise ValueError("candidate IDs must be unique")
+        changed = False
+        selected: list[dict[str, Any]] = []
+        previous_selection = dict(self._selected)
+        for candidate_id in value.candidate_ids:
+            record = self._candidate_records.get(candidate_id)
+            if record is None:
+                raise ValueError("candidate ID is outside the serialized request")
+            project_file = self._require_path(record.path)
+            previous = self._selected.get(record.path)
+            signals = ", ".join(record.ranking_signals)
+            candidate = DiscoveryCandidate(
+                candidate_id=record.candidate_id,
+                kind=(
+                    "related_test"
+                    if _looks_like_test_path(record.path)
+                    else "full_file"
+                ),
+                path=record.path,
+                reason=SelectionReason(
+                    summary=(f"Ranked candidate #{record.rank}; signals: {signals}."),
+                    discovery_source="model-selected:indexed-candidate-id",
+                    evidence=record.ranking_signals,
+                ),
+                confidence=min(0.99, 0.5 + record.score / (2 * (record.score + 1))),
+                source_sha256=project_file.sha256,
+                model_selected=True,
+            )
+            self._selected[record.path] = candidate
+            self._removed.pop(record.path, None)
+            changed = changed or previous != candidate
+            selected.append(candidate.model_dump(mode="json"))
+        try:
+            self._update_context_usage()
+        except ToolBudgetExceededError:
+            self._selected = previous_selection
+            self._update_context_usage()
+            raise
+        return _ToolResult({"candidates": selected}, made_progress=changed)
+
     def _remove_context(self, raw: ToolInput) -> _ToolResult:
         value = _as(raw, RemoveContextInput)
         path = self._require_path(value.path).path
@@ -939,17 +1008,42 @@ class DiscoveryToolExecutor:
         )
 
     def _read(self, project_file: ProjectFile) -> SelectedTextFile:
+        return self.read_selected(
+            project_file, max_content_bytes=max(project_file.size_bytes, 1)
+        )
+
+    def read_selected(
+        self,
+        project_file: ProjectFile,
+        *,
+        line_ranges: tuple[LineRange, ...] = (),
+        max_content_bytes: int,
+    ) -> SelectedTextFile:
+        """Return one snapshot-verified read, reusing identical source selections."""
+
+        key = (
+            project_file.path,
+            tuple((item.start, item.end) for item in line_ranges),
+        )
+        cached = self._source_cache.get(key)
+        if cached is not None:
+            if cached.included_content_bytes > max_content_bytes:
+                raise ToolBudgetExceededError("selected content exceeds byte limit")
+            return cached
         self.budget.charge_read(project_file.size_bytes)
         self.read_paths.add(project_file.path)
-        return read_selected_text_file(
+        selected = read_selected_text_file(
             self.knowledge.snapshot,
             project_file,
+            line_ranges=line_ranges,
             limits=ReaderLimits(
                 max_files=1,
                 max_source_bytes=max(project_file.size_bytes, 1),
-                max_content_bytes=max(project_file.size_bytes, 1),
+                max_content_bytes=max_content_bytes,
             ),
         )
+        self._source_cache[key] = selected
+        return selected
 
     def _require_path(self, path: str) -> ProjectFile:
         portable = validate_portable_relative_path(path)

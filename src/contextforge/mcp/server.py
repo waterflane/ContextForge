@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any, BinaryIO
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.logging import LogLevel, emit
 from contextforge.mcp.foundation import ReadOnlyMCPFoundation, ReadOnlyToolError
 
 SUPPORTED_PROTOCOL_VERSIONS = (
@@ -155,9 +156,15 @@ async def _serve_stdio(foundation: ReadOnlyMCPFoundation) -> None:
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             response = _error(request_id, -32700, f"Parse error: {exc}")
         except Exception as exc:
-            print(
-                f"ContextForge MCP operational error: {type(exc).__name__}",
-                file=sys.stderr,
+            emit(
+                "mcp",
+                "operation.failed",
+                "MCP stdio request failed with an internal operational error.",
+                level=LogLevel.ERROR,
+                error=exc,
+                error_code="internal_error",
+                status="failed",
+                data={"stdout_protocol_only": True},
             )
             response = _error(request_id, -32603, "Internal error")
         if response is not None:

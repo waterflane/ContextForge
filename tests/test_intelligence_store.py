@@ -627,7 +627,7 @@ def test_junction_storage_path_is_portably_rejected(
         initialize_index(tmp_path)
 
 
-def test_generated_directories_are_scanner_protected_but_config_is_visible(
+def test_contextforge_directory_is_entirely_scanner_protected(
     tmp_path: Path,
 ) -> None:
     layout = initialize_index(tmp_path)
@@ -639,16 +639,12 @@ def test_generated_directories_are_scanner_protected_but_config_is_visible(
     snapshot = scan_repository(tmp_path)
 
     paths = tuple(item.path for item in snapshot.files)
-    assert paths == (".contextforge/config.toml", "source.py")
+    assert paths == ("source.py",)
     protected = tuple(
         item.path for item in snapshot.ignored_files if item.source == "protected"
     )
-    assert protected == (
-        ".contextforge/contexts",
-        ".contextforge/index",
-        ".contextforge/runs",
-    )
-    assert snapshot.summary.protected_count == 3
+    assert protected == (".contextforge",)
+    assert snapshot.summary.protected_count == 1
 
 
 def test_clean_generated_index_preserves_user_and_other_generated_categories(

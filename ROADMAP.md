@@ -31,6 +31,16 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Build reviewable handoffs with optional Git diff and compiled prompts.
 - [x] Expose thin CLI commands and a local read-only stdio MCP foundation.
 
+### v0.4.1 maintenance release (complete)
+
+- [x] Expose structured progress events with weighted percentages for CLI and
+  future interface adapters.
+- [x] Correct nested `.gitignore` scope, inheritance, and negation behavior.
+- [x] Provide consistent `version`/`--version` output and the `ctxf` alias from
+  one authoritative package version.
+- [x] Add structured diagnostics without mixing logs, progress, and command
+  output streams.
+
 ## Later
 
 - Full multi-root workspaces.

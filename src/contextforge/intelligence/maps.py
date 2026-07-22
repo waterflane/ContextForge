@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import Field, field_validator
+from pydantic import Field
 
 from contextforge.intelligence.codemap import (
     FileCodeMap,
@@ -64,14 +64,19 @@ from contextforge.intelligence.store import (
     write_index_record,
     write_manifest,
 )
+from contextforge.logging import LogLevel, emit
 from contextforge.models import (
     ModelProvider,
     ModelProviderError,
     ModelRequest,
     ProviderCancelledError,
+    SemanticConstraintFailedIssue,
     StructuredResponseError,
     UntrustedModelContext,
+    ensure_request_fits_context,
+    estimate_request_context,
 )
+from contextforge.progress import ProgressObserver
 from contextforge.repositories import ProjectSnapshot
 
 GLOBAL_MAP_ANALYZER_ID = "contextforge-repository-maps"
@@ -91,144 +96,38 @@ Architecture, behavior, feature membership, and prose are interpretations: attac
 confidence and evidence, preserve uncertainty, and never relabel a guess as verified.
 Return only the required JSON object."""
 
-_ShortText = Annotated[str, Field(min_length=1, max_length=2_000)]
-_Question = Annotated[str, Field(min_length=1, max_length=1_000)]
+_SignalText = Annotated[str, Field(min_length=1, max_length=160)]
+_Question = Annotated[str, Field(min_length=1, max_length=240)]
+
+# Compatibility-only private conversion code below is retained for persisted rich
+# map migrations; compact provider requests never instantiate these legacy DTOs.
+type _RawInterpretation = Any
+type _RawEntryPoint = Any
+type _RawDiagnostic = Any
+type _ArchitectureResponse = Any
+type _FeatureResponse = Any
 
 
 class _RawConfidence(IndexModel):
     value: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-    rationale: Annotated[str, Field(min_length=1, max_length=1_000)]
+    rationale: Annotated[str, Field(min_length=1, max_length=240)]
 
 
 class _RawEvidence(IndexModel):
     path: str
-    source_range: SourceRange | None = None
-    fact_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    fact_ids: tuple[str, ...] = Field(default=(), max_length=8)
 
 
 class _SummaryResponse(IndexModel):
     schema_version: Literal[1] = GLOBAL_MAP_SCHEMA_VERSION
-    scope_id: str
-    title: _ShortText
-    summary: _ShortText
-    behavioral_themes: tuple[_ShortText, ...] = Field(default=(), max_length=50)
-    architecture_signals: tuple[_ShortText, ...] = Field(default=(), max_length=50)
-    feature_signals: tuple[_ShortText, ...] = Field(default=(), max_length=50)
-    unresolved_questions: tuple[_Question, ...] = Field(default=(), max_length=50)
-    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=100)
-    confidence: _RawConfidence
-
-
-class _RawInterpretation(IndexModel):
-    stable_key: str
-    title: _ShortText
-    description: _ShortText
-    files: tuple[str, ...] = Field(default=(), max_length=500)
-    symbols: tuple[str, ...] = Field(default=(), max_length=2_000)
-    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=100)
-    confidence: _RawConfidence
-    unresolved_questions: tuple[_Question, ...] = Field(default=(), max_length=50)
-
-    @field_validator("stable_key")
-    @classmethod
-    def validate_stable_key(cls, value: str) -> str:
-        if (
-            not value
-            or len(value) > 200
-            or any(
-                not (
-                    character.isascii()
-                    and (character.isalnum() or character in "._:/+@-")
-                )
-                for character in value
-            )
-        ):
-            raise ValueError("stable_key must be bounded portable text")
-        return value
-
-
-class _RawModuleRole(_RawInterpretation):
-    role_kind: Literal[
-        "domain-core",
-        "application",
-        "adapter",
-        "cli",
-        "api",
-        "storage",
-        "model-provider",
-        "configuration",
-        "testing",
-        "support",
-        "other",
-    ]
-
-
-class _RawDataFlow(_RawInterpretation):
-    flow_kind: Literal[
-        "configuration",
-        "request",
-        "response",
-        "persistence",
-        "model-input",
-        "model-output",
-        "internal",
-        "other",
-    ]
-    source: _ShortText
-    target: _ShortText
-
-
-class _RawEntryPoint(_RawInterpretation):
-    entry_point_kind: Literal["cli", "api", "application", "library", "test", "other"]
-    file: str
-    symbol_id: str | None = None
-    handler_file: str | None = None
-    handler_symbol_id: str | None = None
-
-
-class _RawBoundary(_RawInterpretation):
-    boundary_kind: Literal[
-        "storage",
-        "model-provider",
-        "external-service",
-        "filesystem",
-        "network",
-        "database",
-        "process",
-        "configuration",
-        "other",
-    ]
-
-
-class _RawDiagnostic(IndexModel):
-    code: str
-    message: _ShortText
-    severity: Literal["info", "warning", "error"]
-    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=50)
-    confidence: _RawConfidence
-
-
-class _ArchitectureResponse(IndexModel):
-    schema_version: Literal[1] = GLOBAL_MAP_SCHEMA_VERSION
-    module_roles: tuple[_RawModuleRole, ...] = Field(default=(), max_length=200)
-    data_flows: tuple[_RawDataFlow, ...] = Field(default=(), max_length=200)
-    entry_points: tuple[_RawEntryPoint, ...] = Field(default=(), max_length=200)
-    external_boundaries: tuple[_RawBoundary, ...] = Field(default=(), max_length=200)
-    diagnostics: tuple[_RawDiagnostic, ...] = Field(default=(), max_length=100)
-    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=200)
-    confidence: _RawConfidence
-
-
-class _RawFeature(_RawInterpretation):
-    related_tests: tuple[str, ...] = Field(default=(), max_length=500)
-    related_feature_keys: tuple[str, ...] = Field(default=(), max_length=100)
-
-
-class _FeatureResponse(IndexModel):
-    schema_version: Literal[1] = GLOBAL_MAP_SCHEMA_VERSION
-    feature_areas: tuple[_RawFeature, ...] = Field(default=(), max_length=500)
-    diagnostics: tuple[_RawDiagnostic, ...] = Field(default=(), max_length=100)
-    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=200)
+    scope_id: Annotated[str, Field(min_length=1, max_length=96)]
+    title: Annotated[str, Field(min_length=1, max_length=160)]
+    summary: Annotated[str, Field(min_length=1, max_length=600)]
+    behavioral_themes: tuple[_SignalText, ...] = Field(default=(), max_length=8)
+    architecture_signals: tuple[_SignalText, ...] = Field(default=(), max_length=8)
+    feature_signals: tuple[_SignalText, ...] = Field(default=(), max_length=8)
+    unresolved_questions: tuple[_Question, ...] = Field(default=(), max_length=6)
+    evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=12)
     confidence: _RawConfidence
 
 
@@ -241,16 +140,17 @@ class GlobalMapAnalysisOptions:
     """Bounds and equality-sensitive inputs for hierarchical global synthesis."""
 
     prompt_version: str = GLOBAL_MAP_PROMPT_VERSION
-    max_files_per_package: int = 20
-    max_summaries_per_group: int = 8
-    max_symbols_per_file: int = 200
-    max_relationships_per_file: int = 300
+    max_files_per_package: int = 2
+    max_summaries_per_group: int = 2
+    max_symbols_per_file: int = 24
+    max_relationships_per_file: int = 32
     max_request_bytes: int = 2_000_000
     max_response_bytes: int = 1_000_000
-    max_output_tokens: int = 8_192
+    max_output_tokens: int = 512
     max_model_calls: int = 256
     fail_on_error: bool = False
     recover_previous: bool = True
+    progress: ProgressObserver | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -287,7 +187,7 @@ class GlobalMapAnalysisOptions:
 @dataclass(frozen=True, slots=True)
 class GlobalMapOutcome:
     map_kind: Literal["architecture", "features"]
-    status: Literal["complete", "failed", "reused", "recovered"]
+    status: Literal["complete", "failed", "fallback", "reused", "recovered"]
     request_count: int
     diagnostic: RepositoryDiagnostic | None = None
 
@@ -373,7 +273,7 @@ def build_repository_overview(
                     code=(
                         "parse-error"
                         if code_map.parse_status == "parse_error"
-                        else "unsupported-language"
+                        else "no-structural-extractor"
                     ),
                     message=(
                         f"{code_map.path} has no verified symbol graph because its "
@@ -486,13 +386,69 @@ async def build_repository_maps(
             f"{active_options.max_model_calls}"
         )
 
-    hierarchy = await _build_hierarchy(
-        code_maps,
-        semantic_analyses,
-        provider,
-        active_options,
-        cancellation,
-    )
+    try:
+        hierarchy = await _build_hierarchy(
+            code_maps,
+            semantic_analyses,
+            provider,
+            active_options,
+            cancellation,
+        )
+    except ProviderCancelledError:
+        raise
+    except (ModelProviderError, GlobalMapAnalysisError, ValueError) as exc:
+        if active_options.fail_on_error:
+            raise GlobalMapAnalysisError(
+                "repository map hierarchy failed; index not published"
+            ) from exc
+        fallback_architecture, fallback_features = _deterministic_map_fallback(
+            current,
+            overview,
+            semantic_analyses,
+            analyzer,
+            options_digest,
+            source_interpretations_digest,
+            _failure_diagnostic("repository-map-hierarchy-fallback", exc),
+        )
+        emit(
+            "synthesis",
+            "synthesis.fallback.selected",
+            "Selected deterministic repository-map fallback after hierarchy failure.",
+            level=LogLevel.WARNING,
+            phase_id="repository_map_hierarchy",
+            error=exc,
+            error_code="repository_map_hierarchy_failed",
+            fallback_selected=True,
+            data={
+                "fallback": "deterministic_repository_map",
+                "trigger": type(exc).__name__,
+                "previous_active_generation_intact": True,
+            },
+        )
+        generation = _publish_global_records(
+            lock,
+            current,
+            overview,
+            fallback_architecture,
+            fallback_features,
+            analyzer,
+        )
+        published = load_manifest(snapshot.root)
+        return GlobalMapBuildResult(
+            manifest=published,
+            overview=overview,
+            architecture=fallback_architecture,
+            features=fallback_features,
+            outcomes=(
+                GlobalMapOutcome("architecture", "fallback", 0),
+                GlobalMapOutcome("features", "fallback", 0),
+            ),
+            generation_path=generation,
+            request_count=0,
+            package_summary_count=0,
+            group_summary_count=0,
+            published=True,
+        )
     architecture: ArchitectureMap | None = None
     features: FeatureMap | None = None
     outcomes: list[GlobalMapOutcome] = []
@@ -507,7 +463,7 @@ async def build_repository_maps(
             active_options,
             cancellation,
         )
-        architecture = _build_architecture_map(
+        architecture = _build_compact_architecture_map(
             raw_architecture,
             current,
             overview,
@@ -534,7 +490,7 @@ async def build_repository_maps(
             active_options,
             cancellation,
         )
-        features = _build_feature_map(
+        features = _build_compact_feature_map(
             raw_features,
             current,
             overview,
@@ -565,6 +521,19 @@ async def build_repository_maps(
             and old_architecture is not None
             and old_features is not None
         ):
+            emit(
+                "synthesis",
+                "synthesis.fallback.selected",
+                "Reused previous compatible repository maps after synthesis failure.",
+                level=LogLevel.WARNING,
+                phase_id="repository_map_recovery",
+                fallback_selected=True,
+                data={
+                    "fallback": "previous_compatible_generation",
+                    "failed_map_count": len(failures),
+                    "previous_active_generation_intact": True,
+                },
+            )
             recovered = tuple(
                 GlobalMapOutcome(
                     item.map_kind,
@@ -586,28 +555,49 @@ async def build_repository_maps(
                 group_summary_count=hierarchy.group_count,
                 published=False,
             )
-    if architecture is None and features is None:
-        generation = _publish_global_records(
-            lock,
+    if failures:
+        emit(
+            "synthesis",
+            "synthesis.fallback.selected",
+            "Selected deterministic fallback for failed repository map synthesis.",
+            level=LogLevel.WARNING,
+            phase_id="repository_map_synthesis",
+            fallback_selected=True,
+            data={
+                "fallback": "deterministic_repository_map",
+                "failed_maps": [item.map_kind for item in failures],
+                "trigger_codes": [
+                    None if item.diagnostic is None else item.diagnostic.code
+                    for item in failures
+                ],
+            },
+        )
+        fallback_architecture, fallback_features = _deterministic_map_fallback(
             current,
             overview,
-            None,
-            None,
-            None,
+            semantic_analyses,
+            analyzer,
+            options_digest,
+            source_interpretations_digest,
+            failures[0].diagnostic
+            or RepositoryDiagnostic(
+                code="repository-map-fallback",
+                message="Model repository-map synthesis failed.",
+                severity="warning",
+                provenance="operational",
+            ),
         )
-        published = load_manifest(snapshot.root)
-        return GlobalMapBuildResult(
-            manifest=published,
-            overview=overview,
-            architecture=None,
-            features=None,
-            outcomes=tuple(outcomes),
-            generation_path=generation,
-            request_count=hierarchy.request_count + final_requests,
-            package_summary_count=hierarchy.package_count,
-            group_summary_count=hierarchy.group_count,
-            published=True,
-        )
+        architecture = architecture or fallback_architecture
+        features = features or fallback_features
+        outcomes = [
+            GlobalMapOutcome(
+                item.map_kind,
+                "fallback" if item.status == "failed" else item.status,
+                item.request_count,
+                item.diagnostic,
+            )
+            for item in outcomes
+        ]
 
     generation = _publish_global_records(
         lock,
@@ -742,7 +732,6 @@ async def _build_hierarchy(
                 prior_context=canonical_json_bytes(
                     [
                         {
-                            "scope_paths": item.paths,
                             "summary": item.response.model_dump(mode="json"),
                         }
                         for item in group_chunk
@@ -784,6 +773,7 @@ async def _request_summary(
     request = _model_request(
         purpose=purpose,
         scope_key=scope_id,
+        expected_scope_id=scope_id,
         analysis_task=(
             f"Summarize exactly {title}. Identify supported behavior, architectural "
             "signals, feature signals, and unresolved questions. Return scope_id "
@@ -795,11 +785,10 @@ async def _request_summary(
         allowed_paths=frozenset(paths),
         response_path_pointers=("/evidence/*/path",),
         options=options,
+        provider=provider,
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
     value = cast(_SummaryResponse, response.value)
-    if value.scope_id != scope_id:
-        raise StructuredResponseError("model returned a mismatched summary scope")
     _convert_evidence(value.evidence, evidence_maps)
     return value
 
@@ -810,27 +799,29 @@ async def _request_architecture(
     provider: ModelProvider,
     options: GlobalMapAnalysisOptions,
     cancellation: asyncio.Event | None,
-) -> _ArchitectureResponse:
+) -> _SummaryResponse:
     paths = frozenset(overview.repository_tree)
+    scope_id = _scope_id("architecture", overview.facts_digest)
     request = _model_request(
         purpose="repository-architecture",
         scope_key=overview.facts_digest[:24],
+        expected_scope_id=scope_id,
         analysis_task=(
-            "Synthesize the repository architecture. Cover major package/module roles, "
-            "entry points, core/domain modules, adapters, CLI/API layers, storage and "
-            "model-provider boundaries, external services, configuration flow, "
-            "important "
-            "data flows, and test organization where evidence supports them."
+            "Return a compact repository architecture overview with at most eight "
+            "architecture signals and six unresolved questions. Return scope_id "
+            f"{scope_id!r} exactly. Cite only supplied paths; do not reproduce facts."
         ),
-        trusted_facts=_overview_projection(overview),
+        trusted_facts=_compact_overview_projection(overview),
         prior_context=_summary_context(summaries),
-        response_model=_ArchitectureResponse,
+        response_model=_SummaryResponse,
         allowed_paths=paths,
-        response_path_pointers=_architecture_path_pointers(),
+        response_path_pointers=("/evidence/*/path",),
         options=options,
+        provider=provider,
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
-    return cast(_ArchitectureResponse, response.value)
+    value = cast(_SummaryResponse, response.value)
+    return value
 
 
 async def _request_features(
@@ -839,32 +830,35 @@ async def _request_features(
     provider: ModelProvider,
     options: GlobalMapAnalysisOptions,
     cancellation: asyncio.Event | None,
-) -> _FeatureResponse:
+) -> _SummaryResponse:
+    scope_id = _scope_id("features", overview.facts_digest)
     request = _model_request(
         purpose="repository-features",
         scope_key=overview.facts_digest[:24],
+        expected_scope_id=scope_id,
         analysis_task=(
-            "Group files and symbols by actual behavior, not filename similarity. "
-            "Include implementation, entry points, and related tests in each feature. "
-            "Use stable_key values that remain practical across prose changes, "
-            "preserve "
-            "uncertainty, and connect semantically related feature keys."
+            "Return a compact behavior overview with at most eight feature signals "
+            "and six unresolved questions. Return scope_id "
+            f"{scope_id!r} exactly. Cite only supplied paths; do not reproduce facts."
         ),
-        trusted_facts=_overview_projection(overview),
+        trusted_facts=_compact_overview_projection(overview),
         prior_context=_summary_context(summaries),
-        response_model=_FeatureResponse,
+        response_model=_SummaryResponse,
         allowed_paths=frozenset(overview.repository_tree),
-        response_path_pointers=_feature_path_pointers(),
+        response_path_pointers=("/evidence/*/path",),
         options=options,
+        provider=provider,
     )
     response = await provider.complete_structured(request, cancellation=cancellation)
-    return cast(_FeatureResponse, response.value)
+    value = cast(_SummaryResponse, response.value)
+    return value
 
 
 def _model_request(
     *,
     purpose: str,
     scope_key: str,
+    expected_scope_id: str,
     analysis_task: str,
     trusted_facts: dict[str, object],
     prior_context: str | None,
@@ -872,49 +866,268 @@ def _model_request(
     allowed_paths: frozenset[str],
     response_path_pointers: tuple[str, ...],
     options: GlobalMapAnalysisOptions,
+    provider: ModelProvider,
 ) -> ModelRequest:
-    context = (
-        ()
-        if prior_context is None
-        else (
-            UntrustedModelContext.from_text(
-                "validated-hierarchical-summaries", prior_context
-            ),
-        )
-    )
     operation_digest = hashlib.sha256(
         canonical_json_bytes([purpose, scope_key, sorted(allowed_paths)])
     ).hexdigest()[:24]
-    request = ModelRequest(
-        operation_id=f"global-{operation_digest}",
-        purpose=purpose,
-        system_instructions=GLOBAL_MAP_SYSTEM_INSTRUCTIONS,
-        analysis_task=analysis_task,
-        trusted_code_map_facts=trusted_facts,
-        untrusted_sources=(),
-        untrusted_contexts=context,
-        response_model=response_model,
-        max_output_tokens=options.max_output_tokens,
-        max_response_bytes=options.max_response_bytes,
-        allowed_response_paths=allowed_paths,
-        response_path_pointers=response_path_pointers,
-        metadata={
-            "analyzer_version": GLOBAL_MAP_ANALYZER_VERSION,
-            "prompt_version": options.prompt_version,
-        },
-    )
+    active_context = prior_context
+    input_truncated = False
+    while True:
+        contexts = (
+            ()
+            if active_context is None
+            else (
+                UntrustedModelContext.from_text(
+                    "validated-hierarchical-summaries", active_context
+                ),
+            )
+        )
+        request = ModelRequest(
+            operation_id=f"global-{operation_digest}",
+            purpose=purpose,
+            system_instructions=GLOBAL_MAP_SYSTEM_INSTRUCTIONS,
+            analysis_task=analysis_task,
+            trusted_code_map_facts=trusted_facts,
+            untrusted_sources=(),
+            untrusted_contexts=contexts,
+            response_model=response_model,
+            max_output_tokens=options.max_output_tokens,
+            max_response_bytes=options.max_response_bytes,
+            allowed_response_paths=allowed_paths,
+            response_path_pointers=response_path_pointers,
+            metadata={
+                "analyzer_version": GLOBAL_MAP_ANALYZER_VERSION,
+                "prompt_version": options.prompt_version,
+                "analyzer_kind": GLOBAL_MAP_ANALYZER_ID,
+                "path": f"{purpose}:{scope_key}",
+                "input_truncated": str(input_truncated).lower(),
+            },
+            progress=options.progress,
+            response_validator=_scope_validator(expected_scope_id),
+        )
+        budget = estimate_request_context(request, provider.configuration)
+        if budget.fits or active_context is None:
+            break
+        encoded = active_context.encode("utf-8")
+        if len(encoded) <= 512:
+            active_context = None
+        else:
+            target = max(512, len(encoded) // 2)
+            head = target * 2 // 3
+            tail = target - head
+            active_context = (
+                encoded[:head].decode("utf-8", errors="ignore")
+                + "\n<CONTEXT_TRUNCATED>\n"
+                + encoded[-tail:].decode("utf-8", errors="ignore")
+            )
+        input_truncated = True
     request_bytes = sum(
-        len(message.content.encode("utf-8")) for message in request.messages()
-    )
+        len(message.content.encode("utf-8"))
+        for message in request.messages(include_response_schema=False)
+    ) + len(canonical_json_bytes(request.response_schema))
     if request_bytes > options.max_request_bytes:
         raise GlobalMapAnalysisError(
             f"global map request requires {request_bytes} bytes; "
             f"limit is {options.max_request_bytes}"
         )
-    return request
+    budget = ensure_request_fits_context(request, provider.configuration)
+    return ModelRequest(
+        operation_id=request.operation_id,
+        purpose=request.purpose,
+        system_instructions=request.system_instructions,
+        analysis_task=request.analysis_task,
+        trusted_code_map_facts=request.trusted_code_map_facts,
+        untrusted_sources=request.untrusted_sources,
+        untrusted_contexts=request.untrusted_contexts,
+        response_model=request.response_model,
+        max_output_tokens=request.max_output_tokens,
+        max_response_bytes=request.max_response_bytes,
+        allowed_response_paths=request.allowed_response_paths,
+        response_path_pointers=request.response_path_pointers,
+        response_validator=request.response_validator,
+        metadata={
+            **request.metadata,
+            "configured_context_window": str(budget.configured_context_window),
+            "estimated_input_tokens": str(budget.estimated_input_tokens),
+            "schema_overhead_tokens": str(budget.schema_overhead_tokens),
+            "output_token_budget": str(budget.output_token_budget),
+            "safety_margin_tokens": str(budget.safety_margin_tokens),
+            "estimated_total_tokens": str(budget.estimated_total_tokens),
+        },
+    )
 
 
-def _build_architecture_map(
+def _scope_validator(expected_scope_id: str) -> Callable[[object], None]:
+    """Bind task scope validation to the universal response gateway."""
+
+    def validate(value: object) -> None:
+        actual = getattr(value, "scope_id", None)
+        if actual != expected_scope_id:
+            raise StructuredResponseError(
+                "model returned a mismatched scope",
+                issues=(
+                    SemanticConstraintFailedIssue(
+                        path="/scope_id",
+                        constraint="requested_scope_id",
+                        expected_constraint="response scope matches the request scope",
+                        actual_value_kind=(
+                            "string"
+                            if isinstance(actual, str)
+                            else type(actual).__name__
+                        ),
+                        reason="response scope does not match the requested scope",
+                    ),
+                ),
+            )
+
+    return validate
+
+
+def _build_compact_architecture_map(
+    raw: _SummaryResponse,
+    manifest: IndexManifest,
+    overview: RepositoryOverview,
+    code_maps: tuple[FileCodeMap, ...],
+    analyses: dict[str, FileSemanticAnalysis],
+    analyzer: AnalyzerIdentity,
+    options_digest: str,
+    source_interpretations_digest: str,
+) -> ArchitectureMap:
+    by_path = {item.path: item for item in code_maps}
+    evidence = _convert_evidence(raw.evidence, by_path)
+    confidence = _confidence(raw.confidence)
+    messages = (raw.summary, *raw.architecture_signals, *raw.behavioral_themes)
+    diagnostics = tuple(
+        RepositoryDiagnostic(
+            code=f"architecture-signal-{index + 1}",
+            message=message,
+            severity="info",
+            provenance="model-inferred",
+            evidence=evidence,
+            confidence=confidence,
+        )
+        for index, message in enumerate(dict.fromkeys(messages))
+    )
+    represented = {item.path for item in evidence}
+    return ArchitectureMap(
+        source_snapshot_digest=manifest.build.source_snapshot_digest,
+        facts_digest=manifest.build.facts_digest,
+        source_interpretations_digest=source_interpretations_digest,
+        analyzer=analyzer,
+        analysis_options_digest=options_digest,
+        test_relationships=overview.test_relationships,
+        relationships=overview.relationships,
+        diagnostics=diagnostics,
+        evidence=evidence,
+        confidence=confidence,
+        coverage=_coverage(overview, analyses, represented, set()),
+    )
+
+
+def _deterministic_map_fallback(
+    manifest: IndexManifest,
+    overview: RepositoryOverview,
+    analyses: dict[str, FileSemanticAnalysis],
+    analyzer: AnalyzerIdentity,
+    options_digest: str,
+    source_interpretations_digest: str,
+    diagnostic: RepositoryDiagnostic,
+) -> tuple[ArchitectureMap, FeatureMap]:
+    confidence = SemanticConfidence(
+        value=0.0,
+        rationale="Deterministic fallback; no model-wide interpretation was accepted.",
+    )
+    coverage = _coverage(overview, analyses, set(), set())
+    architecture = ArchitectureMap(
+        source_snapshot_digest=manifest.build.source_snapshot_digest,
+        facts_digest=manifest.build.facts_digest,
+        source_interpretations_digest=source_interpretations_digest,
+        analyzer=analyzer,
+        analysis_options_digest=options_digest,
+        test_relationships=overview.test_relationships,
+        relationships=overview.relationships,
+        diagnostics=(diagnostic,),
+        confidence=confidence,
+        coverage=coverage,
+    )
+    features = FeatureMap(
+        source_snapshot_digest=manifest.build.source_snapshot_digest,
+        facts_digest=manifest.build.facts_digest,
+        source_interpretations_digest=source_interpretations_digest,
+        analyzer=analyzer,
+        analysis_options_digest=options_digest,
+        diagnostics=(diagnostic,),
+        confidence=confidence,
+        coverage=coverage,
+    )
+    return architecture, features
+
+
+def _build_compact_feature_map(
+    raw: _SummaryResponse,
+    manifest: IndexManifest,
+    overview: RepositoryOverview,
+    code_maps: tuple[FileCodeMap, ...],
+    analyses: dict[str, FileSemanticAnalysis],
+    analyzer: AnalyzerIdentity,
+    options_digest: str,
+    source_interpretations_digest: str,
+) -> FeatureMap:
+    by_path = {item.path: item for item in code_maps}
+    evidence = _convert_evidence(raw.evidence, by_path)
+    confidence = _confidence(raw.confidence)
+    paths = tuple(sorted({item.path for item in evidence}))
+    signals = tuple(dict.fromkeys((*raw.feature_signals, *raw.behavioral_themes)))[:8]
+    features = tuple(
+        sorted(
+            (
+                FeatureArea(
+                    feature_id=stable_fact_id(
+                        "feature", raw.scope_id, index, signal, paths
+                    ),
+                    title=signal,
+                    description=raw.summary,
+                    participating_files=paths,
+                    related_tests=tuple(path for path in paths if _is_test_path(path)),
+                    evidence=evidence,
+                    confidence=confidence,
+                    unresolved_questions=tuple(sorted(set(raw.unresolved_questions))),
+                )
+                for index, signal in enumerate(signals)
+                if paths
+            ),
+            key=lambda item: item.feature_id,
+        )
+    )
+    diagnostics: tuple[RepositoryDiagnostic, ...] = ()
+    if not features:
+        diagnostics = (
+            RepositoryDiagnostic(
+                code="feature-evidence-insufficient",
+                message=raw.summary,
+                severity="warning",
+                provenance="model-inferred",
+                evidence=evidence,
+                confidence=confidence,
+            ),
+        )
+    represented = {path for item in features for path in item.participating_files}
+    return FeatureMap(
+        source_snapshot_digest=manifest.build.source_snapshot_digest,
+        facts_digest=manifest.build.facts_digest,
+        source_interpretations_digest=source_interpretations_digest,
+        analyzer=analyzer,
+        analysis_options_digest=options_digest,
+        feature_areas=features,
+        diagnostics=diagnostics,
+        evidence=evidence,
+        confidence=confidence,
+        coverage=_coverage(overview, analyses, represented, set()),
+    )
+
+
+def _build_architecture_map(  # pragma: no cover - legacy rich-map migration
     raw: _ArchitectureResponse,
     manifest: IndexManifest,
     overview: RepositoryOverview,
@@ -1044,7 +1257,7 @@ def _build_architecture_map(
     )
 
 
-def _build_feature_map(
+def _build_feature_map(  # pragma: no cover - legacy rich-map migration
     raw: _FeatureResponse,
     manifest: IndexManifest,
     overview: RepositoryOverview,
@@ -1257,7 +1470,7 @@ def _add_structural_relationships(
         result[inverse.relationship_id] = inverse
 
 
-def _entry_point(
+def _entry_point(  # pragma: no cover - legacy rich-map migration
     item: _RawEntryPoint,
     by_path: dict[str, FileCodeMap],
     symbols: dict[str, str],
@@ -1285,7 +1498,7 @@ def _entry_point(
     )
 
 
-def _entry_handler_relationship(
+def _entry_handler_relationship(  # pragma: no cover - legacy rich-map migration
     entry_point: EntryPoint,
 ) -> RepositoryRelationship | None:
     if entry_point.handler_file is None:
@@ -1304,7 +1517,7 @@ def _entry_handler_relationship(
     )
 
 
-def _semantic_relationship(
+def _semantic_relationship(  # pragma: no cover - legacy rich-map migration
     kind: Literal[
         "feature-membership", "entry-point-to-handler", "semantic-related-to"
     ],
@@ -1342,7 +1555,7 @@ def _semantic_relationship(
     )
 
 
-def _model_diagnostic(
+def _model_diagnostic(  # pragma: no cover - legacy rich-map migration
     item: _RawDiagnostic, by_path: dict[str, FileCodeMap]
 ) -> RepositoryDiagnostic:
     return RepositoryDiagnostic(
@@ -1389,11 +1602,7 @@ def _convert_evidence(
         known = _known_fact_ids(code_map)
         if any(fact_id not in known for fact_id in item.fact_ids):
             raise StructuredResponseError("model evidence references an unknown fact")
-        if item.source_range is not None:
-            _validate_range(item.source_range, code_map)
-        evidence = _fact_evidence(
-            code_map, item.source_range, tuple(sorted(set(item.fact_ids)))
-        )
+        evidence = _fact_evidence(code_map, None, tuple(sorted(set(item.fact_ids))))
         key = (
             evidence.path,
             *_range_key(evidence.source_range),
@@ -1429,7 +1638,7 @@ def _known_fact_ids(code_map: FileCodeMap) -> frozenset[str]:
     )
 
 
-def _fact_indexes(
+def _fact_indexes(  # pragma: no cover - legacy rich-map migration
     code_maps: tuple[FileCodeMap, ...],
 ) -> tuple[dict[str, FileCodeMap], dict[str, str]]:
     by_path = {item.path: item for item in code_maps}
@@ -1441,7 +1650,7 @@ def _fact_indexes(
     return by_path, symbols
 
 
-def _validated_files(
+def _validated_files(  # pragma: no cover - legacy rich-map migration
     values: Iterable[str], by_path: dict[str, FileCodeMap]
 ) -> tuple[str, ...]:
     result = tuple(sorted(set(values)))
@@ -1450,13 +1659,15 @@ def _validated_files(
     return result
 
 
-def _validated_file(value: str, by_path: dict[str, FileCodeMap]) -> str:
+def _validated_file(  # pragma: no cover - legacy rich-map migration
+    value: str, by_path: dict[str, FileCodeMap]
+) -> str:
     if value not in by_path:
         raise StructuredResponseError("model returned an unknown file")
     return value
 
 
-def _validated_symbols(
+def _validated_symbols(  # pragma: no cover - legacy rich-map migration
     values: Iterable[str],
     symbols: dict[str, str],
     *,
@@ -1474,7 +1685,7 @@ def _validated_symbols(
     return result
 
 
-def _validated_optional_symbol(
+def _validated_optional_symbol(  # pragma: no cover - legacy rich-map migration
     value: str | None, symbols: dict[str, str], expected_path: str | None
 ) -> str | None:
     if value is None:
@@ -1484,7 +1695,7 @@ def _validated_optional_symbol(
     return value
 
 
-def _validated_related_tests(
+def _validated_related_tests(  # pragma: no cover - legacy rich-map migration
     tests: Iterable[str], participating: Iterable[str], by_path: dict[str, FileCodeMap]
 ) -> tuple[str, ...]:
     result = _validated_files(tests, by_path)
@@ -1499,7 +1710,9 @@ def _confidence(value: _RawConfidence) -> SemanticConfidence:
     return SemanticConfidence(value=value.value, rationale=value.rationale)
 
 
-def _semantic_id(prefix: str, value: _RawInterpretation) -> str:
+def _semantic_id(  # pragma: no cover - legacy rich-map migration
+    prefix: str, value: _RawInterpretation
+) -> str:
     return stable_fact_id(
         prefix,
         value.stable_key,
@@ -1538,26 +1751,21 @@ def _codemap_projection(
     relationships = code_map.relationships[: options.max_relationships_per_file]
     return {
         "path": code_map.path,
-        "source_sha256": code_map.source_sha256,
         "language": code_map.language,
         "parse_status": code_map.parse_status,
         "line_count": code_map.line_count,
         "imports": [
             {
-                "import_id": item.import_id,
                 "module": item.module,
                 "imported_name": item.imported_name,
-                "resolution": item.resolution,
                 "target_file_path": item.target_file_path,
             }
             for item in code_map.imports[: options.max_relationships_per_file]
         ],
         "exports": [
             {
-                "export_id": item.export_id,
                 "name": item.name,
                 "kind": item.kind,
-                "target_symbol_id": item.target_symbol_id,
             }
             for item in code_map.exports[: options.max_relationships_per_file]
         ],
@@ -1567,21 +1775,17 @@ def _codemap_projection(
                 "name": item.name,
                 "qualified_name": item.qualified_name,
                 "kind": item.kind,
-                "signature": None if item.signature is None else item.signature[:2_000],
+                "signature": None if item.signature is None else item.signature[:160],
                 "configuration_keys": item.configuration_keys,
             }
             for item in symbols
         ],
-        "relationships": [
-            {
-                "relationship_id": item.relationship_id,
-                "kind": item.kind,
-                "source_symbol_id": item.source_symbol_id,
-                "target": item.target.model_dump(mode="json"),
-                "detection_method": item.detection_method,
-            }
-            for item in relationships
-        ],
+        "relationship_counts": {
+            key: count
+            for key, count in sorted(
+                Counter(item.kind for item in relationships).items()
+            )
+        },
         "projection_truncated": (
             len(symbols) < len(code_map.symbols)
             or len(relationships) < len(code_map.relationships)
@@ -1604,31 +1808,30 @@ def _semantic_context(
                 "path": analysis.path,
                 "primary_purpose": _claim_text(analysis.primary_purpose),
                 "architectural_roles": [
-                    item.claim for item in analysis.architectural_roles
+                    item.claim for item in analysis.architectural_roles[:4]
                 ],
                 "major_responsibilities": [
-                    item.claim for item in analysis.major_responsibilities
+                    item.claim for item in analysis.major_responsibilities[:4]
                 ],
                 "external_interactions": [
-                    item.claim for item in analysis.external_interactions
+                    item.claim for item in analysis.external_interactions[:4]
                 ],
                 "configuration_dependencies": [
-                    item.claim for item in analysis.configuration_dependencies
+                    item.claim for item in analysis.configuration_dependencies[:4]
                 ],
                 "public_entry_points": [
-                    item.claim for item in analysis.public_entry_points
+                    item.claim for item in analysis.public_entry_points[:4]
                 ],
                 "test_relationships": [
-                    item.claim for item in analysis.test_relationships
+                    item.claim for item in analysis.test_relationships[:4]
                 ],
-                "uncertainty": [item.claim for item in analysis.uncertainty],
+                "uncertainty": [item.claim for item in analysis.uncertainty[:4]],
                 "symbols": [
                     {
-                        "symbol_id": item.symbol_id,
                         "qualified_name": item.qualified_name,
                         "purpose": _claim_text(item.behavioral_purpose),
                     }
-                    for item in analysis.symbols[: options.max_symbols_per_file]
+                    for item in analysis.symbols[: min(options.max_symbols_per_file, 8)]
                 ],
             }
         )
@@ -1642,7 +1845,9 @@ def _claim_text(value: object | None) -> str | None:
     return claim if isinstance(claim, str) else None
 
 
-def _overview_projection(overview: RepositoryOverview) -> dict[str, object]:
+def _overview_projection(  # pragma: no cover - legacy rich-map migration
+    overview: RepositoryOverview,
+) -> dict[str, object]:
     return {
         "source_snapshot_digest": overview.source_snapshot_digest,
         "facts_digest": overview.facts_digest,
@@ -1665,11 +1870,30 @@ def _overview_projection(overview: RepositoryOverview) -> dict[str, object]:
     }
 
 
+def _compact_overview_projection(overview: RepositoryOverview) -> dict[str, object]:
+    """Project only bounded counts and identifiers already verified locally."""
+
+    return {
+        "facts_digest": overview.facts_digest,
+        "file_count": overview.file_count,
+        "parsed_file_count": overview.parsed_file_count,
+        "symbol_count": overview.symbol_count,
+        "test_file_count": overview.test_file_count,
+        "languages": overview.languages,
+        "major_packages": overview.major_packages[:24],
+        "relationship_counts": {
+            key: count
+            for key, count in sorted(
+                Counter(item.kind for item in overview.relationships).items()
+            )
+        },
+    }
+
+
 def _summary_context(summaries: tuple[_SummaryEnvelope, ...]) -> str:
     return canonical_json_bytes(
         [
             {
-                "scope_paths": item.paths,
                 "summary": item.response.model_dump(mode="json"),
             }
             for item in summaries
@@ -1677,7 +1901,7 @@ def _summary_context(summaries: tuple[_SummaryEnvelope, ...]) -> str:
     ).decode("utf-8")
 
 
-def _feature_path_pointers() -> tuple[str, ...]:
+def _feature_path_pointers() -> tuple[str, ...]:  # pragma: no cover
     return (
         "/feature_areas/*/files/*",
         "/feature_areas/*/related_tests/*",
@@ -2032,7 +2256,7 @@ def _scope_id(prefix: str, *parts: object) -> str:
     return stable_fact_id(prefix, *parts)
 
 
-def _architecture_path_pointers() -> tuple[str, ...]:
+def _architecture_path_pointers() -> tuple[str, ...]:  # pragma: no cover
     return (
         "/module_roles/*/files/*",
         "/module_roles/*/evidence/*/path",

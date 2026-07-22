@@ -493,8 +493,10 @@ def test_stdio_protocol_smoke_and_parse_error(
         b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n'
     )
     outgoing = _BinaryStream()
+    diagnostics = io.StringIO()
     monkeypatch.setattr(sys, "stdin", incoming)
     monkeypatch.setattr(sys, "stdout", outgoing)
+    monkeypatch.setattr(sys, "stderr", diagnostics)
 
     asyncio.run(server_module._serve_stdio(_foundation(tmp_path)))
 
@@ -504,6 +506,7 @@ def test_stdio_protocol_smoke_and_parse_error(
     ]
     assert messages[0]["error"]["code"] == -32700
     assert messages[1]["result"] == {}
+    assert diagnostics.getvalue() == ""
 
 
 def test_stdio_drains_oversized_lines_and_propagates_cancellation(

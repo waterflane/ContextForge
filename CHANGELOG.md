@@ -7,6 +7,49 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-22
+
+### Added
+
+- Added a presentation-independent, schema-versioned structured progress event
+  contract for CLI consumers and future API/GUI adapters.
+- Added weighted overall and phase percentages, per-item accounting, provider
+  lifecycle details, and safe cancellation/failure terminal events for
+  long-running index and automatic context workflows.
+- Added `contextforge version`, the eager `contextforge --version` option, and
+  the interchangeable `ctxf` console alias. `python -m contextforge --version`
+  uses the same authoritative package version.
+- Added the centralized structured logging system with quiet through
+  trace levels, pretty/JSON stderr rendering, component focus, rotating local
+  JSON file logs, centralized structured redaction, correlation IDs, safe
+  provider/request/budget/schema/retry/fallback events, and API-readable
+  versioned diagnostic records.
+- Added context-window provenance and reproducible request-budget diagnostics,
+  including explicit local-rejection state and the 98,304-token regression
+  path for LM Studio/OpenAI-compatible configurations.
+- Added safe run summaries under `.contextforge/runs` and read-only
+  `diagnostics last`, `show`, `config`, and `provider` commands.
+
+### Changed
+
+- Rendered interactive progress as a single Rich stderr panel and redirected
+  progress as discrete, non-ANSI records while preserving parseable JSON and
+  Markdown stdout.
+- Kept progress and diagnostics as distinct contracts while routing stderr
+  logging through the existing single Rich live-console owner. MCP stdout
+  remains protocol-only, and JSON/Markdown command stdout remains parseable.
+- Documented logging configuration, diagnostics, redaction, and context-window
+  troubleshooting for the 0.4.1 maintenance release.
+
+### Fixed
+
+- Applied nested `.gitignore` files relative to their containing directories
+  during repository scans, including inherited rules and Git-style negation.
+- Kept provider/model progress accounting monotonic across reuse, fallback,
+  retry, failure, publication, and cancellation paths.
+- Excluded local index/run state, test and analysis caches, coverage shards,
+  staging data, and temporary files explicitly from distribution builds.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added

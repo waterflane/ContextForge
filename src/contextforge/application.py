@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
+from contextforge.diagnostics import persist_summary, summarize_operation
 from contextforge.discovery import (
     DiscoveryBudget,
+    DiscoveryCancelledError,
     DiscoveryMode,
     DiscoveryRequest,
     DiscoveryRunRecord,
@@ -32,6 +36,8 @@ from contextforge.handoff import (
 )
 from contextforge.intelligence import (
     FALLBACK_ANALYZER,
+    GENERIC_SEMANTIC_ANALYZER_ID,
+    GENERIC_SEMANTIC_ANALYZER_VERSION,
     GLOBAL_MAP_PROMPT_VERSION,
     INDEX_SCHEMA_VERSION,
     PYTHON_ANALYZER,
@@ -62,7 +68,20 @@ from contextforge.intelligence import (
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
-from contextforge.models import ModelProvider, ProviderConfiguration
+from contextforge.logging import recent_records
+from contextforge.models import (
+    ModelProvider,
+    ModelProviderError,
+    ProviderCancelledError,
+    ProviderConfiguration,
+    provider_error_details,
+)
+from contextforge.progress import (
+    ProgressActivity,
+    ProgressEvent,
+    ProgressObserver,
+    ProgressReporter,
+)
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 MAX_HANDOFF_BYTES = 16 * 1024 * 1024
@@ -168,10 +187,100 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
+    semantic_max_output_tokens: int = 512,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> IndexBuildReport:
     """Build/update all index phases while retaining a prior pointer on failure."""
+
+    reporter = _progress_reporter(
+        "repository.index.update" if update_only else "repository.index.build",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+        metadata={
+            "provider_id": (
+                provider_configuration.provider_id
+                if provider_configuration is not None
+                else None
+            ),
+            "model_id": (
+                provider_configuration.model_id
+                if provider_configuration is not None
+                else None
+            ),
+        },
+    )
+    diagnostic_start = _last_diagnostic_sequence()
+    reporter.report(
+        "initialize",
+        "Initializing repository index.",
+        percentage=0,
+        phase_label="Initialization",
+        phase_percent=0,
+        phase_weight=2,
+        activity=ProgressActivity.ACTIVE,
+    )
+    try:
+        report = await _build_repository_index(
+            repository_root,
+            provider=provider,
+            provider_configuration=provider_configuration,
+            update_only=update_only,
+            concurrency=concurrency,
+            fail_on_error=fail_on_error,
+            force_reanalyze=force_reanalyze,
+            max_files=max_files,
+            semantic_max_output_tokens=semantic_max_output_tokens,
+            recover_stale_lock=recover_stale_lock,
+            confirm_unknown_lock=confirm_unknown_lock,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            repository_root,
+            reporter,
+            diagnostic_start,
+            command="index update" if update_only else "index build",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
+        raise
+    reporter.complete(
+        message="Repository index build completed.",
+        metadata={"partial": report.partial},
+    )
+    _persist_application_diagnostic(
+        repository_root,
+        reporter,
+        diagnostic_start,
+        command="index update" if update_only else "index build",
+        outcome="completed",
+        generation_id=report.manifest.generation_id,
+    )
+    return report
+
+
+async def _build_repository_index(
+    repository_root: str | Path,
+    *,
+    provider: ModelProvider | None,
+    provider_configuration: ProviderConfiguration | None,
+    update_only: bool,
+    concurrency: int,
+    fail_on_error: bool,
+    force_reanalyze: bool,
+    max_files: int | None,
+    semantic_max_output_tokens: int,
+    recover_stale_lock: bool,
+    confirm_unknown_lock: bool,
+    progress: ProgressReporter,
+) -> IndexBuildReport:
+    """Implement index construction under the public progress boundary."""
 
     root = Path(repository_root).expanduser().resolve(strict=True)
     initialize_index(root)
@@ -184,7 +293,44 @@ async def build_repository_index(
                 "no active repository index exists; run 'contextforge index build'"
             ) from None
         previous = None
+    model_enabled = provider is not None
+    scan_end = 5.0 if model_enabled else 10.0
+    compare_end = 8.0 if model_enabled else 15.0
+    structural_end = 18.0 if model_enabled else 75.0
+    progress.report(
+        "scan",
+        "Scanning repository files.",
+        percentage=1,
+        phase_label="Repository scan",
+        phase_percent=0,
+        phase_weight=scan_end,
+        activity=ProgressActivity.ACTIVE,
+    )
     snapshot = scan_repository(root)
+    progress.report(
+        "scan",
+        "Repository scan completed.",
+        percentage=scan_end,
+        phase_label="Repository scan",
+        phase_percent=100,
+        phase_weight=scan_end,
+        completed_units=len(snapshot.files),
+        total_units=len(snapshot.files),
+        unit_type="files",
+        metadata={"files": len(snapshot.files)},
+    )
+    progress.report(
+        "compare",
+        "Compared the repository with the previous index generation.",
+        percentage=compare_end,
+        phase_label="Incremental planning",
+        phase_percent=100,
+        phase_weight=compare_end - scan_end,
+        metadata={
+            "previous_generation": previous.generation_id if previous else None,
+            "update": update_only,
+        },
+    )
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
@@ -195,12 +341,95 @@ async def build_repository_index(
         confirm_unknown=confirm_unknown_lock,
     ) as lock:
         try:
+            progress.report(
+                "structural_index",
+                "Building structural repository index.",
+                percentage=compare_end,
+                completed=0,
+                total=len(snapshot.files),
+                phase_label="Structural extraction",
+                phase_percent=0,
+                phase_weight=structural_end - compare_end,
+                completed_units=0,
+                total_units=len(snapshot.files),
+                unit_type="files",
+                activity=ProgressActivity.ACTIVE,
+            )
             structural = build_structural_index(
                 snapshot,
                 lock,
                 previous_manifest=previous,
             )
+            progress.report(
+                "structural_index",
+                "Structural extraction and relationship construction completed.",
+                percentage=structural_end,
+                completed=len(snapshot.files),
+                total=len(snapshot.files),
+                phase_label="Structural extraction",
+                phase_percent=100,
+                phase_weight=structural_end - compare_end,
+                completed_units=len(snapshot.files),
+                total_units=len(snapshot.files),
+                unit_type="files",
+                reused_units=len(structural.reused_paths),
+                metadata={
+                    "extracted": len(structural.extracted_paths),
+                    "reused": len(structural.reused_paths),
+                },
+            )
             if provider is not None:
+                semantic_start = 18.0
+                semantic_end = 82.0
+                semantic_running_end = semantic_start
+                model_semantic_observer = progress.scaled_observer(semantic_start, 81.0)
+                metadata_semantic_observer = progress.scaled_observer(
+                    semantic_start, 22.0
+                )
+                reused_semantic_observer = progress.scaled_observer(
+                    semantic_start, semantic_start
+                )
+
+                def observe_semantic(event: ProgressEvent) -> None:
+                    nonlocal semantic_running_end
+                    route_totals = event.metadata.get("route_totals")
+                    model_units = 0
+                    metadata_units = 0
+                    if isinstance(route_totals, dict):
+                        model_units = sum(
+                            value
+                            for key, value in route_totals.items()
+                            if key in {"rich_model_analysis", "generic_model_analysis"}
+                            and isinstance(value, int)
+                        )
+                        metadata_value = route_totals.get(
+                            "deterministic_metadata_summary", 0
+                        )
+                        if isinstance(metadata_value, int):
+                            metadata_units = metadata_value
+                    if model_units:
+                        semantic_running_end = 81.0
+                        model_semantic_observer(event)
+                    elif metadata_units:
+                        semantic_running_end = 22.0
+                        metadata_semantic_observer(event)
+                    else:
+                        reused_semantic_observer(event)
+
+                progress.report(
+                    "semantic_index",
+                    "Planning semantic repository analysis.",
+                    percentage=semantic_start,
+                    completed=0,
+                    total=0,
+                    phase_label="Semantic analysis",
+                    phase_percent=0,
+                    phase_weight=semantic_end - semantic_start,
+                    completed_units=0,
+                    total_units=0,
+                    unit_type="files",
+                    activity=ProgressActivity.ACTIVE,
+                )
                 semantic = await build_semantic_index(
                     snapshot,
                     lock,
@@ -208,18 +437,159 @@ async def build_repository_index(
                     options=SemanticAnalysisOptions(
                         max_concurrency=concurrency,
                         max_files=max_files,
+                        max_output_tokens=semantic_max_output_tokens,
                         fail_on_error=fail_on_error,
                         force_reanalyze=force_reanalyze,
                         resume=not force_reanalyze,
+                        progress=observe_semantic,
                     ),
                     previous_manifest=previous,
+                )
+                semantic_event = progress.last_event
+                if semantic_event is not None:
+                    semantic_publish_end = (
+                        semantic_end
+                        if semantic_running_end == 81.0
+                        else 23.0
+                        if semantic_running_end == 22.0
+                        else semantic_start
+                    )
+                    progress.report(
+                        "semantic_index",
+                        "Semantic analysis was validated and published.",
+                        percentage=semantic_publish_end,
+                        completed=semantic_event.processed_units,
+                        total=semantic_event.planned_units,
+                        phase_label="Semantic analysis",
+                        phase_percent=100,
+                        phase_weight=semantic_publish_end - semantic_start,
+                        completed_units=semantic_event.processed_units,
+                        total_units=semantic_event.planned_units,
+                        unit_type="items",
+                        last_completed_item=semantic_event.last_completed_item,
+                        last_failed_item=semantic_event.last_failed_item,
+                        reused_units=semantic_event.reused_units,
+                        skipped_units=semantic_event.skipped_units,
+                        failed_units=semantic_event.failed_units,
+                        planned_units=semantic_event.planned_units,
+                        processed_units=semantic_event.processed_units,
+                        succeeded_units=semantic_event.succeeded_units,
+                        fallback_units=semantic_event.fallback_units,
+                        lifecycle_state="published",
+                        safe_error_code=semantic_event.safe_error_code,
+                        safe_error_message=semantic_event.safe_error_message,
+                        analyzer_kind=semantic_event.analyzer_kind,
+                        estimated_input_tokens=semantic_event.estimated_input_tokens,
+                        output_token_budget=semantic_event.output_token_budget,
+                        input_truncated=semantic_event.input_truncated,
+                        metadata={
+                            "analyzed": len(semantic.analyzed_paths),
+                            "reused": len(semantic.reused_paths),
+                            "failed": len(semantic.failed_paths),
+                        },
+                    )
+                maps_start = (
+                    semantic_end
+                    if semantic_running_end == 81.0
+                    else 23.0
+                    if semantic_running_end == 22.0
+                    else semantic_start
+                )
+                progress.report(
+                    "repository_maps",
+                    "Building repository maps.",
+                    percentage=maps_start,
+                    phase_label="Semantic repository maps",
+                    phase_percent=0,
+                    phase_weight=94 - maps_start,
+                    activity=ProgressActivity.WAITING,
                 )
                 maps = await build_repository_maps(
                     snapshot,
                     lock,
                     provider,
-                    options=GlobalMapAnalysisOptions(fail_on_error=fail_on_error),
+                    options=GlobalMapAnalysisOptions(
+                        fail_on_error=fail_on_error,
+                        progress=progress.scaled_observer(
+                            maps_start, 93.0, phase_prefix="repository_maps"
+                        ),
+                    ),
                 )
+                map_fallback = any(item.status == "fallback" for item in maps.outcomes)
+                progress.report(
+                    "repository_maps",
+                    (
+                        "Deterministic repository-map fallback was validated "
+                        "and published."
+                        if map_fallback
+                        else "Repository maps were validated and published."
+                    ),
+                    percentage=94,
+                    phase_label="Semantic repository maps",
+                    phase_percent=100,
+                    phase_weight=94 - maps_start,
+                    lifecycle_state="fallback" if map_fallback else "published",
+                    safe_error_code=(
+                        "repository_map_fallback" if map_fallback else None
+                    ),
+                    metadata={
+                        "outcomes": {
+                            item.map_kind: item.status for item in maps.outcomes
+                        }
+                    },
+                )
+            else:
+                progress.report(
+                    "model_analysis",
+                    "Model-backed analysis was not requested.",
+                    percentage=structural_end,
+                    phase_label="Model analysis",
+                    phase_percent=100,
+                    phase_weight=0,
+                    lifecycle_state="skipped",
+                    safe_error_code="provider_disabled",
+                    safe_error_message="model provider is disabled",
+                    metadata={"skipped": True},
+                )
+
+            progress.report(
+                "finalization",
+                "Deterministic relationships and index records finalized.",
+                percentage=97 if model_enabled else 90,
+                phase_label="Deterministic finalization",
+                phase_percent=100,
+                phase_weight=3 if model_enabled else 15,
+            )
+            progress.report(
+                "validation",
+                "Validating the active index generation.",
+                percentage=97 if model_enabled else 90,
+                phase_label="Validation and publication",
+                phase_percent=0,
+                phase_weight=3 if model_enabled else 10,
+                activity=ProgressActivity.ACTIVE,
+            )
+            active = load_manifest(root)
+            expected = (
+                maps.manifest
+                if maps is not None
+                else semantic.manifest
+                if semantic is not None
+                else structural.manifest
+            )
+            if active != expected:
+                raise ApplicationError(
+                    "published index generation does not match the completed build"
+                )
+            progress.report(
+                "publication",
+                "Atomic index publication completed.",
+                percentage=99,
+                phase_label="Validation and publication",
+                phase_percent=(2 / 3 * 100 if model_enabled else 9 / 10 * 100),
+                phase_weight=3 if model_enabled else 10,
+                metadata={"generation_id": active.generation_id},
+            )
         except BaseException:
             if previous is not None:
                 with suppress(Exception):
@@ -247,11 +617,51 @@ def inspect_repository_index(
     repository_root: str | Path,
     *,
     provider_configuration: ProviderConfiguration | None,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> IndexStatusReport:
     """Compare current source with one pinned active generation without mutation."""
 
+    reporter = _progress_reporter(
+        "repository.index.inspect",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    reporter.report("scan", "Scanning repository and index state.", percentage=0)
+    try:
+        report = _inspect_repository_index(
+            repository_root,
+            provider_configuration=provider_configuration,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        raise
+    reporter.complete(
+        message="Repository index inspection completed.",
+        metadata={"initialized": report.initialized},
+    )
+    return report
+
+
+def _inspect_repository_index(
+    repository_root: str | Path,
+    *,
+    provider_configuration: ProviderConfiguration | None,
+    progress: ProgressReporter,
+) -> IndexStatusReport:
+    """Implement synchronous index inspection with coarse phase reporting."""
+
     root = Path(repository_root).expanduser().resolve(strict=True)
     snapshot = scan_repository(root)
+    progress.report(
+        "scan",
+        "Repository scan completed.",
+        percentage=50,
+        metadata={"files": len(snapshot.files)},
+    )
     repository_identity = calculate_source_snapshot_digest(snapshot)
     index_root = root / ".contextforge" / "index"
     initialized = index_root.is_dir()
@@ -266,6 +676,11 @@ def inspect_repository_index(
     try:
         manifest = load_manifest(root)
     except IndexManifestNotFoundError:
+        progress.report(
+            "compare",
+            "No active repository index was found.",
+            percentage=90,
+        )
         return IndexStatusReport(
             initialized=initialized,
             index_schema=INDEX_SCHEMA_VERSION,
@@ -294,6 +709,7 @@ def inspect_repository_index(
             lock_status=lock_status,
         )
 
+    progress.report("compare", "Comparing repository and index state.", percentage=70)
     current = {item.path: item for item in snapshot.files}
     indexed = {item.path: item for item in manifest.files}
     added = tuple(sorted(set(current) - set(indexed)))
@@ -307,7 +723,6 @@ def inspect_repository_index(
             or current[path].language != indexed[path].language
         )
     )
-    semantic_expected = _semantic_identity(provider_configuration)
     stale = set(added) | set(changed)
     for path in sorted(set(current) & set(indexed)):
         state = indexed[path]
@@ -316,6 +731,9 @@ def inspect_repository_index(
         )
         if state.analyzer != structural_expected:
             stale.add(path)
+        semantic_expected = _semantic_identity(
+            provider_configuration, generic=current[path].language != "Python"
+        )
         if semantic_expected is not None and (
             state.semantic_status != "complete"
             or semantic_expected not in manifest.semantic_analyzers
@@ -341,6 +759,9 @@ def inspect_repository_index(
                 GLOBAL_MAP_PROMPT_VERSION,
             }
         )
+    )
+    progress.report(
+        "compare", "Repository and index comparison completed.", percentage=90
     )
     return IndexStatusReport(
         initialized=initialized,
@@ -379,24 +800,137 @@ def clean_repository_index(
 
 
 async def suggest_repository_context(
-    snapshot: ProjectSnapshot,
+    snapshot: ProjectSnapshot | str | Path,
     provider: ModelProvider,
     request: DiscoveryRequest,
+    *,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> DiscoveryRunRecord:
     """Run existing bounded discovery without source or index mutation."""
 
-    return await discover_repository(snapshot, provider, request)
+    reporter = _progress_reporter(
+        "repository.context.suggest",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    diagnostic_start = _last_diagnostic_sequence()
+    reporter.report("scan", "Preparing repository snapshot.", percentage=0)
+    try:
+        active_snapshot = _workflow_snapshot(snapshot, reporter, end_percentage=10)
+        discovery_mode = (
+            request.mode.value if isinstance(request, DiscoveryRequest) else "hybrid"
+        )
+        result = await discover_repository(
+            active_snapshot,
+            provider,
+            request,
+            progress=reporter.scaled_observer(
+                10, 95, phase_prefix=f"{discovery_mode}_discovery"
+            ),
+            parent_operation_id=(
+                reporter.last_event.operation_id
+                if reporter.last_event is not None
+                else None
+            ),
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            _snapshot_root(snapshot),
+            reporter,
+            diagnostic_start,
+            command="context suggest",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
+        raise
+    reporter.complete(
+        message="Repository context discovery completed.",
+        metadata={"run_id": result.run_id},
+    )
+    _persist_application_diagnostic(
+        active_snapshot.root,
+        reporter,
+        diagnostic_start,
+        command="context suggest",
+        outcome="completed",
+        generation_id=result.index_generation_id,
+    )
+    return result
 
 
 async def create_automatic_handoff(
-    snapshot: ProjectSnapshot,
+    snapshot: ProjectSnapshot | str | Path,
     provider: ModelProvider,
     request: DiscoveryRequest,
     *,
     refine_task: bool = False,
     git_diff_request: GitDiffRequest | None = None,
+    progress: ProgressObserver | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
 ) -> tuple[DiscoveryHandoffResult, CompiledPrompt]:
     """Discover, review, verify, package, and compile one automatic handoff."""
+
+    reporter = _progress_reporter(
+        "repository.handoff.create",
+        progress,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+    )
+    diagnostic_start = _last_diagnostic_sequence()
+    reporter.report(
+        "repository_knowledge",
+        "Loading repository knowledge.",
+        percentage=0,
+    )
+
+    try:
+        active_snapshot = _workflow_snapshot(snapshot, reporter, end_percentage=10)
+        result = await _create_automatic_handoff(
+            active_snapshot,
+            provider,
+            request,
+            refine_task=refine_task,
+            git_diff_request=git_diff_request,
+            progress=reporter,
+        )
+    except BaseException as exc:
+        _report_terminal_exception(reporter, exc)
+        _persist_application_diagnostic(
+            _snapshot_root(snapshot),
+            reporter,
+            diagnostic_start,
+            command="context create --auto",
+            outcome=_diagnostic_outcome(exc),
+            error=exc,
+        )
+        raise
+    reporter.complete(message="Automatic context handoff completed.")
+    _persist_application_diagnostic(
+        active_snapshot.root,
+        reporter,
+        diagnostic_start,
+        command="context create --auto",
+        outcome="completed",
+        generation_id=result[0].discovery_run.index_generation_id,
+    )
+    return result
+
+
+async def _create_automatic_handoff(
+    snapshot: ProjectSnapshot,
+    provider: ModelProvider,
+    request: DiscoveryRequest,
+    *,
+    refine_task: bool,
+    git_diff_request: GitDiffRequest | None,
+    progress: ProgressReporter,
+) -> tuple[DiscoveryHandoffResult, CompiledPrompt]:
+    """Implement handoff construction under the public progress boundary."""
 
     architecture: ArchitectureMap | None = None
     features = None
@@ -404,6 +938,9 @@ async def create_automatic_handoff(
         manifest = load_manifest(snapshot.root)
         architecture = load_architecture_map(snapshot.root, manifest=manifest)
         features = load_feature_map(snapshot.root, manifest=manifest)
+    progress.report(
+        "discovery", "Discovering and reviewing repository context.", percentage=15
+    )
     result = await discover_context_handoff(
         snapshot,
         provider,
@@ -416,8 +953,24 @@ async def create_automatic_handoff(
             max_source_bytes=request.budget.max_context_bytes,
             max_files=request.budget.max_context_files,
         ),
+        progress=progress.scaled_observer(15, 88, phase_prefix="handoff"),
+        parent_operation_id=(
+            progress.last_event.operation_id
+            if progress.last_event is not None
+            else None
+        ),
     )
-    return result, compile_prompt(result.handoff)
+    progress.report("compile", "Compiling the portable context handoff.", percentage=90)
+    compiled = compile_prompt(
+        result.handoff,
+        progress=progress.scaled_observer(90, 99, phase_prefix="compile"),
+        parent_operation_id=(
+            progress.last_event.operation_id
+            if progress.last_event is not None
+            else None
+        ),
+    )
+    return result, compiled
 
 
 def canonical_json(value: object) -> str:
@@ -603,6 +1156,7 @@ def build_discovery_request(
     excludes: tuple[str, ...] = (),
     max_files: int = 100,
     max_context_bytes: int = 1_000_000,
+    strict: bool = False,
 ) -> DiscoveryRequest:
     """Translate public CLI limits into the closed discovery request contract."""
 
@@ -611,6 +1165,7 @@ def build_discovery_request(
         mode=DiscoveryMode(mode),
         pinned_paths=tuple(sorted(set(includes))),
         excluded_paths=tuple(sorted(set(excludes))),
+        strict=strict,
         budget=DiscoveryBudget(
             max_context_files=max_files,
             max_files_read=min(1_000, max_files * 2),
@@ -622,13 +1177,20 @@ def build_discovery_request(
 
 def _semantic_identity(
     configuration: ProviderConfiguration | None,
+    *,
+    generic: bool = False,
 ) -> AnalyzerIdentity | None:
     if configuration is None:
         return None
     return AnalyzerIdentity(
-        analyzer_id=SEMANTIC_ANALYZER_ID,
+        analyzer_id=(GENERIC_SEMANTIC_ANALYZER_ID if generic else SEMANTIC_ANALYZER_ID),
         analyzer_version=_model_dependent_analyzer_version(
-            SEMANTIC_ANALYZER_VERSION, configuration
+            (
+                GENERIC_SEMANTIC_ANALYZER_VERSION
+                if generic
+                else SEMANTIC_ANALYZER_VERSION
+            ),
+            configuration,
         ),
         analysis_prompt_version=SEMANTIC_PROMPT_VERSION,
         response_schema_version=1,
@@ -689,6 +1251,172 @@ def _global_statuses(
         status(load_architecture_map),
         status(load_feature_map),
     )
+
+
+def _progress_reporter(
+    operation_type: str,
+    observer: ProgressObserver | None,
+    *,
+    operation_id: str | None,
+    parent_operation_id: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> ProgressReporter:
+    """Create one application operation reporter with a unique default ID."""
+
+    return ProgressReporter(
+        operation_id or f"{operation_type}:{uuid.uuid4()}",
+        operation_type,
+        observer=observer,
+        parent_operation_id=parent_operation_id,
+        metadata=metadata,
+    )
+
+
+def _workflow_snapshot(
+    source: object,
+    reporter: ProgressReporter,
+    *,
+    end_percentage: float,
+) -> ProjectSnapshot:
+    """Resolve a workflow snapshot while preserving existing snapshot callers."""
+
+    if isinstance(source, ProjectSnapshot):
+        reporter.report(
+            "scan",
+            "Using the caller-provided repository snapshot.",
+            percentage=end_percentage,
+            metadata={"files": len(source.files), "reused": True},
+        )
+        return source
+    if isinstance(source, (str, Path)):
+        reporter.report(
+            "scan",
+            "Scanning repository files.",
+            percentage=min(2, end_percentage),
+        )
+        snapshot = scan_repository(source)
+        reporter.report(
+            "scan",
+            "Repository scan completed.",
+            percentage=end_percentage,
+            metadata={"files": len(snapshot.files), "reused": False},
+        )
+        return snapshot
+    # Retain compatibility with duck-typed test and adapter callers; downstream
+    # validation still owns rejection of an invalid snapshot.
+    return cast(ProjectSnapshot, source)
+
+
+def _report_terminal_exception(
+    reporter: ProgressReporter, error: BaseException
+) -> None:
+    """Classify cancellation without allowing progress to replace the failure."""
+
+    metadata = {"error_type": type(error).__name__}
+    if isinstance(
+        error,
+        (
+            asyncio.CancelledError,
+            DiscoveryCancelledError,
+            KeyboardInterrupt,
+            ProviderCancelledError,
+        ),
+    ):
+        reporter.cancel(metadata=metadata)
+    else:
+        code = _diagnostic_error_code(error) or "internal_error"
+        message = (
+            provider_error_details(error)[1]
+            if isinstance(error, ModelProviderError)
+            else str(error)[:1_000] or code.replace("_", " ")
+        )
+        reporter.fail(
+            metadata=metadata,
+            safe_error_code=code,
+            safe_error_message=message,
+        )
+
+
+def _last_diagnostic_sequence() -> int:
+    records = recent_records()
+    return records[-1].sequence if records else 0
+
+
+def _snapshot_root(source: object) -> Path | None:
+    if isinstance(source, ProjectSnapshot):
+        return source.root
+    if isinstance(source, (str, Path)):
+        return Path(source)
+    return None
+
+
+def _diagnostic_outcome(
+    error: BaseException,
+) -> Literal["failed", "cancelled"]:
+    if isinstance(
+        error,
+        (
+            asyncio.CancelledError,
+            DiscoveryCancelledError,
+            KeyboardInterrupt,
+            ProviderCancelledError,
+        ),
+    ):
+        return "cancelled"
+    return "failed"
+
+
+def _diagnostic_error_code(error: BaseException | None) -> str | None:
+    if error is None:
+        return None
+    if isinstance(error, ModelProviderError):
+        return provider_error_details(error)[0]
+    run_record = getattr(error, "run_record", None)
+    value = getattr(run_record, "failure_code", None)
+    if isinstance(value, str):
+        return value
+    if isinstance(error, OSError):
+        return "persistence_failure"
+    return "internal_error"
+
+
+def _persist_application_diagnostic(
+    repository_root: str | Path | None,
+    reporter: ProgressReporter,
+    start_sequence: int,
+    *,
+    command: str,
+    outcome: Literal["completed", "failed", "cancelled"],
+    error: BaseException | None = None,
+    generation_id: str | None = None,
+) -> None:
+    if repository_root is None:
+        return
+    terminal = reporter.last_event
+    if terminal is None:
+        return
+    records = tuple(item for item in recent_records() if item.sequence > start_sequence)
+    code = _diagnostic_error_code(error)
+    hints = (
+        (
+            "Inspect `contextforge diagnostics config .` for the effective "
+            "context window.",
+            "Increase ContextForge context_window or reduce request candidates.",
+        )
+        if code == "context_window_exceeded"
+        else ()
+    )
+    summary = summarize_operation(
+        terminal.operation_id,
+        command,
+        records,
+        operation_type=terminal.operation_type,
+        outcome=outcome,
+        generation_id=generation_id,
+        final_error_code=code,
+        remediation_hints=hints,
+    )
+    persist_summary(repository_root, summary)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

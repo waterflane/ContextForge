@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
+from contextforge.logging import LogLevel, emit, sanitize_url
 from contextforge.models.providers import (
     ModelRequest,
     ModelResponse,
@@ -76,7 +78,10 @@ class OllamaModelProvider:
     async def _complete_once(
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
-        messages = [message.model_dump(mode="json") for message in request.messages()]
+        messages = [
+            message.model_dump(mode="json")
+            for message in request.messages(include_response_schema=False)
+        ]
         options: dict[str, Any] = {"temperature": request.temperature}
         if request.max_output_tokens is not None:
             options["num_predict"] = request.max_output_tokens
@@ -85,7 +90,11 @@ class OllamaModelProvider:
                 "model": self.configuration.model_id,
                 "messages": messages,
                 "stream": False,
-                "format": request.response_schema,
+                "format": (
+                    request.response_schema
+                    if request.schema_mode == "json_schema"
+                    else "json"
+                ),
                 "options": options,
             },
             ensure_ascii=False,
@@ -97,6 +106,20 @@ class OllamaModelProvider:
         if credential is not None:
             headers["Authorization"] = "Bearer " + credential.get_secret_value()
         transport_limit = self.configuration.max_response_bytes + MAX_HTTP_HEADER_BYTES
+        started = time.monotonic()
+        emit(
+            "provider",
+            "provider.http.dispatch",
+            "Dispatching a bounded Ollama HTTP request.",
+            level=LogLevel.TRACE,
+            request_id=request.operation_id,
+            data={
+                "http_method": "POST",
+                "endpoint": sanitize_url(self.configuration.endpoint),
+                "request_body_bytes": len(payload),
+                "authorization_configured": credential is not None,
+            },
+        )
         try:
             raw = await self._transport(
                 self.configuration.endpoint,
@@ -104,9 +127,31 @@ class OllamaModelProvider:
                 headers,
                 transport_limit,
             )
+            emit(
+                "provider",
+                "provider.http.response_body_received",
+                "Received complete bounded Ollama response body.",
+                level=LogLevel.TRACE,
+                request_id=request.operation_id,
+                duration_ms=round((time.monotonic() - started) * 1_000),
+                data={"response_byte_length": len(raw)},
+            )
         except ProviderUnavailableError:
             raise
         except Exception as exc:
+            emit(
+                "provider",
+                "provider.http.failed",
+                "Ollama HTTP transport failed.",
+                level=LogLevel.DEBUG,
+                request_id=request.operation_id,
+                duration_ms=round((time.monotonic() - started) * 1_000),
+                error=exc,
+                error_code="provider_connection_error",
+                transient=True,
+                retryable=True,
+                data={"endpoint": sanitize_url(self.configuration.endpoint)},
+            )
             raise ProviderUnavailableError("Ollama request failed") from exc
         return _parse_ollama_envelope(raw)
 

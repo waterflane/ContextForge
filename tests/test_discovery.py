@@ -39,6 +39,7 @@ from contextforge.discovery import (
     discover_repository,
     review_completeness,
 )
+from contextforge.discovery.session import _result_confidence
 from contextforge.intelligence import (
     AnalyzerIdentity,
     FileSemanticAnalysis,
@@ -48,6 +49,7 @@ from contextforge.intelligence import (
     extract_code_maps,
     load_manifest,
 )
+from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
@@ -171,6 +173,7 @@ def test_discovery_models_and_all_tool_schemas_are_closed_and_typed() -> None:
         "read_lines",
         "get_git_diff",
         "add_to_context",
+        "select_candidates",
         "remove_from_context",
         "get_context_budget",
         "finalize_context",
@@ -215,22 +218,37 @@ def test_fresh_discovery_full_file_is_deterministic_and_uses_no_index(
 def test_indexed_success_searches_facts_and_verifies_source(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"service.py": "def serve():\n    return 1\n"})
     _index(snapshot)
-    result = _run(
-        snapshot,
-        _batch(
-            _call("search", "search_index", {"query": "serve"}),
-            _call(
-                "add", "add_to_context", {"path": "service.py", "reason": "indexed hit"}
-            ),
-            _call("read", "read_file", {"path": "service.py"}),
-            _finalize(),
-        ),
-        request=DiscoveryRequest(task="Find serving", mode="indexed"),
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "service.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the indexed service implementation.",
+            }
+        )
+
+    provider = FakeModelProvider(_configuration(), responder=responder)
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(task="Find serving", mode="indexed"),
+        )
     )
     assert result.status == "complete"
     assert result.index_generation_id == load_manifest(tmp_path).generation_id
-    assert result.budget_usage.files_read >= 2
-    assert any(item.tool_name == "search_index" for item in result.observations)
+    assert result.budget_usage.files_read == 1
+    assert result.budget_usage.model_calls == 1
+    assert result.budget_usage.provider_http_calls == 1
+    assert any(item.tool_name == "select_candidates" for item in result.observations)
 
 
 def test_indexed_missing_and_entirely_stale_index_refuse_explicitly(
@@ -255,45 +273,100 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     _index(snapshot)
     _write(tmp_path, "b.py", "B = 2\n")
     current = scan_repository(tmp_path)
-    result = _run(
-        current,
-        _batch(
-            _call("add", "add_to_context", {"path": "a.py", "reason": "current"}),
-            _call("read", "read_file", {"path": "a.py"}),
-            _finalize(),
-        ),
-        _batch(_finalize("finish-after-review")),
-        request=DiscoveryRequest(task="x", mode="indexed"),
+    clear_recent_records()
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "a.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the current indexed record.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            current,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="x", mode="indexed"),
+        )
     )
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
+    assert result.final_selection is not None
+    assert result.final_selection.confidence == pytest.approx(0.57456)
+    verification = next(
+        item
+        for item in recent_records()
+        if item.event == "context_suggestion.source_verification_completed"
+    )
+    assert verification.data["stale_file_count"] == 1
 
 
-def test_hybrid_uses_index_then_leaves_initial_candidate_set(tmp_path: Path) -> None:
+def test_hybrid_uses_compact_selection_over_current_index_candidates(
+    tmp_path: Path,
+) -> None:
     snapshot = _snapshot(
         tmp_path,
         {"obvious.py": "KNOWN = 1\n", "x.py": "POOR_NAME_BUT_RELEVANT = 2\n"},
     )
     _index(snapshot)
-    result = _run(
-        snapshot,
-        _batch(_call("map", "search_index", {"query": "KNOWN"})),
-        _batch(_call("fresh", "search_text", {"query": "POOR_NAME_BUT_RELEVANT"})),
-        _batch(
-            _call("add", "add_to_context", {"path": "x.py", "reason": "fresh evidence"})
-        ),
-        _batch(_finalize()),
+
+    def responder(request: ModelRequest, _: int) -> str:
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "x.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the relevant current hybrid candidate.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="POOR_NAME_BUT_RELEVANT", mode="hybrid"),
+        )
     )
     assert result.final_selection is not None
     assert result.final_selection.selected[0].path == "x.py"
+    assert result.budget_usage.model_calls == 1
 
 
 def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
-    result = _run(
-        snapshot,
-        _batch(_call("add", "add_to_context", {"path": "a.py", "reason": "fresh"})),
-        _batch(_finalize()),
+
+    def responder(request: ModelRequest, _: int) -> str:
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "Selected fresh structural context.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="A", mode="hybrid"),
+        )
     )
     assert any(item.code == "hybrid-index-unavailable" for item in result.warnings)
 
@@ -458,19 +531,26 @@ def test_every_path_tool_rejects_absolute_traversal_unc_and_drive_paths(
 
 def test_unknown_tool_and_malformed_action_are_typed(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"safe.py": "SAFE = 1\n"})
-    with pytest.raises(DiscoveryLimitError) as unknown:
+    unknown_response = _batch(_call("unknown", "run_shell", {"command": "dir"}))
+    with pytest.raises(DiscoveryProtocolError) as unknown:
         _run(
             snapshot,
-            _batch(_call("unknown", "run_shell", {"command": "dir"})),
+            *([unknown_response] * 6),
             request=DiscoveryRequest(
                 task="x",
                 mode="fresh",
+                strict=True,
                 budget=DiscoveryBudget(max_steps=1),
             ),
         )
-    assert unknown.value.run_record.observations[0].code == "unknown_tool"
+    assert unknown.value.run_record.failure_code == "invalid_field_value"
+    assert unknown.value.run_record.observations == ()
     with pytest.raises(DiscoveryProtocolError):
-        _run(snapshot, '{"schema_version":1,"actions":[{"bad":true}]}')
+        _run(
+            snapshot,
+            *(['{"schema_version":1,"actions":[{"bad":true}]}'] * 6),
+            request=DiscoveryRequest(task="x", mode="fresh", strict=True),
+        )
 
 
 def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
@@ -573,7 +653,8 @@ def test_prompt_injection_is_untrusted_and_cannot_expand_path_authority(
     )
     assert result.status == "complete"
     assert requests[0].system_instructions == DISCOVERY_SYSTEM_INSTRUCTIONS
-    assert any(item.code == "invalid_input" for item in result.observations)
+    assert not any(item.code == "invalid_input" for item in result.observations)
+    assert "STRUCTURED_RESPONSE_REPAIR" in requests[2].analysis_task
 
 
 def test_discovery_never_invokes_shell_or_process_execution(
@@ -705,6 +786,102 @@ def test_final_selection_model_rejects_partial_failure_shape() -> None:
     assert warning.severity == "warning"
     with pytest.raises(ValidationError):
         DiscoveryLineRange(start_line=2, end_line=1)
+
+
+def test_result_confidence_applies_small_advisory_parse_penalty() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    warning = CompletenessWarning(
+        code="incomplete-parse-data",
+        message="parse incomplete",
+        confidence=0.2,
+    )
+    confidence = _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(warning,),
+        provenance="model",
+        sources_verified=True,
+    )
+    assert confidence == pytest.approx(0.96432)
+    assert warning.model_dump(mode="json")["confidence"] == 0.2
+
+
+def test_result_confidence_strongly_penalizes_unresolved_source_warning() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    confidence = _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(
+            CompletenessWarning(
+                code="selected-source-unread",
+                message="source unread",
+                confidence=1.0,
+            ),
+        ),
+        provenance="model",
+        sources_verified=False,
+    )
+    assert confidence < 0.1
+
+
+def test_result_confidence_uses_verified_model_selection_without_penalty() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    assert _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(),
+        provenance="model",
+        sources_verified=True,
+    ) == pytest.approx(0.98)
+
+
+def test_result_confidence_penalizes_fallback_provenance() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.8,
+    )
+    assert _result_confidence(
+        (candidate,),
+        fallback_confidence=0.4,
+        warnings=(),
+        provenance="deterministic_fallback",
+        sources_verified=True,
+    ) == pytest.approx(0.68)
+
+
+@pytest.mark.parametrize(("base", "expected"), [(-1.0, 0.0), (2.0, 1.0)])
+def test_result_confidence_is_bounded(base: float, expected: float) -> None:
+    assert (
+        _result_confidence(
+            (),
+            fallback_confidence=base,
+            warnings=(),
+            provenance="model",
+            sources_verified=True,
+        )
+        == expected
+    )
 
 
 def test_closed_discovery_models_cover_invalid_shape_branches() -> None:

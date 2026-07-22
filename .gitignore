@@ -3,25 +3,28 @@
 .agents/
 .uv-cache/
 .python/
-.contextforge/
+
+.env
+.env.*
+!.env.example
 
 __pycache__/
 *.py[cod]
 *$py.class
 
+.contextforge/
 .pytest_cache/
 .pytest-tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
+
+*.tmp
 
 build/
 dist/
 *.egg-info/
-
-.env
-.env.*
-!.env.example
 
 site/
