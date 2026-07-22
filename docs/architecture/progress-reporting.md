@@ -143,8 +143,8 @@ provider, and discovery cancellation emit a `cancelled` terminal event and are
 also re-raised unchanged. Terminal failure metadata includes only the exception
 type, not exception text that could contain source content or secrets.
 
-CLI rendering is outside this contract and is intentionally not implemented by
-the progress foundation. `contextforge.cli.progress.CLIProgressRenderer` is the
+CLI rendering is outside the application contract.
+`contextforge.cli.progress.CLIProgressRenderer` is the
 single Typer adapter and the top-level CLI command is its sole owner. Nested
 work emits events only. A stream-scoped, synchronized ownership guard makes
 repeated initialization, start, refresh, and close idempotent; a nested adapter
@@ -277,3 +277,7 @@ report = await build_repository_index(
 Observers are invoked only after reporter state is validated. Their failures are
 isolated, including during validation, rollback, and publication, so they cannot
 change index identity, semantic records, or transactional outcomes.
+
+This contract and its CLI adapter are shipped in 0.4.1. HTTP streaming and GUI
+renderers remain future adapter work; their suitability is a design property of
+the structured event schema, not a claim that those interfaces are implemented.

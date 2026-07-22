@@ -90,7 +90,7 @@ first attempt. An individual request may lower its response cap. Ollama's
 For a non-loopback endpoint, `local_only=false` is not sufficient by itself:
 `external_data_policy="allow_repository"` is also required. The
 `allow_selected` value is reserved and does not authorize remote transport in
-v0.4.0 because path-level transmission enforcement is not implemented.
+this release because path-level transmission enforcement is not implemented.
 
 Credentials are optional and indirect. `credential_env` names an environment
 variable; the configuration stores only that name and resolves its value at

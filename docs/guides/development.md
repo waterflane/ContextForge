@@ -62,6 +62,24 @@ pytest
 git diff --check
 ```
 
+For a release candidate, also run the full branch-coverage suite, exercise both
+installed console entry points and module execution, and verify the wheel and
+source distribution:
+
+```bash
+pytest --cov=contextforge --cov-branch --cov-report=term-missing
+contextforge version
+contextforge --version
+ctxf version
+ctxf --version
+python -m contextforge --version
+python -m build
+```
+
+Release smoke checks use temporary repositories for non-Git operation, nested
+`.gitignore` behavior, table/JSON progress separation, and cancellation. They
+must not write generated index/runs/staging data into the source checkout.
+
 Both editable and regular package installations create `contextforge` and its
 short alias, `ctxf`. They invoke the same CLI application; `ctxf` does not have
 a separate command tree or behavior.

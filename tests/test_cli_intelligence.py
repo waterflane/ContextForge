@@ -238,6 +238,8 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
 ) -> None:
     _write(tmp_path, "app.py", "VALUE = 1\n")
     built = _invoke(
+        "--log-level",
+        "quiet",
         "index",
         "build",
         str(tmp_path),
@@ -247,6 +249,8 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
         "never",
     )
     suggested = _invoke(
+        "--log-level",
+        "quiet",
         "context",
         "suggest",
         str(tmp_path),

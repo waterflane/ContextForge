@@ -318,6 +318,7 @@ def test_hybrid_uses_compact_selection_over_current_index_candidates(
         {"obvious.py": "KNOWN = 1\n", "x.py": "POOR_NAME_BUT_RELEVANT = 2\n"},
     )
     _index(snapshot)
+
     def responder(request: ModelRequest, _: int) -> str:
         records = cast(
             list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
@@ -347,6 +348,7 @@ def test_hybrid_uses_compact_selection_over_current_index_candidates(
 
 def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+
     def responder(request: ModelRequest, _: int) -> str:
         records = cast(
             list[dict[str, Any]], request.trusted_code_map_facts["candidates"]

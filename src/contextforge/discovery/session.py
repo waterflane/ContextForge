@@ -1021,8 +1021,7 @@ class DiscoverySession:
             compact_selection
             and self._validated_selection is not None
             and self._validated_response_fingerprint is not None
-            and selection_step_fingerprint
-            == self._validated_selection_step_fingerprint
+            and selection_step_fingerprint == self._validated_selection_step_fingerprint
         ):
             return self._validated_selection
         self.budget.model_calls += 1
@@ -1147,9 +1146,7 @@ class DiscoverySession:
                 self._stage = "provider_wait"
             raise
         if response.diagnostic is not None:
-            self.budget.provider_http_calls += (
-                response.diagnostic.total_provider_calls
-            )
+            self.budget.provider_http_calls += response.diagnostic.total_provider_calls
         self._stage = "internal_conversion"
         if isinstance(response.value, IndexedContextSelection):
             self._stage = "response_validation"
@@ -1692,11 +1689,7 @@ class DiscoverySession:
                     signal.startswith("task_path_token_matches=")
                     for signal in record.ranking_signals
                 )
-                and (
-                    record.path.rsplit("/", 1)[0]
-                    if "/" in record.path
-                    else ""
-                )
+                and (record.path.rsplit("/", 1)[0] if "/" in record.path else "")
                 in selected_directories
             ]
             dependency_paths.extend(
@@ -1807,9 +1800,7 @@ class DiscoverySession:
                 "selected_file_count": selected,
                 "read_file_count": len(executor.read_paths & selected_paths),
                 "verified_file_count": verified,
-                "stale_file_count": len(
-                    self._require_knowledge().stale_index_paths
-                ),
+                "stale_file_count": len(self._require_knowledge().stale_index_paths),
                 "missing_file_count": missing,
                 "failed_file_count": failed,
             },
@@ -1984,9 +1975,7 @@ def _rank_candidate_records(
         }
         summary = knowledge.semantic_analyses.get(path)
         summary_tokens = (
-            set()
-            if summary is None
-            else _ranking_tokens(summary.model_dump_json())
+            set() if summary is None else _ranking_tokens(summary.model_dump_json())
         )
         match_counts[path] = (
             path_matches,
@@ -2001,9 +1990,7 @@ def _rank_candidate_records(
         and _metadata_penalty(path, task_tokens) == 0.0
     }
     direct_tests = {
-        test
-        for source, test in direct_test_pairs
-        if source in relevant_implementations
+        test for source, test in direct_test_pairs if source in relevant_implementations
     }
 
     scored: list[tuple[float, str, str, tuple[str, ...]]] = []
@@ -2011,12 +1998,7 @@ def _rank_candidate_records(
         if path in excluded:
             continue
         path_matches, symbol_matches, summary_matches = match_counts[path]
-        score = (
-            1.0
-            + path_matches * 12.0
-            + symbol_matches * 8.0
-            + summary_matches * 6.0
-        )
+        score = 1.0 + path_matches * 12.0 + symbol_matches * 8.0 + summary_matches * 6.0
         signals: list[str] = []
         if path in pinned:
             score += 10_000.0
@@ -2162,9 +2144,7 @@ def _rank_candidates_by_facet(
             }
             summary = knowledge.semantic_analyses.get(path)
             summary_tokens = (
-                set()
-                if summary is None
-                else _ranking_tokens(summary.model_dump_json())
+                set() if summary is None else _ranking_tokens(summary.model_dump_json())
             )
             score = (
                 path_matches * 12.0

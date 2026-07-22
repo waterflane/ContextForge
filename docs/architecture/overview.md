@@ -94,4 +94,6 @@ The initial release deliberately excludes:
 Repository scanning was excluded from v0.1.0 and is implemented by the
 subsequent v0.2 milestone. Context selection/export shipped in v0.3, and
 repository intelligence, bounded discovery, handoffs, and read-only MCP are
-implemented in v0.4.0.
+implemented in v0.4. Version 0.4.1 adds maintenance-level progress,
+diagnostics, nested-ignore, and CLI usability improvements; it does not claim
+future GUI, remote transport, orchestration, or source-mutation functionality.

@@ -109,9 +109,7 @@ def _indexed_snapshot(root: Path, count: int = 26) -> ProjectSnapshot:
 
 def _selection_response(request: ModelRequest, *, finalize_only: bool = False) -> str:
     del finalize_only
-    records = cast(
-        list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
-    )
+    records = cast(list[dict[str, Any]], request.trusted_code_map_facts["candidates"])
     return json.dumps(
         {
             "schema_version": 1,
@@ -356,9 +354,7 @@ def test_indexed_compact_selection_succeeds_on_one_repair(tmp_path: Path) -> Non
                 list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
             )
             selected_id = cast(str, records[0]["candidate_id"])
-            return json.dumps(
-                {"schema_version": 1, "summary": "candidate IDs omitted"}
-            )
+            return json.dumps({"schema_version": 1, "summary": "candidate IDs omitted"})
         assert selected_id is not None
         return json.dumps(
             {
@@ -420,9 +416,7 @@ def test_hybrid_repeated_validation_fingerprint_stops_after_one_generation(
     tmp_path: Path,
 ) -> None:
     snapshot = _indexed_snapshot(tmp_path, count=2)
-    invalid = json.dumps(
-        {"schema_version": 1, "summary": "candidate IDs omitted"}
-    )
+    invalid = json.dumps({"schema_version": 1, "summary": "candidate IDs omitted"})
     provider = FakeModelProvider(
         _configuration(max_json_repair_attempts=2), scripts=[invalid] * 10
     )
@@ -523,9 +517,10 @@ def test_final_verification_resolves_source_read_warning_and_confidence(
     result = asyncio.run(
         suggest_repository_context(
             snapshot,
-            FakeModelProvider(_configuration(), responder=lambda request, _: (
-                _selection_response(request)
-            )),
+            FakeModelProvider(
+                _configuration(),
+                responder=lambda request, _: _selection_response(request),
+            ),
             DiscoveryRequest(task="candidate", mode=DiscoveryMode.INDEXED),
         )
     )
@@ -604,9 +599,7 @@ def test_indexed_selection_enriches_task_matched_implementation_dependency(
             list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
         )
         app_id = next(
-            item["candidate_id"]
-            for item in records
-            if item["path"] == "public/app.js"
+            item["candidate_id"] for item in records if item["path"] == "public/app.js"
         )
         return json.dumps(
             {

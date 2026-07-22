@@ -176,9 +176,7 @@ class OpenAICompatibleModelProvider:
             response = await self._complete_in_mode(
                 request, credential, mode="plain_json"
             )
-            return _with_provider_http_calls(
-                response, verification_calls + 1
-            )
+            return _with_provider_http_calls(response, verification_calls + 1)
         async with self._structured_mode_lock:
             self._schema_support = "supported"
         return _with_provider_http_calls(response, verification_calls)

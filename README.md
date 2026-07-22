@@ -10,10 +10,11 @@ source selections, and produces reviewable handoffs and compiled prompts.
 
 ## Status
 
-The v0.4.0 milestone implements repository intelligence, model-provider
-adapters, architecture/feature maps, automatic context discovery, Git-aware
-handoffs, prompt compilation, thin CLI commands, and a local read-only stdio MCP
-foundation. Structural indexing works without a model. Model-assisted behavior
+Version 0.4.1 is a maintenance and usability release for the completed v0.4
+repository-intelligence milestone. It adds structured, percentage-based
+progress for long-running workflows, correct nested `.gitignore` handling,
+consistent version commands, the `ctxf` console alias, and structured
+diagnostics. Structural indexing works without a model. Model-assisted behavior
 uses a configured local Ollama provider by default; the deterministic fake is
 for offline tests and demonstrations.
 
@@ -326,8 +327,8 @@ context overflow and rejected schemas are never resent unchanged.
 Remote endpoints are fail-closed unless configuration explicitly sets both
 `local_only = false` and `external_data_policy = "allow_repository"`.
 `allow_selected` is reserved for a future path-level transmission policy and
-does not authorize a remote endpoint in v0.4.0. External repository-wide use
-can transmit any selectable snapshot content, so review ignore rules and
+does not authorize a remote endpoint in this release. External repository-wide
+use can transmit any selectable snapshot content, so review ignore rules and
 provider retention before enabling it.
 
 ### Read-only MCP

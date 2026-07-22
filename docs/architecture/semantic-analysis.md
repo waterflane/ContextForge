@@ -153,7 +153,7 @@ Raw prompt and response retention is off by default. Loopback Ollama keeps the
 provider path local, but users remain responsible for the model process and
 its retention policy. Sending repository content to a non-loopback provider
 requires `local_only=false` and `external_data_policy="allow_repository"`.
-`allow_selected` does not authorize remote transport in v0.4.0. Repository-wide
+`allow_selected` does not authorize remote transport in this release. Repository-wide
 authorization can include secret-like selectable files; ContextForge does not
 claim complete secret detection, so ignore rules and provider retention must be
 reviewed first.
