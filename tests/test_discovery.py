@@ -39,6 +39,7 @@ from contextforge.discovery import (
     discover_repository,
     review_completeness,
 )
+from contextforge.discovery.session import _result_confidence
 from contextforge.intelligence import (
     AnalyzerIdentity,
     FileSemanticAnalysis,
@@ -300,7 +301,7 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
     assert result.final_selection is not None
-    assert result.final_selection.confidence == 0.3
+    assert result.final_selection.confidence == pytest.approx(0.57456)
     verification = next(
         item
         for item in recent_records()
@@ -309,31 +310,61 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     assert verification.data["stale_file_count"] == 1
 
 
-def test_hybrid_uses_index_then_leaves_initial_candidate_set(tmp_path: Path) -> None:
+def test_hybrid_uses_compact_selection_over_current_index_candidates(
+    tmp_path: Path,
+) -> None:
     snapshot = _snapshot(
         tmp_path,
         {"obvious.py": "KNOWN = 1\n", "x.py": "POOR_NAME_BUT_RELEVANT = 2\n"},
     )
     _index(snapshot)
-    result = _run(
-        snapshot,
-        _batch(_call("map", "search_index", {"query": "KNOWN"})),
-        _batch(_call("fresh", "search_text", {"query": "POOR_NAME_BUT_RELEVANT"})),
-        _batch(
-            _call("add", "add_to_context", {"path": "x.py", "reason": "fresh evidence"})
-        ),
-        _batch(_finalize()),
+    def responder(request: ModelRequest, _: int) -> str:
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        candidate_id = next(
+            item["candidate_id"] for item in records if item["path"] == "x.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [candidate_id],
+                "summary": "Selected the relevant current hybrid candidate.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="POOR_NAME_BUT_RELEVANT", mode="hybrid"),
+        )
     )
     assert result.final_selection is not None
     assert result.final_selection.selected[0].path == "x.py"
+    assert result.budget_usage.model_calls == 1
 
 
 def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
-    result = _run(
-        snapshot,
-        _batch(_call("add", "add_to_context", {"path": "a.py", "reason": "fresh"})),
-        _batch(_finalize()),
+    def responder(request: ModelRequest, _: int) -> str:
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "Selected fresh structural context.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task="A", mode="hybrid"),
+        )
     )
     assert any(item.code == "hybrid-index-unavailable" for item in result.warnings)
 
@@ -753,6 +784,102 @@ def test_final_selection_model_rejects_partial_failure_shape() -> None:
     assert warning.severity == "warning"
     with pytest.raises(ValidationError):
         DiscoveryLineRange(start_line=2, end_line=1)
+
+
+def test_result_confidence_applies_small_advisory_parse_penalty() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    warning = CompletenessWarning(
+        code="incomplete-parse-data",
+        message="parse incomplete",
+        confidence=0.2,
+    )
+    confidence = _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(warning,),
+        provenance="model",
+        sources_verified=True,
+    )
+    assert confidence == pytest.approx(0.96432)
+    assert warning.model_dump(mode="json")["confidence"] == 0.2
+
+
+def test_result_confidence_strongly_penalizes_unresolved_source_warning() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    confidence = _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(
+            CompletenessWarning(
+                code="selected-source-unread",
+                message="source unread",
+                confidence=1.0,
+            ),
+        ),
+        provenance="model",
+        sources_verified=False,
+    )
+    assert confidence < 0.1
+
+
+def test_result_confidence_uses_verified_model_selection_without_penalty() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.98,
+    )
+    assert _result_confidence(
+        (candidate,),
+        fallback_confidence=0.5,
+        warnings=(),
+        provenance="model",
+        sources_verified=True,
+    ) == pytest.approx(0.98)
+
+
+def test_result_confidence_penalizes_fallback_provenance() -> None:
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate:a",
+        kind="full_file",
+        path="a.py",
+        reason=SelectionReason(summary="x", discovery_source="test"),
+        confidence=0.8,
+    )
+    assert _result_confidence(
+        (candidate,),
+        fallback_confidence=0.4,
+        warnings=(),
+        provenance="deterministic_fallback",
+        sources_verified=True,
+    ) == pytest.approx(0.68)
+
+
+@pytest.mark.parametrize(("base", "expected"), [(-1.0, 0.0), (2.0, 1.0)])
+def test_result_confidence_is_bounded(base: float, expected: float) -> None:
+    assert (
+        _result_confidence(
+            (),
+            fallback_confidence=base,
+            warnings=(),
+            provenance="model",
+            sources_verified=True,
+        )
+        == expected
+    )
 
 
 def test_closed_discovery_models_cover_invalid_shape_branches() -> None:

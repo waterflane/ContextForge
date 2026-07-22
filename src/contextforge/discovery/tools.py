@@ -322,6 +322,25 @@ class DiscoveryToolExecutor:
     def removed(self) -> Mapping[str, str]:
         return dict(self._removed)
 
+    def mark_coverage_added(self, paths: tuple[str, ...]) -> None:
+        """Label engine-selected candidates without changing the public schema."""
+
+        for path in paths:
+            candidate = self._selected.get(path)
+            if candidate is None:
+                continue
+            self._selected[path] = candidate.model_copy(
+                update={
+                    "reason": SelectionReason(
+                        summary="Added deterministically to cover a task intent facet.",
+                        discovery_source="deterministic-facet-coverage",
+                        evidence=candidate.reason.evidence,
+                    ),
+                    "model_selected": False,
+                    "added_by_completeness": True,
+                }
+            )
+
     def execute(
         self,
         *,

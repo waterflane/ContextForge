@@ -118,6 +118,17 @@ to ten IDs copied exactly from the supplied candidates; summary must briefly exp
 why those candidates fit the task. candidate_ids is required. Do not return actions,
 tool names, nested arguments, paths in place of IDs, Markdown, or extra fields."""
 
+HYBRID_MAX_MODEL_GENERATIONS = 1
+FACET_CANDIDATE_MIN_SCORE = 8.0
+MAX_FACET_COVERAGE_ADDITIONS = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _IntentFacet:
+    label: str
+    tokens: frozenset[str]
+    substantial: bool = True
+
 
 class DiscoveryError(RuntimeError):
     """Typed unsuccessful discovery carrying an audit record with no final selection."""
@@ -194,6 +205,12 @@ class DiscoverySession:
         self._provider_request_dispatched = False
         self._ranked_candidates: tuple[DiscoveryCandidateRecord, ...] = ()
         self._preselected_candidates: tuple[DiscoveryCandidateRecord, ...] = ()
+        self._intent_facets: tuple[_IntentFacet, ...] = ()
+        self._facet_rankings: dict[str, tuple[str, ...]] = {}
+        self._coverage_diagnostics_emitted = False
+        self._validated_selection: tuple[DiscoveryAction, ...] | None = None
+        self._validated_selection_step_fingerprint: str | None = None
+        self._validated_response_fingerprint: str | None = None
         active_operation_id = operation_id or uuid.uuid4().hex
         self._operation_id = active_operation_id
         self._top_level_operation_id = parent_operation_id or active_operation_id
@@ -239,8 +256,19 @@ class DiscoverySession:
             pinned_paths=self.request.pinned_paths,
             excluded_paths=self.request.excluded_paths,
         )
+        self._intent_facets = _detect_intent_facets(self.request.task)
+        self._facet_rankings = _rank_candidates_by_facet(
+            loaded.knowledge,
+            self._ranked_candidates,
+            self._intent_facets,
+        )
         limit = self.request.budget.max_preselected_candidates
-        self._preselected_candidates = self._ranked_candidates[:limit]
+        self._preselected_candidates = _facet_aware_preselection(
+            self._ranked_candidates,
+            self._intent_facets,
+            self._facet_rankings,
+            limit=limit,
+        )
         if self._ranked_candidates and limit > 0 and not self._preselected_candidates:
             emit(
                 "retrieval",
@@ -346,7 +374,7 @@ class DiscoverySession:
                         "steps": self.budget.steps,
                         "max_steps": self.request.budget.max_steps,
                         "model_calls": self.budget.model_calls,
-                        "max_model_calls": self.request.budget.max_model_calls,
+                        "max_model_calls": self._max_model_calls,
                     },
                 )
                 actions = await self._request_actions()
@@ -460,6 +488,7 @@ class DiscoverySession:
         except DiscoveryError as exc:
             if isinstance(exc, DiscoveryCancelledError):
                 self._progress.cancel()
+                self._stage = "cancelled"
             else:
                 failure_code = exc.run_record.failure_code or "discovery_failed"
                 self._progress.fail(
@@ -471,10 +500,12 @@ class DiscoverySession:
             raise
         except asyncio.CancelledError:
             self._progress.cancel()
+            self._stage = "cancelled"
             self._log_failure(None, "cancelled")
             raise
         except ProviderCancelledError as exc:
             self._progress.cancel()
+            self._stage = "cancelled"
             self._log_failure(exc, "cancelled")
             raise self._failure(
                 DiscoveryCancelledError,
@@ -647,6 +678,7 @@ class DiscoverySession:
             source_was_read=True,
         )
         self.warnings.extend(warnings)
+        final_warnings = _unique_warnings(self.warnings)
         knowledge = self._require_knowledge()
         final = FinalContextSelection(
             task=self.request.task,
@@ -663,8 +695,14 @@ class DiscoverySession:
                 "ContextForge selected the highest-ranked valid candidates."
             ),
             unknowns=("Model-guided selection could not be validated.",),
-            completeness_warnings=_unique_warnings(self.warnings),
-            confidence=min(item.confidence or 0.4 for item in verified),
+            completeness_warnings=final_warnings,
+            confidence=_result_confidence(
+                verified,
+                fallback_confidence=0.4,
+                warnings=final_warnings,
+                provenance="deterministic_fallback",
+                sources_verified=True,
+            ),
             budget_usage=self.budget.usage(),
             run_id=self.run_id,
             provenance="deterministic_fallback",
@@ -882,7 +920,6 @@ class DiscoverySession:
 
     async def _request_actions(self) -> tuple[DiscoveryAction, ...]:
         self._stage = "budget_calculation"
-        self.budget.model_calls += 1
         observations = [
             item.model_dump(mode="json") for item in self.observations[-20:]
         ]
@@ -931,7 +968,11 @@ class DiscoverySession:
             "budget": self.request.budget.model_dump(mode="json"),
             "budget_usage": self.budget.usage().model_dump(mode="json"),
         }
-        if self.request.mode is not DiscoveryMode.INDEXED:
+        compact_selection = self.request.mode in {
+            DiscoveryMode.INDEXED,
+            DiscoveryMode.HYBRID,
+        }
+        if not compact_selection:
             trusted["tool_schemas"] = _compact_tool_schemas()
         serialized_candidate_count = len(serialized_candidates)
         request_candidates = trusted["candidates"]
@@ -967,13 +1008,30 @@ class DiscoverySession:
             separators=(",", ":"),
             allow_nan=False,
         )
-        indexed_selection = self.request.mode is DiscoveryMode.INDEXED
+        selection_step_fingerprint = hashlib.sha256(
+            _json_bytes(
+                {
+                    "task": self.request.task,
+                    "candidates": serialized_candidates,
+                    "schema": IndexedContextSelection.model_json_schema(),
+                }
+            )
+        ).hexdigest()
+        if (
+            compact_selection
+            and self._validated_selection is not None
+            and self._validated_response_fingerprint is not None
+            and selection_step_fingerprint
+            == self._validated_selection_step_fingerprint
+        ):
+            return self._validated_selection
+        self.budget.model_calls += 1
         request = ModelRequest(
             operation_id=f"discovery-{self.run_id[:16]}-{self.budget.model_calls}",
             purpose="repository-discovery",
             system_instructions=(
                 DISCOVERY_SYSTEM_INSTRUCTIONS + "\n\n" + INDEXED_SELECTION_INSTRUCTIONS
-                if indexed_selection
+                if compact_selection
                 else DISCOVERY_SYSTEM_INSTRUCTIONS
             ),
             analysis_task=(
@@ -982,7 +1040,7 @@ class DiscoverySession:
                     "candidates. Return schema_version=1, the required candidate_ids "
                     "array using only supplied candidate IDs, and a concise summary."
                 )
-                if indexed_selection
+                if compact_selection
                 else (
                     f"Task: {self.request.task}\nInvestigate the repository in "
                     f"{self.request.mode.value} mode. Return one to ten actions. Use "
@@ -998,7 +1056,7 @@ class DiscoverySession:
             untrusted_sources=(),
             untrusted_contexts=contexts,
             response_model=(
-                IndexedContextSelection if indexed_selection else DiscoveryActionBatch
+                IndexedContextSelection if compact_selection else DiscoveryActionBatch
             ),
             max_output_tokens=512,
             temperature=0.0,
@@ -1009,7 +1067,7 @@ class DiscoverySession:
             phase_id="request_assembly",
             response_validator=(
                 self._validate_indexed_selection
-                if indexed_selection
+                if compact_selection
                 else self._validate_model_action_batch
             ),
         )
@@ -1095,15 +1153,15 @@ class DiscoverySession:
         self._stage = "internal_conversion"
         if isinstance(response.value, IndexedContextSelection):
             self._stage = "response_validation"
-            return (
+            actions = (
                 DiscoveryAction(
-                    action_id="model-indexed-selection",
+                    action_id="model-candidate-selection",
                     kind="call_tool",
                     tool_name="select_candidates",
                     arguments={"candidate_ids": list(response.value.candidate_ids)},
                 ),
                 DiscoveryAction(
-                    action_id="model-indexed-finalize",
+                    action_id="model-selection-finalize",
                     kind="finalize",
                     arguments={
                         "summary": response.value.summary,
@@ -1111,6 +1169,12 @@ class DiscoverySession:
                     },
                 ),
             )
+            self._validated_selection = actions
+            self._validated_selection_step_fingerprint = selection_step_fingerprint
+            self._validated_response_fingerprint = hashlib.sha256(
+                response.normalized_json.encode("utf-8")
+            ).hexdigest()
+            return actions
         if not isinstance(response.value, DiscoveryActionBatch):
             raise self._failure(
                 DiscoveryProtocolError,
@@ -1316,7 +1380,7 @@ class DiscoverySession:
             else None,
             operation_type="repository.context.discovery",
             phase_id=self._stage,
-            status="failed",
+            status="cancelled" if code == "cancelled" else "failed",
             error=error,
             error_code=code,
             data={
@@ -1375,6 +1439,7 @@ class DiscoverySession:
         self, value: FinalizeContextInput
     ) -> DiscoveryRunRecord | None:
         executor = self._require_executor()
+        self._enrich_facet_coverage()
         self._enrich_direct_dependencies()
         selected = executor.selected
         if not selected:
@@ -1447,17 +1512,14 @@ class DiscoverySession:
             )
         self.budget.context_bytes = exact_context_bytes
         self.budget.context_files = sum(item.path is not None for item in verified)
-        selected_confidences = [
-            item.confidence for item in verified if item.confidence is not None
-        ]
-        confidence = (
-            min(selected_confidences) if selected_confidences else value.confidence
+        final_warnings = _unique_warnings(self.warnings)
+        confidence = _result_confidence(
+            verified,
+            fallback_confidence=value.confidence,
+            warnings=final_warnings,
+            provenance="model",
+            sources_verified=True,
         )
-        warning_confidences = [
-            item.confidence for item in warnings if item.confidence is not None
-        ]
-        if warning_confidences:
-            confidence = min(confidence, min(warning_confidences))
         knowledge = self._require_knowledge()
         active_manifest = knowledge.manifest
         final = FinalContextSelection(
@@ -1470,7 +1532,7 @@ class DiscoverySession:
             selected=tuple(sorted(verified, key=lambda item: item.candidate_id)),
             summary=value.summary,
             unknowns=value.unknowns,
-            completeness_warnings=_unique_warnings(self.warnings),
+            completeness_warnings=final_warnings,
             confidence=confidence,
             budget_usage=self.budget.usage(),
             run_id=self.run_id,
@@ -1487,10 +1549,107 @@ class DiscoverySession:
             final_selection=final,
         )
 
+    def _enrich_facet_coverage(self) -> None:
+        """Boundedly add the best high-confidence candidate for uncovered facets."""
+
+        if self.request.mode not in {DiscoveryMode.INDEXED, DiscoveryMode.HYBRID}:
+            return
+        executor = self._require_executor()
+        selected_paths = {item.path for item in executor.selected if item.path}
+
+        def coverage_paths(facet: _IntentFacet) -> set[str]:
+            ranked = set(self._facet_rankings.get(facet.label, ()))
+            implementations = {
+                path for path in ranked if not _looks_like_test_path(path)
+            }
+            return implementations or ranked
+
+        covered = {
+            facet.label
+            for facet in self._intent_facets
+            if selected_paths & coverage_paths(facet)
+        }
+        substantial_uncovered = [
+            facet
+            for facet in self._intent_facets
+            if facet.substantial and facet.label not in covered
+        ]
+        remaining = min(
+            MAX_FACET_COVERAGE_ADDITIONS,
+            self.request.budget.max_context_files - len(selected_paths),
+            self.request.budget.max_preselected_candidates - len(selected_paths),
+        )
+        records_by_path = {item.path: item for item in self._preselected_candidates}
+        added: list[str] = []
+        for facet in substantial_uncovered:
+            if remaining <= 0:
+                break
+            candidate = next(
+                (
+                    path
+                    for path in self._facet_rankings.get(facet.label, ())
+                    if path not in selected_paths and path in records_by_path
+                ),
+                None,
+            )
+            if candidate is None:
+                continue
+            observation = executor.execute(
+                step=self.budget.steps,
+                action_id=f"engine-facet-coverage-{len(added) + 1}",
+                tool_name="select_candidates",
+                arguments={"candidate_ids": [records_by_path[candidate].candidate_id]},
+            )
+            self.observations.append(observation)
+            if observation.ok:
+                added.append(candidate)
+                selected_paths.add(candidate)
+                if candidate in coverage_paths(facet):
+                    covered.add(facet.label)
+                remaining -= 1
+        executor.mark_coverage_added(tuple(added))
+        if self._coverage_diagnostics_emitted:
+            return
+        uncovered = [
+            facet.label for facet in self._intent_facets if facet.label not in covered
+        ]
+        data = {
+            "detected_facets": [facet.label for facet in self._intent_facets],
+            "covered_facets": [
+                facet.label for facet in self._intent_facets if facet.label in covered
+            ],
+            "uncovered_facets": uncovered,
+            "files_added_for_coverage": added,
+        }
+        self.observations.append(
+            DiscoveryObservation(
+                step=self.budget.steps,
+                action_id="engine-facet-coverage-diagnostics",
+                tool_name="select_candidates",
+                ok=True,
+                code="facet_coverage",
+                data=data,
+                result_bytes=len(_json_bytes(data)),
+                made_progress=bool(added),
+            )
+        )
+        emit(
+            "retrieval",
+            "context_suggestion.facet_coverage",
+            "Checked deterministic task-facet coverage.",
+            level=LogLevel.DEBUG,
+            operation_id=self._operation_id,
+            top_level_operation_id=self._top_level_operation_id,
+            parent_operation_id=self._operation_id,
+            phase_id="context_assembly",
+            data=data,
+        )
+        self._coverage_diagnostics_emitted = True
+
     def _enrich_direct_dependencies(self) -> None:
         """Add at most two task-relevant direct imports already in the candidate set."""
 
-        if self.request.mode is not DiscoveryMode.INDEXED:
+        if self.request.mode not in {DiscoveryMode.INDEXED, DiscoveryMode.HYBRID}:
             return
         executor = self._require_executor()
         selected_paths = {item.path for item in executor.selected if item.path}
@@ -1664,7 +1823,7 @@ class DiscoverySession:
                 "maximum_steps",
                 "discovery reached the maximum action steps",
             )
-        if self.budget.model_calls >= self.request.budget.max_model_calls:
+        if self.budget.model_calls >= self._max_model_calls:
             raise self._failure(
                 DiscoveryLimitError,
                 "maximum_model_calls",
@@ -1676,6 +1835,15 @@ class DiscoverySession:
                 "total_timeout",
                 "discovery reached its total timeout",
             )
+
+    @property
+    def _max_model_calls(self) -> int:
+        if self.request.mode is DiscoveryMode.HYBRID:
+            return min(
+                self.request.budget.max_model_calls,
+                HYBRID_MAX_MODEL_GENERATIONS,
+            )
+        return self.request.budget.max_model_calls
 
     def _check_step_limit(self) -> None:
         if self.budget.steps >= self.request.budget.max_steps:
@@ -1910,6 +2078,142 @@ def _rank_candidate_records(
     return tuple(records)
 
 
+def _detect_intent_facets(task: str) -> tuple[_IntentFacet, ...]:
+    """Split a compound task into a few stable, reviewable intent facets."""
+
+    clauses = re.split(r"\s*(?:,|;|\b(?:and|then|plus)\b)\s*", task.casefold())
+    facets: list[_IntentFacet] = []
+    startup_terms = frozenset(
+        {
+            "app",
+            "application",
+            "boot",
+            "bootstrap",
+            "entry",
+            "main",
+            "server",
+            "start",
+            "starts",
+            "startup",
+        }
+    )
+    support_terms = frozenset({"file", "files", "test", "tests"})
+    ignored = {
+        "about",
+        "explain",
+        "find",
+        "how",
+        "list",
+        "relevant",
+        "show",
+        "the",
+        "works",
+    }
+    for clause in clauses:
+        tokens = _ranking_tokens(clause)
+        if not tokens:
+            continue
+        if tokens & {"start", "starts", "startup", "boot", "bootstrap"}:
+            facet = _IntentFacet("application startup", startup_terms)
+        elif tokens & support_terms and tokens & {"list", "relevant", "test", "tests"}:
+            facet = _IntentFacet(
+                "relevant tests/files", support_terms, substantial=False
+            )
+        else:
+            meaningful = frozenset(tokens - ignored - {"file", "files"})
+            if not meaningful:
+                continue
+            facet = _IntentFacet(" ".join(sorted(meaningful)), meaningful)
+        if all(item.label != facet.label for item in facets):
+            facets.append(facet)
+        if len(facets) == 4:
+            break
+    if facets:
+        return tuple(facets)
+    fallback_tokens = frozenset(_ranking_tokens(task))
+    return (_IntentFacet("task", fallback_tokens),)
+
+
+def _rank_candidates_by_facet(
+    knowledge: DiscoveryKnowledge,
+    records: tuple[DiscoveryCandidateRecord, ...],
+    facets: tuple[_IntentFacet, ...],
+) -> dict[str, tuple[str, ...]]:
+    """Rank eligible candidates independently for each deterministic facet."""
+
+    entry_points: set[str] = set()
+    if knowledge.architecture is not None:
+        for item in knowledge.architecture.entry_points:
+            entry_points.add(item.file)
+            if item.handler_file is not None:
+                entry_points.add(item.handler_file)
+    by_path = {item.path: item for item in records}
+    result: dict[str, tuple[str, ...]] = {}
+    for facet in facets:
+        scored: list[tuple[bool, float, int, str]] = []
+        for path, code_map in knowledge.code_maps.items():
+            path_matches = len(facet.tokens & _ranking_tokens(path))
+            symbol_tokens = {
+                token
+                for symbol in code_map.symbols
+                for token in _ranking_tokens(
+                    f"{symbol.name} {symbol.qualified_name} {symbol.signature or ''}"
+                )
+            }
+            summary = knowledge.semantic_analyses.get(path)
+            summary_tokens = (
+                set()
+                if summary is None
+                else _ranking_tokens(summary.model_dump_json())
+            )
+            score = (
+                path_matches * 12.0
+                + len(facet.tokens & symbol_tokens) * 8.0
+                + len(facet.tokens & summary_tokens) * 6.0
+            )
+            stem = path.rsplit("/", 1)[-1].split(".", 1)[0].casefold()
+            if facet.label == "application startup":
+                if path in entry_points:
+                    score += 24.0
+                elif stem in {"app", "bootstrap", "index", "main", "server", "startup"}:
+                    score += 14.0
+            elif facet.label == "relevant tests/files" and _looks_like_test_path(path):
+                score += 8.0
+            if score < FACET_CANDIDATE_MIN_SCORE or path not in by_path:
+                continue
+            scored.append(
+                (_looks_like_test_path(path), -score, by_path[path].rank, path)
+            )
+        scored.sort()
+        result[facet.label] = tuple(item[3] for item in scored)
+    return result
+
+
+def _facet_aware_preselection(
+    records: tuple[DiscoveryCandidateRecord, ...],
+    facets: tuple[_IntentFacet, ...],
+    facet_rankings: dict[str, tuple[str, ...]],
+    *,
+    limit: int,
+) -> tuple[DiscoveryCandidateRecord, ...]:
+    """Reserve one bounded request slot per substantial facet, then fill globally."""
+
+    if limit <= 0:
+        return ()
+    selected_paths: set[str] = set()
+    for facet in facets:
+        if not facet.substantial or len(selected_paths) >= limit:
+            continue
+        ranking = facet_rankings.get(facet.label, ())
+        if ranking:
+            selected_paths.add(ranking[0])
+    for record in records:
+        if len(selected_paths) >= limit:
+            break
+        selected_paths.add(record.path)
+    return tuple(record for record in records if record.path in selected_paths)
+
+
 def _looks_like_test_path(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].casefold()
     return (
@@ -2018,6 +2322,59 @@ def _unique_warnings(
         values[key]
         for key in sorted(values, key=lambda item: (item[0], item[1] or "", item[2]))
     )
+
+
+def _result_confidence(
+    selected: tuple[DiscoveryCandidate, ...],
+    *,
+    fallback_confidence: float,
+    warnings: tuple[CompletenessWarning, ...],
+    provenance: str,
+    sources_verified: bool,
+) -> float:
+    """Combine selection quality with provenance and bounded warning penalties."""
+
+    selected_confidences = [
+        item.confidence for item in selected if item.confidence is not None
+    ]
+    confidence = (
+        min(selected_confidences) if selected_confidences else fallback_confidence
+    )
+    confidence *= 1.0 if sources_verified else 0.35
+    confidence *= 1.0 if provenance == "model" else 0.85
+
+    penalties_by_code: dict[str, float] = {}
+    for warning in warnings:
+        certainty = warning.confidence if warning.confidence is not None else 0.5
+        penalty = _warning_penalty(warning.code, warning.severity) * certainty
+        penalties_by_code[warning.code] = max(
+            penalties_by_code.get(warning.code, 0.0), penalty
+        )
+    for penalty in penalties_by_code.values():
+        confidence *= 1.0 - min(0.9, max(0.0, penalty))
+    return min(1.0, max(0.0, confidence))
+
+
+def _warning_penalty(code: str, severity: str) -> float:
+    if any(
+        marker in code
+        for marker in (
+            "hash-mismatch",
+            "missing",
+            "source-not-read",
+            "stale",
+            "unread",
+        )
+    ):
+        penalty = 0.8
+    else:
+        penalty = {
+            "incomplete-parse-data": 0.08,
+            "structural-coverage-limitations": 0.12,
+            "dynamic-or-unresolved-calls": 0.15,
+            "structural-record-unavailable": 0.5,
+        }.get(code, 0.1)
+    return penalty * (0.5 if severity == "info" else 1.0)
 
 
 def _json_bytes(value: object) -> bytes:

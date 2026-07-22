@@ -15,9 +15,11 @@ from contextforge.application import suggest_repository_context
 from contextforge.cli.main import app
 from contextforge.discovery import (
     DiscoveryBudget,
+    DiscoveryCancelledError,
     DiscoveryMode,
     DiscoveryProtocolError,
     DiscoveryRequest,
+    DiscoverySession,
     DiscoverySourceChangedError,
     FinalContextSelection,
 )
@@ -25,8 +27,10 @@ from contextforge.intelligence import acquire_index_lock, build_structural_index
 from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
     FakeModelProvider,
+    FakeScript,
     InvalidFieldValueIssue,
     ModelRequest,
+    ProviderCancelledError,
     ProviderConfiguration,
     StructuredResponseError,
     WrongFieldTypeIssue,
@@ -379,6 +383,136 @@ def test_indexed_compact_selection_succeeds_on_one_repair(tmp_path: Path) -> Non
     assert result.final_selection.provenance == "model"
     assert result.budget_usage.model_calls == 1
     assert result.budget_usage.provider_http_calls == 2
+
+
+@pytest.mark.parametrize("mode", [DiscoveryMode.INDEXED, DiscoveryMode.HYBRID])
+def test_indexed_and_hybrid_share_compact_selection_contract(
+    tmp_path: Path, mode: DiscoveryMode
+) -> None:
+    snapshot = _indexed_snapshot(tmp_path, count=2)
+    requests: list[ModelRequest] = []
+
+    def responder(request: ModelRequest, _: int) -> str:
+        requests.append(request)
+        return _selection_response(request)
+
+    provider = FakeModelProvider(_configuration(), responder=responder)
+    result = asyncio.run(
+        suggest_repository_context(
+            snapshot,
+            provider,
+            DiscoveryRequest(task="candidate", mode=mode),
+        )
+    )
+
+    assert provider.call_count == 1
+    assert result.budget_usage.model_calls == 1
+    assert set(requests[0].response_schema["properties"]) == {
+        "schema_version",
+        "candidate_ids",
+        "summary",
+    }
+    assert "actions" not in requests[0].response_schema["properties"]
+    assert "tool_schemas" not in requests[0].trusted_code_map_facts
+
+
+def test_hybrid_repeated_validation_fingerprint_stops_after_one_generation(
+    tmp_path: Path,
+) -> None:
+    snapshot = _indexed_snapshot(tmp_path, count=2)
+    invalid = json.dumps(
+        {"schema_version": 1, "summary": "candidate IDs omitted"}
+    )
+    provider = FakeModelProvider(
+        _configuration(max_json_repair_attempts=2), scripts=[invalid] * 10
+    )
+
+    result = asyncio.run(
+        suggest_repository_context(
+            snapshot,
+            provider,
+            DiscoveryRequest(
+                task="candidate",
+                mode=DiscoveryMode.HYBRID,
+                budget=DiscoveryBudget(max_model_calls=100),
+            ),
+        )
+    )
+
+    assert result.final_selection is not None
+    assert result.final_selection.provenance == "deterministic_fallback"
+    assert result.budget_usage.model_calls == 1
+    assert result.budget_usage.provider_http_calls == 3
+    assert provider.call_count == 3
+
+
+def test_hybrid_reuses_selected_source_read_during_deterministic_review(
+    tmp_path: Path,
+) -> None:
+    _indexed_snapshot(tmp_path, count=2)
+    changed = tmp_path / "src" / "candidate_01.py"
+    changed.write_text("CHANGED = True\n", encoding="utf-8")
+    current = scan_repository(tmp_path)
+    clear_recent_records()
+
+    result = asyncio.run(
+        suggest_repository_context(
+            current,
+            FakeModelProvider(
+                _configuration(),
+                responder=lambda request, _: _selection_response(request),
+            ),
+            DiscoveryRequest(task="candidate 00", mode=DiscoveryMode.HYBRID),
+        )
+    )
+
+    verification = [
+        item
+        for item in recent_records()
+        if item.event == "context_suggestion.source_verification_completed"
+    ]
+    assert len(verification) == 2
+    assert result.final_selection is not None
+    assert result.budget_usage.files_read == 1 + len(result.final_selection.selected)
+    assert all(
+        item.data["read_file_count"] == len(result.final_selection.selected)
+        for item in verification
+    )
+
+
+def test_hybrid_provider_cancellation_is_reported_as_cancelled(
+    tmp_path: Path,
+) -> None:
+    snapshot = _indexed_snapshot(tmp_path, count=1)
+    cancellation = asyncio.Event()
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=[
+            FakeScript(
+                ProviderCancelledError("cancelled"),
+                delay_seconds=0.01,
+            )
+        ],
+    )
+    clear_recent_records()
+
+    session = DiscoverySession(
+        snapshot,
+        provider,
+        DiscoveryRequest(task="candidate", mode=DiscoveryMode.HYBRID),
+        cancellation=cancellation,
+    )
+    with pytest.raises(DiscoveryCancelledError) as captured:
+        asyncio.run(session.run())
+
+    assert captured.value.run_record.status == "cancelled"
+    failure = next(
+        item for item in recent_records() if item.event == "context_suggestion.failed"
+    )
+    assert failure.status == "cancelled"
+    assert failure.phase_id == "cancelled"
+    assert failure.error is not None
+    assert failure.error.code == "cancelled"
 
 
 def test_final_verification_resolves_source_read_warning_and_confidence(
