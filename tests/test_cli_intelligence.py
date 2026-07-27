@@ -19,6 +19,7 @@ from contextforge.discovery import (
     FinalContextSelection,
     SelectionReason,
 )
+from contextforge.discovery.renderers import DiscoveryResultFormat
 from contextforge.intelligence import IndexManifestNotFoundError, load_manifest
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 
@@ -357,8 +358,10 @@ def test_context_suggest_explain_adds_technical_details(tmp_path: Path) -> None:
     assert explained.stdout.startswith(concise.stdout.rstrip("\n"))
 
 
-def test_context_suggestion_text_renderer_contract() -> None:
-    selection = FinalContextSelection(
+def _renderer_selection(
+    budget_usage: DiscoveryBudgetUsage | None = None,
+) -> FinalContextSelection:
+    return FinalContextSelection(
         task="Review Unicode output",
         mode=DiscoveryMode.HYBRID,
         source_snapshot_digest="a" * 64,
@@ -387,10 +390,14 @@ def test_context_suggestion_text_renderer_contract() -> None:
             ),
         ),
         confidence=0.625,
-        budget_usage=DiscoveryBudgetUsage(context_bytes=123, context_files=1),
+        budget_usage=budget_usage
+        or DiscoveryBudgetUsage(context_bytes=123, context_files=1),
         run_id="run-output",
     )
 
+
+def test_context_suggestion_text_renderer_contract() -> None:
+    selection = _renderer_selection()
     rendered = render_context_suggestion(selection)
     assert rendered == (
         "ContextForge context suggestion\n"
@@ -406,9 +413,112 @@ def test_context_suggestion_text_renderer_contract() -> None:
         "    related-test-missing\n"
         "  Unknowns:\n"
         "    Terminal color support is unknown.\n"
-        "Performance: selected 1 file (123 bytes); 0 steps, 0 model calls, "
-        "read 0 files (0 bytes).\n"
+        "Performance: selected 1 file (123 bytes); 0 model generations, "
+        "0 provider HTTP calls, read 0 files.\n"
     )
+
+
+def test_context_suggestion_text_omits_zero_optional_counters() -> None:
+    rendered = render_context_suggestion(_renderer_selection())
+
+    assert "repair generation" not in rendered
+    assert "transport attempt" not in rendered
+    assert "provider discovery" not in rendered
+    assert "provider capability" not in rendered
+    assert "source bytes" not in rendered
+    assert "tool-result bytes" not in rendered
+    assert "step" not in rendered
+
+
+def test_context_suggestion_text_shows_nonzero_repair_generations() -> None:
+    selection = _renderer_selection(
+        DiscoveryBudgetUsage(
+            context_bytes=123,
+            context_files=1,
+            model_generations=2,
+            repair_generations=1,
+        )
+    )
+
+    rendered = render_context_suggestion(selection)
+
+    assert (
+        "Performance: selected 1 file (123 bytes); 2 model generations, "
+        "1 repair generation, 0 provider HTTP calls, read 0 files.\n"
+        in rendered
+    )
+
+
+def test_context_suggestion_explain_shows_detailed_counters() -> None:
+    selection = _renderer_selection(
+        DiscoveryBudgetUsage(
+            steps=3,
+            model_generations=2,
+            repair_generations=1,
+            transport_attempts=4,
+            provider_discovery_calls=2,
+            provider_capability_calls=1,
+            total_provider_http_calls=7,
+            files_read=5,
+            source_bytes=456,
+            tool_result_bytes=78,
+            context_bytes=123,
+            context_files=1,
+        )
+    )
+
+    rendered = render_context_suggestion(selection, explain=True)
+
+    assert "Detailed performance counters:\n" in rendered
+    assert "  Discovery steps: 3\n" in rendered
+    assert "  Model generations: 2\n" in rendered
+    assert "  Repair generations: 1\n" in rendered
+    assert "  Transport attempts: 4\n" in rendered
+    assert "  Provider discovery calls: 2\n" in rendered
+    assert "  Provider capability calls: 1\n" in rendered
+    assert "  Total provider HTTP calls: 7\n" in rendered
+    assert "  Files read: 5\n" in rendered
+    assert "  Source bytes: 456\n" in rendered
+    assert "  Tool-result bytes: 78\n" in rendered
+    assert "  Context files: 1\n" in rendered
+    assert "  Context bytes: 123\n" in rendered
+
+
+def test_context_suggestion_json_counters_remain_unchanged() -> None:
+    usage = DiscoveryBudgetUsage(
+        steps=3,
+        model_generations=2,
+        repair_generations=1,
+        transport_attempts=4,
+        provider_discovery_calls=2,
+        provider_capability_calls=1,
+        total_provider_http_calls=7,
+        files_read=5,
+        source_bytes=456,
+        tool_result_bytes=78,
+        context_bytes=123,
+        context_files=1,
+    )
+    selection = _renderer_selection(usage)
+
+    payload = json.loads(
+        render_context_suggestion(
+            selection,
+            output_format=DiscoveryResultFormat.json,
+        )
+    )
+
+    assert payload == selection.model_dump(mode="json")
+    counters = payload["budget_usage"]
+    assert counters["model_generations"] == usage.model_generations
+    assert counters["repair_generations"] == usage.repair_generations
+    assert counters["total_provider_http_calls"] == usage.total_provider_http_calls
+    assert counters["model_calls"] == usage.model_calls
+    assert counters["provider_http_calls"] == usage.provider_http_calls
+
+
+def test_context_suggestion_explain_contract() -> None:
+    selection = _renderer_selection()
     explained = render_context_suggestion(selection, explain=True)
     assert "      Reason: No related test was selected.\n" in explained
     assert (

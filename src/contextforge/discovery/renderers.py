@@ -105,29 +105,45 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
     if not selection.completeness_warnings and not selection.unknowns:
         lines.append("  (none; this is not a proof of completeness)")
     usage = selection.budget_usage
-    lines.append(
+    performance = (
         "Performance: "
         f"selected {usage.context_files} {_plural(usage.context_files, 'file')} "
         f"({usage.context_bytes} bytes); "
-        f"{usage.steps} {_plural(usage.steps, 'step')}, "
         f"{usage.model_generations} model "
-        f"{_plural(usage.model_generations, 'generation')}, "
-        f"{usage.repair_generations} repair "
-        f"{_plural(usage.repair_generations, 'generation')}, "
-        f"{usage.transport_attempts} transport "
-        f"{_plural(usage.transport_attempts, 'attempt')}, "
-        f"{usage.provider_discovery_calls} provider discovery "
-        f"{_plural(usage.provider_discovery_calls, 'call')}, "
-        f"{usage.provider_capability_calls} provider capability "
-        f"{_plural(usage.provider_capability_calls, 'call')}, "
+        f"{_plural(usage.model_generations, 'generation')}"
+    )
+    if usage.repair_generations:
+        performance += (
+            f", {usage.repair_generations} repair "
+            f"{_plural(usage.repair_generations, 'generation')}"
+        )
+    performance += (
+        ", "
         f"{usage.total_provider_http_calls} provider HTTP "
         f"{_plural(usage.total_provider_http_calls, 'call')}, "
-        f"read {usage.files_read} {_plural(usage.files_read, 'file')} "
-        f"({usage.source_bytes} bytes)."
+        f"read {usage.files_read} {_plural(usage.files_read, 'file')}"
+        "."
     )
+    lines.append(performance)
     if explain:
         lines.extend(
             (
+                "Detailed performance counters:",
+                f"  Discovery steps: {usage.steps}",
+                f"  Model generations: {usage.model_generations}",
+                f"  Repair generations: {usage.repair_generations}",
+                f"  Transport attempts: {usage.transport_attempts}",
+                "  Provider discovery calls: "
+                f"{usage.provider_discovery_calls}",
+                "  Provider capability calls: "
+                f"{usage.provider_capability_calls}",
+                "  Total provider HTTP calls: "
+                f"{usage.total_provider_http_calls}",
+                f"  Files read: {usage.files_read}",
+                f"  Source bytes: {usage.source_bytes}",
+                f"  Tool-result bytes: {usage.tool_result_bytes}",
+                f"  Context files: {usage.context_files}",
+                f"  Context bytes: {usage.context_bytes}",
                 "Technical selection details:",
                 f"  Exact confidence: {selection.confidence}",
             )
