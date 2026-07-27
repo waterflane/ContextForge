@@ -165,14 +165,22 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
     lines = [
         "# ContextForge context suggestion",
         "",
-        f"- Discovery mode: {_markdown_code_span(selection.mode.value)}",
-        f"- Estimated size: {selection.budget_usage.context_bytes} bytes",
-        f"- Selected files: {selection.budget_usage.context_files}",
-        f"- Confidence: {selection.confidence:.3f}",
+        "## Task",
         "",
-        "## Selections",
+        _escape_markdown_inline(selection.task),
+        "",
+        "## Discovery Summary",
+        "",
+        _escape_markdown_inline(selection.summary),
+        "",
+        f"- Discovery mode: {_markdown_code_span(selection.mode.value)}",
+        f"- Confidence: {selection.confidence:.3f}",
+        "- Provenance: "
+        f"{_escape_markdown_inline(_provenance_label(selection.provenance))}",
+        "",
+        "## Selected Files",
     ]
-    for item in selection.selected:
+    for rank, item in enumerate(selection.selected, start=1):
         path = item.path or f"[{item.kind}]"
         ranges = (
             "all lines"
@@ -185,35 +193,116 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
         lines.extend(
             (
                 "",
-                f"### {_markdown_code_span(path)}",
+                f"### {rank}. {_markdown_code_span(path)}",
                 "",
                 f"- Lines: {ranges}",
                 f"- Confidence: {confidence}",
                 f"- Reason: {_escape_markdown_inline(item.reason.summary)}",
+                f"- Provenance: {_markdown_code_span(item.reason.discovery_source)}",
             )
         )
-        if explain:
-            lines.append(
-                f"- Source: {_markdown_code_span(item.reason.discovery_source)}"
+
+    additions = tuple(
+        item for item in selection.selected if item.added_by_completeness
+    )
+    lines.extend(("", "## Deterministic Completeness Additions", ""))
+    if additions:
+        lines.extend(
+            f"- {_markdown_code_span(item.path or f'[{item.kind}]')}: "
+            f"{_escape_markdown_inline(item.reason.summary)}"
+            for item in additions
+        )
+    else:
+        lines.append("_(none)_")
+
+    lines.extend(("", "## Warnings", ""))
+    warning_groups = (
+        (
+            "Warnings",
+            tuple(
+                item
+                for item in selection.completeness_warnings
+                if item.severity == "warning"
+            ),
+        ),
+        (
+            "Information",
+            tuple(
+                item
+                for item in selection.completeness_warnings
+                if item.severity == "info"
+            ),
+        ),
+    )
+    any_warnings = False
+    for label, warnings in warning_groups:
+        if not warnings:
+            continue
+        any_warnings = True
+        lines.extend((f"### {label}", ""))
+        lines.extend(
+            f"- {_markdown_code_span(item.code)}: "
+            f"{_escape_markdown_inline(item.message)}"
+            for item in warnings
+        )
+        lines.append("")
+    if selection.unknowns:
+        any_warnings = True
+        lines.extend(("### Unknowns", ""))
+        lines.extend(
+            f"- {_escape_markdown_inline(item)}" for item in selection.unknowns
+        )
+    if not any_warnings:
+        lines.append("_(none; this is not a proof of completeness)_")
+    if lines[-1] == "":
+        lines.pop()
+
+    usage = selection.budget_usage
+    lines.extend(
+        (
+            "",
+            "## Counters",
+            "",
+            f"- Context: {usage.context_files} "
+            f"{_plural(usage.context_files, 'file')}, {usage.context_bytes} bytes; "
+            f"read {usage.files_read} {_plural(usage.files_read, 'file')} and "
+            f"{usage.source_bytes} source bytes; "
+            f"{usage.tool_result_bytes} tool-result bytes",
+            f"- Provider: {usage.model_calls} model "
+            f"{_plural(usage.model_calls, 'call')}, {usage.provider_http_calls} HTTP "
+            f"{_plural(usage.provider_http_calls, 'call')}, {usage.steps} discovery "
+            f"{_plural(usage.steps, 'step')}",
+        )
+    )
+    if explain:
+        lines.extend(("", "## Detailed Explanation", ""))
+        for rank, item in enumerate(selection.selected, start=1):
+            path = item.path or f"[{item.kind}]"
+            selection_type = _escape_markdown_inline(
+                _selection_type_label(item.kind)
+            )
+            exact_confidence = (
+                item.confidence if item.confidence is not None else "unknown"
+            )
+            lines.extend(
+                (
+                    f"### {rank}. {_markdown_code_span(path)}",
+                    "",
+                    f"- Selection type: {selection_type}",
+                    f"- Exact confidence: {exact_confidence}",
+                    f"- Manually pinned: {'yes' if item.manually_pinned else 'no'}",
+                    f"- Model selected: {'yes' if item.model_selected else 'no'}",
+                    "- Added by deterministic completeness review: "
+                    f"{'yes' if item.added_by_completeness else 'no'}",
+                )
             )
             lines.extend(
                 f"- Evidence: {_escape_markdown_inline(value)}"
                 for value in item.reason.evidence
             )
-    lines.extend(("", "## Warnings", ""))
-    if selection.completeness_warnings:
-        lines.extend(
-            f"- {_markdown_code_span(item.code)}: "
-            f"{_escape_markdown_inline(item.message)}"
-            for item in selection.completeness_warnings
-        )
-    else:
-        lines.append("_(none; this is not a proof of completeness)_")
-    if selection.unknowns:
-        lines.extend(("", "## Unknowns", ""))
-        lines.extend(
-            f"- {_escape_markdown_inline(item)}" for item in selection.unknowns
-        )
+            lines.append("")
+        if lines[-1] == "":
+            lines.pop()
     return "\n".join(lines) + "\n"
 
 
