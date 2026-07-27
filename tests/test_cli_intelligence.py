@@ -280,7 +280,84 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
     assert json.loads(suggested.stdout)["mode"] == "hybrid"
 
 
-def test_context_suggestion_table_renderer_contract() -> None:
+def _invoke_focused_suggestion(tmp_path: Path, *arguments: str) -> Result:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    return _invoke(
+        "--log-level",
+        "quiet",
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "Review run",
+        "--provider",
+        "fake",
+        *arguments,
+    )
+
+
+def test_context_suggest_defaults_to_text(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(tmp_path, "--progress", "never")
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith(
+        "ContextForge context suggestion\nTask: Review run\n"
+    )
+    assert "Confidence:" in result.stdout and "%" in result.stdout
+    assert "Provenance:" in result.stdout
+    assert "Selected files:" in result.stdout
+    assert "Warnings:" in result.stdout
+    assert "Performance:" in result.stdout
+
+
+def test_context_suggest_json_remains_valid_json(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "json", "--progress", "never"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["task"] == "Review run"
+
+
+def test_context_suggest_explicit_text_is_deterministic(tmp_path: Path) -> None:
+    first = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+    second = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+
+    assert first.exit_code == second.exit_code == 0
+    assert first.stdout == second.stdout
+
+
+def test_context_suggest_progress_stays_on_stderr(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "always"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Suggesting context:" in _plain(result.stderr)
+    assert "Suggesting context:" not in result.stdout
+    assert result.stdout.startswith("ContextForge context suggestion\n")
+
+
+def test_context_suggest_explain_adds_technical_details(tmp_path: Path) -> None:
+    concise = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+    explained = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--explain", "--progress", "never"
+    )
+
+    assert concise.exit_code == explained.exit_code == 0
+    assert "Technical selection details:" not in concise.stdout
+    assert "Technical selection details:" in explained.stdout
+    assert "Discovery source:" in explained.stdout
+    assert explained.stdout.startswith(concise.stdout.rstrip("\n"))
+
+
+def test_context_suggestion_text_renderer_contract() -> None:
     selection = FinalContextSelection(
         task="Review Unicode output",
         mode=DiscoveryMode.HYBRID,
@@ -317,23 +394,30 @@ def test_context_suggestion_table_renderer_contract() -> None:
     rendered = render_context_suggestion(selection)
     assert rendered == (
         "ContextForge context suggestion\n"
+        "Task: Review Unicode output\n"
         "Discovery mode: hybrid\n"
-        "Estimated size: 123 bytes\n"
-        "Selected files: 1\n"
-        "Confidence: 0.625\n"
-        "Selections:\n"
-        "  src/app.py | 2-4 | confidence 0.750\n"
+        "Confidence: 62.5%\n"
+        "Provenance: model-guided selection\n"
+        "Selected files:\n"
+        "  src/app.py (2-4, 75% confidence)\n"
         "    reason: Handles the requested output.\n"
         "Warnings:\n"
-        "  related-test-missing: No related test was selected.\n"
-        "Unknowns:\n"
-        "  Terminal color support is unknown.\n"
+        "  Warnings:\n"
+        "    No related test was selected.\n"
+        "  Unknowns:\n"
+        "    Terminal color support is unknown.\n"
+        "Performance: selected 1 file (123 bytes); 0 steps, 0 model calls, "
+        "read 0 files (0 bytes).\n"
     )
-    assert render_context_suggestion(selection, explain=True) == rendered.replace(
-        "Warnings:\n",
-        "    source: model-tool:add_to_context\n"
-        "    evidence: Defines render_output\n"
-        "Warnings:\n",
+    assert render_context_suggestion(selection, explain=True) == rendered + (
+        "Technical selection details:\n"
+        "  Exact confidence: 0.625\n"
+        "  src/app.py:\n"
+        "    Selection type: line ranges\n"
+        "    Exact confidence: 0.75\n"
+        "    Discovery source: model-tool:add_to_context\n"
+        f"    Verified source SHA-256: {'b' * 64}\n"
+        "    Evidence: Defines render_output\n"
     )
 
 

@@ -68,13 +68,15 @@ def test_all_formats_render_the_same_validated_selection() -> None:
         )
         for output_format in DiscoveryResultFormat
     }
-    assert "src/app.py | 2-4 | confidence 0.750" in rendered[
-        DiscoveryResultFormat.text
-    ]
+    assert (
+        "src/app.py (2-4, 75% confidence)\n"
+        "    reason: Handles *formatted* output."
+        in rendered[DiscoveryResultFormat.text]
+    )
+    assert "Exact confidence: 0.625" in rendered[DiscoveryResultFormat.text]
+    assert "candidate:app" not in rendered[DiscoveryResultFormat.text]
     assert "### `src/app.py`" in rendered[DiscoveryResultFormat.markdown]
-    assert r"Handles \*formatted\* output\." in rendered[
-        DiscoveryResultFormat.markdown
-    ]
+    assert r"Handles \*formatted\* output\." in rendered[DiscoveryResultFormat.markdown]
     assert json.loads(rendered[DiscoveryResultFormat.json]) == selection.model_dump(
         mode="json"
     )

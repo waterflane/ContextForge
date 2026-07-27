@@ -75,6 +75,7 @@ class DiscoveryChoice(StrEnum):
 
 
 class SuggestFormat(StrEnum):
+    text = "text"
     table = "table"
     markdown = "markdown"
     json = "json"
@@ -141,7 +142,7 @@ def suggest_context(
     output_format: Annotated[
         SuggestFormat,
         typer.Option("--format", help="Output representation.", case_sensitive=False),
-    ] = SuggestFormat.table,
+    ] = SuggestFormat.text,
     explain: Annotated[
         bool,
         typer.Option("--explain", help="Include detailed selection provenance."),
@@ -219,6 +220,7 @@ def suggest_context(
         if selection is None:
             raise RuntimeError("complete discovery returned no final selection")
         render_format = {
+            SuggestFormat.text: DiscoveryResultFormat.text,
             SuggestFormat.table: DiscoveryResultFormat.text,
             SuggestFormat.markdown: DiscoveryResultFormat.markdown,
             SuggestFormat.json: DiscoveryResultFormat.json,
