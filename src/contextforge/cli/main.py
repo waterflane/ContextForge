@@ -8,6 +8,7 @@ from typing import Annotated, Never
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
 from contextforge.cli.diagnostics_commands import diagnostics_app
 from contextforge.cli.intelligence_commands import index_app
@@ -67,6 +68,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(context_app, name="context")
+app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(index_app, name="index")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(diagnostics_app, name="diagnostics")
@@ -159,7 +161,7 @@ def cli(
             log_format=None if log_format is None else log_format.value,
             log_file=log_file,
             component_filter=selected_components,
-            no_log_file=no_log_file,
+            no_log_file=no_log_file or ctx.invoked_subcommand == "benchmark",
             no_color=no_color,
             verbosity=verbose,
         )

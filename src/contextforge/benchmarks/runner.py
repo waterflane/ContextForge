@@ -33,19 +33,22 @@ from contextforge.discovery import (
     DiscoveryRunRecord,
 )
 from contextforge.models import ModelProvider
-from contextforge.progress import ProgressEvent
+from contextforge.progress import ProgressEvent, ProgressObserver
 
 
 class _RunMetrics:
     """Collect non-domain metrics exposed by the normal application workflow."""
 
-    def __init__(self) -> None:
+    def __init__(self, progress: ProgressObserver | None) -> None:
         self.files_considered = 0
+        self.progress = progress
 
     def observe(self, event: ProgressEvent) -> None:
         value = event.metadata.get("structural_files")
         if type(value) is int:
             self.files_considered = max(self.files_considered, value)
+        if self.progress is not None:
+            self.progress(event)
 
 
 async def run_discovery_benchmark(
@@ -54,6 +57,7 @@ async def run_discovery_benchmark(
     provider: ModelProvider,
     *,
     clock: Callable[[], float] = time.monotonic,
+    progress: ProgressObserver | None = None,
 ) -> BenchmarkResult:
     """Execute every configured task and retain a canonical result for each run."""
 
@@ -71,6 +75,7 @@ async def run_discovery_benchmark(
                         repetition,
                         provider,
                         clock=clock,
+                        progress=progress,
                     )
                 )
     canonical_runs = tuple(runs)
@@ -91,8 +96,9 @@ async def _run_once(
     provider: ModelProvider,
     *,
     clock: Callable[[], float],
+    progress: ProgressObserver | None,
 ) -> BenchmarkRunResult:
-    metrics = _RunMetrics()
+    metrics = _RunMetrics(progress)
     started = clock()
     run_record: DiscoveryRunRecord | None = None
     failure: BenchmarkFailure | None = None
@@ -258,6 +264,9 @@ def _evaluate_expectations(
     covered_facets = tuple(
         facet for facet in expected_facets if _facet_covered(facet, candidates)
     )
+    missing_facets = tuple(
+        facet for facet in expected_facets if facet not in covered_facets
+    )
     unexpected_warnings = tuple(sorted(observed_warnings - allowed_warnings))
     missing_warnings = tuple(sorted(required_warnings - observed_warnings))
     passed = not (
@@ -265,6 +274,7 @@ def _evaluate_expectations(
         or selected_forbidden
         or unexpected_warnings
         or missing_warnings
+        or missing_facets
         or any(not group.passed for group in any_groups)
     )
     return BenchmarkExpectationEvaluation(
@@ -276,6 +286,7 @@ def _evaluate_expectations(
         selected_forbidden_files=selected_forbidden,
         expected_facets=expected_facets,
         covered_expected_facets=covered_facets,
+        missing_expected_facets=missing_facets,
         unexpected_warnings=unexpected_warnings,
         missing_required_warnings=missing_warnings,
         passed=passed,

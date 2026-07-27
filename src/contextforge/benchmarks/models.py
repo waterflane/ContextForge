@@ -293,6 +293,7 @@ class BenchmarkExpectationEvaluation(BenchmarkModel):
     selected_forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
     covered_expected_facets: tuple[ExpectedFacet, ...] = ()
+    missing_expected_facets: tuple[ExpectedFacet, ...] = ()
     unexpected_warnings: tuple[WarningCode, ...] = ()
     missing_required_warnings: tuple[WarningCode, ...] = ()
     passed: bool
