@@ -17,7 +17,6 @@ from contextforge.application import (
     canonical_json,
     create_automatic_handoff,
     load_task_handoff,
-    render_context_suggestion,
     render_handoff_review,
     suggest_repository_context,
 )
@@ -42,7 +41,11 @@ from contextforge.context import (
     render_context_package_json,
     render_context_package_markdown,
 )
-from contextforge.discovery import DiscoveryError
+from contextforge.discovery import (
+    DiscoveryError,
+    DiscoveryResultFormat,
+    render_context_suggestion,
+)
 from contextforge.filesystem import FileTooLargeError, StableReadError, read_file_stably
 from contextforge.git import GitDiffRequest
 from contextforge.handoff import ContextMaterializationError, PromptCompileError
@@ -73,6 +76,7 @@ class DiscoveryChoice(StrEnum):
 
 class SuggestFormat(StrEnum):
     table = "table"
+    markdown = "markdown"
     json = "json"
 
 
@@ -214,10 +218,15 @@ def suggest_context(
         selection = run.final_selection
         if selection is None:
             raise RuntimeError("complete discovery returned no final selection")
-        representation = (
-            canonical_json(selection.model_dump(mode="json"))
-            if output_format is SuggestFormat.json
-            else render_context_suggestion(selection, explain=explain)
+        render_format = {
+            SuggestFormat.table: DiscoveryResultFormat.text,
+            SuggestFormat.markdown: DiscoveryResultFormat.markdown,
+            SuggestFormat.json: DiscoveryResultFormat.json,
+        }[output_format]
+        representation = render_context_suggestion(
+            selection,
+            output_format=render_format,
+            explain=explain,
         )
     except (
         FileNotFoundError,

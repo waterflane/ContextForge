@@ -20,8 +20,8 @@ from contextforge.discovery import (
     DiscoveryMode,
     DiscoveryRequest,
     DiscoveryRunRecord,
-    FinalContextSelection,
     discover_repository,
+    render_context_suggestion,
 )
 from contextforge.filesystem import FileTooLargeError, StableReadError, read_file_stably
 from contextforge.git import GitDiffRequest
@@ -986,53 +986,6 @@ def canonical_json(value: object) -> str:
         )
         + "\n"
     )
-
-
-def render_context_suggestion(
-    selection: FinalContextSelection,
-    *,
-    explain: bool = False,
-) -> str:
-    """Render a stable table-like discovery review."""
-
-    lines = [
-        "ContextForge context suggestion",
-        f"Discovery mode: {selection.mode.value}",
-        f"Estimated size: {selection.budget_usage.context_bytes} bytes",
-        f"Selected files: {selection.budget_usage.context_files}",
-        f"Confidence: {selection.confidence:.3f}",
-        "Selections:",
-    ]
-    for item in selection.selected:
-        path = item.path or f"[{item.kind}]"
-        ranges = (
-            "all lines"
-            if not item.ranges
-            else ", ".join(
-                f"{value.start_line}-{value.end_line}" for value in item.ranges
-            )
-        )
-        confidence = "unknown" if item.confidence is None else f"{item.confidence:.3f}"
-        lines.extend(
-            (
-                f"  {path} | {ranges} | confidence {confidence}",
-                f"    reason: {item.reason.summary}",
-            )
-        )
-        if explain:
-            lines.append(f"    source: {item.reason.discovery_source}")
-            lines.extend(f"    evidence: {value}" for value in item.reason.evidence)
-    lines.append("Warnings:")
-    if selection.completeness_warnings:
-        lines.extend(
-            f"  {item.code}: {item.message}" for item in selection.completeness_warnings
-        )
-    else:
-        lines.append("  (none; this is not a proof of completeness)")
-    if selection.unknowns:
-        lines.append("Unknowns:")
-        lines.extend(f"  {item}" for item in selection.unknowns)
-    return "\n".join(lines) + "\n"
 
 
 def load_task_handoff(path: Path) -> TaskHandoff:
