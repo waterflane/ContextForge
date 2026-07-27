@@ -73,13 +73,46 @@ class DiscoveryBudgetUsage(DiscoveryModel):
     """Authoritative byte and operation charges accumulated by the engine."""
 
     steps: NonNegativeInt = 0
+    # Compatibility field: initial model requests initiated, including ones that
+    # are rejected locally or fail before returning model content.
     model_calls: NonNegativeInt = 0
+    model_generations: NonNegativeInt = 0
+    repair_generations: NonNegativeInt = 0
+    provider_discovery_calls: NonNegativeInt = 0
+    provider_capability_calls: NonNegativeInt = 0
+    transport_attempts: NonNegativeInt = 0
+    total_provider_http_calls: NonNegativeInt = 0
+    # Compatibility alias for total_provider_http_calls.
     provider_http_calls: NonNegativeInt = 0
     files_read: NonNegativeInt = 0
     source_bytes: NonNegativeInt = 0
     tool_result_bytes: NonNegativeInt = 0
     context_bytes: NonNegativeInt = 0
     context_files: NonNegativeInt = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_provider_http_calls(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "total_provider_http_calls" not in normalized:
+            normalized["total_provider_http_calls"] = normalized.get(
+                "provider_http_calls", 0
+            )
+        if "provider_http_calls" not in normalized:
+            normalized["provider_http_calls"] = normalized[
+                "total_provider_http_calls"
+            ]
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_provider_http_calls(self) -> DiscoveryBudgetUsage:
+        if self.provider_http_calls != self.total_provider_http_calls:
+            raise ValueError(
+                "provider_http_calls must equal total_provider_http_calls"
+            )
+        return self
 
 
 class DiscoveryRequest(DiscoveryModel):

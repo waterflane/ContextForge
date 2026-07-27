@@ -110,7 +110,18 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
         f"selected {usage.context_files} {_plural(usage.context_files, 'file')} "
         f"({usage.context_bytes} bytes); "
         f"{usage.steps} {_plural(usage.steps, 'step')}, "
-        f"{usage.model_calls} model {_plural(usage.model_calls, 'call')}, "
+        f"{usage.model_generations} model "
+        f"{_plural(usage.model_generations, 'generation')}, "
+        f"{usage.repair_generations} repair "
+        f"{_plural(usage.repair_generations, 'generation')}, "
+        f"{usage.transport_attempts} transport "
+        f"{_plural(usage.transport_attempts, 'attempt')}, "
+        f"{usage.provider_discovery_calls} provider discovery "
+        f"{_plural(usage.provider_discovery_calls, 'call')}, "
+        f"{usage.provider_capability_calls} provider capability "
+        f"{_plural(usage.provider_capability_calls, 'call')}, "
+        f"{usage.total_provider_http_calls} provider HTTP "
+        f"{_plural(usage.total_provider_http_calls, 'call')}, "
         f"read {usage.files_read} {_plural(usage.files_read, 'file')} "
         f"({usage.source_bytes} bytes)."
     )
@@ -295,10 +306,15 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
             f"read {usage.files_read} {_plural(usage.files_read, 'file')} and "
             f"{usage.source_bytes} source bytes; "
             f"{usage.tool_result_bytes} tool-result bytes",
-            f"- Provider: {usage.model_calls} model "
-            f"{_plural(usage.model_calls, 'call')}, {usage.provider_http_calls} HTTP "
-            f"{_plural(usage.provider_http_calls, 'call')}, {usage.steps} discovery "
-            f"{_plural(usage.steps, 'step')}",
+            f"- Provider generations: {usage.model_generations} model, "
+            f"{usage.repair_generations} repair; legacy model requests: "
+            f"{usage.model_calls}",
+            f"- Provider HTTP: {usage.transport_attempts} transport attempts, "
+            f"{usage.provider_discovery_calls} discovery calls, "
+            f"{usage.provider_capability_calls} capability calls, "
+            f"{usage.total_provider_http_calls} total; legacy "
+            f"provider_http_calls: {usage.provider_http_calls}; {usage.steps} "
+            f"discovery {_plural(usage.steps, 'step')}",
         )
     )
     if explain:

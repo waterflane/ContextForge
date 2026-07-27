@@ -1129,9 +1129,10 @@ class DiscoverySession:
         except ModelProviderError as exc:
             diagnostic = exc.diagnostic
             if diagnostic is not None:
-                self.budget.provider_http_calls += diagnostic.total_provider_calls
+                self.budget.charge_provider(diagnostic)
             self._provider_request_dispatched = bool(
-                diagnostic is not None and diagnostic.total_provider_calls > 0
+                diagnostic is not None
+                and diagnostic.total_provider_http_calls > 0
             )
             if isinstance(exc, StructuredResponseError):
                 codes = {item.code for item in exc.issues}
@@ -1146,7 +1147,7 @@ class DiscoverySession:
                 self._stage = "provider_wait"
             raise
         if response.diagnostic is not None:
-            self.budget.provider_http_calls += response.diagnostic.total_provider_calls
+            self.budget.charge_provider(response.diagnostic)
         self._stage = "internal_conversion"
         if isinstance(response.value, IndexedContextSelection):
             self._stage = "response_validation"

@@ -437,6 +437,12 @@ def test_hybrid_repeated_validation_fingerprint_stops_after_one_generation(
     assert result.final_selection.provenance == "deterministic_fallback"
     assert result.budget_usage.model_calls == 1
     assert result.budget_usage.provider_http_calls == 3
+    assert result.budget_usage.model_generations == 1
+    assert result.budget_usage.repair_generations == 2
+    assert result.budget_usage.provider_discovery_calls == 0
+    assert result.budget_usage.provider_capability_calls == 0
+    assert result.budget_usage.transport_attempts == 3
+    assert result.budget_usage.total_provider_http_calls == 3
     assert provider.call_count == 3
 
 

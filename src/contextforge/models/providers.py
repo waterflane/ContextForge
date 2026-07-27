@@ -246,10 +246,41 @@ class ProviderDiagnostic(ProviderModel):
     transport_max_attempts: int = Field(default=1, ge=1, strict=True)
     json_repair_attempt: int = Field(default=0, ge=0, strict=True)
     json_repair_max_attempts: int = Field(default=0, ge=0, strict=True)
+    model_generations: int = Field(default=0, ge=0, strict=True)
+    repair_generations: int = Field(default=0, ge=0, strict=True)
+    provider_discovery_calls: int = Field(default=0, ge=0, strict=True)
+    provider_capability_calls: int = Field(default=0, ge=0, strict=True)
+    transport_attempts: int = Field(default=0, ge=0, strict=True)
+    total_provider_http_calls: int = Field(default=1, ge=0, strict=True)
+    # Compatibility alias: historically this meant every provider HTTP call.
     total_provider_calls: int = Field(default=1, ge=0, strict=True)
     duration_ms: int | None = Field(default=None, ge=0, strict=True)
     response_validation: Literal["valid", "invalid", "not_received"]
     usage: ModelUsage | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_total_provider_calls(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "total_provider_http_calls" not in normalized:
+            normalized["total_provider_http_calls"] = normalized.get(
+                "total_provider_calls", 1
+            )
+        if "total_provider_calls" not in normalized:
+            normalized["total_provider_calls"] = normalized[
+                "total_provider_http_calls"
+            ]
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_total_provider_calls(self) -> ProviderDiagnostic:
+        if self.total_provider_calls != self.total_provider_http_calls:
+            raise ValueError(
+                "total_provider_calls must equal total_provider_http_calls"
+            )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,11 +607,23 @@ class ProviderTransportResponse:
     text: str | bytes
     finish_reason: str | None = None
     usage: ModelUsage | None = None
+    provider_discovery_calls: int = 0
+    provider_capability_calls: int = 0
+    transport_attempts: int = 1
+    # Compatibility field: this remains the total number of provider HTTP calls.
     provider_http_calls: int = 1
 
     def __post_init__(self) -> None:
         if type(self.provider_http_calls) is not int or self.provider_http_calls < 1:
             raise ValueError("provider_http_calls must be a positive integer")
+        for name in (
+            "provider_discovery_calls",
+            "provider_capability_calls",
+            "transport_attempts",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,7 +793,26 @@ class ModelProviderError(RuntimeError):
         self, message: str, *, diagnostic: ProviderDiagnostic | None = None
     ) -> None:
         self.diagnostic = diagnostic
+        self.provider_discovery_calls = 0
+        self.provider_capability_calls = 0
+        self.transport_attempts = 1
+        self.total_provider_http_calls = 1
         super().__init__(message)
+
+    def add_http_accounting(
+        self,
+        *,
+        provider_discovery_calls: int = 0,
+        provider_capability_calls: int = 0,
+        transport_attempts: int = 0,
+        total_provider_http_calls: int = 0,
+    ) -> None:
+        """Attach safe request counts to a provider failure for retry accounting."""
+
+        self.provider_discovery_calls += provider_discovery_calls
+        self.provider_capability_calls += provider_capability_calls
+        self.transport_attempts += transport_attempts
+        self.total_provider_http_calls += total_provider_http_calls
 
 
 class StructuredResponseError(ModelProviderError):
@@ -1016,7 +1078,12 @@ class ProviderRuntime:
         repair_max = self.configuration.max_json_repair_attempts
         transport_attempt = 1
         repair_attempt = 0
-        total_calls = 0
+        model_generations = 0
+        repair_generations = 0
+        provider_discovery_calls = 0
+        provider_capability_calls = 0
+        transport_attempts = 0
+        total_http_calls = 0
         budget = estimate_request_context(
             request,
             self.configuration,
@@ -1044,7 +1111,14 @@ class ProviderRuntime:
                 "transport_max_attempts": transport_max,
                 "json_repair_attempt": repair_attempt,
                 "json_repair_max_attempts": repair_max,
-                "total_provider_calls": total_calls,
+                "model_generations": model_generations,
+                "repair_generations": repair_generations,
+                "provider_discovery_calls": provider_discovery_calls,
+                "provider_capability_calls": provider_capability_calls,
+                "transport_attempts": transport_attempts,
+                "total_provider_http_calls": total_http_calls,
+                # Compatibility alias retained with its historical meaning.
+                "total_provider_calls": total_http_calls,
                 "repair_strategy": active_request.metadata.get(
                     "repair_strategy", "initial"
                 ),
@@ -1145,6 +1219,12 @@ class ProviderRuntime:
                 transport_max_attempts=transport_max,
                 json_repair_attempt=0,
                 json_repair_max_attempts=repair_max,
+                model_generations=0,
+                repair_generations=0,
+                provider_discovery_calls=0,
+                provider_capability_calls=0,
+                transport_attempts=0,
+                total_provider_http_calls=0,
                 total_provider_calls=0,
             )
             progress.report(
@@ -1234,13 +1314,21 @@ class ProviderRuntime:
                     timeout=timeout,
                 )
                 try:
-                    total_calls += 1
+                    transport_attempts += 1
+                    total_http_calls += 1
                     raw = await _await_bounded(
                         call(active_request, credential),
                         cancellation=cancellation,
                         timeout=timeout,
                     )
-                    total_calls += raw.provider_http_calls - 1
+                    transport_attempts += raw.transport_attempts - 1
+                    provider_discovery_calls += raw.provider_discovery_calls
+                    provider_capability_calls += raw.provider_capability_calls
+                    total_http_calls += raw.provider_http_calls - 1
+                    if repair_attempt == 0:
+                        model_generations += 1
+                    else:
+                        repair_generations += 1
                 finally:
                     self._semaphore.release()
                 response_size = _response_size(raw.text)
@@ -1338,7 +1426,13 @@ class ProviderRuntime:
                     transport_max_attempts=transport_max,
                     json_repair_attempt=repair_attempt,
                     json_repair_max_attempts=repair_max,
-                    total_provider_calls=total_calls,
+                    model_generations=model_generations,
+                    repair_generations=repair_generations,
+                    provider_discovery_calls=provider_discovery_calls,
+                    provider_capability_calls=provider_capability_calls,
+                    transport_attempts=transport_attempts,
+                    total_provider_http_calls=total_http_calls,
+                    total_provider_calls=total_http_calls,
                 )
                 emit(
                     "schema",
@@ -1398,7 +1492,7 @@ class ProviderRuntime:
                 )
                 _log_request_metrics(
                     request,
-                    attempt=total_calls,
+                    attempt=total_http_calls,
                     duration_seconds=max(0.0, self._clock() - started),
                     validation="valid",
                     usage=raw.usage,
@@ -1426,7 +1520,13 @@ class ProviderRuntime:
                     transport_max_attempts=transport_max,
                     json_repair_attempt=repair_attempt,
                     json_repair_max_attempts=repair_max,
-                    total_provider_calls=total_calls,
+                    model_generations=model_generations,
+                    repair_generations=repair_generations,
+                    provider_discovery_calls=provider_discovery_calls,
+                    provider_capability_calls=provider_capability_calls,
+                    transport_attempts=transport_attempts,
+                    total_provider_http_calls=total_http_calls,
+                    total_provider_calls=total_http_calls,
                 )
                 progress.cancel(message="Provider request cancelled.")
                 raise
@@ -1437,6 +1537,12 @@ class ProviderRuntime:
                 error.__cause__ = exc
             except ModelProviderError as exc:
                 error = _redacted_provider_error(exc, secrets)
+
+            if raw is None:
+                transport_attempts += error.transport_attempts - 1
+                provider_discovery_calls += error.provider_discovery_calls
+                provider_capability_calls += error.provider_capability_calls
+                total_http_calls += error.total_provider_http_calls - 1
 
             code, message = provider_error_details(error)
             if isinstance(error, StructuredResponseError):
@@ -1627,7 +1733,13 @@ class ProviderRuntime:
                 transport_max_attempts=transport_max,
                 json_repair_attempt=repair_attempt,
                 json_repair_max_attempts=repair_max,
-                total_provider_calls=total_calls,
+                model_generations=model_generations,
+                repair_generations=repair_generations,
+                provider_discovery_calls=provider_discovery_calls,
+                provider_capability_calls=provider_capability_calls,
+                transport_attempts=transport_attempts,
+                total_provider_http_calls=total_http_calls,
+                total_provider_calls=total_http_calls,
             )
             exhausted = isinstance(error, StructuredResponseError)
             progress.report(
@@ -3054,6 +3166,12 @@ def _diagnostic(
     transport_max_attempts: int = 1,
     json_repair_attempt: int = 0,
     json_repair_max_attempts: int = 0,
+    model_generations: int = 0,
+    repair_generations: int = 0,
+    provider_discovery_calls: int = 0,
+    provider_capability_calls: int = 0,
+    transport_attempts: int = 0,
+    total_provider_http_calls: int = 1,
     total_provider_calls: int = 1,
 ) -> ProviderDiagnostic:
     elapsed = max(0.0, clock() - started)
@@ -3066,6 +3184,12 @@ def _diagnostic(
         transport_max_attempts=transport_max_attempts,
         json_repair_attempt=json_repair_attempt,
         json_repair_max_attempts=json_repair_max_attempts,
+        model_generations=model_generations,
+        repair_generations=repair_generations,
+        provider_discovery_calls=provider_discovery_calls,
+        provider_capability_calls=provider_capability_calls,
+        transport_attempts=transport_attempts,
+        total_provider_http_calls=total_provider_http_calls,
         total_provider_calls=total_provider_calls,
         duration_ms=round(elapsed * 1_000),
         response_validation=validation,
@@ -3232,8 +3356,16 @@ def _redacted_provider_error(
     if message == str(error):
         return error
     if isinstance(error, StructuredResponseError):
-        return StructuredResponseError(message, issues=error.issues)
-    return type(error)(message)
+        redacted: ModelProviderError = StructuredResponseError(
+            message, issues=error.issues
+        )
+    else:
+        redacted = type(error)(message)
+    redacted.provider_discovery_calls = error.provider_discovery_calls
+    redacted.provider_capability_calls = error.provider_capability_calls
+    redacted.transport_attempts = error.transport_attempts
+    redacted.total_provider_http_calls = error.total_provider_http_calls
+    return redacted
 
 
 __all__ = [

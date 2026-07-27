@@ -55,7 +55,12 @@ OpenAICompatibleTransport = Callable[
 
 
 def _with_provider_http_calls(
-    response: ProviderTransportResponse, additional_calls: int
+    response: ProviderTransportResponse,
+    additional_calls: int,
+    *,
+    discovery_calls: int = 0,
+    capability_calls: int = 0,
+    transport_attempts: int = 0,
 ) -> ProviderTransportResponse:
     if additional_calls == 0:
         return response
@@ -63,6 +68,13 @@ def _with_provider_http_calls(
         text=response.text,
         finish_reason=response.finish_reason,
         usage=response.usage,
+        provider_discovery_calls=(
+            response.provider_discovery_calls + discovery_calls
+        ),
+        provider_capability_calls=(
+            response.provider_capability_calls + capability_calls
+        ),
+        transport_attempts=response.transport_attempts + transport_attempts,
         provider_http_calls=response.provider_http_calls + additional_calls,
     )
 
@@ -148,10 +160,48 @@ class OpenAICompatibleModelProvider:
     async def _complete_once(
         self, request: ModelRequest, credential: SecretStr | None
     ) -> ProviderTransportResponse:
-        verification_calls = await self._ensure_model_available(credential)
+        try:
+            verification_calls = await self._ensure_model_available(credential)
+        except (
+            ProviderRequestError,
+            ProviderUnavailableError,
+            ProviderTimeoutError,
+        ) as exc:
+            exc.provider_discovery_calls = 1
+            exc.provider_capability_calls = 0
+            exc.transport_attempts = 0
+            exc.total_provider_http_calls = 1
+            raise
+        try:
+            return await self._complete_verified_once(
+                request, credential, verification_calls
+            )
+        except (
+            ProviderRequestError,
+            ProviderUnavailableError,
+            ProviderTimeoutError,
+            StructuredOutputJsonObjectUnsupportedError,
+            StructuredOutputSchemaUnsupportedError,
+        ) as exc:
+            exc.add_http_accounting(
+                provider_discovery_calls=verification_calls,
+                total_provider_http_calls=verification_calls,
+            )
+            raise
+
+    async def _complete_verified_once(
+        self,
+        request: ModelRequest,
+        credential: SecretStr | None,
+        verification_calls: int,
+    ) -> ProviderTransportResponse:
         if request.schema_mode == "json_object":
             response = await self._complete_json_object_or_plain(request, credential)
-            return _with_provider_http_calls(response, verification_calls)
+            return _with_provider_http_calls(
+                response,
+                verification_calls,
+                discovery_calls=verification_calls,
+            )
         if request.schema_mode == "plain_json":
             mode = (
                 "json_object"
@@ -159,12 +209,20 @@ class OpenAICompatibleModelProvider:
                 else "plain_json"
             )
             response = await self._complete_in_mode(request, credential, mode=mode)
-            return _with_provider_http_calls(response, verification_calls)
+            return _with_provider_http_calls(
+                response,
+                verification_calls,
+                discovery_calls=verification_calls,
+            )
         if self._schema_support == "unsupported":
             response = await self._complete_in_mode(
                 request, credential, mode="plain_json"
             )
-            return _with_provider_http_calls(response, verification_calls)
+            return _with_provider_http_calls(
+                response,
+                verification_calls,
+                discovery_calls=verification_calls,
+            )
         try:
             response = await self._complete_in_mode(
                 request, credential, mode="json_schema"
@@ -173,13 +231,28 @@ class OpenAICompatibleModelProvider:
             async with self._structured_mode_lock:
                 self._schema_support = "unsupported"
             self._emit_mode_rejection(request, exc, fallback="plain_json")
-            response = await self._complete_in_mode(
-                request, credential, mode="plain_json"
+            try:
+                response = await self._complete_in_mode(
+                    request, credential, mode="plain_json"
+                )
+            except (ProviderRequestError, ProviderUnavailableError) as fallback_error:
+                fallback_error.add_http_accounting(
+                    transport_attempts=1, total_provider_http_calls=1
+                )
+                raise
+            return _with_provider_http_calls(
+                response,
+                verification_calls + 1,
+                discovery_calls=verification_calls,
+                transport_attempts=1,
             )
-            return _with_provider_http_calls(response, verification_calls + 1)
         async with self._structured_mode_lock:
             self._schema_support = "supported"
-        return _with_provider_http_calls(response, verification_calls)
+        return _with_provider_http_calls(
+            response,
+            verification_calls,
+            discovery_calls=verification_calls,
+        )
 
     async def _complete_json_object_or_plain(
         self, request: ModelRequest, credential: SecretStr | None
@@ -196,13 +269,22 @@ class OpenAICompatibleModelProvider:
             async with self._structured_mode_lock:
                 self._json_object_support = "unsupported"
             self._emit_mode_rejection(request, exc, fallback="plain_json")
-            response = await self._complete_in_mode(
-                request, credential, mode="plain_json"
-            )
+            try:
+                response = await self._complete_in_mode(
+                    request, credential, mode="plain_json"
+                )
+            except (ProviderRequestError, ProviderUnavailableError) as fallback_error:
+                fallback_error.add_http_accounting(
+                    transport_attempts=1, total_provider_http_calls=1
+                )
+                raise
             return ProviderTransportResponse(
                 text=response.text,
                 finish_reason=response.finish_reason,
                 usage=response.usage,
+                provider_discovery_calls=response.provider_discovery_calls,
+                provider_capability_calls=response.provider_capability_calls,
+                transport_attempts=response.transport_attempts + 1,
                 provider_http_calls=response.provider_http_calls + 1,
             )
         async with self._structured_mode_lock:
@@ -357,6 +439,9 @@ class OpenAICompatibleModelProvider:
             data={
                 "http_method": method,
                 "endpoint": sanitize_url(url),
+                "provider_call_kind": (
+                    "provider_discovery" if method == "GET" else "model_transport"
+                ),
                 "request_body_bytes": 0 if body is None else len(body),
                 "authorization_configured": credential is not None,
             },

@@ -116,6 +116,7 @@ class OllamaModelProvider:
             data={
                 "http_method": "POST",
                 "endpoint": sanitize_url(self.configuration.endpoint),
+                "provider_call_kind": "model_transport",
                 "request_body_bytes": len(payload),
                 "authorization_configured": credential is not None,
             },

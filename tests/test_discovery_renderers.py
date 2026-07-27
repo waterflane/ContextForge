@@ -131,7 +131,10 @@ def test_markdown_report_has_an_exact_stable_concise_shape() -> None:
         "\n"
         "- Context: 1 file, 123 bytes; read 0 files and 0 source bytes; "
         "0 tool-result bytes\n"
-        "- Provider: 0 model calls, 0 HTTP calls, 0 discovery steps\n"
+        "- Provider generations: 0 model, 0 repair; legacy model requests: 0\n"
+        "- Provider HTTP: 0 transport attempts, 0 discovery calls, "
+        "0 capability calls, 0 total; legacy provider_http_calls: 0; "
+        "0 discovery steps\n"
     )
 
 
