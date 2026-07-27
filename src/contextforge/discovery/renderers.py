@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from enum import StrEnum
 
-from contextforge.discovery.models import FinalContextSelection
+from contextforge.discovery.models import CompletenessWarning, FinalContextSelection
 
 _BACKTICK_RUN = re.compile(r"`+")
 _MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_{}\[\]<>()#+\-.!|>])")
@@ -22,6 +23,15 @@ class DiscoveryResultFormat(StrEnum):
 
 class DiscoveryRenderError(ValueError):
     """Raised when a context discovery result cannot be rendered."""
+
+
+@dataclass(frozen=True)
+class _WarningGroup:
+    code: str
+    message: str
+    severity: str
+    confidence: float | None
+    paths: tuple[str, ...]
 
 
 def render_context_suggestion(
@@ -73,28 +83,22 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
             )
         )
     lines.append("Warnings:")
+    aggregated = _aggregate_warnings(selection.completeness_warnings)
     warning_groups = (
         (
             "Warnings",
-            tuple(
-                item
-                for item in selection.completeness_warnings
-                if item.severity == "warning"
-            ),
+            tuple(item for item in aggregated if item.severity == "warning"),
         ),
         (
             "Information",
-            tuple(
-                item
-                for item in selection.completeness_warnings
-                if item.severity == "info"
-            ),
+            tuple(item for item in aggregated if item.severity == "info"),
         ),
     )
     for label, warnings in warning_groups:
         if warnings:
             lines.append(f"  {label}:")
-            lines.extend(f"    {_visible_inline(item.message)}" for item in warnings)
+            for item in warnings:
+                lines.append(f"    {_text_warning_summary(item)}")
     if selection.unknowns:
         lines.append("  Unknowns:")
         lines.extend(f"    {_visible_inline(item)}" for item in selection.unknowns)
@@ -132,6 +136,23 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
                 f"    Evidence: {_visible_inline(value)}"
                 for value in item.reason.evidence
             )
+        if aggregated:
+            lines.append("  Warning details:")
+            for item in aggregated:
+                lines.append(f"    {_text_warning_summary(item)}")
+                lines.append(f"      Reason: {_visible_inline(item.message)}")
+                confidence = (
+                    "unknown" if item.confidence is None else str(item.confidence)
+                )
+                lines.append(
+                    "      Warning confidence (not result confidence): "
+                    f"{confidence}"
+                )
+                if item.paths:
+                    lines.append("      Affected files:")
+                    lines.extend(
+                        f"        {_visible_inline(path)}" for path in item.paths
+                    )
     return "\n".join(lines) + "\n"
 
 
@@ -216,22 +237,15 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
         lines.append("_(none)_")
 
     lines.extend(("", "## Warnings", ""))
+    aggregated = _aggregate_warnings(selection.completeness_warnings)
     warning_groups = (
         (
             "Warnings",
-            tuple(
-                item
-                for item in selection.completeness_warnings
-                if item.severity == "warning"
-            ),
+            tuple(item for item in aggregated if item.severity == "warning"),
         ),
         (
             "Information",
-            tuple(
-                item
-                for item in selection.completeness_warnings
-                if item.severity == "info"
-            ),
+            tuple(item for item in aggregated if item.severity == "info"),
         ),
     )
     any_warnings = False
@@ -240,11 +254,24 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
             continue
         any_warnings = True
         lines.extend((f"### {label}", ""))
-        lines.extend(
-            f"- {_markdown_code_span(item.code)}: "
-            f"{_escape_markdown_inline(item.message)}"
-            for item in warnings
-        )
+        for item in warnings:
+            lines.append(f"- {_markdown_warning_summary(item)}")
+            if explain:
+                lines.append(
+                    f"  - Reason: {_escape_markdown_inline(item.message)}"
+                )
+                confidence = (
+                    "unknown" if item.confidence is None else f"{item.confidence:.3f}"
+                )
+                lines.append(
+                    "  - Warning confidence (not result confidence): "
+                    f"{confidence}"
+                )
+                if item.paths:
+                    lines.append("  - Affected files:")
+                    lines.extend(
+                        f"    - {_markdown_code_span(path)}" for path in item.paths
+                    )
         lines.append("")
     if selection.unknowns:
         any_warnings = True
@@ -317,6 +344,63 @@ def _render_json(selection: FinalContextSelection) -> str:
         )
         + "\n"
     )
+
+
+def _aggregate_warnings(
+    warnings: tuple[CompletenessWarning, ...],
+) -> tuple[_WarningGroup, ...]:
+    grouped: dict[tuple[str, str, str, float | None], set[str]] = {}
+    for warning in warnings:
+        key = (
+            warning.code,
+            warning.severity,
+            warning.message,
+            warning.confidence,
+        )
+        grouped.setdefault(key, set()).update(
+            path
+            for path in (warning.path, *warning.related_paths)
+            if path is not None
+        )
+    return tuple(
+        _WarningGroup(
+            code=key[0],
+            severity=key[1],
+            message=key[2],
+            confidence=key[3],
+            paths=tuple(sorted(paths)),
+        )
+        for key, paths in sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0][1],
+                item[0][0],
+                item[0][2],
+                -1.0 if item[0][3] is None else item[0][3],
+                tuple(sorted(item[1])),
+            ),
+        )
+    )
+
+
+def _text_warning_summary(group: _WarningGroup) -> str:
+    summary = _visible_inline(group.code)
+    if group.paths:
+        summary += (
+            f" ({len(group.paths)} "
+            f"{_plural(len(group.paths), 'affected file')})"
+        )
+    return summary
+
+
+def _markdown_warning_summary(group: _WarningGroup) -> str:
+    summary = _markdown_code_span(group.code)
+    if group.paths:
+        summary += (
+            f" ({len(group.paths)} "
+            f"{_plural(len(group.paths), 'affected file')})"
+        )
+    return summary
 
 
 def _markdown_code_span(value: str) -> str:

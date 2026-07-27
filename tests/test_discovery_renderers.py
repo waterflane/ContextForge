@@ -121,7 +121,7 @@ def test_markdown_report_has_an_exact_stable_concise_shape() -> None:
         "\n"
         "### Warnings\n"
         "\n"
-        "- `related-test-missing`: No related test was selected\\.\n"
+        "- `related-test-missing`\n"
         "\n"
         "### Unknowns\n"
         "\n"
@@ -166,10 +166,9 @@ def test_markdown_explanation_and_completeness_groups_are_safe() -> None:
         "## Deterministic Completeness Additions\n\n"
         "- `src/app.py`: Handles \\*formatted\\* output\\."
     ) in rendered
-    assert (
-        "### Information\n\n- `index-note`: Index coverage is advisory\\."
-        in rendered
-    )
+    assert "### Information\n\n- `index-note`" in rendered
+    assert "  - Reason: Index coverage is advisory\\." in rendered
+    assert "Warning confidence (not result confidence): unknown" in rendered
     assert "## Detailed Explanation" in rendered
     assert "- Evidence: Defines render\\_output" in rendered
 
@@ -208,6 +207,128 @@ def test_json_rendering_is_byte_compatible_with_existing_output() -> None:
     )
 
     assert rendered == canonical_json(selection.model_dump(mode="json"))
+
+
+def test_duplicate_warnings_are_grouped_with_sorted_deduplicated_paths() -> None:
+    base = _selection()
+    warnings = (
+        CompletenessWarning(
+            code="unreadable-source",
+            message="Source could not be read; check file permissions.",
+            path="src/z.py",
+            related_paths=("src/a.py", "src/shared.py"),
+            confidence=0.9,
+        ),
+        CompletenessWarning(
+            code="unreadable-source",
+            message="Source could not be read; check file permissions.",
+            path="src/a.py",
+            related_paths=("src/b.py", "src/shared.py"),
+            confidence=0.9,
+        ),
+    )
+    selection = FinalContextSelection.model_validate(
+        base.model_dump() | {"completeness_warnings": warnings}
+    )
+
+    concise = render_context_suggestion(selection)
+    explained = render_context_suggestion(selection, explain=True)
+    json_output = json.loads(
+        render_context_suggestion(selection, output_format=DiscoveryResultFormat.json)
+    )
+
+    assert concise.count("unreadable-source (4 affected files)") == 1
+    assert "Source could not be read" not in concise
+    assert explained.count("Source could not be read") == 1
+    assert explained.index("src/a.py") < explained.index("src/b.py")
+    assert explained.index("src/b.py") < explained.index("src/shared.py")
+    assert explained.index("src/shared.py") < explained.index("src/z.py")
+    assert len(json_output["completeness_warnings"]) == 2
+
+
+def test_warning_groups_keep_mixed_severities_and_reasons_separate() -> None:
+    base = _selection()
+    selection = FinalContextSelection.model_validate(
+        base.model_dump()
+        | {
+            "completeness_warnings": (
+                CompletenessWarning(
+                    code="stale-source",
+                    message="Refresh the source index.",
+                    severity="warning",
+                    path="src/app.py",
+                ),
+                CompletenessWarning(
+                    code="stale-source",
+                    message="Refresh the source index.",
+                    severity="info",
+                    path="src/info.py",
+                ),
+                CompletenessWarning(
+                    code="stale-source",
+                    message="Re-read the source before continuing.",
+                    severity="warning",
+                    path="src/other.py",
+                ),
+            )
+        }
+    )
+
+    concise = render_context_suggestion(selection)
+    rendered = render_context_suggestion(selection, explain=True)
+
+    assert concise.count("stale-source (1 affected file)") == 3
+    assert "  Warnings:" in rendered
+    assert "  Information:" in rendered
+    assert rendered.count("Refresh the source index.") == 2
+    assert rendered.count("Re-read the source before continuing.") == 1
+
+
+@pytest.mark.parametrize(
+    "output_format", (DiscoveryResultFormat.text, DiscoveryResultFormat.markdown)
+)
+def test_warning_rendering_order_is_stable(
+    output_format: DiscoveryResultFormat,
+) -> None:
+    base = _selection()
+    warnings = (
+        CompletenessWarning(
+            code="missing-source", message="Missing.", path="src/z.py"
+        ),
+        CompletenessWarning(
+            code="hash-mismatch", message="Changed.", path="src/b.py"
+        ),
+        CompletenessWarning(
+            code="hash-mismatch", message="Changed.", path="src/a.py"
+        ),
+    )
+
+    first = FinalContextSelection.model_validate(
+        base.model_dump() | {"completeness_warnings": warnings}
+    )
+    second = FinalContextSelection.model_validate(
+        base.model_dump() | {"completeness_warnings": tuple(reversed(warnings))}
+    )
+
+    assert render_context_suggestion(
+        first, output_format=output_format, explain=True
+    ) == render_context_suggestion(second, output_format=output_format, explain=True)
+
+
+def test_empty_warnings_render_a_stable_empty_summary() -> None:
+    base = _selection()
+    selection = FinalContextSelection.model_validate(
+        base.model_dump()
+        | {"completeness_warnings": (), "unknowns": ()}
+    )
+
+    text = render_context_suggestion(selection)
+    markdown = render_context_suggestion(
+        selection, output_format=DiscoveryResultFormat.markdown
+    )
+
+    assert "Warnings:\n  (none; this is not a proof of completeness)" in text
+    assert "## Warnings\n\n_(none; this is not a proof of completeness)_" in markdown
 
 
 def test_renderer_selection_is_explicit_and_rejects_unknown_formats() -> None:

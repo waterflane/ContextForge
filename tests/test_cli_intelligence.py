@@ -403,22 +403,23 @@ def test_context_suggestion_text_renderer_contract() -> None:
         "    reason: Handles the requested output.\n"
         "Warnings:\n"
         "  Warnings:\n"
-        "    No related test was selected.\n"
+        "    related-test-missing\n"
         "  Unknowns:\n"
         "    Terminal color support is unknown.\n"
         "Performance: selected 1 file (123 bytes); 0 steps, 0 model calls, "
         "read 0 files (0 bytes).\n"
     )
-    assert render_context_suggestion(selection, explain=True) == rendered + (
-        "Technical selection details:\n"
-        "  Exact confidence: 0.625\n"
-        "  src/app.py:\n"
-        "    Selection type: line ranges\n"
-        "    Exact confidence: 0.75\n"
-        "    Discovery source: model-tool:add_to_context\n"
-        f"    Verified source SHA-256: {'b' * 64}\n"
-        "    Evidence: Defines render_output\n"
+    explained = render_context_suggestion(selection, explain=True)
+    assert "      Reason: No related test was selected.\n" in explained
+    assert (
+        "      Warning confidence (not result confidence): unknown\n" in explained
     )
+    assert "Technical selection details:\n  Exact confidence: 0.625\n" in explained
+    assert "    Selection type: line ranges\n" in explained
+    assert "    Exact confidence: 0.75\n" in explained
+    assert "    Discovery source: model-tool:add_to_context\n" in explained
+    assert f"    Verified source SHA-256: {'b' * 64}\n" in explained
+    assert "    Evidence: Defines render_output\n" in explained
 
 
 @pytest.mark.parametrize("mode", ["fresh", "hybrid"])
