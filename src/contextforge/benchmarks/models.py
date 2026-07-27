@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-from contextforge.core.validation import validate_portable_relative_path
+from contextforge.core.validation import Sha256, validate_portable_relative_path
 from contextforge.discovery.models import CompletenessWarning
 
 BENCHMARK_SCHEMA_VERSION: Literal[1] = 1
@@ -25,6 +25,10 @@ NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 ConfidenceValue = Annotated[
     float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)
+]
+Rate = ConfidenceValue
+NonNegativeFloat = Annotated[
+    float, Field(ge=0.0, allow_inf_nan=False, strict=True)
 ]
 RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
 ExpectedFacet = Annotated[str, Field(min_length=1, max_length=500)]
@@ -260,6 +264,7 @@ class BenchmarkManifest(BenchmarkModel):
 class BenchmarkProviderCounters(BenchmarkModel):
     """Provider activity charged to one discovery run."""
 
+    model_calls: NonNegativeInt = 0
     model_generations: NonNegativeInt = 0
     repair_generations: NonNegativeInt = 0
     auxiliary_provider_calls: NonNegativeInt = 0
@@ -280,10 +285,14 @@ class BenchmarkAnyFileExpectation(BenchmarkModel):
 class BenchmarkExpectationEvaluation(BenchmarkModel):
     """Machine-readable file and warning expectation evaluation."""
 
+    required_files: tuple[RepositoryRelativePath, ...] = ()
+    matched_required_files: tuple[RepositoryRelativePath, ...] = ()
     missing_required_files: tuple[RepositoryRelativePath, ...] = ()
     any_file_groups: tuple[BenchmarkAnyFileExpectation, ...] = ()
+    forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     selected_forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
+    covered_expected_facets: tuple[ExpectedFacet, ...] = ()
     unexpected_warnings: tuple[WarningCode, ...] = ()
     missing_required_warnings: tuple[WarningCode, ...] = ()
     passed: bool
@@ -328,6 +337,9 @@ class BenchmarkRunResult(BenchmarkModel):
     selected_files: tuple[RepositoryRelativePath, ...] = ()
     files_considered: NonNegativeInt = 0
     files_read: NonNegativeInt = 0
+    source_snapshot_digest: Sha256 | None = None
+    index_generation_id: Sha256 | None = None
+    effective_configuration_digest: Sha256 | None = None
     provider_id: str
     model_id: str
     provider_counters: BenchmarkProviderCounters
@@ -341,6 +353,78 @@ class BenchmarkRunResult(BenchmarkModel):
     failure: BenchmarkFailure | None = None
 
 
+class BenchmarkIntegerRange(BenchmarkModel):
+    """Inclusive observed range for an integer run metric."""
+
+    minimum: NonNegativeInt
+    maximum: NonNegativeInt
+
+
+class BenchmarkConfidenceSummary(BenchmarkModel):
+    """Aggregate confidence over complete comparable runs."""
+
+    mean: ConfidenceValue
+    minimum: ConfidenceValue
+    maximum: ConfidenceValue
+    spread: Rate
+
+
+class BenchmarkDurationPercentiles(BenchmarkModel):
+    """Deterministic nearest-rank duration percentiles."""
+
+    p50_ms: NonNegativeInt
+    p90_ms: NonNegativeInt
+    p95_ms: NonNegativeInt
+
+
+class BenchmarkDurationSummary(BenchmarkModel):
+    """Duration summary over complete comparable runs."""
+
+    mean_ms: NonNegativeFloat
+    percentiles: BenchmarkDurationPercentiles | None = None
+
+
+class BenchmarkPairwiseJaccard(BenchmarkModel):
+    """Selected-file set similarity for one pair of repetitions."""
+
+    first_repetition: PositiveInt
+    second_repetition: PositiveInt
+    similarity: Rate
+
+
+class BenchmarkCohortMetrics(BenchmarkModel):
+    """Quality and repeatability metrics for one strictly comparable cohort."""
+
+    task_id: str
+    repository_path: RepositoryRelativePath
+    mode: BenchmarkMode
+    source_snapshot_digest: Sha256 | None
+    index_generation_id: Sha256 | None
+    effective_configuration_digest: Sha256 | None
+    total_run_count: PositiveInt
+    complete_run_count: NonNegativeInt
+    excluded_run_count: NonNegativeInt
+    comparable_pair_count: NonNegativeInt
+    stability_kind: Literal[
+        "insufficient_data",
+        "semantic_stability",
+        "deterministic_fallback_repeatability",
+    ]
+    exact_selected_file_match_rate: Rate | None = None
+    exact_ordered_match_rate: Rate | None = None
+    required_file_recall: Rate | None = None
+    forbidden_file_selection_rate: Rate | None = None
+    expected_facet_coverage_rate: Rate | None = None
+    pairwise_jaccard: tuple[BenchmarkPairwiseJaccard, ...] = ()
+    mean_jaccard_similarity: Rate | None = None
+    warning_stability: Rate | None = None
+    fallback_rate: Rate | None = None
+    confidence: BenchmarkConfidenceSummary | None = None
+    duration: BenchmarkDurationSummary | None = None
+    files_read_range: BenchmarkIntegerRange | None = None
+    model_call_range: BenchmarkIntegerRange | None = None
+
+
 class BenchmarkResult(BenchmarkModel):
     """Canonical, prose-free result DTO for one validated benchmark manifest."""
 
@@ -348,6 +432,7 @@ class BenchmarkResult(BenchmarkModel):
     manifest_schema_version: Literal[1]
     suite_name: str
     runs: tuple[BenchmarkRunResult, ...]
+    metrics: tuple[BenchmarkCohortMetrics, ...] = ()
     passed: bool
 
 
@@ -361,14 +446,20 @@ __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkAnyFileExpectation",
     "BenchmarkBudgetEvaluation",
+    "BenchmarkCohortMetrics",
+    "BenchmarkConfidenceSummary",
+    "BenchmarkDurationPercentiles",
+    "BenchmarkDurationSummary",
     "BenchmarkExpectations",
     "BenchmarkExpectationEvaluation",
     "BenchmarkFailure",
+    "BenchmarkIntegerRange",
     "BenchmarkLimitEvaluation",
     "BenchmarkManifest",
     "BenchmarkMode",
     "BenchmarkModeOverrides",
     "BenchmarkProviderCounters",
+    "BenchmarkPairwiseJaccard",
     "BenchmarkResult",
     "BenchmarkRunResult",
     "BenchmarkTask",

@@ -115,6 +115,7 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert run.files_read == 3
     assert run.context_bytes == len(b"def main():\n    return 1\n")
     assert run.provider_counters.model_generations == 1
+    assert run.provider_counters.model_calls == 1
     assert run.provider_counters.repair_generations == 1
     assert run.provider_counters.auxiliary_provider_calls == 0
     assert run.provider_counters.transport_attempts == 2
@@ -127,6 +128,13 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert run.budgets.passed is True
     assert run.failure is None
     assert not (repository / ".contextforge").exists()
+    metric = result.metrics[0]
+    assert metric.stability_kind == "insufficient_data"
+    assert metric.exact_selected_file_match_rate is None
+    assert metric.required_file_recall == 1.0
+    assert metric.expected_facet_coverage_rate == 1.0
+    assert metric.duration is not None
+    assert metric.duration.percentiles is None
 
 
 def test_runner_records_deterministic_fallback_state(tmp_path: Path) -> None:
@@ -197,4 +205,7 @@ def test_mode_overrides_control_repeats_and_budget_evaluation(tmp_path: Path) ->
         run.expectations for run in result.runs
     )
     assert all(not run.budgets.model_generations.passed for run in result.runs)
+    assert result.metrics[0].stability_kind == "semantic_stability"
+    assert result.metrics[0].exact_selected_file_match_rate == 1.0
+    assert result.metrics[0].exact_ordered_match_rate == 1.0
     assert result.passed is False
