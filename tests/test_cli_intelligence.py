@@ -8,7 +8,17 @@ from typer.testing import CliRunner, Result
 
 import contextforge.cli.context_commands as context_cli
 import contextforge.cli.intelligence_commands as index_cli
+from contextforge.application import render_context_suggestion
 from contextforge.cli.main import app
+from contextforge.discovery import (
+    CompletenessWarning,
+    DiscoveryBudgetUsage,
+    DiscoveryCandidate,
+    DiscoveryLineRange,
+    DiscoveryMode,
+    FinalContextSelection,
+    SelectionReason,
+)
 from contextforge.intelligence import IndexManifestNotFoundError, load_manifest
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 
@@ -270,6 +280,63 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
     assert json.loads(suggested.stdout)["mode"] == "hybrid"
 
 
+def test_context_suggestion_table_renderer_contract() -> None:
+    selection = FinalContextSelection(
+        task="Review Unicode output",
+        mode=DiscoveryMode.HYBRID,
+        source_snapshot_digest="a" * 64,
+        selected=(
+            DiscoveryCandidate(
+                candidate_id="candidate:app",
+                kind="line_ranges",
+                path="src/app.py",
+                ranges=(DiscoveryLineRange(start_line=2, end_line=4),),
+                reason=SelectionReason(
+                    summary="Handles the requested output.",
+                    discovery_source="model-tool:add_to_context",
+                    evidence=("Defines render_output",),
+                ),
+                confidence=0.75,
+                source_sha256="b" * 64,
+                model_selected=True,
+            ),
+        ),
+        summary="Selected the output implementation.",
+        unknowns=("Terminal color support is unknown.",),
+        completeness_warnings=(
+            CompletenessWarning(
+                code="related-test-missing",
+                message="No related test was selected.",
+            ),
+        ),
+        confidence=0.625,
+        budget_usage=DiscoveryBudgetUsage(context_bytes=123, context_files=1),
+        run_id="run-output",
+    )
+
+    rendered = render_context_suggestion(selection)
+    assert rendered == (
+        "ContextForge context suggestion\n"
+        "Discovery mode: hybrid\n"
+        "Estimated size: 123 bytes\n"
+        "Selected files: 1\n"
+        "Confidence: 0.625\n"
+        "Selections:\n"
+        "  src/app.py | 2-4 | confidence 0.750\n"
+        "    reason: Handles the requested output.\n"
+        "Warnings:\n"
+        "  related-test-missing: No related test was selected.\n"
+        "Unknowns:\n"
+        "  Terminal color support is unknown.\n"
+    )
+    assert render_context_suggestion(selection, explain=True) == rendered.replace(
+        "Warnings:\n",
+        "    source: model-tool:add_to_context\n"
+        "    evidence: Defines render_output\n"
+        "Warnings:\n",
+    )
+
+
 @pytest.mark.parametrize("mode", ["fresh", "hybrid"])
 def test_context_suggest_table_and_json_are_read_only(
     tmp_path: Path, mode: str
@@ -413,6 +480,9 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
     )
     assert first.exit_code == forced.exit_code == 0
     assert refused.exit_code == 1
+    assert first.stdout.strip() == f"Output written to {output.resolve()}"
+    assert "Suggesting context:" in _plain(first.stderr)
+    assert "already exists" in _plain(refused.stderr)
     assert json.loads(output.read_text(encoding="utf-8"))["mode"] == "hybrid"
 
 
@@ -453,6 +523,10 @@ def test_context_create_automatic_json_prompt_and_portable_review(
     assert payload["review"]["discovery"]["mode"] == "fresh"
     assert payload["context_package"]["schema_version"] == 1
     assert "## Original task" in prompt_path.read_text(encoding="utf-8")
+    assert created.stdout.strip() == f"Output written to {handoff_path.resolve()}"
+    assert f"Compiled prompt written to {prompt_path.resolve()}" in _plain(
+        created.stderr
+    )
 
     (tmp_path / "app.py").unlink()
     reviewed = _invoke("context", "review", str(handoff_path))
@@ -468,6 +542,33 @@ def test_context_create_automatic_json_prompt_and_portable_review(
         "Model provenance:",
     ):
         assert expected in _plain(reviewed.stdout)
+
+
+def test_context_create_automatic_defaults_to_markdown_stdout(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+
+    created = _invoke(
+        "--log-level",
+        "quiet",
+        "context",
+        "create",
+        str(tmp_path),
+        "--task",
+        "Review VALUE",
+        "--discovery",
+        "fresh",
+        "--provider",
+        "fake",
+        "--progress",
+        "never",
+    )
+
+    assert created.exit_code == 0, created.output
+    assert created.stdout.startswith("## Original task\n\n```text\nReview VALUE\n```")
+    assert "## Repository overview" in created.stdout
+    assert "### `app.py`" in created.stdout
+    assert created.stdout.endswith("\n")
+    assert created.stderr == ""
 
 
 def test_context_create_manual_regression_and_automatic_option_validation(
