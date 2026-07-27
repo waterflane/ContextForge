@@ -54,6 +54,7 @@ class CLIProgressRenderer:
         *,
         stream: TextIO | None = None,
         console: Console | None = None,
+        stdout: TextIO | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(mode, (str, ProgressMode)):
@@ -66,6 +67,7 @@ class CLIProgressRenderer:
         self.mode = ProgressMode(mode)
         self._console = console or self._console_for(stream)
         self._stream = self._console.file
+        self._stdout = sys.stdout if stdout is None else stdout
         self._clock = clock
         self._state_lock = threading.RLock()
         self._started: float | None = None
@@ -83,7 +85,10 @@ class CLIProgressRenderer:
         self._unicode = self._supports_unicode(self._console.encoding)
         self._spinner = Spinner("dots" if self._unicode else "line", style="cyan")
         self._dynamic = (
-            self.mode is not ProgressMode.NEVER and self._console.is_terminal
+            self.mode is not ProgressMode.NEVER
+            and self._console.is_terminal
+            and self._is_interactive(self._stdout)
+            and self._is_interactive(self._stream)
         )
 
     @staticmethod
@@ -106,6 +111,13 @@ class CLIProgressRenderer:
         except (LookupError, UnicodeEncodeError):
             return False
         return True
+
+    @staticmethod
+    def _is_interactive(stream: TextIO) -> bool:
+        try:
+            return bool(stream.isatty())
+        except (AttributeError, OSError, ValueError):
+            return False
 
     @property
     def rendering_mode(self) -> str:

@@ -320,6 +320,19 @@ def test_context_suggest_json_remains_valid_json(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["task"] == "Review run"
 
 
+def test_context_suggest_json_stdout_stays_clean_with_plain_progress(
+    tmp_path: Path,
+) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "json", "--progress", "always"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["task"] == "Review run"
+    assert "Suggesting context:" in _plain(result.stderr)
+    assert "Suggesting context:" not in result.stdout
+
+
 def test_context_suggest_explicit_text_is_deterministic(tmp_path: Path) -> None:
     first = _invoke_focused_suggestion(
         tmp_path, "--format", "text", "--progress", "never"

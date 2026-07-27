@@ -568,19 +568,67 @@ class _TTYStringIO(io.StringIO):
         return True
 
 
-def test_interactive_stderr_chooses_dynamic_when_stdout_is_captured(
+def test_interactive_stdout_and_stderr_choose_dynamic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stdout = io.StringIO()
+    stdout = _TTYStringIO()
     stderr = _TTYStringIO()
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
 
     renderer = CLIProgressRenderer(ProgressMode.AUTO)
 
-    assert stdout.isatty() is False
     assert renderer.rendering_mode == "dynamic"
     renderer.close()
+
+
+def test_redirected_stdout_disables_dynamic_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", _TTYStringIO())
+
+    renderer = CLIProgressRenderer(ProgressMode.ALWAYS)
+
+    assert renderer.rendering_mode == "discrete"
+    renderer.close()
+
+
+def test_redirected_stderr_disables_dynamic_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdout", _TTYStringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    renderer = CLIProgressRenderer(ProgressMode.ALWAYS)
+
+    assert renderer.rendering_mode == "discrete"
+    renderer.close()
+
+
+def test_discrete_waiting_events_ignore_spinner_only_refreshes() -> None:
+    stream = io.StringIO()
+    renderer = CLIProgressRenderer(stream)
+    waiting = {
+        "operation_type": "repository.context.suggest",
+        "phase_id": "model_selection",
+        "phase_label": "Model selection",
+        "percentage": 40,
+        "activity": ProgressActivity.WAITING,
+        "lifecycle_state": "waiting_for_provider",
+    }
+
+    renderer(_event(**waiting))
+    renderer(
+        _event(
+            **waiting,
+            sequence=3,
+            elapsed_seconds=1,
+            request_elapsed_seconds=1,
+        )
+    )
+
+    assert len(stream.getvalue().splitlines()) == 1
 
 
 def test_dynamic_panel_shows_overall_phase_activity_and_elapsed() -> None:
@@ -588,7 +636,7 @@ def test_dynamic_panel_shows_overall_phase_activity_and_elapsed() -> None:
     console = Console(file=stream, force_terminal=True, width=120)
     now = [0.0]
     renderer = CLIProgressRenderer(
-        ProgressMode.AUTO, console=console, clock=lambda: now[0]
+        ProgressMode.AUTO, console=console, stdout=stream, clock=lambda: now[0]
     )
     waiting = _event(
         operation_type="repository.index.build",
@@ -646,8 +694,8 @@ def test_one_stream_has_one_idempotent_live_owner(
     monkeypatch.setattr(cli_progress_module, "Live", FakeLive)
     stream = _TTYStringIO()
     console = Console(file=stream, force_terminal=True, width=100)
-    owner = CLIProgressRenderer(console=console)
-    nested = CLIProgressRenderer(console=console)
+    owner = CLIProgressRenderer(console=console, stdout=stream)
+    nested = CLIProgressRenderer(console=console, stdout=stream)
 
     owner(_event(operation_type="repository.index.build"))
     nested(
@@ -689,7 +737,7 @@ def test_logging_during_live_reuses_the_same_renderer(
     monkeypatch.setattr(cli_progress_module, "Live", FakeLive)
     stream = _TTYStringIO()
     renderer = CLIProgressRenderer(
-        console=Console(file=stream, force_terminal=True, width=100)
+        console=Console(file=stream, force_terminal=True, width=100), stdout=stream
     )
     handler = logging.StreamHandler(stream)
     logger = logging.getLogger("contextforge.progress-test")
@@ -808,7 +856,7 @@ def test_dynamic_renderer_cleans_up_unsuccessful_terminal_state(
 ) -> None:
     stream = _TTYStringIO()
     console = Console(file=stream, force_terminal=True, width=100)
-    renderer = CLIProgressRenderer(console=console)
+    renderer = CLIProgressRenderer(console=console, stdout=stream)
     renderer(_event(operation_type="repository.index.build"))
     renderer(
         _event(
@@ -826,7 +874,7 @@ def test_dynamic_renderer_cleans_up_unsuccessful_terminal_state(
 def test_observer_error_does_not_leave_dynamic_renderer_live() -> None:
     stream = _TTYStringIO()
     renderer = CLIProgressRenderer(
-        console=Console(file=stream, force_terminal=True, width=100)
+        console=Console(file=stream, force_terminal=True, width=100), stdout=stream
     )
 
     def broken(event: ProgressEvent) -> None:
