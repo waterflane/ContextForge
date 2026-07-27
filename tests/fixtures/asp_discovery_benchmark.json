@@ -1,0 +1,459 @@
+{
+  "schema_version": 1,
+  "suite_name": "asp-initial-discovery",
+  "tasks": [
+    {
+      "task_id": "application-startup",
+      "repository_path": "ASP",
+      "task": "Trace application startup from the npm command through the Node server entry point to the browser application bootstrap. Identify the files needed to explain that path.",
+      "modes": [
+        "fresh",
+        "indexed",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "server.js"
+      ],
+      "required_files_any": [
+        [
+          "README.md",
+          "package.json"
+        ],
+        [
+          "public/app.js",
+          "public/index.html"
+        ]
+      ],
+      "expected_facets": [
+        "server"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 5,
+      "max_files_read": 31,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4,
+      "mode_overrides": {
+        "indexed": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        },
+        "hybrid": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "architecture-overview",
+      "repository_path": "ASP",
+      "task": "Give a concise architecture overview of ASP, covering the server, browser-facing applications, and one representative media subsystem. Select implementation files rather than trying to enumerate the whole repository.",
+      "modes": [
+        "indexed",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "server.js"
+      ],
+      "required_files_any": [
+        [
+          "media-search.js",
+          "public/media-source.js",
+          "public/player-adapters.js"
+        ]
+      ],
+      "expected_facets": [
+        "server"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data",
+        "semantic-uncertainty",
+        "structural-coverage-limitations"
+      ],
+      "max_selected_files": 7,
+      "max_files_read": 16,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4
+    },
+    {
+      "task_id": "bug-localization-library-refresh",
+      "repository_path": "ASP",
+      "task": "A slower, older video-library response can overwrite a newer render. Locate the client implementation that prevents this race and the focused regression test that specifies the behavior.",
+      "modes": [
+        "fresh",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "include_paths": [
+        ".env.example"
+      ],
+      "required_files_all": [
+        "public/videos.js",
+        "test/library-ui.test.js"
+      ],
+      "forbidden_files": [
+        "LICENSE",
+        "setup-global-access.bat",
+        "setup-global-access.ps1"
+      ],
+      "expected_facets": [
+        "library ui",
+        "videos"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 3,
+      "max_files_read": 30,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 3,
+      "mode_overrides": {
+        "hybrid": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "client-startup",
+      "repository_path": "ASP",
+      "task": "Explain how the main browser client starts: identify the HTML entry document and the application script it loads. Do not expand into server startup or the separate video-library page.",
+      "modes": [
+        "fresh"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "public/app.js",
+        "public/index.html"
+      ],
+      "expected_facets": [
+        "app",
+        "index"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 3,
+      "max_files_read": 30,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 3
+    },
+    {
+      "task_id": "configuration-media-providers",
+      "repository_path": "ASP",
+      "task": "Trace media-provider configuration from public runtime settings and environment-variable examples into the server code that constructs provider and search configuration.",
+      "modes": [
+        "fresh"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        ".env.example",
+        "config.json",
+        "server.js"
+      ],
+      "expected_facets": [
+        "config",
+        "env",
+        "server"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 5,
+      "max_files_read": 31,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4
+    },
+    {
+      "task_id": "cross-module-media-search-flow",
+      "repository_path": "ASP",
+      "task": "Trace the media-search request across modules from the video-library browser client, through the server API route, to the provider search service.",
+      "modes": [
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "media-search.js",
+        "public/videos.js",
+        "server.js"
+      ],
+      "expected_facets": [
+        "media search",
+        "server",
+        "videos"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data",
+        "semantic-uncertainty",
+        "structural-coverage-limitations"
+      ],
+      "max_selected_files": 5,
+      "max_files_read": 14,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4
+    },
+    {
+      "task_id": "explicit-include-media-search-tests",
+      "repository_path": "ASP",
+      "task": "Review the media-search service together with its focused unit tests. Both explicitly included files are intentional context and must remain available even if ordinary ranking would prefer implementation-only context.",
+      "modes": [
+        "fresh",
+        "indexed",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "include_paths": [
+        "media-search.js",
+        "test/media-search.test.js"
+      ],
+      "required_files_all": [
+        "media-search.js",
+        "test/media-search.test.js"
+      ],
+      "expected_facets": [
+        "media search",
+        "test media search"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 2,
+      "max_files_read": 31,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 3,
+      "mode_overrides": {
+        "indexed": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        },
+        "hybrid": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "implementation-plus-tests-media-search",
+      "repository_path": "ASP",
+      "task": "Prepare context to change media-search validation or normalization and update relevant automated coverage. Include the implementation and at least one directly relevant test suite.",
+      "modes": [
+        "fresh",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "media-search.js"
+      ],
+      "required_files_any": [
+        [
+          "test/media-search.test.js",
+          "test/video-api.test.js"
+        ]
+      ],
+      "expected_facets": [
+        "media search"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 4,
+      "max_files_read": 30,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4,
+      "mode_overrides": {
+        "hybrid": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "media-search-implementation",
+      "repository_path": "ASP",
+      "task": "Locate and explain the core multi-provider media-search implementation, including adapter construction, normalization, provider filtering, and partial-failure isolation.",
+      "modes": [
+        "fresh",
+        "indexed"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "media-search.js"
+      ],
+      "forbidden_files": [
+        "LICENSE",
+        "setup-global-access.bat",
+        "setup-global-access.ps1"
+      ],
+      "expected_facets": [
+        "media search"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 3,
+      "max_files_read": 30,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 3,
+      "mode_overrides": {
+        "indexed": {
+          "allowed_warnings": [
+            "incomplete-parse-data",
+            "semantic-uncertainty",
+            "structural-coverage-limitations"
+          ],
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "media-search-integration",
+      "repository_path": "ASP",
+      "task": "Identify the files that integrate media search into ASP: the provider service, the protected HTTP endpoint, and the video-library client that submits and renders catalog searches.",
+      "modes": [
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "media-search.js",
+        "public/videos.js",
+        "server.js"
+      ],
+      "expected_facets": [
+        "media search",
+        "server",
+        "videos"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data",
+        "semantic-uncertainty",
+        "structural-coverage-limitations"
+      ],
+      "max_selected_files": 5,
+      "max_files_read": 14,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4
+    },
+    {
+      "task_id": "server-startup",
+      "repository_path": "ASP",
+      "task": "Explain how the HTTP and Socket.IO server starts, including the executable entry point and where its host, port, and npm start command are defined.",
+      "modes": [
+        "fresh"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "server.js"
+      ],
+      "required_files_any": [
+        [
+          "config.json",
+          "package.json"
+        ]
+      ],
+      "expected_facets": [
+        "server"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 4,
+      "max_files_read": 30,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 3
+    },
+    {
+      "task_id": "stale-index-current-source",
+      "repository_path": "ASP",
+      "task": "Using the published index, locate the media-search service and its server integration while verifying selections against current source. Preserve and report stale-index coverage diagnostics if the checked-out source has drifted from a partially usable index.",
+      "modes": [
+        "indexed",
+        "hybrid"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "media-search.js",
+        "server.js"
+      ],
+      "expected_facets": [
+        "media search",
+        "server"
+      ],
+      "max_selected_files": 4,
+      "max_files_read": 14,
+      "max_model_generations": 3,
+      "max_provider_http_calls": 4,
+      "allowed_warnings": [
+        "incomplete-parse-data",
+        "semantic-uncertainty",
+        "stale-global-maps",
+        "stale-index-coverage",
+        "structural-coverage-limitations"
+      ],
+      "mode_overrides": {
+        "indexed": {
+          "max_files_read": 12
+        },
+        "hybrid": {
+          "max_files_read": 14
+        }
+      }
+    },
+    {
+      "task_id": "strict-budget-media-search",
+      "repository_path": "ASP",
+      "task": "Under a strict one-file context and small read budget, locate only the core media-search implementation. Do not spend context on tests, documentation, setup helpers, or integration callers.",
+      "modes": [
+        "fresh"
+      ],
+      "repeat_count": 1,
+      "include_paths": [
+        "media-search.js"
+      ],
+      "required_files_all": [
+        "media-search.js"
+      ],
+      "forbidden_files": [
+        "LICENSE",
+        "setup-global-access.bat",
+        "setup-global-access.ps1"
+      ],
+      "expected_facets": [
+        "media search"
+      ],
+      "allowed_warnings": [
+        "incomplete-parse-data"
+      ],
+      "max_selected_files": 1,
+      "max_files_read": 27,
+      "max_model_generations": 2,
+      "max_provider_http_calls": 2
+    }
+  ]
+}
