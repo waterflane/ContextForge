@@ -17,11 +17,15 @@ from pydantic import (
 )
 
 from contextforge.core.validation import validate_portable_relative_path
+from contextforge.discovery.models import CompletenessWarning
 
 BENCHMARK_SCHEMA_VERSION: Literal[1] = 1
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
+ConfidenceValue = Annotated[
+    float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)
+]
 RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
 ExpectedFacet = Annotated[str, Field(min_length=1, max_length=500)]
 WarningCode = Annotated[
@@ -253,6 +257,100 @@ class BenchmarkManifest(BenchmarkModel):
         return value
 
 
+class BenchmarkProviderCounters(BenchmarkModel):
+    """Provider activity charged to one discovery run."""
+
+    model_generations: NonNegativeInt = 0
+    repair_generations: NonNegativeInt = 0
+    auxiliary_provider_calls: NonNegativeInt = 0
+    provider_discovery_calls: NonNegativeInt = 0
+    provider_capability_calls: NonNegativeInt = 0
+    transport_attempts: NonNegativeInt = 0
+    total_provider_http_calls: NonNegativeInt = 0
+
+
+class BenchmarkAnyFileExpectation(BenchmarkModel):
+    """Evaluation of one group where any configured file is acceptable."""
+
+    files: tuple[RepositoryRelativePath, ...]
+    matched_files: tuple[RepositoryRelativePath, ...]
+    passed: bool
+
+
+class BenchmarkExpectationEvaluation(BenchmarkModel):
+    """Machine-readable file and warning expectation evaluation."""
+
+    missing_required_files: tuple[RepositoryRelativePath, ...] = ()
+    any_file_groups: tuple[BenchmarkAnyFileExpectation, ...] = ()
+    selected_forbidden_files: tuple[RepositoryRelativePath, ...] = ()
+    expected_facets: tuple[ExpectedFacet, ...] = ()
+    unexpected_warnings: tuple[WarningCode, ...] = ()
+    missing_required_warnings: tuple[WarningCode, ...] = ()
+    passed: bool
+
+
+class BenchmarkLimitEvaluation(BenchmarkModel):
+    """One configured upper bound and its observed value."""
+
+    limit: NonNegativeInt
+    actual: NonNegativeInt
+    passed: bool
+
+
+class BenchmarkBudgetEvaluation(BenchmarkModel):
+    """All configured benchmark limits evaluated after a discovery run."""
+
+    selected_files: BenchmarkLimitEvaluation
+    files_read: BenchmarkLimitEvaluation
+    model_generations: BenchmarkLimitEvaluation
+    provider_http_calls: BenchmarkLimitEvaluation | None = None
+    passed: bool
+
+
+class BenchmarkFailure(BenchmarkModel):
+    """Typed task failure retained alongside successful benchmark results."""
+
+    code: str = Field(min_length=1, max_length=200)
+    error_type: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1, max_length=2_000)
+
+
+class BenchmarkRunResult(BenchmarkModel):
+    """Canonical result for one task, mode, and repetition."""
+
+    task_id: str
+    repository_path: RepositoryRelativePath
+    mode: BenchmarkMode
+    repetition: PositiveInt
+    status: Literal["complete", "failed", "cancelled"]
+    passed: bool
+    duration_ms: NonNegativeInt
+    selected_files: tuple[RepositoryRelativePath, ...] = ()
+    files_considered: NonNegativeInt = 0
+    files_read: NonNegativeInt = 0
+    provider_id: str
+    model_id: str
+    provider_counters: BenchmarkProviderCounters
+    confidence: ConfidenceValue | None = None
+    warnings: tuple[CompletenessWarning, ...] = ()
+    provenance: Literal["model", "deterministic_fallback"] | None = None
+    fallback_used: bool = False
+    context_bytes: NonNegativeInt = 0
+    expectations: BenchmarkExpectationEvaluation
+    budgets: BenchmarkBudgetEvaluation
+    failure: BenchmarkFailure | None = None
+
+
+class BenchmarkResult(BenchmarkModel):
+    """Canonical, prose-free result DTO for one validated benchmark manifest."""
+
+    schema_version: Literal[1] = BENCHMARK_SCHEMA_VERSION
+    manifest_schema_version: Literal[1]
+    suite_name: str
+    runs: tuple[BenchmarkRunResult, ...]
+    passed: bool
+
+
 def load_benchmark_manifest(path: str | Path) -> BenchmarkManifest:
     """Read and validate an entire JSON manifest before any task can run."""
 
@@ -261,10 +359,18 @@ def load_benchmark_manifest(path: str | Path) -> BenchmarkManifest:
 
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
+    "BenchmarkAnyFileExpectation",
+    "BenchmarkBudgetEvaluation",
     "BenchmarkExpectations",
+    "BenchmarkExpectationEvaluation",
+    "BenchmarkFailure",
+    "BenchmarkLimitEvaluation",
     "BenchmarkManifest",
     "BenchmarkMode",
     "BenchmarkModeOverrides",
+    "BenchmarkProviderCounters",
+    "BenchmarkResult",
+    "BenchmarkRunResult",
     "BenchmarkTask",
     "load_benchmark_manifest",
 ]

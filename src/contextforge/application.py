@@ -807,6 +807,7 @@ async def suggest_repository_context(
     progress: ProgressObserver | None = None,
     operation_id: str | None = None,
     parent_operation_id: str | None = None,
+    persist_diagnostics: bool = True,
 ) -> DiscoveryRunRecord:
     """Run existing bounded discovery without source or index mutation."""
 
@@ -838,27 +839,29 @@ async def suggest_repository_context(
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
-        _persist_application_diagnostic(
-            _snapshot_root(snapshot),
-            reporter,
-            diagnostic_start,
-            command="context suggest",
-            outcome=_diagnostic_outcome(exc),
-            error=exc,
-        )
+        if persist_diagnostics:
+            _persist_application_diagnostic(
+                _snapshot_root(snapshot),
+                reporter,
+                diagnostic_start,
+                command="context suggest",
+                outcome=_diagnostic_outcome(exc),
+                error=exc,
+            )
         raise
     reporter.complete(
         message="Repository context discovery completed.",
         metadata={"run_id": result.run_id},
     )
-    _persist_application_diagnostic(
-        active_snapshot.root,
-        reporter,
-        diagnostic_start,
-        command="context suggest",
-        outcome="completed",
-        generation_id=result.index_generation_id,
-    )
+    if persist_diagnostics:
+        _persist_application_diagnostic(
+            active_snapshot.root,
+            reporter,
+            diagnostic_start,
+            command="context suggest",
+            outcome="completed",
+            generation_id=result.index_generation_id,
+        )
     return result
 
 
