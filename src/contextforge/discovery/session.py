@@ -1114,8 +1114,9 @@ class DiscoverySession:
         )
         self._stage = "provider_dispatch"
         self._provider_request_dispatched = True
+        total_deadline = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining):
+            async with total_deadline:
                 response = await self.provider.complete_structured(
                     request, cancellation=self.cancellation
                 )
@@ -1145,6 +1146,12 @@ class DiscoverySession:
                 self._stage = "budget_validation"
             else:
                 self._stage = "provider_wait"
+            if isinstance(exc, ProviderCancelledError) and total_deadline.expired():
+                raise self._failure(
+                    DiscoveryLimitError,
+                    "total_timeout",
+                    "discovery reached its total timeout",
+                ) from exc
             raise
         if response.diagnostic is not None:
             self.budget.charge_provider(response.diagnostic)
