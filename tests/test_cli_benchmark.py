@@ -86,7 +86,15 @@ def test_help_documents_command_and_regression_exit_policy() -> None:
     output = click.unstyle(result.output)
 
     assert result.exit_code == 0
-    for value in ("PATH", "--tasks", "--modes", "--repeat", "--format", "--output"):
+    for value in (
+        "PATH",
+        "--tasks",
+        "--modes",
+        "--repeat",
+        "--config",
+        "--format",
+        "--output",
+    ):
         assert value in output
     assert "Exit code 3" in output
     parent = click.unstyle(
@@ -141,6 +149,113 @@ def test_default_text_and_json_repeat_override_are_clean(
     assert "Suggesting context" in machine.stderr
     assert not (tmp_path / "repository/.contextforge").exists()
     assert not (tmp_path / ".contextforge/logs/benchmark.log").exists()
+
+
+@pytest.mark.parametrize("config_kind", ["root", "file"])
+def test_sibling_repository_uses_explicit_configuration_for_every_mode(
+    tmp_path: Path, config_kind: str
+) -> None:
+    benchmark_root = tmp_path / "benchmarks"
+    _write(
+        benchmark_root,
+        ".contextforge/config.toml",
+        "[models]\nprovider='fake'\nmodel='benchmark-root'\n",
+    )
+    _write(
+        benchmark_root,
+        "ASP/.contextforge/config.toml",
+        (
+            "[models]\nprovider='fake'\nmodel='asp-model'\n"
+            "endpoint='http://asp.invalid:11434'\ncontext_window=65536\n"
+        ),
+    )
+    _write(benchmark_root, "ASP/main.py", "def main():\n    return 1\n")
+    task = _task("asp", repository_path="ASP")
+    task["allowed_warnings"] = ["hybrid-index-unavailable"]
+    manifest = _manifest(tmp_path, task)
+    config_root = benchmark_root / "ASP"
+    config = (
+        config_root
+        if config_kind == "root"
+        else config_root / ".contextforge/config.toml"
+    )
+    before = {
+        path.relative_to(config_root): path.read_bytes()
+        for path in config_root.rglob("*")
+        if path.is_file()
+    }
+
+    result = _invoke(
+        benchmark_root,
+        manifest,
+        "--config",
+        str(config),
+        "--format",
+        "json",
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert {run["mode"] for run in payload["runs"]} == {"fresh", "hybrid"}
+    assert {run["provider_id"] for run in payload["runs"]} == {"fake"}
+    assert {run["model_id"] for run in payload["runs"]} == {"asp-model"}
+    assert result.stderr
+    assert {
+        path.relative_to(config_root): path.read_bytes()
+        for path in config_root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_omitted_config_uses_benchmark_root_configuration(tmp_path: Path) -> None:
+    _repository(tmp_path)
+    _write(
+        tmp_path,
+        "repository/.contextforge/config.toml",
+        "[models]\nprovider='fake'\nmodel='repository-model'\n",
+    )
+    manifest = _manifest(tmp_path)
+
+    result = _invoke(
+        tmp_path,
+        manifest,
+        "--modes",
+        "fresh",
+        "--format",
+        "json",
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["runs"][0]["provider_id"] == "fake"
+    assert payload["runs"][0]["model_id"] == "benchmark-v1"
+
+
+def test_invalid_config_fails_cleanly_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repository(tmp_path)
+    manifest = _manifest(tmp_path)
+
+    async def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("benchmark execution must not start")
+
+    monkeypatch.setattr(benchmark_cli, "run_discovery_benchmark", unexpected)
+    missing = tmp_path / "missing-config.toml"
+
+    for output_format in ("text", "json"):
+        result = _invoke(
+            tmp_path,
+            manifest,
+            "--config",
+            str(missing),
+            "--format",
+            output_format,
+        )
+
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "configuration file does not exist" in result.stderr
 
 
 def test_markdown_output_file_receives_the_only_result(tmp_path: Path) -> None:

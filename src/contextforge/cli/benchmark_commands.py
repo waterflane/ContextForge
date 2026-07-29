@@ -28,6 +28,7 @@ from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
     ProjectConfigError,
+    ProjectConfiguration,
     create_model_provider,
     load_project_configuration,
     resolve_provider_configuration,
@@ -84,6 +85,13 @@ def benchmark_discovery(
             help="Override task and per-mode manifest repeat counts.",
         ),
     ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Explicit project configuration TOML or repository root.",
+        ),
+    ] = None,
     output_format: Annotated[
         BenchmarkFormat,
         typer.Option(
@@ -112,7 +120,7 @@ def benchmark_discovery(
             modes=selected_modes,
             repeat=repeat,
         )
-        project = load_project_configuration(path)
+        project = _load_benchmark_configuration(path, config)
         provider_configuration = resolve_provider_configuration(project)
         if provider_configuration is None:
             raise ValueError("discovery benchmark requires a model provider")
@@ -157,6 +165,16 @@ def benchmark_discovery(
             _exit_with_error(str(exc), code=1)
     if not result.passed:
         raise typer.Exit(code=BENCHMARK_REGRESSION_EXIT_CODE)
+
+
+def _load_benchmark_configuration(
+    repository_root: Path, config: Path | None
+) -> ProjectConfiguration:
+    if config is None:
+        return load_project_configuration(repository_root)
+    if config.expanduser().is_dir():
+        return load_project_configuration(config, require_file=True)
+    return load_project_configuration(repository_root, config_path=config)
 
 
 def _parse_modes(value: str | None) -> tuple[BenchmarkMode, ...] | None:
