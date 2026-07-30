@@ -67,6 +67,18 @@ Repository source, index prose, diffs, and prior observations are framed as
 untrusted model context. Only ContextForge orchestration supplies system
 instructions. Every action is schema-validated before dispatch.
 
+Fresh action requests state the required non-empty `actions` array and include a
+minimal valid one-action example. The schema remains closed and strict. A
+session-level structured-action circuit breaker fingerprints each validation
+failure as `structured-validation-v1:` plus the SHA-256 of canonical JSON
+containing only schema path, issue type, and relevant constraint. Three
+equivalent failures without an intervening tool result that makes meaningful
+progress stop model-assisted repair and select the existing deterministic
+fallback. Distinct fingerprints have independent counts; meaningful tool
+progress clears the active counts while lifetime diagnostic totals remain
+tracked. A valid response received before the third equivalent failure is
+accepted normally.
+
 ## Budgets and completeness
 
 Hard limits cover steps, model calls, files read, source bytes, tool-result

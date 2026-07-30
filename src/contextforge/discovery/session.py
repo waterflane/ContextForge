@@ -45,7 +45,9 @@ from contextforge.models import (
     StructuredResponseError,
     UnknownCandidateIdIssue,
     UntrustedModelContext,
+    ValidationIssue,
     provider_error_details,
+    structured_validation_fingerprint,
 )
 from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.repositories import ProjectSnapshot
@@ -118,7 +120,15 @@ to ten IDs copied exactly from the supplied candidates; summary must briefly exp
 why those candidates fit the task. candidate_ids is required. Do not return actions,
 tool names, nested arguments, paths in place of IDs, Markdown, or extra fields."""
 
+FRESH_ACTION_INSTRUCTIONS = """Return exactly one JSON object with schema_version=1
+and a required non-empty actions array containing one to ten actions. Every action
+also requires schema_version=1, action_id, kind, and arguments. A minimal valid
+investigation response is:
+{"schema_version":1,"actions":[{"schema_version":1,"action_id":"inspect","kind":"call_tool","tool_name":"list_tree","arguments":{}}]}
+Return the full object, never an action by itself or an empty actions array."""
+
 HYBRID_MAX_MODEL_GENERATIONS = 1
+FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT = 3
 FACET_CANDIDATE_MIN_SCORE = 8.0
 MAX_FACET_COVERAGE_ADDITIONS = 2
 
@@ -211,6 +221,9 @@ class DiscoverySession:
         self._validated_selection: tuple[DiscoveryAction, ...] | None = None
         self._validated_selection_step_fingerprint: str | None = None
         self._validated_response_fingerprint: str | None = None
+        self._structured_failure_totals: dict[str, int] = {}
+        self._structured_failures_since_progress: dict[str, int] = {}
+        self._structured_fallback_fingerprint: str | None = None
         active_operation_id = operation_id or uuid.uuid4().hex
         self._operation_id = active_operation_id
         self._top_level_operation_id = parent_operation_id or active_operation_id
@@ -515,21 +528,36 @@ class DiscoverySession:
             ) from exc
         except ModelProviderError as exc:
             error_code, error_message = provider_error_details(exc)
-            if (
+            repeated_fresh_failure = (
                 isinstance(exc, StructuredResponseError)
-                and not self.request.strict
+                and self.request.mode is DiscoveryMode.FRESH
+                and exc.repair_circuit_broken
+            )
+            repairs_exhausted = (
+                isinstance(exc, StructuredResponseError)
                 and exc.diagnostic is not None
                 and exc.diagnostic.json_repair_attempt
                 >= exc.diagnostic.json_repair_max_attempts
+            )
+            if (
+                isinstance(exc, StructuredResponseError)
+                and not self.request.strict
+                and (repeated_fresh_failure or repairs_exhausted)
             ):
                 self._stage = "fallback_selection"
                 fallback = self._deterministic_fallback()
                 if fallback is not None:
+                    bounded_repetition = repeated_fresh_failure
                     self._progress.report(
                         "fallback_selection",
                         (
-                            "Selected deterministic ranked context after repair "
-                            "exhaustion."
+                            "Selected deterministic ranked context after bounded "
+                            "structured-action validation."
+                            if bounded_repetition
+                            else (
+                                "Selected deterministic ranked context after repair "
+                                "exhaustion."
+                            )
                         ),
                         percentage=99,
                         planned_units=1,
@@ -540,7 +568,13 @@ class DiscoverySession:
                         lifecycle_state="degraded_success",
                         metadata={
                             "fallback_kind": "deterministic_context_selection",
-                            "repair_attempts_exhausted": True,
+                            "repair_attempts_exhausted": repairs_exhausted,
+                            "structured_failure_circuit_broken": bounded_repetition,
+                            "equivalent_failure_limit": (
+                                FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT
+                                if bounded_repetition
+                                else None
+                            ),
                         },
                     )
                     self._progress.complete(
@@ -549,7 +583,15 @@ class DiscoverySession:
                     emit(
                         "fallback",
                         "context_suggestion.fallback_selected",
-                        "Selected deterministic context after repair exhaustion.",
+                        (
+                            "Selected deterministic context after repeated "
+                            "structured-action validation failures."
+                            if bounded_repetition
+                            else (
+                                "Selected deterministic context after repair "
+                                "exhaustion."
+                            )
+                        ),
                         level=LogLevel.WARNING,
                         operation_id=self._operation_id,
                         top_level_operation_id=self._top_level_operation_id,
@@ -562,7 +604,18 @@ class DiscoverySession:
                         status="completed",
                         fallback_selected=True,
                         data={
-                            "repair_attempts_exhausted": True,
+                            "repair_attempts_exhausted": repairs_exhausted,
+                            "structured_failure_circuit_broken": bounded_repetition,
+                            "equivalent_failure_limit": (
+                                FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT
+                                if bounded_repetition
+                                else None
+                            ),
+                            "failure_fingerprint": (
+                                self._structured_fallback_fingerprint
+                                if bounded_repetition
+                                else None
+                            ),
                             "fallback_selected": True,
                             "fallback_kind": "deterministic_context_selection",
                             "fallback_units": 1,
@@ -1031,7 +1084,7 @@ class DiscoverySession:
             system_instructions=(
                 DISCOVERY_SYSTEM_INSTRUCTIONS + "\n\n" + INDEXED_SELECTION_INSTRUCTIONS
                 if compact_selection
-                else DISCOVERY_SYSTEM_INSTRUCTIONS
+                else DISCOVERY_SYSTEM_INSTRUCTIONS + "\n\n" + FRESH_ACTION_INSTRUCTIONS
             ),
             analysis_task=(
                 (
@@ -1042,7 +1095,12 @@ class DiscoverySession:
                 if compact_selection
                 else (
                     f"Task: {self.request.task}\nInvestigate the repository in "
-                    f"{self.request.mode.value} mode. Return one to ten actions. Use "
+                    f"{self.request.mode.value} mode. Return schema_version=1 and "
+                    "the required non-empty actions array with one to ten actions. "
+                    "Minimal valid response: "
+                    '{"schema_version":1,"actions":[{"schema_version":1,'
+                    '"action_id":"inspect","kind":"call_tool",'
+                    '"tool_name":"list_tree","arguments":{}}]}. Use '
                     "select_candidates with only the supplied candidate IDs when a "
                     "ranked candidate should enter the context. Use call_tool actions "
                     "to investigate or mutate the ephemeral selection. Use a finalize "
@@ -1068,6 +1126,9 @@ class DiscoverySession:
                 self._validate_indexed_selection
                 if compact_selection
                 else self._validate_model_action_batch
+            ),
+            structured_failure_handler=(
+                None if compact_selection else self._handle_structured_failure
             ),
         )
         remaining = self._remaining_seconds()
@@ -1414,6 +1475,7 @@ class DiscoverySession:
         count = self._repeat_counts.get(signature, 0) + 1
         if observation.made_progress:
             count = 1
+            self._structured_failures_since_progress.clear()
         self._repeat_counts[signature] = count
         if count >= self.request.budget.repeated_action_warning:
             data = dict(observation.data)
@@ -1439,6 +1501,20 @@ class DiscoverySession:
             return None
         value = FinalizeContextInput.model_validate(action.arguments)
         return self._attempt_finalize(value)
+
+    def _handle_structured_failure(self, issues: tuple[ValidationIssue, ...]) -> bool:
+        """Stop fresh repairs after three equivalent failures without tool progress."""
+
+        fingerprint = structured_validation_fingerprint(issues)
+        self._structured_failure_totals[fingerprint] = (
+            self._structured_failure_totals.get(fingerprint, 0) + 1
+        )
+        active_count = self._structured_failures_since_progress.get(fingerprint, 0) + 1
+        self._structured_failures_since_progress[fingerprint] = active_count
+        if active_count < FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT:
+            return False
+        self._structured_fallback_fingerprint = fingerprint
+        return True
 
     def _attempt_finalize(
         self, value: FinalizeContextInput

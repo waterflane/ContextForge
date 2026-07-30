@@ -78,6 +78,7 @@ from contextforge.models.providers import (
     parse_structured_response,
     provider_error_details,
     redact_secrets,
+    structured_validation_fingerprint,
     validate_structured_response,
     validate_structured_text_content,
 )
@@ -160,4 +161,5 @@ __all__ = [
     "validate_structured_text_content",
     "provider_error_details",
     "redact_secrets",
+    "structured_validation_fingerprint",
 ]

@@ -429,6 +429,9 @@ class ModelRequest:
     response_validator: Callable[[BaseModel], None] | None = field(
         default=None, repr=False, compare=False
     )
+    structured_failure_handler: Callable[[tuple[ValidationIssue, ...]], bool] | None = (
+        field(default=None, repr=False, compare=False)
+    )
     _trusted_json: str = field(init=False, repr=False, compare=False)
     _schema_json: str = field(init=False, repr=False, compare=False)
 
@@ -543,6 +546,10 @@ class ModelRequest:
             self.response_validator
         ):
             raise TypeError("response_validator must be callable or None")
+        if self.structured_failure_handler is not None and not callable(
+            self.structured_failure_handler
+        ):
+            raise TypeError("structured_failure_handler must be callable or None")
         trusted_json = _canonical_json(self.trusted_code_map_facts)
         schema_json = _canonical_json(schema)
         if len(trusted_json.encode("utf-8")) > MAX_TRUSTED_FACT_BYTES:
@@ -825,6 +832,7 @@ class StructuredResponseError(ModelProviderError):
         issues: Sequence[ValidationIssue] = (),
     ) -> None:
         self.issues = tuple(issues)
+        self.repair_circuit_broken = False
         super().__init__(message)
 
 
@@ -1548,24 +1556,27 @@ class ProviderRuntime:
             if isinstance(error, StructuredResponseError):
                 issues = error.issues
                 issue_data = _safe_issue_data(issues)
-                response_issue_fingerprint = _response_issue_fingerprint(
-                    issues, None if raw is None else raw.text
-                )
+                response_issue_fingerprint = structured_validation_fingerprint(issues)
                 repeated_failure = (
                     last_response_issue_fingerprint == response_issue_fingerprint
                 )
                 last_response_issue_fingerprint = response_issue_fingerprint
-                failure_fingerprint = _failure_fingerprint(
-                    issues,
-                    None if raw is None else raw.text,
-                    active_request.metadata.get("repair_strategy", "initial"),
-                    active_request.schema_mode,
+                circuit_broken = (
+                    request.structured_failure_handler is not None
+                    and request.structured_failure_handler(tuple(issues))
+                )
+                error.repair_circuit_broken = circuit_broken
+                repair_scheduled = repair_attempt < repair_max and not circuit_broken
+                diagnostic_level = (
+                    LogLevel.DEBUG
+                    if request.structured_failure_handler is not None
+                    else LogLevel.WARNING
                 )
                 emit(
                     "schema",
                     "response.validation.failed",
                     "Provider response failed structured validation.",
-                    level=LogLevel.WARNING,
+                    level=diagnostic_level,
                     operation_id=request.operation_id,
                     request_id=request_id,
                     parent_operation_id=request.parent_operation_id,
@@ -1577,13 +1588,14 @@ class ProviderRuntime:
                         **counter_data(),
                         **issue_data,
                         "validation_result": "invalid",
-                        "repair_scheduled": repair_attempt < repair_max,
+                        "repair_scheduled": repair_scheduled,
                         "repair_reason": code,
-                        "failure_fingerprint": failure_fingerprint,
+                        "failure_fingerprint": response_issue_fingerprint,
                         "repeated_failure_detected": repeated_failure,
+                        "repair_circuit_broken": circuit_broken,
                     },
                 )
-                if repair_attempt < repair_max:
+                if repair_scheduled:
                     repair_attempt += 1
                     transport_attempt = 1
                     plan = _repair_request(
@@ -1609,7 +1621,7 @@ class ProviderRuntime:
                             "schema",
                             "response.repair.scheduled",
                             "Scheduled a bounded model-assisted JSON repair.",
-                            level=LogLevel.WARNING,
+                            level=diagnostic_level,
                             operation_id=request.operation_id,
                             request_id=request_id,
                             parent_operation_id=request.parent_operation_id,
@@ -1638,7 +1650,7 @@ class ProviderRuntime:
                             "provider",
                             "provider.retry.scheduled",
                             "Structured repair scheduled by the validation gateway.",
-                            level=LogLevel.WARNING,
+                            level=diagnostic_level,
                             operation_id=request.operation_id,
                             request_id=request_id,
                             parent_operation_id=request.parent_operation_id,
@@ -1741,18 +1753,34 @@ class ProviderRuntime:
                 total_provider_http_calls=total_http_calls,
                 total_provider_calls=total_http_calls,
             )
-            exhausted = isinstance(error, StructuredResponseError)
+            circuit_broken = (
+                isinstance(error, StructuredResponseError)
+                and error.repair_circuit_broken
+            )
+            exhausted = (
+                isinstance(error, StructuredResponseError) and not circuit_broken
+            )
             progress.report(
                 "provider_failure",
-                "Repair attempts exhausted." if exhausted else message,
+                (
+                    "Structured repair circuit breaker reached."
+                    if circuit_broken
+                    else "Repair attempts exhausted."
+                    if exhausted
+                    else message
+                ),
                 percentage=0,
                 completed=1,
                 total=1,
                 planned_units=1,
                 processed_units=1,
-                failed_units=1,
+                failed_units=0 if circuit_broken else 1,
                 lifecycle_state=(
-                    "repair_attempts_exhausted" if exhausted else "failed"
+                    "repair_circuit_broken"
+                    if circuit_broken
+                    else "repair_attempts_exhausted"
+                    if exhausted
+                    else "failed"
                 ),
                 safe_error_code=code,
                 safe_error_message=message,
@@ -1765,7 +1793,12 @@ class ProviderRuntime:
                 "provider",
                 "provider.request.failed",
                 "Structured model request failed in a controlled state.",
-                level=LogLevel.ERROR,
+                level=(
+                    LogLevel.DEBUG
+                    if isinstance(error, StructuredResponseError)
+                    and error.repair_circuit_broken
+                    else LogLevel.ERROR
+                ),
                 operation_id=request.operation_id,
                 request_id=request_id,
                 top_level_operation_id=request.top_level_operation_id,
@@ -1776,10 +1809,19 @@ class ProviderRuntime:
                 data={
                     **counter_data(),
                     "repair_attempts_exhausted": exhausted,
-                    "final_outcome": "controlled_failure",
+                    "final_outcome": (
+                        "repair_circuit_broken"
+                        if circuit_broken
+                        else "controlled_failure"
+                    ),
                 },
             )
-            progress.fail(message=message)
+            if circuit_broken:
+                progress.complete(
+                    message="Structured repair stopped at the application bound."
+                )
+            else:
+                progress.fail(message=message)
             raise error
 
     async def close(self) -> None:
@@ -2844,26 +2886,45 @@ def _allowed_enum_values(schema: Any, path: str = "") -> dict[str, list[Any]]:
     return result
 
 
-def _minimal_required_template(schema: Any) -> Any:
+def _minimal_required_template(schema: Any, root: Any | None = None) -> Any:
     if not isinstance(schema, dict):
         return None
+    root_schema = schema if root is None else root
+    reference = schema.get("$ref")
+    if (
+        isinstance(reference, str)
+        and reference.startswith("#/$defs/")
+        and isinstance(root_schema, dict)
+    ):
+        definition = root_schema.get("$defs", {}).get(reference.rsplit("/", 1)[-1])
+        return _minimal_required_template(definition, root_schema)
     if "const" in schema:
         return schema["const"]
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
     required = schema.get("required")
     properties = schema.get("properties")
     if isinstance(required, list) and isinstance(properties, dict):
         return {
-            key: _minimal_required_template(properties.get(key, {}))
+            key: _minimal_required_template(properties.get(key, {}), root_schema)
             for key in required
             if isinstance(key, str)
         }
     value_type = schema.get("type")
     if not isinstance(value_type, str):
         return None
+    if value_type == "array":
+        minimum = schema.get("minItems", 0)
+        count = minimum if type(minimum) is int and minimum > 0 else 0
+        item = _minimal_required_template(schema.get("items", {}), root_schema)
+        return [item for _ in range(count)]
+    if value_type == "string":
+        minimum = schema.get("minLength", 0)
+        count = minimum if type(minimum) is int and minimum > 0 else 0
+        return "x" * count
     return {
-        "array": [],
         "object": {},
-        "string": "",
         "integer": 0,
         "number": 0,
         "boolean": False,
@@ -2871,32 +2932,32 @@ def _minimal_required_template(schema: Any) -> Any:
     }.get(value_type)
 
 
-def _response_issue_fingerprint(
-    issues: Sequence[ValidationIssue], response: str | bytes | None
-) -> str:
-    material = {
-        "issues": sorted(_normalized_issue(item) for item in issues),
-        "response_shape": _normalized_response_shape(response),
-    }
-    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+def structured_validation_fingerprint(issues: Sequence[ValidationIssue]) -> str:
+    """Identify equivalent schema failures without unstable prose or values."""
 
-
-def _failure_fingerprint(
-    issues: Sequence[ValidationIssue],
-    response: str | bytes | None,
-    strategy: str,
-    schema_mode: str,
-) -> str:
-    material = {
-        "response_issue": _response_issue_fingerprint(issues, response),
-        "repair_strategy": strategy,
-        "schema_mode": schema_mode,
-    }
-    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
-
-
-def _normalized_issue(issue: ValidationIssue) -> str:
-    return _canonical_json(issue.model_dump(mode="json"))
+    normalized = sorted(
+        (
+            {
+                "path": issue.path,
+                "issue_type": issue.code,
+                "constraint": (
+                    issue.constraint
+                    if isinstance(issue, ConstraintValidationIssue)
+                    else (
+                        f"expected_type:{issue.expected_type}"
+                        if isinstance(issue, WrongFieldTypeIssue)
+                        else None
+                    )
+                ),
+            }
+            for issue in issues
+        ),
+        key=_canonical_json,
+    )
+    digest = hashlib.sha256(
+        _canonical_json({"version": 1, "issues": normalized}).encode("utf-8")
+    ).hexdigest()
+    return f"structured-validation-v1:{digest}"
 
 
 def _normalized_response_shape(value: str | bytes | None) -> Any:
@@ -3356,9 +3417,9 @@ def _redacted_provider_error(
     if message == str(error):
         return error
     if isinstance(error, StructuredResponseError):
-        redacted: ModelProviderError = StructuredResponseError(
-            message, issues=error.issues
-        )
+        structured_redacted = StructuredResponseError(message, issues=error.issues)
+        structured_redacted.repair_circuit_broken = error.repair_circuit_broken
+        redacted: ModelProviderError = structured_redacted
     else:
         redacted = type(error)(message)
     redacted.provider_discovery_calls = error.provider_discovery_calls
@@ -3421,4 +3482,5 @@ __all__ = [
     "validate_structured_text_content",
     "provider_error_details",
     "redact_secrets",
+    "structured_validation_fingerprint",
 ]

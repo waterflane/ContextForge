@@ -745,7 +745,8 @@ def test_prompt_injection_is_untrusted_and_cannot_expand_path_authority(
         )
     )
     assert result.status == "complete"
-    assert requests[0].system_instructions == DISCOVERY_SYSTEM_INSTRUCTIONS
+    assert requests[0].system_instructions.startswith(DISCOVERY_SYSTEM_INSTRUCTIONS)
+    assert "required non-empty actions array" in requests[0].system_instructions
     assert not any(item.code == "invalid_input" for item in result.observations)
     assert "STRUCTURED_RESPONSE_REPAIR" in requests[2].analysis_task
 
