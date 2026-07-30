@@ -53,6 +53,7 @@ from contextforge.progress import ProgressObserver, ProgressReporter
 from contextforge.repositories import ProjectSnapshot
 
 from .completeness import review_completeness
+from .constraints import extract_task_file_constraints
 from .models import (
     CompletenessWarning,
     DiscoveryAction,
@@ -224,6 +225,7 @@ class DiscoverySession:
         self._structured_failure_totals: dict[str, int] = {}
         self._structured_failures_since_progress: dict[str, int] = {}
         self._structured_fallback_fingerprint: str | None = None
+        self._task_file_constraints = extract_task_file_constraints(request.task)
         active_operation_id = operation_id or uuid.uuid4().hex
         self._operation_id = active_operation_id
         self._top_level_operation_id = parent_operation_id or active_operation_id
@@ -307,6 +309,19 @@ class DiscoverySession:
                 item.candidate_id: item for item in self._preselected_candidates
             },
         )
+        if len(self.request.pinned_paths) > self.request.budget.max_context_files:
+            self.warnings.append(
+                CompletenessWarning(
+                    code="mandatory-pins-exceed-file-limit",
+                    message=(
+                        "Mandatory pinned files exceed the explicit maximum-file "
+                        "constraint; all mandatory pins were preserved and no "
+                        "unpinned file can be added."
+                    ),
+                    related_paths=self.request.pinned_paths[:50],
+                    confidence=1.0,
+                )
+            )
         return self._executor, loaded.warnings
 
     async def run(self) -> DiscoveryRunRecord:
@@ -674,18 +689,49 @@ class DiscoverySession:
         files = {item.path: item for item in self.snapshot.files}
         selected: list[DiscoveryCandidate] = []
         selected_bytes = 0
-        maximum_files = min(
-            self.request.budget.max_context_files,
-            len(self._preselected_candidates),
+        pinned = set(self.request.pinned_paths)
+        constraints = self._task_file_constraints
+        ranked = tuple(
+            item
+            for item in _rank_candidate_records(
+                self._require_knowledge(),
+                task=constraints.positive_task,
+                pinned_paths=self.request.pinned_paths,
+                excluded_paths=self.request.excluded_paths,
+            )
+            if item.path in pinned or not constraints.excludes(item.path)
         )
-        for record in self._preselected_candidates:
+        facets = _detect_intent_facets(constraints.positive_task)
+        facet_rankings = _rank_candidates_by_facet(
+            self._require_knowledge(), ranked, facets
+        )
+        candidates = list(
+            _facet_aware_preselection(
+                ranked,
+                facets,
+                facet_rankings,
+                limit=self.request.budget.max_preselected_candidates,
+            )
+        )
+        candidate_paths = {item.path for item in candidates}
+        candidates.extend(
+            item
+            for item in ranked
+            if item.path in pinned and item.path not in candidate_paths
+        )
+        maximum_files = max(
+            self.request.budget.max_context_files,
+            len(self.request.pinned_paths),
+        )
+        for record in candidates:
             project_file = files.get(record.path)
             if (
                 project_file is None
                 or project_file.is_text is not True
                 or record.path in self.request.excluded_paths
+                or (record.path not in pinned and constraints.excludes(record.path))
                 or (
-                    record.path not in self.request.pinned_paths
+                    record.path not in pinned
                     and {
                         "incidental_metadata_penalty",
                         "unrelated_test_penalty",
@@ -717,6 +763,7 @@ class DiscoverySession:
                     ),
                     confidence=min(0.8, 0.4 + record.score / (2 * (record.score + 1))),
                     source_sha256=project_file.sha256,
+                    manually_pinned=record.path in pinned,
                 )
             )
         if not selected:
@@ -851,6 +898,7 @@ class DiscoverySession:
                 if path not in code_maps
             ]
             reserve_files = max(
+                len(self.request.pinned_paths),
                 1,
                 min(
                     self.request.budget.max_context_files,

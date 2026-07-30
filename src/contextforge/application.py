@@ -1124,7 +1124,7 @@ def build_discovery_request(
         strict=strict,
         budget=DiscoveryBudget(
             max_context_files=max_files,
-            max_files_read=min(1_000, max_files * 2),
+            max_files_read=min(1_000, max(max_files * 2, len(set(includes)))),
             max_source_bytes=min(16 * 1024 * 1024, max_context_bytes * 2),
             max_context_bytes=max_context_bytes,
         ),

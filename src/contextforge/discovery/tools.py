@@ -1183,7 +1183,10 @@ class DiscoveryToolExecutor:
             for path, candidate in self._selected.items()
             if not candidate.ranges
         )
-        if files > self.budget.limits.max_context_files:
+        effective_max_files = max(
+            self.budget.limits.max_context_files, len(self._pinned)
+        )
+        if files > effective_max_files:
             raise ToolBudgetExceededError("maximum context files exceeded")
         if size > self.budget.limits.max_context_bytes:
             raise ToolBudgetExceededError("maximum context bytes exceeded")
