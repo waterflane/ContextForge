@@ -566,10 +566,102 @@ def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
     repeated = tuple(
         _batch(_call(f"same-{index}", "get_context_budget")) for index in range(5)
     )
+    provider = _provider(*repeated)
+    request = DiscoveryRequest(
+        task="x",
+        mode="fresh",
+        budget=DiscoveryBudget(max_steps=4),
+    )
+
+    with pytest.raises(DiscoveryLimitError) as limit:
+        asyncio.run(discover_repository(snapshot, provider, request))
+
+    record = limit.value.run_record
+    assert record.failure_code == "maximum_steps"
+    assert record.failure_message == "discovery reached the maximum action steps"
+    assert record.final_selection is None
+    assert record.budget_usage.steps == 4
+    assert record.budget_usage.model_calls == 4
+    assert record.budget_usage.model_generations == 4
+    assert record.budget_usage.transport_attempts == 4
+    assert record.budget_usage.total_provider_http_calls == 4
+    assert provider.call_count == 4
+
+
+def test_repeated_valid_actions_still_use_the_action_loop_limit(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    repeated = tuple(_call(f"same-{index}", "get_context_budget") for index in range(5))
+
     with pytest.raises(DiscoveryLimitError) as loop:
-        _run(snapshot, *repeated, request=DiscoveryRequest(task="x", mode="fresh"))
+        _run(
+            snapshot,
+            _batch(*repeated),
+            request=DiscoveryRequest(task="x", mode="fresh"),
+        )
+
     assert loop.value.run_record.failure_code == "repeated_action_loop"
     assert loop.value.run_record.final_selection is None
+
+
+def test_finalize_in_received_batch_can_use_the_last_action_step(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    result = _run(
+        snapshot,
+        _batch(
+            _call("add", "add_to_context", {"path": "a.py", "reason": "task"}),
+            _finalize(),
+        ),
+        request=DiscoveryRequest(
+            task="x",
+            mode="fresh",
+            budget=DiscoveryBudget(max_steps=2),
+        ),
+    )
+
+    assert result.final_selection is not None
+    assert result.budget_usage.steps == 2
+    assert result.budget_usage.model_calls == 1
+
+
+def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        candidates = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return _batch(
+            _call(
+                "select",
+                "select_candidates",
+                {"candidate_ids": [candidates[0]["candidate_id"]]},
+            )
+        )
+
+    provider = FakeModelProvider(_configuration(), responder=responder)
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(
+                task="x",
+                mode="fresh",
+                budget=DiscoveryBudget(max_steps=1),
+            ),
+        )
+    )
+
+    assert result.final_selection is not None
+    assert result.budget_usage.steps == 1
+    assert [item.action_id for item in result.observations] == [
+        "select",
+        "engine-deterministic-finalize",
+    ]
 
 
 def test_source_and_context_byte_budgets_fail_closed(tmp_path: Path) -> None:

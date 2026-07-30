@@ -1892,12 +1892,7 @@ class DiscoverySession:
 
     def _check_limits_before_model(self) -> None:
         self._raise_if_cancelled()
-        if self.budget.steps >= self.request.budget.max_steps:
-            raise self._failure(
-                DiscoveryLimitError,
-                "maximum_steps",
-                "discovery reached the maximum action steps",
-            )
+        self._check_step_limit()
         if self.budget.model_calls >= self._max_model_calls:
             raise self._failure(
                 DiscoveryLimitError,
