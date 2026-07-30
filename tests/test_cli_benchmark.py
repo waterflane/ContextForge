@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 import contextforge.cli.benchmark_commands as benchmark_cli
+from contextforge.benchmarks import BenchmarkManifest, BenchmarkMode
 from contextforge.cli.main import app
 
 runner = CliRunner()
@@ -75,6 +76,158 @@ def _invoke(root: Path, manifest: Path, *arguments: str) -> Result:
         ],
         terminal_width=TERMINAL_WIDTH,
     )
+
+
+def _filtering_manifest() -> BenchmarkManifest:
+    mixed = _task("a-mixed")
+    mixed["modes"] = ["fresh", "indexed", "hybrid"]
+    mixed["index_precondition"] = {"kind": "clean"}
+    fresh = _task("b-fresh")
+    fresh["modes"] = ["fresh"]
+    return BenchmarkManifest.model_validate_json(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "suite_name": "mode-filtering",
+                "tasks": [mixed, fresh],
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected_modes", "precondition_preserved", "task_ids"),
+    [
+        (
+            (BenchmarkMode.FRESH,),
+            (BenchmarkMode.FRESH,),
+            False,
+            ("a-mixed", "b-fresh"),
+        ),
+        (
+            (BenchmarkMode.INDEXED,),
+            (BenchmarkMode.INDEXED,),
+            True,
+            ("a-mixed",),
+        ),
+        (
+            (BenchmarkMode.HYBRID,),
+            (BenchmarkMode.HYBRID,),
+            True,
+            ("a-mixed",),
+        ),
+        (
+            (BenchmarkMode.FRESH, BenchmarkMode.INDEXED),
+            (BenchmarkMode.FRESH, BenchmarkMode.INDEXED),
+            True,
+            ("a-mixed", "b-fresh"),
+        ),
+    ],
+)
+def test_mode_filtering_normalizes_only_derived_index_preconditions(
+    requested: tuple[BenchmarkMode, ...],
+    expected_modes: tuple[BenchmarkMode, ...],
+    precondition_preserved: bool,
+    task_ids: tuple[str, ...],
+) -> None:
+    manifest = _filtering_manifest()
+    original_json = manifest.model_dump_json()
+
+    effective = benchmark_cli._effective_manifest(
+        manifest,
+        modes=requested,
+        repeat=None,
+    )
+
+    assert tuple(task.task_id for task in effective.tasks) == task_ids
+    assert effective.tasks[0].modes == expected_modes
+    assert (effective.tasks[0].index_precondition is not None) is (
+        precondition_preserved
+    )
+    if BenchmarkMode.FRESH in requested and len(effective.tasks) == 2:
+        assert effective.tasks[1] == manifest.tasks[1]
+    assert BenchmarkManifest.model_validate_json(effective.model_dump_json()) == (
+        effective
+    )
+    assert manifest.model_dump_json() == original_json
+
+
+def test_repeated_mode_filtering_does_not_mutate_the_loaded_manifest() -> None:
+    manifest = _filtering_manifest()
+    original_modes = manifest.tasks[0].modes
+    original_precondition = manifest.tasks[0].index_precondition
+
+    first = benchmark_cli._effective_manifest(
+        manifest,
+        modes=(BenchmarkMode.FRESH,),
+        repeat=None,
+    )
+    second = benchmark_cli._effective_manifest(
+        manifest,
+        modes=(BenchmarkMode.FRESH,),
+        repeat=None,
+    )
+
+    assert first == second
+    assert manifest.tasks[0].modes == original_modes
+    assert manifest.tasks[0].index_precondition == original_precondition
+    assert first.tasks[0].index_precondition is None
+
+
+def test_committed_asp_manifest_can_be_derived_as_fresh_only() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "asp_discovery_benchmark.json"
+    manifest = BenchmarkManifest.model_validate_json(fixture.read_bytes())
+
+    effective = benchmark_cli._effective_manifest(
+        manifest,
+        modes=(BenchmarkMode.FRESH,),
+        repeat=None,
+    )
+
+    assert effective.tasks
+    assert all(task.modes == (BenchmarkMode.FRESH,) for task in effective.tasks)
+    assert all(task.index_precondition is None for task in effective.tasks)
+    assert BenchmarkManifest.model_validate_json(effective.model_dump_json()) == (
+        effective
+    )
+
+
+def test_fresh_only_cli_filter_reaches_runner_with_mixed_mode_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repository(tmp_path)
+    task = _task("mixed")
+    task["modes"] = ["fresh", "indexed", "hybrid"]
+    task["index_precondition"] = {"kind": "clean"}
+    manifest = _manifest(tmp_path, task)
+    original_runner = benchmark_cli.run_discovery_benchmark
+    observed: list[BenchmarkManifest] = []
+
+    async def tracking_runner(
+        effective: BenchmarkManifest, *args: object, **kwargs: object
+    ) -> object:
+        observed.append(effective)
+        return await original_runner(effective, *args, **kwargs)
+
+    monkeypatch.setattr(
+        benchmark_cli,
+        "run_discovery_benchmark",
+        tracking_runner,
+    )
+
+    result = _invoke(
+        tmp_path,
+        manifest,
+        "--modes",
+        "fresh",
+        "--format",
+        "json",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(observed) == 1
+    assert observed[0].tasks[0].modes == (BenchmarkMode.FRESH,)
+    assert observed[0].tasks[0].index_precondition is None
 
 
 def test_help_documents_command_and_regression_exit_policy() -> None:

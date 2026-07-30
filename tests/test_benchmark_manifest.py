@@ -142,6 +142,15 @@ def test_manifest_supports_required_groups_warnings_and_per_mode_overrides() -> 
     assert override.max_provider_http_calls == 3
 
 
+def test_manifest_rejects_fresh_only_index_precondition_before_filtering() -> None:
+    payload = _manifest()
+    task = payload["tasks"][0]
+    task["index_precondition"] = {"kind": "clean"}
+
+    with pytest.raises(ValidationError, match="index_precondition requires"):
+        _validate(payload)
+
+
 def test_nested_override_errors_keep_their_exact_location() -> None:
     payload = _manifest()
     task = payload["tasks"][0]

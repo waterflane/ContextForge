@@ -214,6 +214,8 @@ def _effective_manifest(
             continue
         payload = task.model_dump(mode="python")
         payload["modes"] = enabled
+        if not set(enabled) & {BenchmarkMode.INDEXED, BenchmarkMode.HYBRID}:
+            payload["index_precondition"] = None
         overrides: dict[str, object] = {}
         for mode in BenchmarkMode:
             original = getattr(task.mode_overrides, mode.value)
