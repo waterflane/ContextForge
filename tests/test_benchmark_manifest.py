@@ -12,6 +12,7 @@ from contextforge.benchmarks import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "discovery_benchmark_minimal.json"
+ASP_FIXTURE = Path(__file__).parent / "fixtures" / "asp_discovery_benchmark.json"
 
 
 def _manifest() -> dict[str, Any]:
@@ -30,6 +31,31 @@ def test_minimal_manifest_fixture_is_valid_and_deterministic() -> None:
     assert manifest.tasks[0].modes == (BenchmarkMode.FRESH,)
     assert manifest.tasks[0].max_provider_http_calls is None
     assert manifest == BenchmarkManifest.model_validate_json(FIXTURE.read_bytes())
+
+
+def test_asp_manifest_keeps_explicit_includes_with_the_configuration_task() -> None:
+    manifest = load_benchmark_manifest(ASP_FIXTURE)
+    tasks = {task.task_id: task for task in manifest.tasks}
+    bug_localization = tasks["bug-localization-library-refresh"]
+    configuration = tasks["configuration-media-providers"]
+
+    assert ".env.example" not in bug_localization.include_paths
+    assert ".env.example" in configuration.include_paths
+    assert bug_localization.required_files_all == (
+        "public/videos.js",
+        "test/library-ui.test.js",
+    )
+    assert bug_localization.forbidden_files == (
+        "LICENSE",
+        "setup-global-access.bat",
+        "setup-global-access.ps1",
+    )
+    assert configuration.required_files_all == (
+        ".env.example",
+        "config.json",
+        "server.js",
+    )
+    assert configuration.forbidden_files == ()
 
 
 def test_manifest_exposes_a_versioned_machine_readable_schema() -> None:

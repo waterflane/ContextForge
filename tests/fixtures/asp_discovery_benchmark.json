@@ -95,9 +95,6 @@
         "hybrid"
       ],
       "repeat_count": 1,
-      "include_paths": [
-        ".env.example"
-      ],
       "required_files_all": [
         "public/videos.js",
         "test/library-ui.test.js"
@@ -161,6 +158,9 @@
         "fresh"
       ],
       "repeat_count": 1,
+      "include_paths": [
+        ".env.example"
+      ],
       "required_files_all": [
         ".env.example",
         "config.json",
