@@ -58,7 +58,10 @@ benchmark_app = typer.Typer(
 def benchmark_discovery(
     path: Annotated[
         Path,
-        typer.Argument(help="Root containing the manifest task repositories."),
+        typer.Argument(
+            help="Root containing the manifest task repositories.",
+            metavar="PATH",
+        ),
     ],
     tasks: Annotated[
         Path,

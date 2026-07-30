@@ -272,7 +272,7 @@ def doctor() -> None:
 def scan(
     path: Annotated[
         Path,
-        typer.Argument(help="Repository root to scan."),
+        typer.Argument(help="Repository root to scan.", metavar="PATH"),
     ] = Path("."),
     output_format: Annotated[
         ScanFormat,
@@ -345,7 +345,7 @@ def scan(
 def tree(
     path: Annotated[
         Path,
-        typer.Argument(help="Repository root to scan."),
+        typer.Argument(help="Repository root to scan.", metavar="PATH"),
     ] = Path("."),
     depth: Annotated[
         int | None,

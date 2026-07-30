@@ -507,7 +507,10 @@ def create_context(
 def inspect_context(
     package: Annotated[
         Path,
-        typer.Argument(help="JSON context package to validate and inspect."),
+        typer.Argument(
+            help="JSON context package to validate and inspect.",
+            metavar="PACKAGE",
+        ),
     ],
 ) -> None:
     """Validate and summarize a JSON package without its repository."""
