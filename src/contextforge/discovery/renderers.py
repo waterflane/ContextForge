@@ -87,18 +87,26 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
     warning_groups = (
         (
             "Warnings",
-            tuple(item for item in aggregated if item.severity == "warning"),
+            tuple(
+                grouped_warning
+                for grouped_warning in aggregated
+                if grouped_warning.severity == "warning"
+            ),
         ),
         (
             "Information",
-            tuple(item for item in aggregated if item.severity == "info"),
+            tuple(
+                grouped_warning
+                for grouped_warning in aggregated
+                if grouped_warning.severity == "info"
+            ),
         ),
     )
     for label, warnings in warning_groups:
         if warnings:
             lines.append(f"  {label}:")
-            for item in warnings:
-                lines.append(f"    {_text_warning_summary(item)}")
+            for grouped_warning in warnings:
+                lines.append(f"    {_text_warning_summary(grouped_warning)}")
     if selection.unknowns:
         lines.append("  Unknowns:")
         lines.extend(f"    {_visible_inline(item)}" for item in selection.unknowns)
@@ -165,20 +173,25 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
             )
         if aggregated:
             lines.append("  Warning details:")
-            for item in aggregated:
-                lines.append(f"    {_text_warning_summary(item)}")
-                lines.append(f"      Reason: {_visible_inline(item.message)}")
+            for grouped_warning in aggregated:
+                lines.append(f"    {_text_warning_summary(grouped_warning)}")
+                lines.append(
+                    f"      Reason: {_visible_inline(grouped_warning.message)}"
+                )
                 confidence = (
-                    "unknown" if item.confidence is None else str(item.confidence)
+                    "unknown"
+                    if grouped_warning.confidence is None
+                    else str(grouped_warning.confidence)
                 )
                 lines.append(
                     "      Warning confidence (not result confidence): "
                     f"{confidence}"
                 )
-                if item.paths:
+                if grouped_warning.paths:
                     lines.append("      Affected files:")
                     lines.extend(
-                        f"        {_visible_inline(path)}" for path in item.paths
+                        f"        {_visible_inline(affected_path)}"
+                        for affected_path in grouped_warning.paths
                     )
     return "\n".join(lines) + "\n"
 
@@ -268,11 +281,19 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
     warning_groups = (
         (
             "Warnings",
-            tuple(item for item in aggregated if item.severity == "warning"),
+            tuple(
+                grouped_warning
+                for grouped_warning in aggregated
+                if grouped_warning.severity == "warning"
+            ),
         ),
         (
             "Information",
-            tuple(item for item in aggregated if item.severity == "info"),
+            tuple(
+                grouped_warning
+                for grouped_warning in aggregated
+                if grouped_warning.severity == "info"
+            ),
         ),
     )
     any_warnings = False
@@ -281,23 +302,27 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
             continue
         any_warnings = True
         lines.extend((f"### {label}", ""))
-        for item in warnings:
-            lines.append(f"- {_markdown_warning_summary(item)}")
+        for grouped_warning in warnings:
+            lines.append(f"- {_markdown_warning_summary(grouped_warning)}")
             if explain:
                 lines.append(
-                    f"  - Reason: {_escape_markdown_inline(item.message)}"
+                    "  - Reason: "
+                    f"{_escape_markdown_inline(grouped_warning.message)}"
                 )
                 confidence = (
-                    "unknown" if item.confidence is None else f"{item.confidence:.3f}"
+                    "unknown"
+                    if grouped_warning.confidence is None
+                    else f"{grouped_warning.confidence:.3f}"
                 )
                 lines.append(
                     "  - Warning confidence (not result confidence): "
                     f"{confidence}"
                 )
-                if item.paths:
+                if grouped_warning.paths:
                     lines.append("  - Affected files:")
                     lines.extend(
-                        f"    - {_markdown_code_span(path)}" for path in item.paths
+                        f"    - {_markdown_code_span(affected_path)}"
+                        for affected_path in grouped_warning.paths
                     )
         lines.append("")
     if selection.unknowns:

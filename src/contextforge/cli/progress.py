@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TextIO
+from typing import IO, TextIO
 
 from rich import box
 from rich.console import Console, Group, RenderableType
@@ -113,7 +113,7 @@ class CLIProgressRenderer:
         return True
 
     @staticmethod
-    def _is_interactive(stream: TextIO) -> bool:
+    def _is_interactive(stream: IO[str]) -> bool:
         try:
             return bool(stream.isatty())
         except (AttributeError, OSError, ValueError):
