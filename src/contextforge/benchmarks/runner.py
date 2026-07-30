@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +35,19 @@ from contextforge.discovery import (
     DiscoveryRequest,
     DiscoveryRunRecord,
 )
+from contextforge.intelligence import (
+    IndexManifestNotFoundError,
+    IndexManifestReadError,
+    calculate_source_snapshot_digest,
+    load_manifest,
+)
 from contextforge.models import ModelProvider
 from contextforge.progress import ProgressEvent, ProgressObserver
+from contextforge.repositories import scan_repository
+
+
+class _BenchmarkPreconditionError(RuntimeError):
+    """Raised when a task's declared benchmark fixture state is unavailable."""
 
 
 class _RunMetrics:
@@ -103,6 +117,7 @@ async def _run_once(
     run_record: DiscoveryRunRecord | None = None
     failure: BenchmarkFailure | None = None
     configuration_digest: str | None = None
+    expectations_evaluated = True
     try:
         request = build_discovery_request(
             task=task.task,
@@ -113,13 +128,17 @@ async def _run_once(
         configuration_digest = _configuration_digest(task, mode, provider, request)
         repository = root.joinpath(*task.repository_path.split("/")).resolve()
         repository.relative_to(root)
-        run_record = await suggest_repository_context(
-            repository,
-            provider,
-            request,
-            progress=metrics.observe,
-            persist_diagnostics=False,
-        )
+        with _prepared_repository(repository, task, mode) as prepared:
+            run_record = await suggest_repository_context(
+                prepared,
+                provider,
+                request,
+                progress=metrics.observe,
+                persist_diagnostics=False,
+            )
+    except _BenchmarkPreconditionError as exc:
+        expectations_evaluated = False
+        failure = _failure("benchmark_precondition_failed", exc)
     except DiscoveryError as exc:
         run_record = exc.run_record
         failure = _failure(
@@ -140,6 +159,7 @@ async def _run_once(
         metrics.files_considered,
         duration_ms,
         configuration_digest,
+        expectations_evaluated=expectations_evaluated,
     )
 
 
@@ -153,6 +173,8 @@ def _build_result(
     files_considered: int,
     duration_ms: int,
     configuration_digest: str | None,
+    *,
+    expectations_evaluated: bool = True,
 ) -> BenchmarkRunResult:
     selection = None if run is None else run.final_selection
     selected_files = (
@@ -183,12 +205,16 @@ def _build_result(
         ),
     )
     candidates = () if selection is None else selection.selected
-    expectations = _evaluate_expectations(
-        task,
-        mode,
-        selected_files,
-        candidates,
-        tuple(item.code for item in warnings),
+    expectations = (
+        _evaluate_expectations(
+            task,
+            mode,
+            selected_files,
+            candidates,
+            tuple(item.code for item in warnings),
+        )
+        if expectations_evaluated
+        else _unevaluated_expectations(task, mode)
     )
     budgets = _evaluate_budgets(
         task,
@@ -232,6 +258,120 @@ def _build_result(
         expectations=expectations,
         budgets=budgets,
         failure=failure,
+    )
+
+
+@contextmanager
+def _prepared_repository(
+    repository: Path,
+    task: BenchmarkTask,
+    mode: BenchmarkMode,
+) -> Iterator[Path]:
+    precondition = task.index_precondition
+    if mode is BenchmarkMode.FRESH or precondition is None:
+        yield repository
+        return
+    if precondition.kind == "clean":
+        _require_index_drift(repository, ())
+        yield repository
+        return
+
+    drift_path = precondition.drift_path
+    if drift_path is None:  # Defended by manifest validation.
+        raise _BenchmarkPreconditionError(
+            "isolated stale-index fixture has no drift path"
+        )
+    try:
+        snapshot = scan_repository(repository)
+        with tempfile.TemporaryDirectory(prefix="contextforge-benchmark-") as temporary:
+            isolated = Path(temporary) / "repository"
+            for source_file in snapshot.files:
+                source = repository.joinpath(*source_file.path.split("/"))
+                destination = isolated.joinpath(*source_file.path.split("/"))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            index = repository / ".contextforge" / "index"
+            shutil.copytree(index, isolated / ".contextforge" / "index")
+
+            existing_drift = _source_index_drift(isolated)
+            if not existing_drift:
+                target = isolated.joinpath(*drift_path.split("/"))
+                if not target.is_file():
+                    raise _BenchmarkPreconditionError(
+                        f"isolated stale-index drift path is unavailable: {drift_path}"
+                    )
+                target.write_bytes(
+                    target.read_bytes() + b"\ncontextforge benchmark stale fixture\n"
+                )
+            _require_index_drift(isolated, (drift_path,))
+            yield isolated
+    except _BenchmarkPreconditionError:
+        raise
+    except (IndexManifestNotFoundError, IndexManifestReadError, OSError) as exc:
+        raise _BenchmarkPreconditionError(
+            f"isolated stale-index fixture preparation failed: {exc}"
+        ) from exc
+
+
+def _require_index_drift(repository: Path, expected: tuple[str, ...]) -> None:
+    try:
+        observed = _source_index_drift(repository)
+    except (IndexManifestNotFoundError, IndexManifestReadError, OSError) as exc:
+        raise _BenchmarkPreconditionError(
+            f"indexed snapshot precondition could not be verified: {exc}"
+        ) from exc
+    if observed != expected:
+        expected_label = ", ".join(expected) or "none"
+        observed_label = ", ".join(observed) or "none"
+        raise _BenchmarkPreconditionError(
+            "indexed snapshot precondition failed; "
+            f"expected source/index drift [{expected_label}], "
+            f"observed [{observed_label}]"
+        )
+
+
+def _source_index_drift(repository: Path) -> tuple[str, ...]:
+    snapshot = scan_repository(repository)
+    manifest = load_manifest(repository)
+    current = {item.path: item for item in snapshot.files}
+    indexed = {item.path: item for item in manifest.files}
+    drift = set(current) ^ set(indexed)
+    for path in set(current) & set(indexed):
+        source = current[path]
+        state = indexed[path]
+        if (
+            source.sha256 != state.source_sha256
+            or source.size_bytes != state.source_size_bytes
+            or source.language != state.language
+        ):
+            drift.add(path)
+    observed = tuple(sorted(drift))
+    if (
+        not observed
+        and manifest.build.source_snapshot_digest
+        != calculate_source_snapshot_digest(snapshot)
+    ):
+        raise _BenchmarkPreconditionError(
+            "indexed snapshot digest does not match otherwise-current source records"
+        )
+    return observed
+
+
+def _unevaluated_expectations(
+    task: BenchmarkTask,
+    mode: BenchmarkMode,
+) -> BenchmarkExpectationEvaluation:
+    """Retain configured expectations without reporting discovery misses."""
+
+    return BenchmarkExpectationEvaluation(
+        required_files=_effective(task, mode, "required_files_all"),
+        any_file_groups=tuple(
+            BenchmarkAnyFileExpectation(files=group, matched_files=(), passed=True)
+            for group in _effective(task, mode, "required_files_any")
+        ),
+        forbidden_files=_effective(task, mode, "forbidden_files"),
+        expected_facets=_effective(task, mode, "expected_facets"),
+        passed=True,
     )
 
 

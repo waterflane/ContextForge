@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import contextforge.benchmarks.runner as benchmark_runner
 from contextforge.benchmarks import (
     BenchmarkExpectations,
     BenchmarkManifest,
@@ -11,7 +14,13 @@ from contextforge.benchmarks import (
     BenchmarkTask,
     run_discovery_benchmark,
 )
+from contextforge.intelligence import (
+    acquire_index_lock,
+    build_structural_index,
+    initialize_index,
+)
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
+from contextforge.repositories import scan_repository
 
 
 def _write(root: Path, path: str, content: str) -> None:
@@ -60,6 +69,12 @@ def _fallback_provider() -> FakeModelProvider:
         max_json_repair_attempts=1,
     )
     return FakeModelProvider(configuration, responder=lambda _request, _index: "{")
+
+
+def _build_index(repository: Path) -> None:
+    initialize_index(repository)
+    with acquire_index_lock(repository, "benchmark-fixture") as lock:
+        build_structural_index(scan_repository(repository), lock)
 
 
 def _task(task_id: str, repository_path: str, **values: Any) -> BenchmarkTask:
@@ -176,6 +191,134 @@ def test_runner_keeps_failures_and_continues_completed_tasks(tmp_path: Path) -> 
     assert result.runs[0].selected_files == ("main.py",)
     assert result.runs[1].failure is not None
     assert result.runs[1].failure.code == "application_error"
+
+
+def test_clean_index_precondition_permits_matching_indexed_task(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    _write(repository, "main.py", "def main():\n    return 1\n")
+    _write(repository, "alternate.py", "def alternate():\n    return 2\n")
+    _build_index(repository)
+    task = _task(
+        "indexed",
+        "repository",
+        modes=(BenchmarkMode.INDEXED,),
+        index_precondition={"kind": "clean"},
+        allowed_warnings=(),
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="clean-index",
+        tasks=(task,),
+    )
+
+    result = asyncio.run(run_discovery_benchmark(manifest, tmp_path, _provider()))
+
+    assert result.passed is True, result.runs[0]
+    assert result.runs[0].status == "complete"
+    assert result.runs[0].failure is None
+
+
+def test_clean_index_precondition_fails_before_discovery_and_keeps_other_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    _write(repository, "main.py", "value = 1\n")
+    _write(repository, "alternate.py", "value = 2\n")
+    _build_index(repository)
+    _write(repository, "main.py", "value = 3\n")
+    calls = 0
+    original = benchmark_runner.suggest_repository_context
+
+    async def observed(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(benchmark_runner, "suggest_repository_context", observed)
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="precondition-continuation",
+        tasks=(
+            _task(
+                "a-mismatched",
+                "repository",
+                modes=(BenchmarkMode.INDEXED,),
+                index_precondition={"kind": "clean"},
+            ),
+            _task(
+                "b-unrelated",
+                "repository",
+                modes=(BenchmarkMode.FRESH,),
+                allowed_warnings=(),
+            ),
+        ),
+    )
+
+    result = asyncio.run(run_discovery_benchmark(manifest, tmp_path, _provider()))
+
+    assert tuple(run.task_id for run in result.runs) == (
+        "a-mismatched",
+        "b-unrelated",
+    )
+    failed, unrelated = result.runs
+    assert failed.status == "failed"
+    assert failed.failure is not None
+    assert failed.failure.code == "benchmark_precondition_failed"
+    assert failed.expectations.passed is True
+    assert failed.expectations.missing_required_files == ()
+    assert unrelated.status == "complete"
+    assert calls == 1
+
+
+def test_isolated_stale_index_task_warns_and_leaves_repository_read_only(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    _write(repository, "README.md", "# Fixture\n")
+    _write(repository, "main.py", "def main():\n    return 1\n")
+    _write(repository, "alternate.py", "def alternate():\n    return 2\n")
+    _build_index(repository)
+    before = {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    }
+    task = _task(
+        "isolated-stale",
+        "repository",
+        modes=(BenchmarkMode.INDEXED,),
+        index_precondition={
+            "kind": "isolated-stale",
+            "drift_path": "README.md",
+        },
+        allowed_warnings=(
+            "incomplete-parse-data",
+            "stale-global-maps",
+            "stale-index-coverage",
+        ),
+        required_warnings=("stale-global-maps", "stale-index-coverage"),
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="isolated-stale-index",
+        tasks=(task,),
+    )
+
+    result = asyncio.run(run_discovery_benchmark(manifest, tmp_path, _provider()))
+
+    assert result.passed is True, result.runs[0]
+    assert {warning.code for warning in result.runs[0].warnings} >= {
+        "stale-global-maps",
+        "stale-index-coverage",
+    }
+    assert {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    } == before
 
 
 def test_mode_overrides_control_repeats_and_budget_evaluation(tmp_path: Path) -> None:

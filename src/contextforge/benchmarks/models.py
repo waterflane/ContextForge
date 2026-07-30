@@ -52,6 +52,21 @@ class BenchmarkMode(StrEnum):
     HYBRID = "hybrid"
 
 
+class BenchmarkIndexPrecondition(BenchmarkModel):
+    """Required source/index state for an indexed benchmark task."""
+
+    kind: Literal["clean", "isolated-stale"]
+    drift_path: RepositoryRelativePath | None = None
+
+    @model_validator(mode="after")
+    def validate_drift_path(self) -> BenchmarkIndexPrecondition:
+        if (self.kind == "isolated-stale") != (self.drift_path is not None):
+            raise ValueError(
+                "isolated-stale requires drift_path and clean forbids drift_path"
+            )
+        return self
+
+
 def _validate_text(value: str, *, label: str) -> str:
     if not value.strip() or value != value.strip() or "\x00" in value:
         raise ValueError(f"{label} must be canonical non-empty text")
@@ -192,6 +207,7 @@ class BenchmarkTask(BenchmarkExpectations):
     max_provider_http_calls: NonNegativeInt | None = None
     allowed_warnings: tuple[WarningCode, ...] = ()
     required_warnings: tuple[WarningCode, ...] = ()
+    index_precondition: BenchmarkIndexPrecondition | None = None
     mode_overrides: BenchmarkModeOverrides = Field(
         default_factory=BenchmarkModeOverrides
     )
@@ -235,6 +251,12 @@ class BenchmarkTask(BenchmarkExpectations):
         }
         if configured - set(self.modes):
             raise ValueError("mode overrides may only target enabled modes")
+        if self.index_precondition is not None and not (
+            set(self.modes) & {BenchmarkMode.INDEXED, BenchmarkMode.HYBRID}
+        ):
+            raise ValueError(
+                "index_precondition requires an indexed or hybrid task mode"
+            )
         return self
 
 
@@ -455,6 +477,7 @@ __all__ = [
     "BenchmarkExpectationEvaluation",
     "BenchmarkFailure",
     "BenchmarkIntegerRange",
+    "BenchmarkIndexPrecondition",
     "BenchmarkLimitEvaluation",
     "BenchmarkManifest",
     "BenchmarkMode",

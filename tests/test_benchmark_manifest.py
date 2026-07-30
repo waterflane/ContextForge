@@ -38,6 +38,7 @@ def test_asp_manifest_keeps_explicit_includes_with_the_configuration_task() -> N
     tasks = {task.task_id: task for task in manifest.tasks}
     bug_localization = tasks["bug-localization-library-refresh"]
     configuration = tasks["configuration-media-providers"]
+    stale = tasks["stale-index-isolated-source"]
 
     assert ".env.example" not in bug_localization.include_paths
     assert ".env.example" in configuration.include_paths
@@ -56,6 +57,18 @@ def test_asp_manifest_keeps_explicit_includes_with_the_configuration_task() -> N
         "server.js",
     )
     assert configuration.forbidden_files == ()
+    assert all(
+        task.index_precondition is not None
+        for task in tasks.values()
+        if set(task.modes) & {BenchmarkMode.INDEXED, BenchmarkMode.HYBRID}
+    )
+    assert stale.index_precondition is not None
+    assert stale.index_precondition.kind == "isolated-stale"
+    assert stale.index_precondition.drift_path == "README.md"
+    assert stale.required_warnings == (
+        "stale-global-maps",
+        "stale-index-coverage",
+    )
 
 
 def test_manifest_exposes_a_versioned_machine_readable_schema() -> None:

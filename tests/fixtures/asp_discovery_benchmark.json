@@ -11,6 +11,9 @@
         "indexed",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "server.js"
@@ -62,6 +65,9 @@
         "indexed",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "server.js"
@@ -94,6 +100,9 @@
         "fresh",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "public/videos.js",
@@ -186,6 +195,9 @@
       "modes": [
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "media-search.js",
@@ -216,6 +228,9 @@
         "indexed",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "include_paths": [
         "media-search.js",
@@ -263,6 +278,9 @@
         "fresh",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "media-search.js"
@@ -302,6 +320,9 @@
         "fresh",
         "indexed"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "media-search.js"
@@ -339,6 +360,9 @@
       "modes": [
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "clean"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "media-search.js",
@@ -389,13 +413,17 @@
       "max_provider_http_calls": 3
     },
     {
-      "task_id": "stale-index-current-source",
+      "task_id": "stale-index-isolated-source",
       "repository_path": "ASP",
-      "task": "Using the published index, locate the media-search service and its server integration while verifying selections against current source. Preserve and report stale-index coverage diagnostics if the checked-out source has drifted from a partially usable index.",
+      "task": "Using an isolated one-file source drift from the published index, locate the media-search service and its server integration while verifying selections against current source. Preserve and report stale-index coverage diagnostics.",
       "modes": [
         "indexed",
         "hybrid"
       ],
+      "index_precondition": {
+        "kind": "isolated-stale",
+        "drift_path": "README.md"
+      },
       "repeat_count": 1,
       "required_files_all": [
         "media-search.js",
@@ -415,6 +443,10 @@
         "stale-global-maps",
         "stale-index-coverage",
         "structural-coverage-limitations"
+      ],
+      "required_warnings": [
+        "stale-global-maps",
+        "stale-index-coverage"
       ],
       "mode_overrides": {
         "indexed": {
