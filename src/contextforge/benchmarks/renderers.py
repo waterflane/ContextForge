@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import textwrap
+from dataclasses import dataclass
 
 from contextforge.benchmarks.models import (
     BenchmarkCohortMetrics,
@@ -10,6 +13,22 @@ from contextforge.benchmarks.models import (
     BenchmarkResult,
     BenchmarkRunResult,
 )
+from contextforge.discovery.models import CompletenessWarning
+
+_BACKTICK_RUN = re.compile(r"`+")
+_MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_{}\[\]<>()#+\-.!|>])")
+_REPORT_WIDTH = 88
+
+
+@dataclass(frozen=True)
+class _WarningGroup:
+    code: str
+    severity: str
+    message: str
+    record_count: int
+    paths: tuple[str, ...]
+    related_paths: tuple[str, ...]
+    pathless_count: int
 
 
 def render_benchmark_json(result: BenchmarkResult) -> str:
@@ -45,13 +64,21 @@ def render_benchmark_text(result: BenchmarkResult) -> str:
         for run in _cohort_runs(result, metric):
             selected = ", ".join(run.selected_files) or "(none)"
             lines.append(
-                f"    repeat {run.repetition}: {run.status}; selected: {selected}"
+                f"    repeat {run.repetition}: status {run.status}; "
+                f"Benchmark expectations: {_expectation_outcome(run)}; "
+                f"Discovery confidence: {_rate(run.confidence)}; selected: {selected}"
             )
     lines.extend(("Overall quality:", *_quality_lines(result.metrics, "  ")))
     lines.extend(("Repeatability:", *_repeatability_lines(result.metrics, "  ")))
     lines.extend(("Performance:", *_performance_lines(result.metrics, "  ")))
     lines.append("Warnings:")
-    warning_lines = _warning_lines(result.runs, "  ")
+    groups = _run_warning_groups(result.runs)
+    grouped_warning_count, affected_path_count = _warning_counts(groups)
+    lines.append(
+        f"  Grouped warnings: {grouped_warning_count}; "
+        f"affected paths: {affected_path_count}"
+    )
+    warning_lines = _text_warning_lines(groups)
     lines.extend(warning_lines or ("  (none)",))
     lines.append("Failed expectations:")
     failure_lines = _failure_lines(result.runs, "  ")
@@ -80,6 +107,21 @@ def render_benchmark_markdown(result: BenchmarkResult) -> str:
         f"{metric.stability_kind} |"
         for metric in result.metrics
     )
+    lines.extend(
+        (
+            "",
+            "### Runs",
+            "",
+            "| Task | Mode | Repeat | Status | Benchmark expectations | "
+            "Discovery confidence |",
+            "|---|---:|---:|---|---|---:|",
+        )
+    )
+    lines.extend(
+        f"| `{run.task_id}` | {run.mode.value} | {run.repetition} | "
+        f"{run.status} | {_expectation_outcome(run)} | {_rate(run.confidence)} |"
+        for run in result.runs
+    )
     lines.extend(("", "## Overall quality", ""))
     lines.extend(f"- {line.strip()}" for line in _quality_lines(result.metrics, ""))
     lines.extend(("", "## Repeatability", ""))
@@ -87,12 +129,17 @@ def render_benchmark_markdown(result: BenchmarkResult) -> str:
         f"- {line.strip()}" for line in _repeatability_lines(result.metrics, "")
     )
     lines.extend(("", "## Performance", ""))
-    lines.extend(
-        f"- {line.strip()}" for line in _performance_lines(result.metrics, "")
-    )
+    lines.extend(f"- {line.strip()}" for line in _performance_lines(result.metrics, ""))
     lines.extend(("", "## Warnings", ""))
-    warnings = _warning_lines(result.runs, "")
-    lines.extend((f"- {line}" for line in warnings) if warnings else ("(none)",))
+    groups = _run_warning_groups(result.runs)
+    grouped_warning_count, affected_path_count = _warning_counts(groups)
+    lines.append(
+        f"Grouped warnings: **{grouped_warning_count}**; "
+        f"affected paths: **{affected_path_count}**."
+    )
+    lines.append("")
+    warnings = _markdown_warning_lines(groups)
+    lines.extend(warnings or ("(none)",))
     lines.extend(("", "## Failed expectations", ""))
     failures = _failure_lines(result.runs, "")
     lines.extend((f"- {line}" for line in failures) if failures else ("(none)",))
@@ -153,15 +200,113 @@ def _performance_lines(
     return tuple(lines) or (f"{prefix}(none)",)
 
 
-def _warning_lines(
-    runs: tuple[BenchmarkRunResult, ...], prefix: str
-) -> tuple[str, ...]:
+def _run_warning_groups(
+    runs: tuple[BenchmarkRunResult, ...],
+) -> tuple[tuple[BenchmarkRunResult, _WarningGroup], ...]:
     return tuple(
-        f"{prefix}{run.task_id} [{run.mode.value}] repeat {run.repetition}: "
-        f"{warning.code} - {warning.message}"
-        for run in runs
-        for warning in run.warnings
+        (run, group) for run in runs for group in _group_warnings(run.warnings)
     )
+
+
+def _group_warnings(
+    warnings: tuple[CompletenessWarning, ...],
+) -> tuple[_WarningGroup, ...]:
+    grouped: dict[
+        tuple[str, str, str],
+        list[CompletenessWarning],
+    ] = {}
+    for warning in warnings:
+        key = (warning.code, warning.severity, warning.message)
+        grouped.setdefault(key, []).append(warning)
+    return tuple(
+        _WarningGroup(
+            code=code,
+            severity=severity,
+            message=message,
+            record_count=len(records),
+            paths=tuple(
+                sorted(
+                    {warning.path for warning in records if warning.path is not None}
+                )
+            ),
+            related_paths=tuple(
+                sorted({path for warning in records for path in warning.related_paths})
+            ),
+            pathless_count=sum(warning.path is None for warning in records),
+        )
+        for (code, severity, message), records in sorted(grouped.items())
+    )
+
+
+def _warning_counts(
+    groups: tuple[tuple[BenchmarkRunResult, _WarningGroup], ...],
+) -> tuple[int, int]:
+    return len(groups), sum(len(group.paths) for _, group in groups)
+
+
+def _text_warning_lines(
+    groups: tuple[tuple[BenchmarkRunResult, _WarningGroup], ...],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for run, group in groups:
+        lines.extend(
+            (
+                f"  {run.task_id} [{run.mode.value}] repeat {run.repetition}:",
+                f"    {group.code} [{group.severity}]: "
+                f"{group.record_count} {_plural(group.record_count, 'record')}; "
+                f"{len(group.paths)} {_plural(len(group.paths), 'affected path')}",
+            )
+        )
+        lines.extend(
+            textwrap.wrap(
+                _visible_inline(group.message),
+                width=_REPORT_WIDTH,
+                initial_indent="      Message: ",
+                subsequent_indent="        ",
+            )
+        )
+        if group.paths:
+            lines.append(f"      Affected paths ({len(group.paths)}):")
+            lines.extend(f"        - {path}" for path in group.paths)
+        if group.related_paths:
+            lines.append(f"      Related paths ({len(group.related_paths)}):")
+            lines.extend(f"        - {path}" for path in group.related_paths)
+        if group.pathless_count:
+            lines.append(f"      Pathless records: {group.pathless_count}")
+    return tuple(lines)
+
+
+def _markdown_warning_lines(
+    groups: tuple[tuple[BenchmarkRunResult, _WarningGroup], ...],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for run, group in groups:
+        lines.append(
+            f"- {_markdown_code_span(run.task_id)} [{run.mode.value}] "
+            f"repeat {run.repetition}: {_markdown_code_span(group.code)} "
+            f"({group.severity}); {group.record_count} "
+            f"{_plural(group.record_count, 'record')}; {len(group.paths)} "
+            f"{_plural(len(group.paths), 'affected path')}"
+        )
+        lines.extend(
+            textwrap.wrap(
+                _escape_markdown_inline(group.message),
+                width=_REPORT_WIDTH,
+                initial_indent="  - Message: ",
+                subsequent_indent="    ",
+            )
+        )
+        if group.paths:
+            lines.append(f"  - Affected paths ({len(group.paths)}):")
+            lines.extend(f"    - {_markdown_code_span(path)}" for path in group.paths)
+        if group.related_paths:
+            lines.append(f"  - Related paths ({len(group.related_paths)}):")
+            lines.extend(
+                f"    - {_markdown_code_span(path)}" for path in group.related_paths
+            )
+        if group.pathless_count:
+            lines.append(f"  - Pathless records: {group.pathless_count}")
+    return tuple(lines)
 
 
 def _failure_lines(
@@ -209,9 +354,7 @@ def _failure_lines(
             ("provider HTTP calls", run.budgets.provider_http_calls),
         ):
             if limit is not None and not limit.passed:
-                lines.append(
-                    f"{label}: {name} budget {limit.actual}>{limit.limit}"
-                )
+                lines.append(f"{label}: {name} budget {limit.actual}>{limit.limit}")
     return tuple(lines)
 
 
@@ -238,6 +381,12 @@ def _rate(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
 
 
+def _expectation_outcome(run: BenchmarkRunResult) -> str:
+    if run.status != "complete":
+        return "unavailable (run did not complete)"
+    return "passed" if run.expectations.passed else "failed"
+
+
 def _range(value: BenchmarkIntegerRange | None) -> str:
     if value is None:
         return "n/a"
@@ -246,6 +395,40 @@ def _range(value: BenchmarkIntegerRange | None) -> str:
         if value.minimum == value.maximum
         else f"{value.minimum}-{value.maximum}"
     )
+
+
+def _plural(count: int, singular: str) -> str:
+    return singular if count == 1 else f"{singular}s"
+
+
+def _markdown_code_span(value: str) -> str:
+    visible = _visible_inline(value)
+    longest_run = max(
+        (len(match.group()) for match in _BACKTICK_RUN.finditer(visible)), default=0
+    )
+    delimiter = "`" * (longest_run + 1)
+    padded = visible
+    if visible.startswith(("`", " ")) or visible.endswith(("`", " ")):
+        padded = f" {visible} "
+    return f"{delimiter}{padded}{delimiter}"
+
+
+def _escape_markdown_inline(value: str) -> str:
+    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", _visible_inline(value))
+
+
+def _visible_inline(value: str) -> str:
+    return "".join(
+        _visible_control(character)
+        if ord(character) < 32 or ord(character) == 127
+        else character
+        for character in value
+    )
+
+
+def _visible_control(character: str) -> str:
+    escapes = {"\t": r"\t", "\n": r"\n", "\r": r"\r"}
+    return escapes.get(character, f"\\u{ord(character):04x}")
 
 
 __all__ = [
