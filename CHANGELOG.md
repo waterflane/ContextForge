@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Added versioned discovery benchmark manifests and the
+  `contextforge benchmark discovery` command with text, Markdown, and canonical
+  JSON reports for quality, repeatability, performance, warnings, and provider
+  accounting.
+
+### Changed
+
+- Redesigned the public README, added a restrained ContextForge visual identity,
+  prepared a complete English GitHub Wiki workspace, and clarified the current
+  solo-maintainer contribution policy.
+- Tightened distribution metadata and source-distribution exclusions so local
+  state, tests, planning documents, Wiki files, and development-only repository
+  metadata are not packaged.
+- Stabilized `context suggest` around text as the default interactive output and
+  documented text, Markdown, and JSON as presentation renderers over the same
+  canonical structured selection.
+- Documented fresh, indexed, and hybrid intent, valid cross-mode selection
+  differences, exact agreement versus semantic stability, grouped warning and
+  stdout/stderr behavior, and the limits of model-backed repeatability for the
+  v0.4.2 discovery work.
+
 ## [0.4.1] - 2026-07-22
 
 ### Added

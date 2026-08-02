@@ -5,21 +5,29 @@ build-backend = "hatchling.build"
 [project]
 name = "contextforge"
 dynamic = ["version"]
-description = "Build deterministic context packages from local repositories."
+description = "Assemble precise, reviewable repository context for coding agents."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
-  { name = "ContextForge contributors" }
+  { name = "waterflane" }
 ]
-keywords = ["ai", "context", "prompt-engineering", "developer-tools"]
+keywords = [
+  "ai",
+  "coding-agents",
+  "context",
+  "developer-tools",
+  "repository-intelligence",
+]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Environment :: Console",
   "Framework :: FastAPI",
   "Intended Audience :: Developers",
+  "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
 dependencies = [
@@ -44,6 +52,9 @@ dev = [
 Homepage = "https://github.com/waterflane/contextforge"
 Repository = "https://github.com/waterflane/contextforge"
 Issues = "https://github.com/waterflane/contextforge/issues"
+Changelog = "https://github.com/waterflane/contextforge/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/waterflane/contextforge/wiki"
+Security = "https://github.com/waterflane/contextforge/security/policy"
 
 [project.scripts]
 contextforge = "contextforge.cli.main:run"
@@ -55,16 +66,24 @@ path = "src/contextforge/_metadata.py"
 [tool.hatch.build]
 skip-excluded-dirs = true
 exclude = [
+  "/.agents",
   "/.contextforge",
+  "/.github",
   "/.pytest_cache",
   "/.pytest-tmp",
+  "/.review-fixture",
   "/.ruff_cache",
   "/.mypy_cache",
+  "/.vscode",
   "/.coverage",
   "/.coverage.*",
+  "/docs/plans",
   "/htmlcov",
   "/build",
   "/dist",
+  "/tests",
+  "/uv.lock",
+  "/wiki",
   "**/*.tmp",
 ]
 

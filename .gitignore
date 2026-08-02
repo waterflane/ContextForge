@@ -15,6 +15,7 @@ __pycache__/
 .contextforge/
 .pytest_cache/
 .pytest-tmp/
+/.pytest-*-tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -26,5 +27,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+/wiki/
 
 site/

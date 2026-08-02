@@ -33,6 +33,31 @@ until a caller-selected hard budget is exhausted.
 The index is never source truth. A source identity mismatch during investigation
 or final verification aborts without returning a partial successful selection.
 
+The three modes intentionally do not promise identical selections. Their
+available evidence differs, and more than one entry point, test, configuration
+file, or supporting document can validly cover the task. Mode-specific quality
+should therefore be evaluated against required files, acceptable alternatives,
+forbidden files, expected facets, warnings, and budgets rather than cross-mode
+file-list equality.
+
+## Result and rendering boundary
+
+The successful canonical result is `FinalContextSelection`. The text, Markdown,
+and JSON renderers are pure projections of that validated model and never
+rediscover or mutate it. Text is the default interactive CLI representation.
+JSON preserves every structured field and warning record; human renderers may
+group repeated warnings for readability. Canonical serialization and rendering
+are deterministic for the same object, but model-backed selection is not
+claimed deterministic.
+
+The discovery benchmark runner groups repetitions only when task, repository,
+mode, source snapshot, index generation, and effective configuration identities
+match. It labels comparable model-backed results as semantic stability and
+reserves deterministic-fallback repeatability for cohorts whose complete runs
+all used fallback. The user-facing manifest, metrics, counters, and stream
+contracts are documented in the
+[Discovery output and benchmarks guide](../guides/discovery.md).
+
 ## Public API
 
 The main entry point is asynchronous:

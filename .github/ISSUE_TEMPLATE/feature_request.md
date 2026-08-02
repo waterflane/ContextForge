@@ -21,3 +21,7 @@ List any alternatives or workarounds.
 ## Additional context
 
 Add examples or references if useful.
+
+> ContextForge is currently a solo-maintainer project. Feature suggestions are
+> welcome, but external implementation pull requests are not currently
+> accepted. See `CONTRIBUTING.md`.

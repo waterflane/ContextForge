@@ -29,7 +29,15 @@ What happened instead?
 - ContextForge version:
 - Python version:
 - Operating system:
+- Installation method:
+
+## Diagnostics
+
+If relevant, include sanitized output from `contextforge diagnostics last .`.
+Do not include repository source, prompts, tokens, credentials, or private
+absolute paths.
 
 ## Additional context
 
-Add logs or screenshots if useful. Do not include secrets.
+Add sanitized logs or screenshots only when they materially help reproduce the
+problem.

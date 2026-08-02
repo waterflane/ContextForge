@@ -1,38 +1,28 @@
 # Contributing to ContextForge
 
-Thank you for your interest in ContextForge.
+ContextForge is currently developed and maintained by its owner as a
+solo-maintainer project.
 
-ContextForge remains intentionally small after its completed v0.3 context
-packages milestone. Contributions should preserve its explicit, deterministic
-local packaging behavior without speculative business logic.
+## Issues are welcome
 
-## Development workflow
+If GitHub Issues are enabled, users are welcome to report reproducible bugs and
+suggest focused improvements. Before filing an issue, search for an existing
+report and remove credentials, repository contents, and other sensitive data
+from logs or examples.
 
-1. Create a virtual environment with Python 3.12 or newer.
-2. Install development dependencies:
+## Pull-request policy
 
-   ```bash
-   python -m pip install -e ".[dev]"
-   ```
+External pull requests are not currently accepted. Please open an issue before
+writing an implementation. Unsolicited implementation pull requests may be
+closed without review so the maintainer can keep the project direction and
+review workload manageable.
 
-3. Run checks before opening a pull request:
+This policy may change as the project matures. Creating a fork or a fork-based
+pull request does not make anyone an official ContextForge maintainer.
 
-   ```bash
-   ruff check .
-   ruff format --check .
-   mypy
-   pytest
-   ```
+## Owner development workflow
 
-## Contribution guidelines
-
-- Keep the core independent from CLI, API, provider, storage, and editor code.
-- Avoid adding heavy dependencies without a clear architectural need.
-- Prefer small, reviewable pull requests.
-- Update documentation when changing project structure or public behavior.
-- Do not add secrets, tokens, local paths, or environment-specific settings.
-
-## Commit style
-
-Use concise, descriptive commit messages. Conventional Commits are welcome but
-not required.
+The maintainer's local setup and validation commands are documented in
+[Development](docs/guides/development.md). Changes should keep the core
+independent from interface and adapter code, update public documentation when
+behavior changes, and never commit secrets or machine-specific state.
