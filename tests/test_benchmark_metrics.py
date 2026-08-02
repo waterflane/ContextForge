@@ -68,9 +68,7 @@ def _run(
             if warning and complete
             else ()
         ),
-        provenance=(
-            "deterministic_fallback" if fallback else "model"
-        )
+        provenance=("deterministic_fallback" if fallback else "model")
         if complete
         else None,
         fallback_used=fallback if complete else False,
@@ -78,9 +76,7 @@ def _run(
             required_files=("a.py", "b.py"),
             matched_required_files=matched_required if complete else (),
             missing_required_files=tuple(
-                path
-                for path in ("a.py", "b.py")
-                if path not in matched_required
+                path for path in ("a.py", "b.py") if path not in matched_required
             ),
             forbidden_files=("x.py", "y.py"),
             selected_forbidden_files=selected_forbidden if complete else (),
@@ -199,10 +195,7 @@ def test_one_run_defines_quality_but_not_pairwise_repeatability() -> None:
             _run(2, ("a.py",), fallback=True),
         )
     )[0]
-    assert (
-        repeated_fallback.stability_kind
-        == "deterministic_fallback_repeatability"
-    )
+    assert repeated_fallback.stability_kind == "deterministic_fallback_repeatability"
 
 
 def test_failed_runs_are_excluded_and_identity_changes_split_cohorts() -> None:

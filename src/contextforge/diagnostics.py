@@ -168,9 +168,8 @@ def summarize_operation(
     http_dispatches = tuple(
         item for item in ordered if item.event == "provider.http.dispatch"
     )
-    total_provider_http_calls = (
-        len(http_dispatches)
-        or _sum_terminal_counter(ordered, "total_provider_http_calls")
+    total_provider_http_calls = len(http_dispatches) or _sum_terminal_counter(
+        ordered, "total_provider_http_calls"
     )
     transport_attempts = (
         sum(
@@ -265,9 +264,7 @@ def summarize_operation(
     )
 
 
-def _sum_terminal_counter(
-    records: tuple[DiagnosticRecord, ...], key: str
-) -> int:
+def _sum_terminal_counter(records: tuple[DiagnosticRecord, ...], key: str) -> int:
     """Sum one final per-request counter without inspecting provider payloads."""
 
     return sum(

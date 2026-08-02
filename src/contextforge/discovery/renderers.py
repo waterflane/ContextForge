@@ -141,12 +141,9 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
                 f"  Model generations: {usage.model_generations}",
                 f"  Repair generations: {usage.repair_generations}",
                 f"  Transport attempts: {usage.transport_attempts}",
-                "  Provider discovery calls: "
-                f"{usage.provider_discovery_calls}",
-                "  Provider capability calls: "
-                f"{usage.provider_capability_calls}",
-                "  Total provider HTTP calls: "
-                f"{usage.total_provider_http_calls}",
+                f"  Provider discovery calls: {usage.provider_discovery_calls}",
+                f"  Provider capability calls: {usage.provider_capability_calls}",
+                f"  Total provider HTTP calls: {usage.total_provider_http_calls}",
                 f"  Files read: {usage.files_read}",
                 f"  Source bytes: {usage.source_bytes}",
                 f"  Tool-result bytes: {usage.tool_result_bytes}",
@@ -184,8 +181,7 @@ def _render_text(selection: FinalContextSelection, *, explain: bool) -> str:
                     else str(grouped_warning.confidence)
                 )
                 lines.append(
-                    "      Warning confidence (not result confidence): "
-                    f"{confidence}"
+                    f"      Warning confidence (not result confidence): {confidence}"
                 )
                 if grouped_warning.paths:
                     lines.append("      Affected files:")
@@ -263,9 +259,7 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
             )
         )
 
-    additions = tuple(
-        item for item in selection.selected if item.added_by_completeness
-    )
+    additions = tuple(item for item in selection.selected if item.added_by_completeness)
     lines.extend(("", "## Deterministic Completeness Additions", ""))
     if additions:
         lines.extend(
@@ -306,8 +300,7 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
             lines.append(f"- {_markdown_warning_summary(grouped_warning)}")
             if explain:
                 lines.append(
-                    "  - Reason: "
-                    f"{_escape_markdown_inline(grouped_warning.message)}"
+                    f"  - Reason: {_escape_markdown_inline(grouped_warning.message)}"
                 )
                 confidence = (
                     "unknown"
@@ -315,8 +308,7 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
                     else f"{grouped_warning.confidence:.3f}"
                 )
                 lines.append(
-                    "  - Warning confidence (not result confidence): "
-                    f"{confidence}"
+                    f"  - Warning confidence (not result confidence): {confidence}"
                 )
                 if grouped_warning.paths:
                     lines.append("  - Affected files:")
@@ -362,9 +354,7 @@ def _render_markdown(selection: FinalContextSelection, *, explain: bool) -> str:
         lines.extend(("", "## Detailed Explanation", ""))
         for rank, item in enumerate(selection.selected, start=1):
             path = item.path or f"[{item.kind}]"
-            selection_type = _escape_markdown_inline(
-                _selection_type_label(item.kind)
-            )
+            selection_type = _escape_markdown_inline(_selection_type_label(item.kind))
             exact_confidence = (
                 item.confidence if item.confidence is not None else "unknown"
             )
@@ -415,9 +405,7 @@ def _aggregate_warnings(
             warning.confidence,
         )
         grouped.setdefault(key, set()).update(
-            path
-            for path in (warning.path, *warning.related_paths)
-            if path is not None
+            path for path in (warning.path, *warning.related_paths) if path is not None
         )
     return tuple(
         _WarningGroup(
@@ -443,20 +431,14 @@ def _aggregate_warnings(
 def _text_warning_summary(group: _WarningGroup) -> str:
     summary = _visible_inline(group.code)
     if group.paths:
-        summary += (
-            f" ({len(group.paths)} "
-            f"{_plural(len(group.paths), 'affected file')})"
-        )
+        summary += f" ({len(group.paths)} {_plural(len(group.paths), 'affected file')})"
     return summary
 
 
 def _markdown_warning_summary(group: _WarningGroup) -> str:
     summary = _markdown_code_span(group.code)
     if group.paths:
-        summary += (
-            f" ({len(group.paths)} "
-            f"{_plural(len(group.paths), 'affected file')})"
-        )
+        summary += f" ({len(group.paths)} {_plural(len(group.paths), 'affected file')})"
     return summary
 
 

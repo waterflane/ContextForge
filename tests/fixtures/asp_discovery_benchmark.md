@@ -1,6 +1,9 @@
 # ASP initial discovery benchmark rationale
 
-The manifest is intended to be run with `C:\Programming\Projects` as the benchmark root, so every task uses the portable repository path `ASP`. Expectations were derived from the checked-out ASP repository on 2026-07-27. They describe file-set outcomes, not an exact selection order.
+The manifest is intended to be run with a directory containing the `ASP`
+repository as the benchmark root, so every task uses the portable repository
+path `ASP`. Expectations were derived from the checked-out ASP repository on
+2026-07-27. They describe file-set outcomes, not an exact selection order.
 
 ## Evidence and expectations
 

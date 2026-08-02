@@ -1241,8 +1241,7 @@ class DiscoverySession:
             if diagnostic is not None:
                 self.budget.charge_provider(diagnostic)
             self._provider_request_dispatched = bool(
-                diagnostic is not None
-                and diagnostic.total_provider_http_calls > 0
+                diagnostic is not None and diagnostic.total_provider_http_calls > 0
             )
             if isinstance(exc, StructuredResponseError):
                 codes = {item.code for item in exc.issues}

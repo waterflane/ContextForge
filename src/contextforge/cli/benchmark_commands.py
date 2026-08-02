@@ -189,9 +189,7 @@ def _parse_modes(value: str | None) -> tuple[BenchmarkMode, ...] | None:
     try:
         selected = tuple(BenchmarkMode(item) for item in raw)
     except ValueError as exc:
-        raise ValueError(
-            "--modes accepts only fresh,indexed,hybrid"
-        ) from exc
+        raise ValueError("--modes accepts only fresh,indexed,hybrid") from exc
     order = {mode: index for index, mode in enumerate(BenchmarkMode)}
     if len(selected) != len(set(selected)):
         raise ValueError("--modes must not contain duplicates")

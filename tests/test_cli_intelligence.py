@@ -457,8 +457,7 @@ def test_context_suggestion_text_shows_nonzero_repair_generations() -> None:
 
     assert (
         "Performance: selected 1 file (123 bytes); 2 model generations, "
-        "1 repair generation, 0 provider HTTP calls, read 0 files.\n"
-        in rendered
+        "1 repair generation, 0 provider HTTP calls, read 0 files.\n" in rendered
     )
 
 
@@ -534,9 +533,7 @@ def test_context_suggestion_explain_contract() -> None:
     selection = _renderer_selection()
     explained = render_context_suggestion(selection, explain=True)
     assert "      Reason: No related test was selected.\n" in explained
-    assert (
-        "      Warning confidence (not result confidence): unknown\n" in explained
-    )
+    assert "      Warning confidence (not result confidence): unknown\n" in explained
     assert "Technical selection details:\n  Exact confidence: 0.625\n" in explained
     assert "    Selection type: line ranges\n" in explained
     assert "    Exact confidence: 0.75\n" in explained

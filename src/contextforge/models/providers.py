@@ -269,9 +269,7 @@ class ProviderDiagnostic(ProviderModel):
                 "total_provider_calls", 1
             )
         if "total_provider_calls" not in normalized:
-            normalized["total_provider_calls"] = normalized[
-                "total_provider_http_calls"
-            ]
+            normalized["total_provider_calls"] = normalized["total_provider_http_calls"]
         return normalized
 
     @model_validator(mode="after")

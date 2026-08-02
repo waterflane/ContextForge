@@ -110,7 +110,8 @@ def test_markdown_report_has_an_exact_stable_concise_shape() -> None:
         "\n"
         "- Lines: 2-4\n"
         "- Confidence: 0.750\n"
-        r"- Reason: Handles \*formatted\* output\." "\n"
+        r"- Reason: Handles \*formatted\* output\."
+        "\n"
         "- Provenance: `model-tool:add_to_context`\n"
         "\n"
         "## Deterministic Completeness Additions\n"
@@ -197,9 +198,7 @@ def test_markdown_preserves_canonical_selection_rank_order() -> None:
         selection, output_format=DiscoveryResultFormat.markdown
     )
 
-    assert rendered.index("### 1. `src/app.py`") < rendered.index(
-        "### 2. `README.md`"
-    )
+    assert rendered.index("### 1. `src/app.py`") < rendered.index("### 2. `README.md`")
 
 
 def test_json_rendering_is_byte_compatible_with_existing_output() -> None:
@@ -295,15 +294,9 @@ def test_warning_rendering_order_is_stable(
 ) -> None:
     base = _selection()
     warnings = (
-        CompletenessWarning(
-            code="missing-source", message="Missing.", path="src/z.py"
-        ),
-        CompletenessWarning(
-            code="hash-mismatch", message="Changed.", path="src/b.py"
-        ),
-        CompletenessWarning(
-            code="hash-mismatch", message="Changed.", path="src/a.py"
-        ),
+        CompletenessWarning(code="missing-source", message="Missing.", path="src/z.py"),
+        CompletenessWarning(code="hash-mismatch", message="Changed.", path="src/b.py"),
+        CompletenessWarning(code="hash-mismatch", message="Changed.", path="src/a.py"),
     )
 
     first = FinalContextSelection.model_validate(
@@ -321,8 +314,7 @@ def test_warning_rendering_order_is_stable(
 def test_empty_warnings_render_a_stable_empty_summary() -> None:
     base = _selection()
     selection = FinalContextSelection.model_validate(
-        base.model_dump()
-        | {"completeness_warnings": (), "unknowns": ()}
+        base.model_dump() | {"completeness_warnings": (), "unknowns": ()}
     )
 
     text = render_context_suggestion(selection)

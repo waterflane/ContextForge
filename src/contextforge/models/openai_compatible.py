@@ -68,9 +68,7 @@ def _with_provider_http_calls(
         text=response.text,
         finish_reason=response.finish_reason,
         usage=response.usage,
-        provider_discovery_calls=(
-            response.provider_discovery_calls + discovery_calls
-        ),
+        provider_discovery_calls=(response.provider_discovery_calls + discovery_calls),
         provider_capability_calls=(
             response.provider_capability_calls + capability_calls
         ),

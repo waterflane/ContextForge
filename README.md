@@ -27,10 +27,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Package version `0.4.1` is the latest
-> version represented by the source metadata. Discovery benchmarking on the
-> current development branch is unreleased and should be treated as
-> experimental until it appears in a tagged release.
+> ContextForge is pre-alpha software. Package version `0.4.2` is represented by
+> the source metadata. Discovery benchmarking is experimental and its results
+> should be reviewed alongside the recorded provider, model, configuration, and
+> source snapshot.
 
 ## Why ContextForge
 
@@ -258,8 +258,8 @@ is available.
 ## Benchmark workflow
 
 > [!NOTE]
-> `benchmark discovery` is implemented on the current development branch but is
-> not part of the tagged `0.4.1` package metadata.
+> `benchmark discovery` is experimental in `0.4.2`; model-backed repeatability
+> measurements are observations for the recorded fixture state, not guarantees.
 
 ```powershell
 contextforge benchmark discovery 'C:\Repositories' `

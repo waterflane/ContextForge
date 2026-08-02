@@ -1,12 +1,20 @@
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import click
 import pytest
 from typer.testing import CliRunner, Result
 
 import contextforge.cli.benchmark_commands as benchmark_cli
-from contextforge.benchmarks import BenchmarkManifest, BenchmarkMode
+from contextforge.benchmarks import (
+    BenchmarkManifest,
+    BenchmarkMode,
+)
+from contextforge.benchmarks import (
+    run_discovery_benchmark as execute_discovery_benchmark,
+)
 from contextforge.cli.main import app
 
 runner = CliRunner()
@@ -200,7 +208,9 @@ def test_fresh_only_cli_filter_reaches_runner_with_mixed_mode_task(
     task["modes"] = ["fresh", "indexed", "hybrid"]
     task["index_precondition"] = {"kind": "clean"}
     manifest = _manifest(tmp_path, task)
-    original_runner = benchmark_cli.run_discovery_benchmark
+    original_runner = cast(
+        Callable[..., Awaitable[object]], execute_discovery_benchmark
+    )
     observed: list[BenchmarkManifest] = []
 
     async def tracking_runner(
@@ -481,9 +491,9 @@ def test_regressions_and_partial_failures_emit_json_then_exit_three(
     regression_payload = json.loads(regression.stdout)
     assert regression_payload["passed"] is False
     assert regression_payload["runs"][0]["status"] == "complete"
-    assert regression_payload["runs"][0]["expectations"][
-        "missing_required_files"
-    ] == ["missing.py"]
+    assert regression_payload["runs"][0]["expectations"]["missing_required_files"] == [
+        "missing.py"
+    ]
 
     partial_manifest = _manifest(
         tmp_path,

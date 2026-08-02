@@ -101,17 +101,13 @@ class DiscoveryBudgetUsage(DiscoveryModel):
                 "provider_http_calls", 0
             )
         if "provider_http_calls" not in normalized:
-            normalized["provider_http_calls"] = normalized[
-                "total_provider_http_calls"
-            ]
+            normalized["provider_http_calls"] = normalized["total_provider_http_calls"]
         return normalized
 
     @model_validator(mode="after")
     def validate_provider_http_calls(self) -> DiscoveryBudgetUsage:
         if self.provider_http_calls != self.total_provider_http_calls:
-            raise ValueError(
-                "provider_http_calls must equal total_provider_http_calls"
-            )
+            raise ValueError("provider_http_calls must equal total_provider_http_calls")
         return self
 
 

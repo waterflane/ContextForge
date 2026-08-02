@@ -35,12 +35,9 @@ def calculate_benchmark_metrics(
     for position, run in enumerate(runs):
         # A complete result with unknown repository/configuration identity cannot be
         # safely compared, even with another result carrying the same unknown.
-        unknown_identity = (
-            run.status == "complete"
-            and (
-                run.source_snapshot_digest is None
-                or run.effective_configuration_digest is None
-            )
+        unknown_identity = run.status == "complete" and (
+            run.source_snapshot_digest is None
+            or run.effective_configuration_digest is None
         )
         key = (
             run.task_id,
@@ -99,13 +96,15 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
         stability_kind=stability_kind,
         exact_selected_file_match_rate=_pair_rate(
             pairs,
-            lambda first_run, second_run: set(first_run.selected_files)
-            == set(second_run.selected_files),
+            lambda first_run, second_run: (
+                set(first_run.selected_files) == set(second_run.selected_files)
+            ),
         ),
         exact_ordered_match_rate=_pair_rate(
             pairs,
-            lambda first_run, second_run: first_run.selected_files
-            == second_run.selected_files,
+            lambda first_run, second_run: (
+                first_run.selected_files == second_run.selected_files
+            ),
         ),
         required_file_recall=_quality_rate(
             complete,
@@ -130,8 +129,9 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
         ),
         warning_stability=_pair_rate(
             pairs,
-            lambda first_run, second_run: _warning_set(first_run)
-            == _warning_set(second_run),
+            lambda first_run, second_run: (
+                _warning_set(first_run) == _warning_set(second_run)
+            ),
         ),
         fallback_rate=(
             None
@@ -140,9 +140,7 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
         ),
         confidence=_confidence(complete),
         duration=_duration(complete),
-        files_read_range=_integer_range(
-            tuple(run.files_read for run in complete)
-        ),
+        files_read_range=_integer_range(tuple(run.files_read for run in complete)),
         model_call_range=_integer_range(
             tuple(run.provider_counters.model_calls for run in complete)
         ),

@@ -1,11 +1,15 @@
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import contextforge.benchmarks.runner as benchmark_runner
+from contextforge.application import (
+    suggest_repository_context as application_suggest_repository_context,
+)
 from contextforge.benchmarks import (
     BenchmarkExpectations,
     BenchmarkManifest,
@@ -230,7 +234,9 @@ def test_clean_index_precondition_fails_before_discovery_and_keeps_other_results
     _build_index(repository)
     _write(repository, "main.py", "value = 3\n")
     calls = 0
-    original = benchmark_runner.suggest_repository_context
+    original = cast(
+        Callable[..., Awaitable[object]], application_suggest_repository_context
+    )
 
     async def observed(*args: object, **kwargs: object) -> object:
         nonlocal calls
@@ -352,3 +358,17 @@ def test_mode_overrides_control_repeats_and_budget_evaluation(tmp_path: Path) ->
     assert result.metrics[0].exact_selected_file_match_rate == 1.0
     assert result.metrics[0].exact_ordered_match_rate == 1.0
     assert result.passed is False
+
+
+def test_benchmark_failure_does_not_expose_untrusted_exception_text() -> None:
+    private = (
+        r"C:\Users\alice\PrivateRepo\secret.py raw prompt source response "
+        "credential-value"
+    )
+
+    failure = benchmark_runner._failure("application_error", RuntimeError(private))
+
+    assert failure.code == "application_error"
+    assert failure.error_type == "RuntimeError"
+    assert failure.message == "Benchmark run failed before discovery completed."
+    assert all(token not in failure.model_dump_json() for token in private.split())

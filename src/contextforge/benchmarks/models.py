@@ -27,9 +27,7 @@ ConfidenceValue = Annotated[
     float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)
 ]
 Rate = ConfidenceValue
-NonNegativeFloat = Annotated[
-    float, Field(ge=0.0, allow_inf_nan=False, strict=True)
-]
+NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False, strict=True)]
 RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
 ExpectedFacet = Annotated[str, Field(min_length=1, max_length=500)]
 WarningCode = Annotated[
@@ -99,9 +97,10 @@ class BenchmarkExpectations(BenchmarkModel):
     include_paths: tuple[RepositoryRelativePath, ...] | None = None
     exclude_paths: tuple[RepositoryRelativePath, ...] | None = None
     required_files_all: tuple[RepositoryRelativePath, ...] | None = None
-    required_files_any: tuple[
-        Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...
-    ] | None = None
+    required_files_any: (
+        tuple[Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...]
+        | None
+    ) = None
     forbidden_files: tuple[RepositoryRelativePath, ...] | None = None
     expected_facets: tuple[ExpectedFacet, ...] | None = None
     max_selected_files: NonNegativeInt | None = None

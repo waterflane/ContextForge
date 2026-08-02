@@ -251,8 +251,7 @@ def _build_result(
         warnings=warnings,
         provenance=None if selection is None else selection.provenance,
         fallback_used=(
-            selection is not None
-            and selection.provenance == "deterministic_fallback"
+            selection is not None and selection.provenance == "deterministic_fallback"
         ),
         context_bytes=0 if usage is None else usage.context_bytes,
         expectations=expectations,
@@ -527,11 +526,19 @@ def _failure(
     error: Exception,
     message: str | None = None,
 ) -> BenchmarkFailure:
-    safe_message = (message or str(error) or code).replace("\x00", "")[:2_000]
+    if isinstance(error, DiscoveryError) and message:
+        safe_message = message.replace("\x00", "")[:2_000]
+    elif isinstance(error, _BenchmarkPreconditionError):
+        safe_message = "Benchmark repository/index precondition was not satisfied."
+    else:
+        # Arbitrary exception text may contain source, provider payloads, secrets,
+        # or host-private absolute paths. The typed code and exception class retain
+        # enough diagnostic identity without publishing that untrusted material.
+        safe_message = "Benchmark run failed before discovery completed."
     return BenchmarkFailure(
         code=code[:200],
         error_type=type(error).__name__[:200],
-        message=safe_message or code,
+        message=safe_message,
     )
 
 
