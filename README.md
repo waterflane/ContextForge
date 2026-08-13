@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/contextforge-banner.png" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
+  <img src="https://raw.githubusercontent.com/waterflane/ContextForge/main/docs/assets/contextforge-banner.png" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
 </p>
 
 <h1 align="center">ContextForge</h1>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/waterflane/ContextForge/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/waterflane/ContextForge/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.12 or newer" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&amp;logoColor=white"></a>
-  <a href="LICENSE"><img alt="License: CC BY-NC-SA 4.0" src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-6f42c1"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0b6bcb"></a>
 </p>
 
 <p align="center"><strong>Build bounded, reviewable repository context for coding agents.</strong></p>
@@ -75,8 +75,17 @@ contextforge context create . \
 
 ## Installation
 
-ContextForge requires Python 3.12 or newer. Install the checked-out source in a
-virtual environment:
+ContextForge requires Python 3.12 or newer. Install the published distribution:
+
+```bash
+python -m pip install contextforge-cli
+```
+
+The PyPI distribution is named `contextforge-cli`; the import package and
+commands remain `contextforge` and `ctxf`. The similarly named
+`context-forge-cli` distribution is a different project.
+
+To install a checked-out source tree instead:
 
 ```bash
 git clone https://github.com/waterflane/ContextForge.git
@@ -334,8 +343,8 @@ python -m pytest
 ```
 
 Build validation and owner-only publication steps are in the
-[release checklist](docs/RELEASE_CHECKLIST.md). The project does not publish
-automatically from the current CI workflow.
+[release checklist](docs/RELEASE_CHECKLIST.md). Release publication is an
+owner-triggered workflow protected by GitHub environments and PyPI OIDC.
 
 ## Project status
 
@@ -352,13 +361,14 @@ Use GitHub Issues for reproducible bugs and focused feature suggestions when
 Issues are enabled. Do not post secrets, repository source, full prompts, or
 private logs.
 
-External pull requests are not currently accepted. Unsolicited implementation
-pull requests may be closed; this policy may change later. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+External contributions are welcome through a fork and pull request into `dev`.
+Discuss large changes in an Issue before implementation. Merges require owner
+approval and passing CI; contributors do not need direct repository write
+access. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-ContextForge is licensed under the
-[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
-License](LICENSE). The license is non-commercial and is not an OSI-approved
-software license; review its terms before redistribution or integration.
+ContextForge `0.4.2` and later are licensed under the
+[Apache License 2.0](LICENSE). Earlier tagged releases remain available under
+the license included in those release snapshots. See [NOTICE](NOTICE) for the
+project attribution notice.

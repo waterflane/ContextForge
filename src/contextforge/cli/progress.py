@@ -20,7 +20,6 @@ from rich.progress_bar import ProgressBar
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
-from typer.rich_utils import _get_rich_console
 
 from contextforge.logging import color_enabled
 from contextforge.progress import ProgressActivity, ProgressEvent, ProgressStatus
@@ -95,8 +94,8 @@ class CLIProgressRenderer:
     def _console_for(stream: TextIO | None) -> Console:
         if stream is None:
             if color_enabled():
-                return _get_rich_console(stderr=True)
-            return Console(file=sys.stderr, color_system=None)
+                return Console(stderr=True)
+            return Console(stderr=True, color_system=None)
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
         return Console(
             file=stream,

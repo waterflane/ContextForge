@@ -1,52 +1,74 @@
 # Release checklist
 
-ContextForge releases are owner-managed. This checklist prepares and verifies a
-release; it does not authorize publishing to PyPI or changing GitHub settings.
+ContextForge releases are owner-managed. Publishing requires an explicit owner
+action, protected GitHub environments, and PyPI Trusted Publishing. No package
+index API token is stored in repository secrets.
 
 ## Prepare
 
-- [ ] Confirm the working tree contains only intended changes.
+- [ ] Confirm the release branch contains only intended, reviewed changes.
 - [ ] Set the version in `src/contextforge/_metadata.py`.
 - [ ] Move relevant `CHANGELOG.md` entries from **Unreleased** into a dated
       version section.
-- [ ] Confirm README and Wiki commands against recursive `--help` output.
 - [ ] Confirm the supported Python versions in `pyproject.toml` and CI.
+- [ ] Confirm `contextforge-cli` is still available on PyPI and the Trusted
+      Publisher configuration matches `release.yml`.
+- [ ] Update the separate Wiki repository when public behavior or commands
+      changed.
+- [ ] Complete the full-history secret scan outside the source tree.
 
-## Validate
+## Validate offline
 
-```powershell
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy src
-python -m pytest --basetemp="$PWD\.pytest-release-tmp"
-python -m build
-python -m twine check dist/*
+The CI workflow is authoritative. Equivalent local checks may be run from a
+clean environment with the locked dependency graph:
+
+```bash
+uv sync --locked --all-extras
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy
+uv run pytest
+uv build
+uv run twine check dist/*
+uv run check-wheel-contents dist/*.whl
 ```
 
-Install the wheel in a clean environment and check both entry points:
+Inspect wheel and sdist contents. They may contain only package source,
+`pyproject.toml`, README, LICENSE, NOTICE, CHANGELOG, required packaging
+metadata, and Hatch's backend-required `.gitignore` build-control file. They
+must not contain tests, Wiki files, planning notes, GitHub metadata, caches,
+local state, logs, reports, credentials, or heavy images.
 
-```powershell
-python -m venv .release-venv
-.\.release-venv\Scripts\python.exe -m pip install .\dist\contextforge-<version>-py3-none-any.whl
-.\.release-venv\Scripts\contextforge.exe --help
-.\.release-venv\Scripts\contextforge.exe --version
-.\.release-venv\Scripts\ctxf.exe --version
+Install the wheel and sdist in separate clean Python 3.12 and 3.13 environments.
+Verify only package metadata, importability, and version entry points:
+
+```bash
+python -c "import contextforge"
+contextforge --version
+ctxf --version
+python -m contextforge --version
 ```
 
-Inspect both archives before publication. They must not contain `.env`,
-`.contextforge`, caches, test output, `wiki/`, local reports, or credentials.
+Release validation must not require Ollama, LM Studio, a remote model API, an
+API server, or model-backed smoke tests. Tests use structural-only behavior or
+the deterministic fake provider.
 
-## Tag and publish
+## Merge and tag
 
-Only the repository owner should perform these steps after the validation above
-passes:
+- [ ] Merge the reviewed release pull request from `dev` into `main`.
+- [ ] Verify the exact merge commit contains the intended version and changelog.
+- [ ] Create a signed annotated `vX.Y.Z` tag on that exact commit.
+- [ ] Push the tag without rewriting earlier tags.
+- [ ] Synchronize `dev` with the released `main`.
 
-```powershell
-git tag -s v<version> -m "ContextForge v<version>"
-git push origin v<version>
-python -m twine upload dist/*
-```
+## Publish
 
-Uploading to PyPI, TestPyPI, or GitHub Releases requires explicit owner action.
-After publication, verify the release artifacts and update the separate GitHub
-Wiki repository if its pages changed.
+1. Dispatch `.github/workflows/release.yml` as the repository owner and supply
+   the existing tag.
+2. Approve the protected `testpypi` environment and verify the TestPyPI
+   installation job.
+3. Approve the protected `pypi` environment only after TestPyPI succeeds.
+4. Inspect the draft GitHub Release, wheel, sdist, SBOM, and `SHA256SUMS`.
+5. Publish the draft GitHub Release manually.
+6. Verify the PyPI page, install command, release notes, checksums, and Wiki.
+7. After the workflow is proven, enable immutable GitHub Releases.

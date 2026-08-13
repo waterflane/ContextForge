@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed annotated tag to publish (for example v0.4.2)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  UV_LOCKED: "1"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require repository owner
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: test "$ACTOR" = "$OWNER"
+      - name: Check out release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.13"
+          enable-cache: true
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Verify tag, main ancestry, version, and clean tree
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must match vX.Y.Z" >&2; exit 1 ;;
+          esac
+          test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
+          test "$(git rev-parse "$TAG^{}")" = "$GITHUB_SHA"
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"$/\1/p' src/contextforge/_metadata.py)"
+          test "$TAG" = "v$VERSION"
+          grep -F "## [$VERSION]" CHANGELOG.md
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install locked release environment
+        run: uv sync --extra release
+      - name: Build and validate distributions
+        run: |
+          mkdir -p publish release-assets
+          uv build --out-dir publish
+          uv run twine check publish/*
+          uv run check-wheel-contents publish/*.whl
+          uv run python scripts/validate_distribution.py publish
+      - name: Generate runtime SBOM and checksums
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv export --quiet --no-dev --no-emit-project --output-file runtime-requirements.txt
+          uv venv .runtime-venv
+          uv pip install --python .runtime-venv/bin/python --requirement runtime-requirements.txt
+          uv pip install --python .runtime-venv/bin/python --no-deps publish/*.whl
+          uv run cyclonedx-py environment .runtime-venv/bin/python --output-format JSON --output-file "release-assets/contextforge-cli-$VERSION.cdx.json"
+          cp publish/* release-assets/
+          cd release-assets
+          sha256sum *.whl *.tar.gz *.json > SHA256SUMS
+      - name: Upload Python distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-distributions
+          path: publish/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: create draft GitHub Release
+    needs:
+      - validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets/
+      - name: Create or refresh draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* --draft --verify-tag --generate-notes --title "ContextForge $TAG"
+          fi
+
+  publish-testpypi:
+    name: publish to TestPyPI
+    needs:
+      - validate
+      - draft-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/contextforge-cli/${{ needs.validate.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: publish/
+      - name: Publish with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+        with:
+          packages-dir: publish/
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    name: verify TestPyPI artifact
+    needs:
+      - validate
+      - publish-testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install exact TestPyPI release
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "contextforge-cli==$VERSION"; then
+              break
+            fi
+            if test "$attempt" = "5"; then
+              exit 1
+            fi
+            sleep 15
+          done
+          contextforge --version
+          ctxf --version
+          python -m contextforge --version
+
+  publish-pypi:
+    name: publish to PyPI
+    needs:
+      - validate
+      - verify-testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/contextforge-cli/${{ needs.validate.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: publish/
+      - name: Publish with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+        with:
+          packages-dir: publish/

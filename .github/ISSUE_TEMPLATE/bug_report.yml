@@ -1,0 +1,84 @@
+name: Bug report
+description: Report a reproducible problem in ContextForge
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove credentials, private repository
+        content, prompts, and unsanitized absolute paths before submitting.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing Issues for the same problem.
+          required: true
+        - label: This report does not contain a security vulnerability.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide sanitized, deterministic steps and the smallest useful example.
+      placeholder: |
+        1. Install ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ContextForge version
+      placeholder: "0.4.2"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - PyPI
+        - Source checkout
+        - Wheel or sdist artifact
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, Windows 11, macOS 15"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: |
+        If relevant, include sanitized `contextforge diagnostics last .`
+        output. Never include source, prompts, tokens, credentials, or private
+        absolute paths.
+      render: shell
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs or screenshots only when needed.
