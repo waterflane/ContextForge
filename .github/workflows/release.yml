@@ -78,7 +78,7 @@ jobs:
           uv venv .runtime-venv
           uv pip install --python .runtime-venv/bin/python --requirement runtime-requirements.txt
           uv pip install --python .runtime-venv/bin/python --no-deps publish/*.whl
-          uv run cyclonedx-py environment .runtime-venv/bin/python --output-format JSON --output-file "release-assets/contextforge-cli-$VERSION.cdx.json"
+          uv run cyclonedx-py environment .runtime-venv/bin/python --output-format JSON --output-file "release-assets/contextforge-repo-$VERSION.cdx.json"
           cp publish/* release-assets/
           cd release-assets
           sha256sum *.whl *.tar.gz *.json > SHA256SUMS
@@ -131,7 +131,7 @@ jobs:
     timeout-minutes: 10
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/contextforge-cli/${{ needs.validate.outputs.version }}/
+      url: https://test.pypi.org/project/contextforge-repo/${{ needs.validate.outputs.version }}/
     permissions:
       id-token: write
     steps:
@@ -163,7 +163,7 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           for attempt in 1 2 3 4 5; do
-            if python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "contextforge-cli==$VERSION"; then
+            if python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "contextforge-repo==$VERSION"; then
               break
             fi
             if test "$attempt" = "5"; then
@@ -184,7 +184,7 @@ jobs:
     timeout-minutes: 10
     environment:
       name: pypi
-      url: https://pypi.org/project/contextforge-cli/${{ needs.validate.outputs.version }}/
+      url: https://pypi.org/project/contextforge-repo/${{ needs.validate.outputs.version }}/
     permissions:
       id-token: write
     steps:

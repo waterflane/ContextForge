@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27,<1.28"]
 build-backend = "hatchling.build"
 
 [project]
-name = "contextforge-cli"
+name = "contextforge-repo"
 dynamic = ["version"]
 description = "Build bounded, reviewable repository context for coding agents."
 readme = "README.md"

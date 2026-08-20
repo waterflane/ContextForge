@@ -9,7 +9,7 @@ import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-EXPECTED_NAME = "contextforge-cli"
+EXPECTED_NAME = "contextforge-repo"
 EXPECTED_LICENSE = "Apache-2.0"
 VERSION_PATTERN = re.compile(r'^__version__ = "(?P<version>[^"]+)"$', re.MULTILINE)
 FORBIDDEN_PARTS = {
@@ -83,7 +83,7 @@ def _validate_wheel(path: Path, version: str) -> None:
 
 
 def _validate_sdist(path: Path, version: str) -> None:
-    expected_root = f"contextforge_cli-{version}"
+    expected_root = f"contextforge_repo-{version}"
     allowed_files = {
         "CHANGELOG.md",
         "LICENSE",

@@ -39,7 +39,7 @@ from contextforge.models import (
     ProviderConfigurationError,
 )
 
-DEFAULT_MODEL_ID = "qwen2.5-coder"
+DEFAULT_MODEL_ID = "qwen2.5-coder:7b"
 MAX_CONFIG_BYTES = 256 * 1024
 
 

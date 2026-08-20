@@ -310,3 +310,27 @@ use Jaccard, required-file recall, forbidden selection, and facet coverage to
 evaluate semantic usefulness. Do not relabel model-backed agreement as
 determinism. Deterministic fallback repeatability is reported separately and
 does not establish model quality.
+
+### Reproducible v0.4.2 ASP benchmark
+
+The v0.4.2 release gate uses clean ASP commit
+`f4d2e49a639ec8230aae6d7ec25974d1082edd09`, whose expected ContextForge source
+snapshot digest is
+`9ad90fc0bfe4e1d12d6116daf6fcef797693f32200a47c7a1da45a11341116f7`.
+Run the fixture from a temporary copy of ASP, delete only that copy's existing
+`.contextforge/index`, and publish a fresh structural-only index:
+
+```powershell
+uv run contextforge index build '<temporary-root>\ASP' --provider none
+```
+
+Use `qwen2.5-coder:7b`, set both Ollama and ContextForge to a 32768-token context
+window, and retain the tag plus installed digest from `ollama list`. The report
+already records the source snapshot, index generation, effective configuration,
+provider, and model tag. Keep the installed Ollama digest with the report because
+the public benchmark JSON schema is intentionally unchanged in v0.4.2.
+
+Before accepting a release, run indexed and hybrid diagnostics, then fresh, then
+the complete manifest. Retain three consecutive complete reports in which all 22
+runs satisfy their expectations and budgets. Do not increase a budget or remove
+an expected file unless current fixture source proves the expectation obsolete.

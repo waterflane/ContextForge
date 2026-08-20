@@ -14,12 +14,20 @@ from contextforge.benchmarks import (
 )
 from contextforge.discovery import (
     DiscoveryBudget,
+    DiscoveryKnowledge,
     DiscoveryMode,
     DiscoveryRequest,
     DiscoveryRunRecord,
     discover_repository,
 )
 from contextforge.discovery.constraints import extract_task_file_constraints
+from contextforge.discovery.session import (
+    _detect_intent_facets,
+    _facet_aware_preselection,
+    _rank_candidate_records,
+    _rank_candidates_by_facet,
+    _ranking_tokens,
+)
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 from contextforge.repositories import scan_repository
 
@@ -92,6 +100,30 @@ def test_all_negative_task_does_not_reintroduce_negated_relevance() -> None:
     assert constraints.excludes("setup-global-access.ps1")
 
 
+def test_negative_context_spend_list_excludes_each_named_file_role() -> None:
+    constraints = extract_task_file_constraints(
+        "Locate media search. Do not spend context on tests, documentation, "
+        "setup helpers, or integration callers."
+    )
+
+    assert constraints.positive_task == "Locate media search"
+    assert constraints.excludes("test/media-search.test.js")
+    assert constraints.excludes("scripts/setup-access.ps1")
+    assert not constraints.excludes("media-search.js")
+
+
+def test_negative_expand_clause_excludes_unrequested_application_roles() -> None:
+    constraints = extract_task_file_constraints(
+        "Find the browser bootstrap. Do not expand into server startup or the "
+        "separate video-library page."
+    )
+
+    assert constraints.positive_task == "Find the browser bootstrap"
+    assert constraints.excludes("server.js")
+    assert constraints.excludes("public/videos.html")
+    assert not constraints.excludes("public/app.js")
+
+
 @pytest.mark.parametrize("verb", ["do not include", "exclude", "ignore", "without"])
 def test_explicit_filenames_in_negative_clauses_are_excluded(
     tmp_path: Path, verb: str
@@ -147,8 +179,8 @@ def test_unrelated_without_does_not_create_file_exclusions(tmp_path: Path) -> No
     assert "setup-runtime.py" in _selected(result)
 
 
-@pytest.mark.parametrize(("limit", "expected"), [(1, 1), (3, 3)])
-def test_explicit_hard_file_limit_is_respected(
+@pytest.mark.parametrize(("limit", "expected"), [(1, 1), (3, 1)])
+def test_explicit_hard_file_limit_caps_minimal_fallback(
     tmp_path: Path, limit: int, expected: int
 ) -> None:
     _write_files(
@@ -211,12 +243,12 @@ def test_benchmark_selected_file_budget_is_evaluation_only(tmp_path: Path) -> No
     repository.mkdir()
     _write_files(
         repository,
-        ("candidate_a.py", "candidate_b.py", "candidate_c.py"),
+        ("setup-access.bat", "setup-access.ps1", "unrelated.py"),
     )
     task = BenchmarkTask(
         task_id="evaluation-budget-only",
         repository_path="fixture",
-        task="Select candidate files",
+        task="Select the setup access files",
         modes=(BenchmarkMode.FRESH,),
         max_selected_files=1,
         max_files_read=100,
@@ -237,9 +269,138 @@ def test_benchmark_selected_file_budget_is_evaluation_only(tmp_path: Path) -> No
     )
 
     run = benchmark.runs[0]
-    assert len(run.selected_files) == 3
+    assert set(run.selected_files) == {"setup-access.bat", "setup-access.ps1"}
     assert run.budgets.selected_files.limit == 1
     assert run.budgets.selected_files.passed is False
+
+
+def test_snapshot_only_text_files_remain_rankable_without_codemap(
+    tmp_path: Path,
+) -> None:
+    _write_files(tmp_path, ("web/bootstrap.js", "web/home.html", "settings.json"))
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+
+    records = _rank_candidate_records(
+        knowledge,
+        task="Trace the browser bootstrap and configuration",
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+
+    assert {item.path for item in records} == {
+        "settings.json",
+        "web/bootstrap.js",
+        "web/home.html",
+    }
+    assert all("current_snapshot_source" in item.ranking_signals for item in records)
+
+
+def test_role_facets_rank_generic_startup_files_without_fixture_names(
+    tmp_path: Path,
+) -> None:
+    _write_files(
+        tmp_path,
+        (
+            "package.json",
+            "backend/main.js",
+            "web/bootstrap.js",
+            "scripts/setup-access.ps1",
+        ),
+    )
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+    task = "Trace npm startup through the Node server to the browser bootstrap"
+    records = _rank_candidate_records(
+        knowledge,
+        task=task,
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+    facets = _detect_intent_facets(task)
+    selected = _facet_aware_preselection(
+        records,
+        facets,
+        _rank_candidates_by_facet(knowledge, records, facets),
+        limit=5,
+    )
+
+    assert {
+        "package.json",
+        "backend/main.js",
+        "web/bootstrap.js",
+    } <= {item.path for item in selected}
+    assert "scripts/setup-access.ps1" not in {item.path for item in selected}
+
+
+def test_ranking_tokens_normalize_conservative_aliases_and_stopwords() -> None:
+    assert _ranking_tokens("Configuration from videos and providers") == {
+        "config",
+        "provider",
+        "video",
+    }
+
+
+def test_role_scoring_does_not_turn_index_coverage_into_test_request(
+    tmp_path: Path,
+) -> None:
+    _write_files(
+        tmp_path,
+        ("server.js", "public/app.js", "test/service.test.js"),
+    )
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+
+    records = _rank_candidate_records(
+        knowledge,
+        task="Locate server integration and report stale-index coverage diagnostics",
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+    signals = {item.path: set(item.ranking_signals) for item in records}
+
+    assert "server_entry_role" in signals["server.js"]
+    assert "server_entry_role" not in signals["public/app.js"]
+    assert "requested_test_role" not in signals["test/service.test.js"]
+
+
+def test_preselection_does_not_append_an_unrelated_neutral_file(tmp_path: Path) -> None:
+    _write_files(tmp_path, ("media-search.js", "unrelated.txt"))
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+    task = "Locate the media search service"
+    records = _rank_candidate_records(
+        knowledge,
+        task=task,
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+    facets = _detect_intent_facets(task)
+
+    selected = _facet_aware_preselection(
+        records,
+        facets,
+        _rank_candidates_by_facet(knowledge, records, facets),
+        limit=10,
+    )
+
+    assert [item.path for item in selected] == ["media-search.js"]
 
 
 def test_fallback_order_is_deterministic_across_repeated_runs(tmp_path: Path) -> None:

@@ -27,10 +27,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Package version `0.4.2` is represented by
-> the source metadata. Discovery benchmarking is experimental and its results
-> should be reviewed alongside the recorded provider, model, configuration, and
-> source snapshot.
+> ContextForge is pre-alpha software. Version `0.4.2` is the first public-release
+> candidate. Discovery benchmarking is experimental and its results should be
+> reviewed alongside the recorded provider, model, configuration, and source
+> snapshot.
 
 ## Why ContextForge
 
@@ -78,12 +78,21 @@ contextforge context create . \
 ContextForge requires Python 3.12 or newer. Install the published distribution:
 
 ```bash
-python -m pip install contextforge-cli
+python -m pip install contextforge-repo
 ```
 
-The PyPI distribution is named `contextforge-cli`; the import package and
-commands remain `contextforge` and `ctxf`. The similarly named
-`context-forge-cli` distribution is a different project.
+For an isolated command-line installation, use either tool manager:
+
+```bash
+pipx install contextforge-repo
+# or
+uv tool install contextforge-repo
+```
+
+The PyPI distribution is named `contextforge-repo`; the import package remains
+`contextforge`, and the installed commands remain `contextforge` and `ctxf`.
+The similarly named `context-forge-cli` distribution is a different,
+unaffiliated project.
 
 To install a checked-out source tree instead:
 
@@ -201,10 +210,15 @@ The primary supported environment variables are:
   `CONTEXTFORGE_LOG_FILE`, and `CONTEXTFORGE_LOG_COMPONENTS`.
 
 The default provider is local Ollama at
-`http://127.0.0.1:11434/api/chat` using model `qwen2.5-coder`. Use
+`http://127.0.0.1:11434/api/chat` using model `qwen2.5-coder:7b`. Use
 `--provider none` for structural-only indexing. The `openai-compatible`
 provider and its `lmstudio` CLI alias require an exact model ID and a suitable
 `base_url`.
+
+Model-backed discovery requires the configured provider to be running with the
+named model available. ContextForge's configured `context_window` must not
+exceed the window actually loaded by that provider; inspect the resolved policy
+before a long run with `contextforge diagnostics provider PATH`.
 
 Credential configuration stores only the name of an environment variable in
 `credential_env`; the credential value is resolved at request time. See the
@@ -269,6 +283,8 @@ is available.
 > [!NOTE]
 > `benchmark discovery` is experimental in `0.4.2`; model-backed repeatability
 > measurements are observations for the recorded fixture state, not guarantees.
+> Start the configured provider first and use the same context-window value in
+> ContextForge and the provider runtime.
 
 ```powershell
 contextforge benchmark discovery 'C:\Repositories' `
@@ -283,7 +299,8 @@ The runner is repository/index read-only, disables configured file logging, and
 records complete, failed, and cancelled runs in the result. Exit code `3` means
 the command produced a complete benchmark report containing at least one task,
 expectation, or budget failure. Do not discard stdout or the requested output
-file when handling that code.
+file when handling that code. Every run remains bounded by manifest limits,
+provider retry limits, operation timeouts, and the configured context window.
 
 ## Output formats and streams
 

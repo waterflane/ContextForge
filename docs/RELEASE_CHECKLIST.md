@@ -11,10 +11,11 @@ index API token is stored in repository secrets.
 - [ ] Move relevant `CHANGELOG.md` entries from **Unreleased** into a dated
       version section.
 - [ ] Confirm the supported Python versions in `pyproject.toml` and CI.
-- [ ] Confirm `contextforge-cli` is still available on PyPI and the Trusted
-      Publisher configuration matches `release.yml`.
+- [ ] Confirm `contextforge-repo` is still unregistered on both PyPI and
+      TestPyPI, and both Trusted Publisher configurations match `release.yml`.
 - [ ] Update the separate Wiki repository when public behavior or commands
-      changed.
+      changed; before changing visibility, replace its installation command with
+      `python -m pip install contextforge-repo`.
 - [ ] Complete the full-history secret scan outside the source tree.
 
 ## Validate offline
@@ -52,6 +53,42 @@ python -m contextforge --version
 Release validation must not require Ollama, LM Studio, a remote model API, an
 API server, or model-backed smoke tests. Tests use structural-only behavior or
 the deterministic fake provider.
+
+## Validate model-backed discovery
+
+The versioned ASP discovery benchmark is a separate release gate. For v0.4.2,
+the canonical fixture is the clean ASP commit
+`f4d2e49a639ec8230aae6d7ec25974d1082edd09` with source snapshot digest
+`9ad90fc0bfe4e1d12d6116daf6fcef797693f32200a47c7a1da45a11341116f7`.
+Create a temporary copy so the developer's previous index remains untouched,
+remove only the copied `.contextforge/index`, and build a structural-only index
+there with `contextforge index build <temporary-ASP> --provider none`.
+
+Use the official Ollama model tag `qwen2.5-coder:7b`. Record the installed model
+digest reported by `ollama list` alongside every retained report. Start Ollama
+with an actual loaded context window of 32768 tokens, then give ContextForge the
+same explicit value. Do not store provider settings or credentials in the
+repository.
+
+```powershell
+$env:CONTEXTFORGE_MODEL_CONTEXT_WINDOW = "32768"
+ollama list
+uv run contextforge diagnostics provider 'C:\Repositories'
+uv run contextforge benchmark discovery 'C:\Repositories' `
+  --tasks '.\tests\fixtures\asp_discovery_benchmark.json' `
+  --modes 'fresh,indexed,hybrid' `
+  --format json `
+  --output '.\benchmark-report.json'
+```
+
+- [ ] Confirm every run completed and all expectations and budgets passed.
+- [ ] Confirm the ASP commit, source digest, index generation, exact model tag,
+      installed model digest, and context window match across retained reports.
+- [ ] Retain three consecutive fully passing reports made with that same setup.
+- [ ] Inspect every failure; update an expectation only when repository evidence
+      proves it stale, never merely to make the suite pass.
+- [ ] Confirm the report and stderr contain no prompts, responses, source
+      contents, credentials, or private absolute paths.
 
 ## Merge and tag
 

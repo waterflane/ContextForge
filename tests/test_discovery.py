@@ -570,6 +570,7 @@ def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
     request = DiscoveryRequest(
         task="x",
         mode="fresh",
+        strict=True,
         budget=DiscoveryBudget(max_steps=4),
     )
 
@@ -586,6 +587,28 @@ def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
     assert record.budget_usage.transport_attempts == 4
     assert record.budget_usage.total_provider_http_calls == 4
     assert provider.call_count == 4
+
+
+def test_fresh_stagnation_falls_back_after_three_unproductive_generations(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"focused.py": "VALUE = 1\n"})
+    provider = _provider(
+        *(_batch(_call(f"budget-{index}", "get_context_budget")) for index in range(3))
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(task="Find focused behavior", mode="fresh"),
+        )
+    )
+
+    assert provider.call_count == 3
+    assert result.final_selection is not None
+    assert result.final_selection.provenance == "deterministic_fallback"
+    assert result.budget_usage.model_generations == 3
 
 
 def test_repeated_valid_actions_still_use_the_action_loop_limit(

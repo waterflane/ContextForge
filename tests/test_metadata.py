@@ -4,4 +4,4 @@ from contextforge import __version__
 
 
 def test_version() -> None:
-    assert version("contextforge-cli") == __version__
+    assert version("contextforge-repo") == __version__

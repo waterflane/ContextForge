@@ -117,7 +117,7 @@ def test_console_script_and_module_share_the_run_wrapper() -> None:
 def test_installed_distribution_exposes_both_console_scripts() -> None:
     console_scripts = {
         entry_point.name: entry_point.value
-        for entry_point in distribution("contextforge-cli").entry_points
+        for entry_point in distribution("contextforge-repo").entry_points
         if entry_point.group == "console_scripts"
     }
 

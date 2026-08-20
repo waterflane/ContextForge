@@ -121,17 +121,20 @@ to ten IDs copied exactly from the supplied candidates; summary must briefly exp
 why those candidates fit the task. candidate_ids is required. Do not return actions,
 tool names, nested arguments, paths in place of IDs, Markdown, or extra fields."""
 
-FRESH_ACTION_INSTRUCTIONS = """Return exactly one JSON object with schema_version=1
-and a required non-empty actions array containing one to ten actions. Every action
-also requires schema_version=1, action_id, kind, and arguments. A minimal valid
-investigation response is:
-{"schema_version":1,"actions":[{"schema_version":1,"action_id":"inspect","kind":"call_tool","tool_name":"list_tree","arguments":{}}]}
-Return the full object, never an action by itself or an empty actions array."""
+FRESH_ACTION_INSTRUCTIONS = """Return one JSON object matching the supplied schema
+with the required non-empty actions array of one to ten actions; its shape begins
+{"schema_version":1,"actions":[{...}]}. When ranked
+candidates cover the task, select the smallest sufficient set in the first response
+and finalize in that same action batch; do not inspect merely to reconfirm a strong
+candidate. Investigate only when an essential role is missing. After a completeness
+review, add a genuinely missing candidate or finalize unchanged. Normally select one
+to five files, then stop."""
 
 HYBRID_MAX_MODEL_GENERATIONS = 1
 FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT = 3
 FACET_CANDIDATE_MIN_SCORE = 8.0
 MAX_FACET_COVERAGE_ADDITIONS = 2
+FRESH_STAGNANT_GENERATION_LIMIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,13 +222,27 @@ class DiscoverySession:
         self._intent_facets: tuple[_IntentFacet, ...] = ()
         self._facet_rankings: dict[str, tuple[str, ...]] = {}
         self._coverage_diagnostics_emitted = False
+        self._enrichment_added_paths: set[str] = set()
         self._validated_selection: tuple[DiscoveryAction, ...] | None = None
         self._validated_selection_step_fingerprint: str | None = None
         self._validated_response_fingerprint: str | None = None
         self._structured_failure_totals: dict[str, int] = {}
         self._structured_failures_since_progress: dict[str, int] = {}
         self._structured_fallback_fingerprint: str | None = None
+        self._fresh_stagnant_generations = 0
         self._task_file_constraints = extract_task_file_constraints(request.task)
+        pinned = set(request.pinned_paths)
+        self._effective_excluded_paths = tuple(
+            sorted(
+                set(request.excluded_paths)
+                | {
+                    item.path
+                    for item in snapshot.files
+                    if item.path not in pinned
+                    and self._task_file_constraints.excludes(item.path)
+                }
+            )
+        )
         active_operation_id = operation_id or uuid.uuid4().hex
         self._operation_id = active_operation_id
         self._top_level_operation_id = parent_operation_id or active_operation_id
@@ -267,11 +284,13 @@ class DiscoverySession:
         self.warnings.extend(loaded.warnings)
         self._ranked_candidates = _rank_candidate_records(
             loaded.knowledge,
-            task=self.request.task,
+            task=self._task_file_constraints.positive_task,
             pinned_paths=self.request.pinned_paths,
-            excluded_paths=self.request.excluded_paths,
+            excluded_paths=self._effective_excluded_paths,
         )
-        self._intent_facets = _detect_intent_facets(self.request.task)
+        self._intent_facets = _detect_intent_facets(
+            self._task_file_constraints.positive_task
+        )
         self._facet_rankings = _rank_candidates_by_facet(
             loaded.knowledge,
             self._ranked_candidates,
@@ -303,7 +322,7 @@ class DiscoverySession:
             loaded.knowledge,
             self.budget,
             pinned_paths=self.request.pinned_paths,
-            excluded_paths=self.request.excluded_paths,
+            excluded_paths=self._effective_excluded_paths,
             git_diff_provider=self.git_diff_provider,
             candidate_records={
                 item.candidate_id: item for item in self._preselected_candidates
@@ -339,9 +358,7 @@ class DiscoverySession:
             self._stage = "retrieval"
             self.prepare_read_only_tools()
             knowledge = self._require_knowledge()
-            discovered_count = len(
-                set(knowledge.code_maps) | set(knowledge.semantic_analyses)
-            )
+            discovered_count = len(self._ranked_candidates)
             emit(
                 "retrieval",
                 "context_suggestion.candidates_discovered",
@@ -405,6 +422,11 @@ class DiscoverySession:
                         "max_model_calls": self._max_model_calls,
                     },
                 )
+                selected_before = {
+                    item.path
+                    for item in self._require_executor().selected
+                    if item.path is not None
+                }
                 actions = await self._request_actions()
                 if any(
                     action.kind == "call_tool"
@@ -513,6 +535,82 @@ class DiscoverySession:
                             },
                         )
                         return finalized
+                if self.request.mode is DiscoveryMode.FRESH:
+                    selected_after = {
+                        item.path
+                        for item in self._require_executor().selected
+                        if item.path is not None
+                    }
+                    if selected_after - selected_before:
+                        self._fresh_stagnant_generations = 0
+                    else:
+                        self._fresh_stagnant_generations += 1
+                    if (
+                        self._fresh_stagnant_generations
+                        >= FRESH_STAGNANT_GENERATION_LIMIT
+                        and not self.request.strict
+                    ):
+                        fallback = self._deterministic_fallback()
+                        if fallback is None:
+                            raise self._failure(
+                                DiscoveryLimitError,
+                                "stagnant_discovery",
+                                "discovery made no context-selection progress",
+                            )
+                        self._progress.report(
+                            "fallback_selection",
+                            "Selected deterministic ranked context after bounded "
+                            "model stagnation.",
+                            percentage=99,
+                            planned_units=1,
+                            processed_units=1,
+                            succeeded_units=1,
+                            fallback_units=1,
+                            failed_units=0,
+                            lifecycle_state="degraded_success",
+                            metadata={
+                                "fallback_kind": "deterministic_context_selection",
+                                "stagnant_generation_limit": (
+                                    FRESH_STAGNANT_GENERATION_LIMIT
+                                ),
+                            },
+                        )
+                        self._progress.complete(
+                            message=(
+                                "Repository context discovery completed with "
+                                "bounded fallback."
+                            )
+                        )
+                        emit(
+                            "fallback",
+                            "context_suggestion.fallback_selected",
+                            "Selected deterministic context after bounded model "
+                            "stagnation.",
+                            level=LogLevel.WARNING,
+                            operation_id=self._operation_id,
+                            top_level_operation_id=self._top_level_operation_id,
+                            parent_operation_id=self._operation_id,
+                            phase_id="fallback_selection",
+                            status="completed",
+                            fallback_selected=True,
+                            data={
+                                "fallback_selected": True,
+                                "fallback_kind": ("deterministic_context_selection"),
+                                "stagnant_generation_limit": (
+                                    FRESH_STAGNANT_GENERATION_LIMIT
+                                ),
+                                "fallback_units": 1,
+                                "succeeded_units": 1,
+                                "failed_units": 0,
+                                "final_outcome": "degraded_success",
+                                "final_selected_candidate_count": len(
+                                    fallback.final_selection.selected
+                                    if fallback.final_selection is not None
+                                    else ()
+                                ),
+                            },
+                        )
+                        return fallback
         except DiscoveryError as exc:
             if isinstance(exc, DiscoveryCancelledError):
                 self._progress.cancel()
@@ -711,7 +809,30 @@ class DiscoverySession:
                 facets,
                 facet_rankings,
                 limit=self.request.budget.max_preselected_candidates,
+                fill_global=False,
             )
+        )
+        if not candidates and ranked:
+            candidates.append(ranked[0])
+        operational_terms = _ranking_tokens(constraints.positive_task) & {
+            "deploy",
+            "deployment",
+            "install",
+            "setup",
+        }
+        if operational_terms:
+            selected_candidate_paths = {item.path for item in candidates}
+            candidates.extend(
+                item
+                for item in ranked
+                if item.path not in selected_candidate_paths
+                and operational_terms & _ranking_tokens(item.path)
+            )
+        selected_candidate_paths = {item.path for item in candidates}
+        candidates.extend(
+            item
+            for item in _fallback_role_candidates(ranked, constraints.positive_task)
+            if item.path not in selected_candidate_paths
         )
         candidate_paths = {item.path for item in candidates}
         candidates.extend(
@@ -719,6 +840,7 @@ class DiscoverySession:
             for item in ranked
             if item.path in pinned and item.path not in candidate_paths
         )
+        candidates.sort(key=lambda item: (item.path not in pinned, item.rank))
         maximum_files = max(
             self.request.budget.max_context_files,
             len(self.request.pinned_paths),
@@ -895,7 +1017,7 @@ class DiscoverySession:
             missing = [
                 current_files[path]
                 for path in sorted(current_files)
-                if path not in code_maps
+                if path not in code_maps and path not in self._effective_excluded_paths
             ]
             reserve_files = max(
                 len(self.request.pinned_paths),
@@ -1145,16 +1267,13 @@ class DiscoverySession:
                     f"Task: {self.request.task}\nInvestigate the repository in "
                     f"{self.request.mode.value} mode. Return schema_version=1 and "
                     "the required non-empty actions array with one to ten actions. "
-                    "Minimal valid response: "
-                    '{"schema_version":1,"actions":[{"schema_version":1,'
-                    '"action_id":"inspect","kind":"call_tool",'
-                    '"tool_name":"list_tree","arguments":{}}]}. Use '
-                    "select_candidates with only the supplied candidate IDs when a "
-                    "ranked candidate should enter the context. Use call_tool actions "
-                    "to investigate or mutate the ephemeral selection. Use a finalize "
-                    "action with arguments matching finalize_context only after "
-                    "checking imports, callers, tests, configuration, public entry "
-                    "points, relevant diff, documentation, and missing context."
+                    "Minimal valid response: a select_candidates action using only "
+                    "supplied IDs followed by a finalize action. "
+                    "Use select_candidates with only supplied candidate IDs and a "
+                    "finalize action in the same response when those candidates "
+                    "cover the task. Use investigative call_tool actions only when "
+                    "an essential role is absent. Finalize once the smallest "
+                    "sufficient context has been selected."
                 )
             ),
             trusted_code_map_facts=trusted,
@@ -1680,17 +1799,18 @@ class DiscoverySession:
     def _enrich_facet_coverage(self) -> None:
         """Boundedly add the best high-confidence candidate for uncovered facets."""
 
-        if self.request.mode not in {DiscoveryMode.INDEXED, DiscoveryMode.HYBRID}:
-            return
         executor = self._require_executor()
         selected_paths = {item.path for item in executor.selected if item.path}
 
         def coverage_paths(facet: _IntentFacet) -> set[str]:
-            ranked = set(self._facet_rankings.get(facet.label, ()))
-            implementations = {
-                path for path in ranked if not _looks_like_test_path(path)
-            }
-            return implementations or ranked
+            ranked = self._facet_rankings.get(facet.label, ())
+            best_implementation = next(
+                (path for path in ranked if not _looks_like_test_path(path)),
+                None,
+            )
+            if best_implementation is not None:
+                return {best_implementation}
+            return set(ranked[:1])
 
         covered = {
             facet.label
@@ -1703,7 +1823,7 @@ class DiscoverySession:
             if facet.substantial and facet.label not in covered
         ]
         remaining = min(
-            MAX_FACET_COVERAGE_ADDITIONS,
+            MAX_FACET_COVERAGE_ADDITIONS - len(self._enrichment_added_paths),
             self.request.budget.max_context_files - len(selected_paths),
             self.request.budget.max_preselected_candidates - len(selected_paths),
         )
@@ -1731,11 +1851,14 @@ class DiscoverySession:
             self.observations.append(observation)
             if observation.ok:
                 added.append(candidate)
+                self._enrichment_added_paths.add(candidate)
                 selected_paths.add(candidate)
                 if candidate in coverage_paths(facet):
                     covered.add(facet.label)
                 remaining -= 1
         executor.mark_coverage_added(tuple(added))
+        if self.request.mode is DiscoveryMode.FRESH and not added:
+            return
         if self._coverage_diagnostics_emitted:
             return
         uncovered = [
@@ -1775,14 +1898,14 @@ class DiscoverySession:
         self._coverage_diagnostics_emitted = True
 
     def _enrich_direct_dependencies(self) -> None:
-        """Add at most two task-relevant direct imports already in the candidate set."""
+        """Use the shared enrichment allowance for task-relevant direct imports."""
 
         if self.request.mode not in {DiscoveryMode.INDEXED, DiscoveryMode.HYBRID}:
             return
         executor = self._require_executor()
         selected_paths = {item.path for item in executor.selected if item.path}
         remaining = min(
-            2,
+            MAX_FACET_COVERAGE_ADDITIONS - len(self._enrichment_added_paths),
             self.request.budget.max_context_files - len(selected_paths),
             self.request.budget.max_preselected_candidates - len(selected_paths),
         )
@@ -1839,6 +1962,8 @@ class DiscoverySession:
             },
         )
         self.observations.append(observation)
+        if observation.ok:
+            self._enrichment_added_paths.update(dependency_paths)
 
     def _verify_final_selection(
         self, selected: tuple[DiscoveryCandidate, ...]
@@ -2056,20 +2181,10 @@ def _rank_candidate_records(
     pinned_paths: tuple[str, ...],
     excluded_paths: tuple[str, ...],
 ) -> tuple[DiscoveryCandidateRecord, ...]:
-    """Rank current structural records and assign stable short request IDs."""
+    """Rank every current text file and assign stable short request IDs."""
 
-    task_tokens = _ranking_tokens(task) - {
-        "a",
-        "an",
-        "and",
-        "for",
-        "in",
-        "of",
-        "on",
-        "the",
-        "to",
-        "with",
-    }
+    task_tokens = _ranking_tokens(task)
+    tests_requested = bool(task_tokens & {"test", "regression"})
     pinned = set(pinned_paths)
     excluded = set(excluded_paths)
     entry_points: set[str] = set()
@@ -2089,20 +2204,30 @@ def _rank_candidate_records(
             for item in knowledge.overview.test_relationships
         )
 
+    current_files = {
+        item.path: item for item in knowledge.snapshot.files if item.is_text is True
+    }
+    manifest_states = (
+        {}
+        if knowledge.manifest is None
+        else {item.path: item for item in knowledge.manifest.files}
+    )
+    candidate_paths = (
+        set(current_files) | set(knowledge.code_maps) | set(knowledge.semantic_analyses)
+    )
     match_counts: dict[str, tuple[int, int, int]] = {}
-    for path, code_map in knowledge.code_maps.items():
+    for path in candidate_paths:
+        code_map = knowledge.code_maps.get(path)
         path_matches = len(task_tokens & _ranking_tokens(path))
         symbol_tokens = {
             token
-            for symbol in code_map.symbols
+            for symbol in (() if code_map is None else code_map.symbols)
             for token in _ranking_tokens(
                 f"{symbol.name} {symbol.qualified_name} {symbol.signature or ''}"
             )
         }
         summary = knowledge.semantic_analyses.get(path)
-        summary_tokens = (
-            set() if summary is None else _ranking_tokens(summary.model_dump_json())
-        )
+        summary_tokens = set() if summary is None else _semantic_ranking_tokens(summary)
         match_counts[path] = (
             path_matches,
             len(task_tokens & symbol_tokens),
@@ -2120,8 +2245,9 @@ def _rank_candidate_records(
     }
 
     scored: list[tuple[float, str, str, tuple[str, ...]]] = []
-    for path, code_map in sorted(knowledge.code_maps.items()):
-        if path in excluded:
+    for path in sorted(candidate_paths):
+        project_file = current_files.get(path)
+        if path in excluded or project_file is None:
             continue
         path_matches, symbol_matches, summary_matches = match_counts[path]
         score = 1.0 + path_matches * 12.0 + symbol_matches * 8.0 + summary_matches * 6.0
@@ -2138,30 +2264,45 @@ def _rank_candidate_records(
         if path in knowledge.semantic_analyses:
             score += 0.5
             signals.append("current_semantic_record")
+        if path in knowledge.code_maps:
+            signals.append("current_structural_record")
+        elif path in manifest_states:
+            signals.append("current_manifest_source_record")
+        else:
+            signals.append("current_snapshot_source")
         metadata_penalty = _metadata_penalty(path, task_tokens)
         if metadata_penalty:
             score += metadata_penalty
             signals.append("incidental_metadata_penalty")
-        elif path in entry_points:
-            score += 10.0
-            signals.append("application_entry_point")
-        elif _looks_like_implementation_path(path):
-            score += 3.0
-            signals.append("implementation_file")
+        else:
+            if path in entry_points:
+                score += 10.0
+                signals.append("application_entry_point")
+            elif _looks_like_implementation_path(path):
+                score += 3.0
+                signals.append("implementation_file")
+            role_score, role_signals = _task_role_score(path, task_tokens)
+            score += role_score
+            signals.extend(role_signals)
         if _looks_like_test_path(path):
-            if path in direct_tests:
+            if tests_requested and path in direct_tests:
                 score += 10.0
                 signals.append("direct_related_test")
-            elif path_matches or symbol_matches or summary_matches:
+            elif tests_requested and (
+                path_matches or symbol_matches or summary_matches
+            ):
                 score += 2.0
                 signals.append("task_matched_test")
             else:
                 score -= 12.0
-                signals.append("unrelated_test_penalty")
-        if not signals:
-            signals.append("current_structural_record")
+                signals.append(
+                    "unrequested_test_penalty"
+                    if path_matches or symbol_matches or summary_matches
+                    else "unrelated_test_penalty"
+                )
         score = max(score, 0.0)
-        scored.append((score, path, str(code_map.language), tuple(signals)))
+        language = project_file.language or "text"
+        scored.append((score, path, language, tuple(dict.fromkeys(signals))[:10]))
     scored.sort(key=lambda item: (-item[0], item[1]))
     used_ids: set[str] = set()
     records: list[DiscoveryCandidateRecord] = []
@@ -2201,37 +2342,58 @@ def _detect_intent_facets(task: str) -> tuple[_IntentFacet, ...]:
             "main",
             "server",
             "start",
-            "starts",
             "startup",
         }
     )
-    support_terms = frozenset({"file", "files", "test", "tests"})
-    ignored = {
-        "about",
-        "explain",
-        "find",
-        "how",
-        "list",
-        "relevant",
-        "show",
-        "the",
-        "works",
-    }
     for clause in clauses:
         tokens = _ranking_tokens(clause)
-        if not tokens:
-            continue
-        if tokens & {"start", "starts", "startup", "boot", "bootstrap"}:
+        raw_tokens = set(re.findall(r"[a-z0-9]+", clause))
+        if tokens & {"start", "startup", "boot", "bootstrap"}:
             facet = _IntentFacet("application startup", startup_terms)
-        elif tokens & support_terms and tokens & {"list", "relevant", "test", "tests"}:
+        elif tokens & {"config", "setting"} and not tokens & {
+            "implementation",
+            "service",
+        }:
             facet = _IntentFacet(
-                "relevant tests/files", support_terms, substantial=False
+                "configuration",
+                frozenset({"config", "environment", "setting"}),
             )
-        else:
-            meaningful = frozenset(tokens - ignored - {"file", "files"})
-            if not meaningful:
-                continue
+        elif {"media", "search"} <= tokens and tokens & {
+            "implementation",
+            "integration",
+            "provider",
+            "service",
+        }:
+            facet = _IntentFacet("media search service", frozenset(tokens))
+        elif tokens & {"endpoint", "http", "route"}:
+            facet = _IntentFacet("server integration", frozenset(tokens | {"server"}))
+        elif "server" in tokens and tokens & {"code", "entry", "integration"}:
+            facet = _IntentFacet("server integration", frozenset(tokens))
+        elif tokens & {"catalog", "library", "video"} and tokens & {
+            "client",
+            "render",
+            "renders",
+            "submits",
+        }:
+            facet = _IntentFacet("media client", frozenset(tokens))
+        elif raw_tokens & {"test", "tests", "file", "files"} and raw_tokens & {
+            "coverage",
+            "list",
+            "regression",
+            "relevant",
+            "test",
+            "tests",
+        }:
+            facet = _IntentFacet(
+                "relevant tests/files",
+                frozenset({"file", "test"}),
+                substantial=bool(raw_tokens & {"regression", "test", "tests"}),
+            )
+        elif tokens:
+            meaningful = frozenset(tokens)
             facet = _IntentFacet(" ".join(sorted(meaningful)), meaningful)
+        else:
+            continue
         if all(item.label != facet.label for item in facets):
             facets.append(facet)
         if len(facets) == 4:
@@ -2259,37 +2421,35 @@ def _rank_candidates_by_facet(
     result: dict[str, tuple[str, ...]] = {}
     for facet in facets:
         scored: list[tuple[bool, float, int, str]] = []
-        for path, code_map in knowledge.code_maps.items():
+        for path, record in by_path.items():
+            if "incidental_metadata_penalty" in record.ranking_signals:
+                continue
+            code_map = knowledge.code_maps.get(path)
             path_matches = len(facet.tokens & _ranking_tokens(path))
             symbol_tokens = {
                 token
-                for symbol in code_map.symbols
+                for symbol in (() if code_map is None else code_map.symbols)
                 for token in _ranking_tokens(
                     f"{symbol.name} {symbol.qualified_name} {symbol.signature or ''}"
                 )
             }
             summary = knowledge.semantic_analyses.get(path)
             summary_tokens = (
-                set() if summary is None else _ranking_tokens(summary.model_dump_json())
+                set() if summary is None else _semantic_ranking_tokens(summary)
             )
             score = (
                 path_matches * 12.0
                 + len(facet.tokens & symbol_tokens) * 8.0
                 + len(facet.tokens & summary_tokens) * 6.0
             )
-            stem = path.rsplit("/", 1)[-1].split(".", 1)[0].casefold()
-            if facet.label == "application startup":
-                if path in entry_points:
-                    score += 24.0
-                elif stem in {"app", "bootstrap", "index", "main", "server", "startup"}:
-                    score += 14.0
-            elif facet.label == "relevant tests/files" and _looks_like_test_path(path):
-                score += 8.0
-            if score < FACET_CANDIDATE_MIN_SCORE or path not in by_path:
+            score += _facet_role_score(path, facet.label, facet.tokens, entry_points)
+            if score < FACET_CANDIDATE_MIN_SCORE:
                 continue
-            scored.append(
-                (_looks_like_test_path(path), -score, by_path[path].rank, path)
+            is_test = _looks_like_test_path(path)
+            role_mismatch = (
+                not is_test if facet.label == "relevant tests/files" else is_test
             )
+            scored.append((role_mismatch, -score, record.rank, path))
         scored.sort()
         result[facet.label] = tuple(item[3] for item in scored)
     return result
@@ -2301,6 +2461,7 @@ def _facet_aware_preselection(
     facet_rankings: dict[str, tuple[str, ...]],
     *,
     limit: int,
+    fill_global: bool = True,
 ) -> tuple[DiscoveryCandidateRecord, ...]:
     """Reserve one bounded request slot per substantial facet, then fill globally."""
 
@@ -2313,10 +2474,57 @@ def _facet_aware_preselection(
         ranking = facet_rankings.get(facet.label, ())
         if ranking:
             selected_paths.add(ranking[0])
-    for record in records:
-        if len(selected_paths) >= limit:
-            break
-        selected_paths.add(record.path)
+    if fill_global:
+        best_unpinned_score = next(
+            (
+                record.score
+                for record in records
+                if "manual_pin" not in record.ranking_signals
+            ),
+            0.0,
+        )
+        role_facets = {
+            "application startup",
+            "configuration",
+            "media client",
+            "media search service",
+            "relevant tests/files",
+            "server integration",
+        }
+        has_generic_facet = any(facet.label not in role_facets for facet in facets)
+        related_score_floor = max(
+            4.0, best_unpinned_score * (0.25 if has_generic_facet else 0.75)
+        )
+        for record in records:
+            if len(selected_paths) >= limit:
+                break
+            penalized = "incidental_metadata_penalty" in record.ranking_signals
+            generic_task_match = has_generic_facet and any(
+                signal.startswith("task_") for signal in record.ranking_signals
+            )
+            if (
+                _record_has_relevance(record)
+                or generic_task_match
+                or (
+                    not penalized
+                    and record.score >= related_score_floor
+                    and _looks_like_implementation_path(record.path)
+                )
+                or not selected_paths
+            ):
+                selected_paths.add(record.path)
+        if has_generic_facet and len(selected_paths) < limit:
+            neutral = next(
+                (
+                    record
+                    for record in records
+                    if record.path not in selected_paths
+                    and "incidental_metadata_penalty" not in record.ranking_signals
+                ),
+                None,
+            )
+            if neutral is not None:
+                selected_paths.add(neutral.path)
     return tuple(record for record in records if record.path in selected_paths)
 
 
@@ -2330,11 +2538,289 @@ def _looks_like_test_path(path: str) -> bool:
 
 
 def _ranking_tokens(value: str) -> set[str]:
-    return {
-        item
-        for item in re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
-        if len(item) >= 2
+    aliases = {
+        "applications": "application",
+        "clients": "client",
+        "configuration": "config",
+        "configurations": "config",
+        "libraries": "library",
+        "providers": "provider",
+        "services": "service",
+        "settings": "setting",
+        "started": "start",
+        "starts": "start",
+        "tests": "test",
+        "videos": "video",
     }
+    ignored = {
+        "about",
+        "across",
+        "after",
+        "all",
+        "also",
+        "and",
+        "are",
+        "both",
+        "covering",
+        "current",
+        "diagnostic",
+        "diagnostics",
+        "drift",
+        "explain",
+        "file",
+        "files",
+        "find",
+        "for",
+        "from",
+        "give",
+        "how",
+        "identify",
+        "include",
+        "including",
+        "index",
+        "into",
+        "isolated",
+        "its",
+        "locate",
+        "needed",
+        "one",
+        "only",
+        "preserve",
+        "published",
+        "rather",
+        "relevant",
+        "report",
+        "select",
+        "selection",
+        "show",
+        "that",
+        "the",
+        "their",
+        "this",
+        "through",
+        "trace",
+        "under",
+        "using",
+        "where",
+        "which",
+        "with",
+        "works",
+        "verify",
+        "verifying",
+    }
+    raw = re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
+    return {
+        aliases.get(item, item)
+        for item in raw
+        if len(item) >= 2 and item not in ignored
+    }
+
+
+def _semantic_ranking_tokens(summary: Any) -> set[str]:
+    """Use semantic claims and symbol names, excluding provider boilerplate."""
+
+    payload = summary.model_dump(mode="python")
+    texts: list[str] = []
+
+    def visit(value: object, *, key: str | None = None) -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                visit(child, key=str(child_key))
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child, key=key)
+        elif isinstance(value, str) and key in {"claim", "name", "qualified_name"}:
+            texts.append(value)
+
+    visit(payload)
+    return _ranking_tokens(" ".join(texts))
+
+
+def _task_role_score(path: str, task_tokens: set[str]) -> tuple[float, tuple[str, ...]]:
+    """Score common repository roles using path evidence only."""
+
+    lowered = path.casefold()
+    name = lowered.rsplit("/", 1)[-1]
+    stem = name.split(".", 1)[0]
+    parent_tokens = _ranking_tokens(lowered.rsplit("/", 1)[0] if "/" in lowered else "")
+    score = 0.0
+    signals: list[str] = []
+    startup = bool(task_tokens & {"start", "startup", "boot", "bootstrap"})
+    if (
+        startup
+        and task_tokens & {"command", "manifest", "npm", "package"}
+        and name in {"package.json", "pyproject.toml", "cargo.toml"}
+    ):
+        score += 24.0
+        signals.append("startup_manifest_role")
+    server_parent = not parent_tokens & {"browser", "client", "public", "web"}
+    if task_tokens & {"server", "node", "http", "socket", "api"} and (
+        stem == "server" or (stem in {"main", "app"} and server_parent)
+    ):
+        score += 22.0
+        signals.append("server_entry_role")
+    if task_tokens & {"browser", "bootstrap", "document", "html"}:
+        if name in {"index.html", "index.htm"}:
+            score += 22.0
+            signals.append("browser_document_role")
+        elif stem in {"app", "bootstrap", "index", "main"} and parent_tokens & {
+            "client",
+            "public",
+            "web",
+        }:
+            score += 18.0
+            signals.append("browser_bootstrap_role")
+    if task_tokens & {"config", "setting"} and (
+        stem in {"config", "configuration", "setting", "settings"}
+        or "config" in parent_tokens
+    ):
+        score += 20.0
+        signals.append("configuration_role")
+    is_test = _looks_like_test_path(path)
+    if (
+        not is_test
+        and {"media", "search"} <= task_tokens
+        and task_tokens
+        & {"core", "flow", "implementation", "integration", "request", "service"}
+        and {"media", "search"} <= _ranking_tokens(path)
+    ):
+        score += 26.0
+        signals.append("media_search_service_role")
+    if (
+        not is_test
+        and _looks_like_implementation_path(path)
+        and task_tokens & {"video", "library", "catalog"}
+        and _ranking_tokens(path) & {"video", "library", "catalog"}
+    ):
+        score += 16.0
+        signals.append("media_client_role")
+    if task_tokens & {"test", "regression"} and _looks_like_test_path(path):
+        score += 10.0
+        signals.append("requested_test_role")
+    return score, tuple(signals)
+
+
+def _facet_role_score(
+    path: str,
+    label: str,
+    tokens: frozenset[str],
+    entry_points: set[str],
+) -> float:
+    """Return role-specific evidence for one inferred task facet."""
+
+    lowered = path.casefold()
+    name = lowered.rsplit("/", 1)[-1]
+    stem = name.split(".", 1)[0]
+    parent_tokens = _ranking_tokens(lowered.rsplit("/", 1)[0] if "/" in lowered else "")
+    score = 12.0 if path in entry_points else 0.0
+    if label == "application startup":
+        if path in entry_points:
+            return score + 24.0
+        if stem in {"app", "bootstrap", "index", "main", "server", "startup"}:
+            return score + 14.0
+    if label == "relevant tests/files" and _looks_like_test_path(path):
+        return score + 8.0
+    if label == "package startup" and name in {
+        "package.json",
+        "pyproject.toml",
+        "cargo.toml",
+    }:
+        return score + 32.0
+    if label in {"server entry", "server integration"} and stem in {
+        "server",
+        "main",
+        "app",
+    }:
+        return score + 28.0
+    if label == "browser document" and name in {"index.html", "index.htm"}:
+        return score + 32.0
+    if (
+        label == "browser bootstrap"
+        and stem in {"app", "bootstrap", "index", "main"}
+        and parent_tokens & {"client", "public", "web"}
+    ):
+        return score + 28.0
+    if label == "media search service" and {"media", "search"} <= _ranking_tokens(path):
+        return score + 32.0
+    if (
+        label == "media client"
+        and _looks_like_implementation_path(path)
+        and _ranking_tokens(path) & {"video", "library", "catalog"}
+    ):
+        return score + 26.0
+    if label == "configuration" and stem in {
+        "config",
+        "configuration",
+        "setting",
+        "settings",
+    }:
+        return score + 28.0
+    if label == "environment example" and name.startswith(".env"):
+        return score + 30.0
+    if label == "relevant tests" and _looks_like_test_path(path):
+        matched = len(tokens & _ranking_tokens(path))
+        return score + 12.0 + matched * 4.0
+    return score
+
+
+def _record_has_relevance(record: DiscoveryCandidateRecord) -> bool:
+    if {
+        "unrelated_test_penalty",
+        "unrequested_test_penalty",
+    } & set(record.ranking_signals):
+        return "manual_pin" in record.ranking_signals
+    return any(
+        signal == "manual_pin"
+        or signal
+        in {
+            "application_entry_point",
+            "browser_bootstrap_role",
+            "browser_document_role",
+            "configuration_role",
+            "direct_related_test",
+            "media_client_role",
+            "media_search_service_role",
+            "server_entry_role",
+            "startup_manifest_role",
+        }
+        for signal in record.ranking_signals
+    )
+
+
+def _fallback_role_candidates(
+    records: tuple[DiscoveryCandidateRecord, ...], task: str
+) -> tuple[DiscoveryCandidateRecord, ...]:
+    """Choose at most one high-confidence record for each requested file role."""
+
+    task_tokens = _ranking_tokens(task)
+    requested_signals: list[str] = []
+    if task_tokens & {"start", "startup", "boot", "bootstrap"}:
+        if task_tokens & {"npm", "command", "package"}:
+            requested_signals.append("startup_manifest_role")
+        if task_tokens & {"server", "node", "http", "socket"}:
+            requested_signals.append("server_entry_role")
+        if task_tokens & {"browser", "client", "application", "document", "html"}:
+            if task_tokens & {"document", "html"}:
+                requested_signals.append("browser_document_role")
+            requested_signals.append("browser_bootstrap_role")
+    if {"media", "search"} <= task_tokens:
+        requested_signals.append("media_search_service_role")
+    if task_tokens & {"video", "library", "catalog"}:
+        requested_signals.append("media_client_role")
+    if task_tokens & {"config", "setting"}:
+        requested_signals.append("configuration_role")
+    if task_tokens & {"test", "regression"}:
+        requested_signals.append("requested_test_role")
+    selected: list[DiscoveryCandidateRecord] = []
+    for signal in requested_signals:
+        candidate = next(
+            (item for item in records if signal in item.ranking_signals), None
+        )
+        if candidate is not None and candidate.path not in {
+            item.path for item in selected
+        }:
+            selected.append(candidate)
+    return tuple(selected)
 
 
 def _metadata_penalty(path: str, task_tokens: set[str]) -> float:
@@ -2354,6 +2840,20 @@ def _metadata_penalty(path: str, task_tokens: set[str]) -> float:
             "template",
         }
         return 0.0 if requested else -100.0
+    operational = _ranking_tokens(path) & {
+        "deploy",
+        "deployment",
+        "install",
+        "setup",
+    }
+    requested_operational = task_tokens & {
+        "deploy",
+        "deployment",
+        "install",
+        "setup",
+    }
+    if operational and not requested_operational:
+        return -60.0
     return 0.0
 
 

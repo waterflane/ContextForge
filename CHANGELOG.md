@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.4.2] - 2026-08-12
+## [0.4.2] - 2026-08-15
 
 ### Added
 
@@ -20,8 +20,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Relicensed ContextForge `0.4.2` and later under Apache License 2.0; earlier
   tagged releases remain under the license included in their snapshots.
-- Renamed the PyPI distribution to `contextforge-cli` while preserving the
-  `contextforge` import package and the `contextforge` and `ctxf` commands.
+- Prepared the first public PyPI release as `contextforge-repo` while preserving
+  the `contextforge` import package and the `contextforge` and `ctxf` commands.
 - Opened the contribution workflow to fork-based pull requests targeting
   `dev`, with owner review through CODEOWNERS and Apache-2.0 inbound terms.
 - Replaced the editable-install-only CI path with locked, provider-independent
@@ -43,6 +43,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   differences, exact agreement versus semantic stability, grouped warning and
   stdout/stderr behavior, and the limits of model-backed repeatability for the
   v0.4.2 discovery work.
+
+### Fixed
+
+- Kept Ollama native structured output within its grammar compiler limits while
+  retaining strict local response validation, plus a one-shot bounded plain-JSON
+  fallback with the schema in the model instruction and exact HTTP accounting.
 
 ## [0.4.1] - 2026-07-22
 
