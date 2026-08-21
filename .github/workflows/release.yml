@@ -52,9 +52,9 @@ jobs:
             *) echo "tag must match vX.Y.Z or a PEP 440 post release such as vX.Y.Z.postN" >&2; exit 1 ;;
           esac
           test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
-          test "$(git rev-parse "$TAG^{}")" = "$GITHUB_SHA"
+          TAG_COMMIT="$(git rev-parse "$TAG^{}")"
           git fetch origin main --no-tags
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          git merge-base --is-ancestor "$TAG_COMMIT" origin/main
           VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"$/\1/p' src/contextforge/_metadata.py)"
           test "$TAG" = "v$VERSION"
           grep -F "## [$VERSION]" CHANGELOG.md
@@ -114,12 +114,13 @@ jobs:
       - name: Create or refresh draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/* --clobber
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --repo "$GH_REPO" --clobber
           else
-            gh release create "$TAG" release-assets/* --draft --verify-tag --generate-notes --title "ContextForge $TAG"
+            gh release create "$TAG" release-assets/* --repo "$GH_REPO" --draft --verify-tag --generate-notes --title "ContextForge $TAG"
           fi
 
   publish-testpypi:
