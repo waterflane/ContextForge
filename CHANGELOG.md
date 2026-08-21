@@ -8,6 +8,14 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+## [0.4.2.post2] - 2026-08-21
+
+### Fixed
+
+- Updated the SHA-pinned PyPI publishing action to a release that supports
+  Core Metadata 2.4, matching the metadata generated for ContextForge wheels
+  and source distributions.
+
 ## [0.4.2.post1] - 2026-08-21
 
 ### Fixed

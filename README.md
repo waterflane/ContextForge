@@ -28,10 +28,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.4.2.post1` is the corrected
-> first public-release candidate. Discovery benchmarking is experimental and
-> its results should be reviewed alongside the recorded provider, model,
-> configuration, and source snapshot.
+> ContextForge is pre-alpha software. Version `0.4.2.post2` is the current
+> first public-release candidate, including packaging-workflow corrections.
+> Discovery benchmarking is experimental and its results should be reviewed
+> alongside the recorded provider, model, configuration, and source snapshot.
 
 ## Why ContextForge
 
