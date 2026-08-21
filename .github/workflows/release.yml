@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed annotated tag to publish (for example v0.4.2.post1)
+        description: Existing signed annotated tag to publish (for example v0.4.2.post2)
         required: true
         type: string
 
@@ -141,7 +141,7 @@ jobs:
           name: python-distributions
           path: publish/
       - name: Publish with Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: publish/
           repository-url: https://test.pypi.org/legacy/
@@ -194,6 +194,6 @@ jobs:
           name: python-distributions
           path: publish/
       - name: Publish with Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: publish/
