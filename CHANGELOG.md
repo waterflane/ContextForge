@@ -2,10 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Feature releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html),
+and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
+
+## [0.4.2.post1] - 2026-08-21
+
+### Fixed
+
+- Made the CLI help regression validation insensitive to ANSI terminal styling
+  so the same documented options are verified consistently on Linux and
+  Windows CI runners.
 
 ## [0.4.2] - 2026-08-21
 

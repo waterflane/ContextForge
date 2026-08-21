@@ -55,7 +55,10 @@ This roadmap describes broad milestones only. It does not promise dates.
   fixed source, index, model, and context-window provenance.
 - [x] Add locked distribution builds, clean-install validation, SBOM generation,
   Trusted Publishing workflows, and public contribution/security policies.
-- [ ] Publish the reviewed signed release through TestPyPI and PyPI.
+- [x] Correct ANSI-sensitive CLI help validation for consistent Linux and
+  Windows release CI.
+- [ ] Publish the reviewed signed `v0.4.2.post1` release through TestPyPI and
+  PyPI.
 
 ## Later
 

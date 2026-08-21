@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/waterflane/ContextForge/main/docs/assets/contextforge-banner.png" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
+  <img src="https://github.com/user-attachments/assets/3060d8ef-6c77-4a50-a51f-10ff671fe4ff" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
 </p>
 
 <h1 align="center">ContextForge</h1>
@@ -28,10 +28,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.4.2` is the first public-release
-> candidate. Discovery benchmarking is experimental and its results should be
-> reviewed alongside the recorded provider, model, configuration, and source
-> snapshot.
+> ContextForge is pre-alpha software. Version `0.4.2.post1` is the corrected
+> first public-release candidate. Discovery benchmarking is experimental and
+> its results should be reviewed alongside the recorded provider, model,
+> configuration, and source snapshot.
 
 ## Why ContextForge
 
