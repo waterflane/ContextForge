@@ -42,3 +42,20 @@ provider/model roles, context sources, reproducible budget breakdowns, request
 and token totals, retries, failed/fallback phases, final code, safe causal chain,
 and remediation. Source, prompts, credentials, and raw responses are excluded.
 Summary persistence is diagnostic only and cannot roll back or corrupt work.
+
+Provider counters deliberately separate model output from HTTP traffic:
+
+- `model_generations` counts initial content-bearing model responses;
+- `repair_generations` counts content-bearing responses to repair prompts;
+- `provider_discovery_calls` counts discovery requests such as `GET /v1/models`;
+- `provider_capability_calls` counts explicit capability probes, when present;
+- `transport_attempts` counts generation-transport attempts, including retries
+  and rejected structured modes; and
+- `total_provider_http_calls` counts every provider HTTP request.
+
+The legacy `request_count` remains the number of model request budgets created.
+The legacy `total_provider_calls` remains a derived alias of
+`total_provider_http_calls`; neither field should be interpreted as a count of
+successful model generations. The legacy `retry_count` remains the derived sum
+of transport retries and structured-repair schedules, whose separate values are
+`transport_retry_count` and `json_repair_count`.

@@ -20,6 +20,11 @@ from contextforge.discovery.models import (
     IndexedContextSelection,
     SelectionReason,
 )
+from contextforge.discovery.renderers import (
+    DiscoveryRenderError,
+    DiscoveryResultFormat,
+    render_context_suggestion,
+)
 from contextforge.discovery.session import (
     DISCOVERY_SYSTEM_INSTRUCTIONS,
     DiscoveryCancelledError,
@@ -62,7 +67,9 @@ __all__ = [
     "DiscoveryMode",
     "DiscoveryObservation",
     "DiscoveryProtocolError",
+    "DiscoveryRenderError",
     "DiscoveryRequest",
+    "DiscoveryResultFormat",
     "DiscoveryRunRecord",
     "DiscoverySession",
     "DiscoverySourceChangedError",
@@ -78,4 +85,5 @@ __all__ = [
     "ToolBudgetTracker",
     "discover_repository",
     "review_completeness",
+    "render_context_suggestion",
 ]

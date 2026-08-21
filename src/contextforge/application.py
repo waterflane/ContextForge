@@ -20,8 +20,8 @@ from contextforge.discovery import (
     DiscoveryMode,
     DiscoveryRequest,
     DiscoveryRunRecord,
-    FinalContextSelection,
     discover_repository,
+    render_context_suggestion,
 )
 from contextforge.filesystem import FileTooLargeError, StableReadError, read_file_stably
 from contextforge.git import GitDiffRequest
@@ -807,6 +807,7 @@ async def suggest_repository_context(
     progress: ProgressObserver | None = None,
     operation_id: str | None = None,
     parent_operation_id: str | None = None,
+    persist_diagnostics: bool = True,
 ) -> DiscoveryRunRecord:
     """Run existing bounded discovery without source or index mutation."""
 
@@ -838,27 +839,29 @@ async def suggest_repository_context(
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
-        _persist_application_diagnostic(
-            _snapshot_root(snapshot),
-            reporter,
-            diagnostic_start,
-            command="context suggest",
-            outcome=_diagnostic_outcome(exc),
-            error=exc,
-        )
+        if persist_diagnostics:
+            _persist_application_diagnostic(
+                _snapshot_root(snapshot),
+                reporter,
+                diagnostic_start,
+                command="context suggest",
+                outcome=_diagnostic_outcome(exc),
+                error=exc,
+            )
         raise
     reporter.complete(
         message="Repository context discovery completed.",
         metadata={"run_id": result.run_id},
     )
-    _persist_application_diagnostic(
-        active_snapshot.root,
-        reporter,
-        diagnostic_start,
-        command="context suggest",
-        outcome="completed",
-        generation_id=result.index_generation_id,
-    )
+    if persist_diagnostics:
+        _persist_application_diagnostic(
+            active_snapshot.root,
+            reporter,
+            diagnostic_start,
+            command="context suggest",
+            outcome="completed",
+            generation_id=result.index_generation_id,
+        )
     return result
 
 
@@ -986,53 +989,6 @@ def canonical_json(value: object) -> str:
         )
         + "\n"
     )
-
-
-def render_context_suggestion(
-    selection: FinalContextSelection,
-    *,
-    explain: bool = False,
-) -> str:
-    """Render a stable table-like discovery review."""
-
-    lines = [
-        "ContextForge context suggestion",
-        f"Discovery mode: {selection.mode.value}",
-        f"Estimated size: {selection.budget_usage.context_bytes} bytes",
-        f"Selected files: {selection.budget_usage.context_files}",
-        f"Confidence: {selection.confidence:.3f}",
-        "Selections:",
-    ]
-    for item in selection.selected:
-        path = item.path or f"[{item.kind}]"
-        ranges = (
-            "all lines"
-            if not item.ranges
-            else ", ".join(
-                f"{value.start_line}-{value.end_line}" for value in item.ranges
-            )
-        )
-        confidence = "unknown" if item.confidence is None else f"{item.confidence:.3f}"
-        lines.extend(
-            (
-                f"  {path} | {ranges} | confidence {confidence}",
-                f"    reason: {item.reason.summary}",
-            )
-        )
-        if explain:
-            lines.append(f"    source: {item.reason.discovery_source}")
-            lines.extend(f"    evidence: {value}" for value in item.reason.evidence)
-    lines.append("Warnings:")
-    if selection.completeness_warnings:
-        lines.extend(
-            f"  {item.code}: {item.message}" for item in selection.completeness_warnings
-        )
-    else:
-        lines.append("  (none; this is not a proof of completeness)")
-    if selection.unknowns:
-        lines.append("Unknowns:")
-        lines.extend(f"  {item}" for item in selection.unknowns)
-    return "\n".join(lines) + "\n"
 
 
 def load_task_handoff(path: Path) -> TaskHandoff:
@@ -1168,7 +1124,7 @@ def build_discovery_request(
         strict=strict,
         budget=DiscoveryBudget(
             max_context_files=max_files,
-            max_files_read=min(1_000, max_files * 2),
+            max_files_read=min(1_000, max(max_files * 2, len(set(includes)))),
             max_source_bytes=min(16 * 1024 * 1024, max_context_bytes * 2),
             max_context_bytes=max_context_bytes,
         ),

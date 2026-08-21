@@ -30,6 +30,13 @@ ctxf --log-component budget -vv context suggest . --task "Fix indexing"
 JSON logs are JSON Lines on stderr; they do not modify `--format json` stdout.
 Pretty redirected output has no ANSI cursor controls.
 
+Discovery commands follow the same separation. `context suggest` defaults to
+text and supports `--format text|markdown|json`; `benchmark discovery` uses the
+same three result formats. Without `--output`, stdout contains only the selected
+result while progress and logs use stderr. See
+[Discovery output and benchmarks](discovery.md) for the canonical-result,
+renderer, benchmark, warning, counter, and repeatability contracts.
+
 ## Read-only diagnostics
 
 ```bash

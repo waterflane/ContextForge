@@ -52,9 +52,19 @@ class OperationDiagnosticSummary:
     remediation_hints: tuple[str, ...]
     transport_retry_count: int = 0
     json_repair_count: int = 0
+    model_generations: int = 0
+    repair_generations: int = 0
+    provider_discovery_calls: int = 0
+    provider_capability_calls: int = 0
+    transport_attempts: int = 0
+    total_provider_http_calls: int = 0
+    # Compatibility alias for total_provider_http_calls.
     total_provider_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        total_provider_http_calls = (
+            self.total_provider_http_calls or self.total_provider_calls
+        )
         value = {
             "schema_version": DIAGNOSTIC_SUMMARY_SCHEMA_VERSION,
             "operation_id": self.operation_id,
@@ -75,7 +85,13 @@ class OperationDiagnosticSummary:
             "retry_count": self.retry_count,
             "transport_retry_count": self.transport_retry_count,
             "json_repair_count": self.json_repair_count,
-            "total_provider_calls": self.total_provider_calls,
+            "model_generations": self.model_generations,
+            "repair_generations": self.repair_generations,
+            "provider_discovery_calls": self.provider_discovery_calls,
+            "provider_capability_calls": self.provider_capability_calls,
+            "transport_attempts": self.transport_attempts,
+            "total_provider_http_calls": total_provider_http_calls,
+            "total_provider_calls": total_provider_http_calls,
             "failed_phases": list(self.failed_phases),
             "fallback_phases": list(self.fallback_phases),
             "final_error_code": self.final_error_code,
@@ -149,6 +165,20 @@ def summarize_operation(
         for value in unique_budgets
         if type(value.get("estimated_total_tokens")) is int
     )
+    http_dispatches = tuple(
+        item for item in ordered if item.event == "provider.http.dispatch"
+    )
+    total_provider_http_calls = len(http_dispatches) or _sum_terminal_counter(
+        ordered, "total_provider_http_calls"
+    )
+    transport_attempts = (
+        sum(
+            item.data.get("provider_call_kind") == "model_transport"
+            for item in http_dispatches
+        )
+        if http_dispatches
+        else _sum_terminal_counter(ordered, "transport_attempts")
+    )
     return OperationDiagnosticSummary(
         operation_id=operation_id,
         command=command[:500],
@@ -195,10 +225,54 @@ def summarize_operation(
         json_repair_count=sum(
             item.event == "response.repair.scheduled" for item in ordered
         ),
-        total_provider_calls=(
-            sum(item.event == "provider.http.dispatch" for item in ordered)
-            or sum(item.event == "provider.request.started" for item in ordered)
+        model_generations=(
+            _sum_terminal_counter(ordered, "model_generations")
+            or sum(
+                item.event == "provider.response.received"
+                and item.data.get("json_repair_attempt") == 0
+                for item in ordered
+            )
         ),
+        repair_generations=(
+            _sum_terminal_counter(ordered, "repair_generations")
+            or sum(
+                item.event == "provider.response.received"
+                and isinstance(item.data.get("json_repair_attempt"), int)
+                and item.data["json_repair_attempt"] > 0
+                for item in ordered
+            )
+        ),
+        provider_discovery_calls=(
+            sum(
+                item.data.get("provider_call_kind") == "provider_discovery"
+                for item in http_dispatches
+            )
+            if http_dispatches
+            else _sum_terminal_counter(ordered, "provider_discovery_calls")
+        ),
+        provider_capability_calls=(
+            sum(
+                item.data.get("provider_call_kind") == "provider_capability"
+                for item in http_dispatches
+            )
+            if http_dispatches
+            else _sum_terminal_counter(ordered, "provider_capability_calls")
+        ),
+        transport_attempts=transport_attempts,
+        total_provider_http_calls=total_provider_http_calls,
+        total_provider_calls=total_provider_http_calls,
+    )
+
+
+def _sum_terminal_counter(records: tuple[DiagnosticRecord, ...], key: str) -> int:
+    """Sum one final per-request counter without inspecting provider payloads."""
+
+    return sum(
+        value
+        for item in records
+        if item.event in {"provider.request.completed", "provider.request.failed"}
+        and type(value := item.data.get(key)) is int
+        and value >= 0
     )
 
 

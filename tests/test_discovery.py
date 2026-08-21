@@ -50,7 +50,13 @@ from contextforge.intelligence import (
     load_manifest,
 )
 from contextforge.logging import clear_recent_records, recent_records
-from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
+from contextforge.models import (
+    FakeModelProvider,
+    FakeScript,
+    ModelRequest,
+    ProviderCancelledError,
+    ProviderConfiguration,
+)
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 
@@ -560,10 +566,125 @@ def test_repeated_action_loop_and_maximum_steps_have_no_partial_selection(
     repeated = tuple(
         _batch(_call(f"same-{index}", "get_context_budget")) for index in range(5)
     )
+    provider = _provider(*repeated)
+    request = DiscoveryRequest(
+        task="x",
+        mode="fresh",
+        strict=True,
+        budget=DiscoveryBudget(max_steps=4),
+    )
+
+    with pytest.raises(DiscoveryLimitError) as limit:
+        asyncio.run(discover_repository(snapshot, provider, request))
+
+    record = limit.value.run_record
+    assert record.failure_code == "maximum_steps"
+    assert record.failure_message == "discovery reached the maximum action steps"
+    assert record.final_selection is None
+    assert record.budget_usage.steps == 4
+    assert record.budget_usage.model_calls == 4
+    assert record.budget_usage.model_generations == 4
+    assert record.budget_usage.transport_attempts == 4
+    assert record.budget_usage.total_provider_http_calls == 4
+    assert provider.call_count == 4
+
+
+def test_fresh_stagnation_falls_back_after_three_unproductive_generations(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"focused.py": "VALUE = 1\n"})
+    provider = _provider(
+        *(_batch(_call(f"budget-{index}", "get_context_budget")) for index in range(3))
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(task="Find focused behavior", mode="fresh"),
+        )
+    )
+
+    assert provider.call_count == 3
+    assert result.final_selection is not None
+    assert result.final_selection.provenance == "deterministic_fallback"
+    assert result.budget_usage.model_generations == 3
+
+
+def test_repeated_valid_actions_still_use_the_action_loop_limit(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    repeated = tuple(_call(f"same-{index}", "get_context_budget") for index in range(5))
+
     with pytest.raises(DiscoveryLimitError) as loop:
-        _run(snapshot, *repeated, request=DiscoveryRequest(task="x", mode="fresh"))
+        _run(
+            snapshot,
+            _batch(*repeated),
+            request=DiscoveryRequest(task="x", mode="fresh"),
+        )
+
     assert loop.value.run_record.failure_code == "repeated_action_loop"
     assert loop.value.run_record.final_selection is None
+
+
+def test_finalize_in_received_batch_can_use_the_last_action_step(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    result = _run(
+        snapshot,
+        _batch(
+            _call("add", "add_to_context", {"path": "a.py", "reason": "task"}),
+            _finalize(),
+        ),
+        request=DiscoveryRequest(
+            task="x",
+            mode="fresh",
+            budget=DiscoveryBudget(max_steps=2),
+        ),
+    )
+
+    assert result.final_selection is not None
+    assert result.budget_usage.steps == 2
+    assert result.budget_usage.model_calls == 1
+
+
+def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+
+    def responder(request: ModelRequest, index: int) -> str:
+        del index
+        candidates = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return _batch(
+            _call(
+                "select",
+                "select_candidates",
+                {"candidate_ids": [candidates[0]["candidate_id"]]},
+            )
+        )
+
+    provider = FakeModelProvider(_configuration(), responder=responder)
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(
+                task="x",
+                mode="fresh",
+                budget=DiscoveryBudget(max_steps=1),
+            ),
+        )
+    )
+
+    assert result.final_selection is not None
+    assert result.budget_usage.steps == 1
+    assert [item.action_id for item in result.observations] == [
+        "select",
+        "engine-deterministic-finalize",
+    ]
 
 
 def test_source_and_context_byte_budgets_fail_closed(tmp_path: Path) -> None:
@@ -598,6 +719,93 @@ def test_cancellation_before_provider_call_returns_no_partial_success(
         asyncio.run(session.run())
     assert error.value.run_record.status == "cancelled"
     assert error.value.run_record.final_selection is None
+
+
+def test_total_deadline_converted_provider_cancellation_is_timeout(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=(FakeScript(_batch(_finalize()), delay_seconds=1.0),),
+    )
+
+    with pytest.raises(DiscoveryLimitError) as error:
+        asyncio.run(
+            discover_repository(
+                snapshot,
+                provider,
+                DiscoveryRequest(
+                    task="x",
+                    mode="fresh",
+                    budget=DiscoveryBudget(timeout_seconds=0.1),
+                ),
+            )
+        )
+
+    record = error.value.run_record
+    assert record.status == "failed"
+    assert record.failure_code == "total_timeout"
+    assert record.budget_usage.model_calls == 1
+    assert record.budget_usage.transport_attempts == 1
+    assert record.budget_usage.total_provider_http_calls == 1
+    provider_error = error.value.__cause__
+    assert isinstance(provider_error, ProviderCancelledError)
+    assert provider_error.diagnostic is not None
+    assert provider_error.diagnostic.response_validation == "not_received"
+
+
+def test_external_cancellation_during_provider_wait_remains_cancelled(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=(FakeScript(_batch(_finalize()), delay_seconds=1.0),),
+    )
+    cancellation = asyncio.Event()
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            discover_repository(
+                snapshot,
+                provider,
+                DiscoveryRequest(task="x", mode="fresh"),
+                cancellation=cancellation,
+            )
+        )
+        while provider.in_flight == 0:
+            await asyncio.sleep(0)
+        cancellation.set()
+        await task
+
+    with pytest.raises(DiscoveryCancelledError) as error:
+        asyncio.run(exercise())
+
+    assert error.value.run_record.status == "cancelled"
+    assert error.value.run_record.failure_code == "cancelled"
+
+
+def test_provider_raised_cancellation_before_deadline_remains_cancelled(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=(ProviderCancelledError("provider cancelled"),),
+    )
+
+    with pytest.raises(DiscoveryCancelledError) as error:
+        asyncio.run(
+            discover_repository(
+                snapshot,
+                provider,
+                DiscoveryRequest(task="x", mode="fresh"),
+            )
+        )
+
+    assert error.value.run_record.status == "cancelled"
+    assert error.value.run_record.failure_code == "cancelled"
 
 
 def test_source_changed_during_discovery_aborts_without_partial_result(
@@ -652,7 +860,8 @@ def test_prompt_injection_is_untrusted_and_cannot_expand_path_authority(
         )
     )
     assert result.status == "complete"
-    assert requests[0].system_instructions == DISCOVERY_SYSTEM_INSTRUCTIONS
+    assert requests[0].system_instructions.startswith(DISCOVERY_SYSTEM_INSTRUCTIONS)
+    assert "required non-empty actions array" in requests[0].system_instructions
     assert not any(item.code == "invalid_input" for item in result.observations)
     assert "STRUCTURED_RESPONSE_REPAIR" in requests[2].analysis_task
 

@@ -2,41 +2,193 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
+      - dev
   push:
-    branches: [main]
+    branches:
+      - main
+      - dev
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_LOCKED: "1"
+  UV_NO_PROGRESS: "1"
 
 jobs:
-  test:
-    name: Python ${{ matrix.python-version }}
+  lint:
+    name: lint and format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.13"
+          enable-cache: true
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install locked development environment
+        run: uv sync --extra dev
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Ruff lint
+        run: uv run ruff check .
+
+  type:
+    name: mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.13"
+          enable-cache: true
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install locked development environment
+        run: uv sync --extra dev
+      - name: Run mypy
+        run: uv run mypy
+
+  test:
+    name: test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
-
+        python-version:
+          - "3.12"
+          - "3.13"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.13"
+          enable-cache: true
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+      - name: Install locked development environment
+        run: uv sync --extra dev --python ${{ matrix.python-version }}
+      - name: Run offline test suite
+        run: uv run --python ${{ matrix.python-version }} pytest
 
-      - name: Install package
+  build-package:
+    name: build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.13"
+          enable-cache: true
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install locked release environment
+        run: uv sync --extra release
+      - name: Build wheel and source distribution
+        run: uv build
+      - name: Validate metadata and wheel contents
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          uv run twine check dist/*
+          uv run check-wheel-contents dist/*.whl
+          uv run python scripts/validate_distribution.py dist
+      - name: Upload distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Ruff lint
-        run: ruff check .
+  install-package:
+    name: install artifacts (Python ${{ matrix.python-version }})
+    needs:
+      - build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.13"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Install and check wheel
+        run: |
+          python -m venv .wheel-venv
+          .wheel-venv/bin/python -m pip install dist/*.whl
+          .wheel-venv/bin/python scripts/smoke_distribution.py
+          .wheel-venv/bin/contextforge --version
+          .wheel-venv/bin/ctxf --version
+          .wheel-venv/bin/python -m contextforge --version
+      - name: Install and check source distribution
+        run: |
+          python -m venv .sdist-venv
+          .sdist-venv/bin/python -m pip install dist/*.tar.gz
+          .sdist-venv/bin/python scripts/smoke_distribution.py
+          .sdist-venv/bin/contextforge --version
+          .sdist-venv/bin/ctxf --version
+          .sdist-venv/bin/python -m contextforge --version
 
-      - name: Ruff format
-        run: ruff format --check .
-
-      - name: mypy
-        run: mypy
-
-      - name: pytest
-        run: pytest
+  required:
+    name: required
+    if: ${{ always() }}
+    needs:
+      - lint
+      - type
+      - test
+      - build-package
+      - install-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TYPE_RESULT: ${{ needs.type.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build-package.result }}
+          INSTALL_RESULT: ${{ needs.install-package.result }}
+        run: |
+          test "$LINT_RESULT" = "success"
+          test "$TYPE_RESULT" = "success"
+          test "$TEST_RESULT" = "success"
+          test "$BUILD_RESULT" = "success"
+          test "$INSTALL_RESULT" = "success"

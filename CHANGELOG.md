@@ -7,6 +7,52 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-21
+
+### Added
+
+- Added versioned discovery benchmark manifests and the
+  `contextforge benchmark discovery` command with text, Markdown, and canonical
+  JSON reports for quality, repeatability, performance, warnings, and provider
+  accounting.
+
+### Changed
+
+- Relicensed ContextForge `0.4.2` and later under Apache License 2.0; earlier
+  tagged releases remain under the license included in their snapshots.
+- Prepared the first public PyPI release as `contextforge-repo` while preserving
+  the `contextforge` import package and the `contextforge` and `ctxf` commands.
+- Opened the contribution workflow to fork-based pull requests targeting
+  `dev`, with owner review through CODEOWNERS and Apache-2.0 inbound terms.
+- Enabled GitHub Discussions for ordinary usage questions and Q&A, and added a
+  private project conduct-reporting address with a GitHub abuse-reporting
+  fallback.
+- Replaced the editable-install-only CI path with locked, provider-independent
+  lint, type, test, distribution, and clean-install validation.
+- Added owner-triggered OIDC publication for TestPyPI and PyPI, draft GitHub
+  releases, checksums, SBOM generation, and non-PR dependency/security audits.
+- Archived completed implementation plans and removed machine-specific paths
+  from the public documentation set.
+- Redesigned the public README, added a restrained ContextForge visual identity,
+  prepared a complete English GitHub Wiki workspace, and clarified the current
+  solo-maintainer review policy.
+- Tightened distribution metadata and source-distribution exclusions so local
+  state, tests, planning documents, Wiki files, and development-only repository
+  metadata are not packaged.
+- Stabilized `context suggest` around text as the default interactive output and
+  documented text, Markdown, and JSON as presentation renderers over the same
+  canonical structured selection.
+- Documented fresh, indexed, and hybrid intent, valid cross-mode selection
+  differences, exact agreement versus semantic stability, grouped warning and
+  stdout/stderr behavior, and the limits of model-backed repeatability for the
+  v0.4.2 discovery work.
+
+### Fixed
+
+- Kept Ollama native structured output within its grammar compiler limits while
+  retaining strict local response validation, plus a one-shot bounded plain-JSON
+  fallback with the schema in the model instruction and exact HTTP accounting.
+
 ## [0.4.1] - 2026-07-22
 
 ### Added

@@ -217,6 +217,12 @@ def test_valid_first_and_fifth_repairs_and_exhaustion_call_bounds() -> None:
     assert first.call_count == 2
     assert response.diagnostic is not None
     assert response.diagnostic.json_repair_attempt == 1
+    assert response.diagnostic.model_generations == 1
+    assert response.diagnostic.repair_generations == 1
+    assert response.diagnostic.provider_discovery_calls == 0
+    assert response.diagnostic.provider_capability_calls == 0
+    assert response.diagnostic.transport_attempts == 2
+    assert response.diagnostic.total_provider_http_calls == 2
 
     fifth = FakeModelProvider(
         _configuration(max_json_repair_attempts=5),

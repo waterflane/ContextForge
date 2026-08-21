@@ -1,5 +1,9 @@
 .venv/
+.release-venv/
 .vscode/
+.idea/
+.fleet/
+.direnv/
 .agents/
 .uv-cache/
 .python/
@@ -15,16 +19,36 @@ __pycache__/
 .contextforge/
 .pytest_cache/
 .pytest-tmp/
+/.pytest-*-tmp/
+.tox/
+.nox/
+.hypothesis/
 .ruff_cache/
 .mypy_cache/
 .coverage
 .coverage.*
+coverage.xml
+junit.xml
 htmlcov/
 
 *.tmp
+*.log
+*.prof
+*.orig
+*.rej
 
 build/
 dist/
+wheelhouse/
 *.egg-info/
 
+/wiki/
+
 site/
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

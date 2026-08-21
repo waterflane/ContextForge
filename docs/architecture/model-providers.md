@@ -47,7 +47,7 @@ policy:
 [models]
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
-model = "qwen2.5-coder"
+model = "qwen2.5-coder:7b"
 timeout_seconds = 360
 connect_timeout_seconds = 10
 read_timeout_seconds = 300
@@ -170,6 +170,18 @@ raw responses. Semantic requests select an adaptive `max_output_tokens` from
 configured `semantic_max_output_tokens` or CLI `--max-output-tokens` is a
 ceiling, not a target. Global repository maps use a separate 512-token bound.
 OpenAI-compatible requests transmit the selected limit as `max_tokens`.
+
+Discovery results use the same normalized counters as safe run diagnostics.
+`model_generations` is an initial content-bearing response and
+`repair_generations` is a content-bearing repair response. Model-list discovery,
+explicit capability probes, and generation transport attempts are reported as
+`provider_discovery_calls`, `provider_capability_calls`, and
+`transport_attempts`; `total_provider_http_calls` includes all of them. Thus
+`GET /v1/models` never becomes a model generation and is never hidden from the
+HTTP total. The compatibility fields `model_calls` (initial model requests
+initiated, including local rejection and provider failure) and
+`provider_http_calls` (a derived alias of the total HTTP count) retain their
+historical meanings.
 
 Before dispatch, ContextForge adds conservative message/input tokens, native
 schema grammar cost, requested output, provider-wrapper overhead, and a

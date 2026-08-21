@@ -8,7 +8,18 @@ from typer.testing import CliRunner, Result
 
 import contextforge.cli.context_commands as context_cli
 import contextforge.cli.intelligence_commands as index_cli
+from contextforge.application import render_context_suggestion
 from contextforge.cli.main import app
+from contextforge.discovery import (
+    CompletenessWarning,
+    DiscoveryBudgetUsage,
+    DiscoveryCandidate,
+    DiscoveryLineRange,
+    DiscoveryMode,
+    FinalContextSelection,
+    SelectionReason,
+)
+from contextforge.discovery.renderers import DiscoveryResultFormat
 from contextforge.intelligence import IndexManifestNotFoundError, load_manifest
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 
@@ -270,6 +281,267 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
     assert json.loads(suggested.stdout)["mode"] == "hybrid"
 
 
+def _invoke_focused_suggestion(tmp_path: Path, *arguments: str) -> Result:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    return _invoke(
+        "--log-level",
+        "quiet",
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "Review run",
+        "--provider",
+        "fake",
+        *arguments,
+    )
+
+
+def test_context_suggest_defaults_to_text(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(tmp_path, "--progress", "never")
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith(
+        "ContextForge context suggestion\nTask: Review run\n"
+    )
+    assert "Confidence:" in result.stdout and "%" in result.stdout
+    assert "Provenance:" in result.stdout
+    assert "Selected files:" in result.stdout
+    assert "Warnings:" in result.stdout
+    assert "Performance:" in result.stdout
+
+
+def test_context_suggest_json_remains_valid_json(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "json", "--progress", "never"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["task"] == "Review run"
+
+
+def test_context_suggest_json_stdout_stays_clean_with_plain_progress(
+    tmp_path: Path,
+) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "json", "--progress", "always"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["task"] == "Review run"
+    assert "Suggesting context:" in _plain(result.stderr)
+    assert "Suggesting context:" not in result.stdout
+
+
+def test_context_suggest_explicit_text_is_deterministic(tmp_path: Path) -> None:
+    first = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+    second = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+
+    assert first.exit_code == second.exit_code == 0
+    assert first.stdout == second.stdout
+
+
+def test_context_suggest_progress_stays_on_stderr(tmp_path: Path) -> None:
+    result = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "always"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Suggesting context:" in _plain(result.stderr)
+    assert "Suggesting context:" not in result.stdout
+    assert result.stdout.startswith("ContextForge context suggestion\n")
+
+
+def test_context_suggest_explain_adds_technical_details(tmp_path: Path) -> None:
+    concise = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--progress", "never"
+    )
+    explained = _invoke_focused_suggestion(
+        tmp_path, "--format", "text", "--explain", "--progress", "never"
+    )
+
+    assert concise.exit_code == explained.exit_code == 0
+    assert "Technical selection details:" not in concise.stdout
+    assert "Technical selection details:" in explained.stdout
+    assert "Discovery source:" in explained.stdout
+    assert explained.stdout.startswith(concise.stdout.rstrip("\n"))
+
+
+def _renderer_selection(
+    budget_usage: DiscoveryBudgetUsage | None = None,
+) -> FinalContextSelection:
+    return FinalContextSelection(
+        task="Review Unicode output",
+        mode=DiscoveryMode.HYBRID,
+        source_snapshot_digest="a" * 64,
+        selected=(
+            DiscoveryCandidate(
+                candidate_id="candidate:app",
+                kind="line_ranges",
+                path="src/app.py",
+                ranges=(DiscoveryLineRange(start_line=2, end_line=4),),
+                reason=SelectionReason(
+                    summary="Handles the requested output.",
+                    discovery_source="model-tool:add_to_context",
+                    evidence=("Defines render_output",),
+                ),
+                confidence=0.75,
+                source_sha256="b" * 64,
+                model_selected=True,
+            ),
+        ),
+        summary="Selected the output implementation.",
+        unknowns=("Terminal color support is unknown.",),
+        completeness_warnings=(
+            CompletenessWarning(
+                code="related-test-missing",
+                message="No related test was selected.",
+            ),
+        ),
+        confidence=0.625,
+        budget_usage=budget_usage
+        or DiscoveryBudgetUsage(context_bytes=123, context_files=1),
+        run_id="run-output",
+    )
+
+
+def test_context_suggestion_text_renderer_contract() -> None:
+    selection = _renderer_selection()
+    rendered = render_context_suggestion(selection)
+    assert rendered == (
+        "ContextForge context suggestion\n"
+        "Task: Review Unicode output\n"
+        "Discovery mode: hybrid\n"
+        "Confidence: 62.5%\n"
+        "Provenance: model-guided selection\n"
+        "Selected files:\n"
+        "  src/app.py (2-4, 75% confidence)\n"
+        "    reason: Handles the requested output.\n"
+        "Warnings:\n"
+        "  Warnings:\n"
+        "    related-test-missing\n"
+        "  Unknowns:\n"
+        "    Terminal color support is unknown.\n"
+        "Performance: selected 1 file (123 bytes); 0 model generations, "
+        "0 provider HTTP calls, read 0 files.\n"
+    )
+
+
+def test_context_suggestion_text_omits_zero_optional_counters() -> None:
+    rendered = render_context_suggestion(_renderer_selection())
+
+    assert "repair generation" not in rendered
+    assert "transport attempt" not in rendered
+    assert "provider discovery" not in rendered
+    assert "provider capability" not in rendered
+    assert "source bytes" not in rendered
+    assert "tool-result bytes" not in rendered
+    assert "step" not in rendered
+
+
+def test_context_suggestion_text_shows_nonzero_repair_generations() -> None:
+    selection = _renderer_selection(
+        DiscoveryBudgetUsage(
+            context_bytes=123,
+            context_files=1,
+            model_generations=2,
+            repair_generations=1,
+        )
+    )
+
+    rendered = render_context_suggestion(selection)
+
+    assert (
+        "Performance: selected 1 file (123 bytes); 2 model generations, "
+        "1 repair generation, 0 provider HTTP calls, read 0 files.\n" in rendered
+    )
+
+
+def test_context_suggestion_explain_shows_detailed_counters() -> None:
+    selection = _renderer_selection(
+        DiscoveryBudgetUsage(
+            steps=3,
+            model_generations=2,
+            repair_generations=1,
+            transport_attempts=4,
+            provider_discovery_calls=2,
+            provider_capability_calls=1,
+            total_provider_http_calls=7,
+            files_read=5,
+            source_bytes=456,
+            tool_result_bytes=78,
+            context_bytes=123,
+            context_files=1,
+        )
+    )
+
+    rendered = render_context_suggestion(selection, explain=True)
+
+    assert "Detailed performance counters:\n" in rendered
+    assert "  Discovery steps: 3\n" in rendered
+    assert "  Model generations: 2\n" in rendered
+    assert "  Repair generations: 1\n" in rendered
+    assert "  Transport attempts: 4\n" in rendered
+    assert "  Provider discovery calls: 2\n" in rendered
+    assert "  Provider capability calls: 1\n" in rendered
+    assert "  Total provider HTTP calls: 7\n" in rendered
+    assert "  Files read: 5\n" in rendered
+    assert "  Source bytes: 456\n" in rendered
+    assert "  Tool-result bytes: 78\n" in rendered
+    assert "  Context files: 1\n" in rendered
+    assert "  Context bytes: 123\n" in rendered
+
+
+def test_context_suggestion_json_counters_remain_unchanged() -> None:
+    usage = DiscoveryBudgetUsage(
+        steps=3,
+        model_generations=2,
+        repair_generations=1,
+        transport_attempts=4,
+        provider_discovery_calls=2,
+        provider_capability_calls=1,
+        total_provider_http_calls=7,
+        files_read=5,
+        source_bytes=456,
+        tool_result_bytes=78,
+        context_bytes=123,
+        context_files=1,
+    )
+    selection = _renderer_selection(usage)
+
+    payload = json.loads(
+        render_context_suggestion(
+            selection,
+            output_format=DiscoveryResultFormat.json,
+        )
+    )
+
+    assert payload == selection.model_dump(mode="json")
+    counters = payload["budget_usage"]
+    assert counters["model_generations"] == usage.model_generations
+    assert counters["repair_generations"] == usage.repair_generations
+    assert counters["total_provider_http_calls"] == usage.total_provider_http_calls
+    assert counters["model_calls"] == usage.model_calls
+    assert counters["provider_http_calls"] == usage.provider_http_calls
+
+
+def test_context_suggestion_explain_contract() -> None:
+    selection = _renderer_selection()
+    explained = render_context_suggestion(selection, explain=True)
+    assert "      Reason: No related test was selected.\n" in explained
+    assert "      Warning confidence (not result confidence): unknown\n" in explained
+    assert "Technical selection details:\n  Exact confidence: 0.625\n" in explained
+    assert "    Selection type: line ranges\n" in explained
+    assert "    Exact confidence: 0.75\n" in explained
+    assert "    Discovery source: model-tool:add_to_context\n" in explained
+    assert f"    Verified source SHA-256: {'b' * 64}\n" in explained
+    assert "    Evidence: Defines render_output\n" in explained
+
+
 @pytest.mark.parametrize("mode", ["fresh", "hybrid"])
 def test_context_suggest_table_and_json_are_read_only(
     tmp_path: Path, mode: str
@@ -413,6 +685,9 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
     )
     assert first.exit_code == forced.exit_code == 0
     assert refused.exit_code == 1
+    assert first.stdout.strip() == f"Output written to {output.resolve()}"
+    assert "Suggesting context:" in _plain(first.stderr)
+    assert "already exists" in _plain(refused.stderr)
     assert json.loads(output.read_text(encoding="utf-8"))["mode"] == "hybrid"
 
 
@@ -453,6 +728,10 @@ def test_context_create_automatic_json_prompt_and_portable_review(
     assert payload["review"]["discovery"]["mode"] == "fresh"
     assert payload["context_package"]["schema_version"] == 1
     assert "## Original task" in prompt_path.read_text(encoding="utf-8")
+    assert created.stdout.strip() == f"Output written to {handoff_path.resolve()}"
+    assert f"Compiled prompt written to {prompt_path.resolve()}" in _plain(
+        created.stderr
+    )
 
     (tmp_path / "app.py").unlink()
     reviewed = _invoke("context", "review", str(handoff_path))
@@ -468,6 +747,33 @@ def test_context_create_automatic_json_prompt_and_portable_review(
         "Model provenance:",
     ):
         assert expected in _plain(reviewed.stdout)
+
+
+def test_context_create_automatic_defaults_to_markdown_stdout(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+
+    created = _invoke(
+        "--log-level",
+        "quiet",
+        "context",
+        "create",
+        str(tmp_path),
+        "--task",
+        "Review VALUE",
+        "--discovery",
+        "fresh",
+        "--provider",
+        "fake",
+        "--progress",
+        "never",
+    )
+
+    assert created.exit_code == 0, created.output
+    assert created.stdout.startswith("## Original task\n\n```text\nReview VALUE\n```")
+    assert "## Repository overview" in created.stdout
+    assert "### `app.py`" in created.stdout
+    assert created.stdout.endswith("\n")
+    assert created.stderr == ""
 
 
 def test_context_create_manual_regression_and_automatic_option_validation(

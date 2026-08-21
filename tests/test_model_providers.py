@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+import contextforge.models.ollama as ollama_module
+from contextforge.discovery import DiscoveryActionBatch
 from contextforge.intelligence import initialize_index
 from contextforge.models import (
     ContextWindowExceededError,
@@ -26,6 +28,7 @@ from contextforge.models import (
     ProviderTransportResponse,
     ProviderUnavailableError,
     RetryClassification,
+    StructuredOutputSchemaUnsupportedError,
     StructuredResponseError,
     UnsupportedResponseSchemaError,
     UntrustedModelContext,
@@ -51,6 +54,12 @@ class _Analysis(_ClosedModel):
     schema_version: Literal[1]
     summary: str
     evidence: tuple[_Evidence, ...] = ()
+
+
+class _BoundedAnalysis(_ClosedModel):
+    schema_version: Literal[1]
+    summary: str = Field(max_length=2_000)
+    evidence: tuple[_Evidence, ...] = Field(default=(), max_length=10)
 
 
 class _OpenAnalysis(BaseModel):
@@ -881,13 +890,216 @@ def test_ollama_adapter_contract_is_provider_neutral_and_offline() -> None:
     assert payload["model"] == "qwen-local"  # type: ignore[index]
     assert payload["stream"] is False  # type: ignore[index]
     assert payload["format"]["additionalProperties"] is False  # type: ignore[index]
-    assert payload["options"] == {"num_predict": 200, "temperature": 0.0}  # type: ignore[index]
+    assert payload["options"] == {  # type: ignore[index]
+        "num_ctx": 4096,
+        "num_predict": 200,
+        "temperature": 0.0,
+    }
     assert [item["role"] for item in payload["messages"]] == [  # type: ignore[index]
         "system",
         "user",
     ]
     assert response.finish_reason == "stop"
     assert response.usage == ModelUsage(input_tokens=10, output_tokens=8)
+
+
+def test_ollama_native_schema_omits_grammar_expansion_limits() -> None:
+    captured: dict[str, object] = {}
+
+    async def transport(
+        endpoint: str,
+        body: bytes,
+        headers: object,
+        limit: int,
+    ) -> bytes:
+        del endpoint, headers, limit
+        captured.update(json.loads(body))
+        return json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": '{"schema_version":1,"summary":"ok","evidence":[]}',
+                },
+                "done": True,
+                "done_reason": "stop",
+            }
+        ).encode()
+
+    async def exercise() -> None:
+        provider = OllamaModelProvider(
+            ProviderConfiguration(
+                provider_id="ollama",
+                endpoint="http://127.0.0.1:11434/api/chat",
+                model_id="qwen-local",
+                retry_limit=0,
+            ),
+            transport=transport,
+        )
+        await provider.complete_structured(_minimal_request(_BoundedAnalysis))
+
+    asyncio.run(exercise())
+
+    native_schema = captured["format"]
+    assert isinstance(native_schema, dict)
+    serialized_schema = json.dumps(native_schema)
+    assert "maxLength" not in serialized_schema
+    assert "maxItems" not in serialized_schema
+    original_schema = _BoundedAnalysis.model_json_schema()
+    assert "maxLength" in json.dumps(original_schema)
+    assert "maxItems" in json.dumps(original_schema)
+
+
+def test_ollama_discovery_schema_binds_tool_names_to_typed_arguments() -> None:
+    captured: dict[str, object] = {}
+
+    async def transport(
+        endpoint: str,
+        body: bytes,
+        headers: object,
+        limit: int,
+    ) -> bytes:
+        del endpoint, headers, limit
+        captured.update(json.loads(body))
+        return json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "schema_version": 1,
+                            "actions": [
+                                {
+                                    "schema_version": 1,
+                                    "action_id": "inspect",
+                                    "kind": "call_tool",
+                                    "tool_name": "list_tree",
+                                    "arguments": {},
+                                }
+                            ],
+                        }
+                    ),
+                },
+                "done": True,
+                "done_reason": "stop",
+            }
+        ).encode()
+
+    tool_schemas: dict[str, object] = {
+        "finalize_context": {
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}},
+        },
+        "list_tree": {
+            "required": [],
+            "properties": {
+                "path": {"type": "string"},
+                "depth": {"type": "integer"},
+            },
+        },
+        "read_file": {
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+        },
+    }
+
+    async def exercise() -> None:
+        provider = OllamaModelProvider(
+            ProviderConfiguration(
+                provider_id="ollama",
+                endpoint="http://127.0.0.1:11434/api/chat",
+                model_id="qwen-local",
+                retry_limit=0,
+            ),
+            transport=transport,
+        )
+        request = replace(
+            _minimal_request(DiscoveryActionBatch),
+            purpose="repository-discovery",
+            trusted_code_map_facts={"tool_schemas": tool_schemas},
+        )
+        await provider.complete_structured(request)
+
+    asyncio.run(exercise())
+
+    native_schema = captured["format"]
+    assert isinstance(native_schema, dict)
+    definitions = native_schema["$defs"]
+    assert isinstance(definitions, dict)
+    variants = definitions["DiscoveryAction"]["oneOf"]
+    by_tool = {
+        item["properties"].get("tool_name", {}).get("const", "finalize_context"): item
+        for item in variants
+    }
+    assert set(by_tool) == {"finalize_context", "list_tree", "read_file"}
+    assert by_tool["read_file"]["properties"]["arguments"]["required"] == ["path"]
+    assert (
+        by_tool["list_tree"]["properties"]["arguments"]["additionalProperties"] is False
+    )
+    assert "tool_name" not in by_tool["finalize_context"]["properties"]
+
+
+def test_ollama_rejected_schema_falls_back_once_to_prompted_plain_json() -> None:
+    payloads: list[dict[str, object]] = []
+
+    async def transport(
+        endpoint: str,
+        body: bytes,
+        headers: object,
+        limit: int,
+    ) -> bytes:
+        del endpoint, headers, limit
+        payloads.append(json.loads(body))
+        if len(payloads) == 1:
+            raise StructuredOutputSchemaUnsupportedError(
+                "Ollama rejected the structured output schema"
+            )
+        return json.dumps(
+            {
+                "message": {"role": "assistant", "content": _valid_json()},
+                "done": True,
+                "done_reason": "stop",
+            }
+        ).encode()
+
+    async def exercise() -> ModelResponse:
+        configuration = ProviderConfiguration(
+            provider_id="ollama",
+            endpoint="http://127.0.0.1:11434/api/chat",
+            model_id="qwen-local",
+            retry_limit=0,
+        )
+        provider = OllamaModelProvider(configuration, transport=transport)
+        return await provider.complete_structured(_request())
+
+    response = asyncio.run(exercise())
+
+    assert len(payloads) == 2
+    assert isinstance(payloads[0]["format"], dict)
+    assert payloads[1]["format"] == "json"
+    fallback_messages = payloads[1]["messages"]
+    assert isinstance(fallback_messages, list)
+    assert "<EXPECTED_OUTPUT_SCHEMA version=1>" in fallback_messages[1]["content"]
+    assert response.diagnostic is not None
+    assert response.diagnostic.transport_attempts == 2
+    assert response.diagnostic.total_provider_http_calls == 2
+
+
+def test_ollama_http_grammar_rejection_is_safe_and_non_retryable() -> None:
+    raw_error = b'{"error":"Failed to initialize samplers: failed to parse grammar"}'
+
+    with pytest.raises(
+        StructuredOutputSchemaUnsupportedError,
+        match="Ollama rejected the structured output schema",
+    ) as captured:
+        ollama_module._raise_for_ollama_http_error(400, raw_error)
+
+    assert raw_error.decode() not in str(captured.value)
+    with pytest.raises(ProviderRequestError, match="HTTP 400"):
+        ollama_module._raise_for_ollama_http_error(
+            400, b'{"error":"request contains private prompt text"}'
+        )
+    with pytest.raises(ProviderUnavailableError, match="HTTP status 500"):
+        ollama_module._raise_for_ollama_http_error(500, b"not-json")
 
 
 def test_provider_close_rejects_new_requests_without_transport_work() -> None:

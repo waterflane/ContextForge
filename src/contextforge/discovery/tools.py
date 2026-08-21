@@ -231,6 +231,12 @@ class ToolBudgetTracker:
     limits: DiscoveryBudget
     steps: int = 0
     model_calls: int = 0
+    model_generations: int = 0
+    repair_generations: int = 0
+    provider_discovery_calls: int = 0
+    provider_capability_calls: int = 0
+    transport_attempts: int = 0
+    total_provider_http_calls: int = 0
     provider_http_calls: int = 0
     files_read: int = 0
     source_bytes: int = 0
@@ -242,6 +248,12 @@ class ToolBudgetTracker:
         return DiscoveryBudgetUsage(
             steps=self.steps,
             model_calls=self.model_calls,
+            model_generations=self.model_generations,
+            repair_generations=self.repair_generations,
+            provider_discovery_calls=self.provider_discovery_calls,
+            provider_capability_calls=self.provider_capability_calls,
+            transport_attempts=self.transport_attempts,
+            total_provider_http_calls=self.total_provider_http_calls,
             provider_http_calls=self.provider_http_calls,
             files_read=self.files_read,
             source_bytes=self.source_bytes,
@@ -249,6 +261,17 @@ class ToolBudgetTracker:
             context_bytes=self.context_bytes,
             context_files=self.context_files,
         )
+
+    def charge_provider(self, diagnostic: Any) -> None:
+        """Accumulate one provider diagnostic while retaining legacy totals."""
+
+        self.model_generations += diagnostic.model_generations
+        self.repair_generations += diagnostic.repair_generations
+        self.provider_discovery_calls += diagnostic.provider_discovery_calls
+        self.provider_capability_calls += diagnostic.provider_capability_calls
+        self.transport_attempts += diagnostic.transport_attempts
+        self.total_provider_http_calls += diagnostic.total_provider_http_calls
+        self.provider_http_calls += diagnostic.total_provider_http_calls
 
     def charge_read(self, size_bytes: int) -> None:
         if self.files_read + 1 > self.limits.max_files_read:
@@ -1160,7 +1183,10 @@ class DiscoveryToolExecutor:
             for path, candidate in self._selected.items()
             if not candidate.ranges
         )
-        if files > self.budget.limits.max_context_files:
+        effective_max_files = max(
+            self.budget.limits.max_context_files, len(self._pinned)
+        )
+        if files > effective_max_files:
             raise ToolBudgetExceededError("maximum context files exceeded")
         if size > self.budget.limits.max_context_bytes:
             raise ToolBudgetExceededError("maximum context bytes exceeded")

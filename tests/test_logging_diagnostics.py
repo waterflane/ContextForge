@@ -20,6 +20,7 @@ from contextforge.diagnostics import (
     load_last_summary,
     load_summary,
     persist_summary,
+    summarize_operation,
 )
 from contextforge.discovery import DiscoveryProtocolError
 from contextforge.logging import (
@@ -472,6 +473,49 @@ def test_diagnostic_summary_round_trip_and_cli_last(tmp_path: Path) -> None:
     assert shown.exit_code == 0
     assert "context_window_exceeded" in shown.stdout
     assert load_summary(tmp_path, "operation-1")["duration_ms"] == 1_000
+
+
+def test_safe_summary_separates_generation_and_provider_http_counters() -> None:
+    clear_recent_records()
+    emit(
+        "budget",
+        "budget.calculated",
+        "Calculated a safe request budget.",
+        data={"estimated_total_tokens": 10},
+    )
+    emit(
+        "provider",
+        "provider.http.dispatch",
+        "Dispatching provider discovery.",
+        data={"provider_call_kind": "provider_discovery"},
+    )
+    emit(
+        "provider",
+        "provider.http.dispatch",
+        "Dispatching model transport.",
+        data={"provider_call_kind": "model_transport"},
+    )
+    emit(
+        "provider",
+        "provider.response.received",
+        "Received a bounded provider response.",
+        data={"json_repair_attempt": 0},
+    )
+    summary = summarize_operation(
+        "counter-operation",
+        "context suggest",
+        recent_records(),
+        operation_type="repository.context.suggest",
+        outcome="completed",
+    )
+    value = summary.to_dict()
+    assert value["model_generations"] == 1
+    assert value["repair_generations"] == 0
+    assert value["provider_discovery_calls"] == 1
+    assert value["provider_capability_calls"] == 0
+    assert value["transport_attempts"] == 1
+    assert value["total_provider_http_calls"] == 2
+    assert value["total_provider_calls"] == 2
 
 
 def test_diagnostics_last_failed_and_missing_summary_errors(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TextIO
+from typing import IO, TextIO
 
 from rich import box
 from rich.console import Console, Group, RenderableType
@@ -20,7 +20,6 @@ from rich.progress_bar import ProgressBar
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
-from typer.rich_utils import _get_rich_console
 
 from contextforge.logging import color_enabled
 from contextforge.progress import ProgressActivity, ProgressEvent, ProgressStatus
@@ -54,6 +53,7 @@ class CLIProgressRenderer:
         *,
         stream: TextIO | None = None,
         console: Console | None = None,
+        stdout: TextIO | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(mode, (str, ProgressMode)):
@@ -66,6 +66,7 @@ class CLIProgressRenderer:
         self.mode = ProgressMode(mode)
         self._console = console or self._console_for(stream)
         self._stream = self._console.file
+        self._stdout = sys.stdout if stdout is None else stdout
         self._clock = clock
         self._state_lock = threading.RLock()
         self._started: float | None = None
@@ -83,15 +84,18 @@ class CLIProgressRenderer:
         self._unicode = self._supports_unicode(self._console.encoding)
         self._spinner = Spinner("dots" if self._unicode else "line", style="cyan")
         self._dynamic = (
-            self.mode is not ProgressMode.NEVER and self._console.is_terminal
+            self.mode is not ProgressMode.NEVER
+            and self._console.is_terminal
+            and self._is_interactive(self._stdout)
+            and self._is_interactive(self._stream)
         )
 
     @staticmethod
     def _console_for(stream: TextIO | None) -> Console:
         if stream is None:
             if color_enabled():
-                return _get_rich_console(stderr=True)
-            return Console(file=sys.stderr, color_system=None)
+                return Console(stderr=True)
+            return Console(stderr=True, color_system=None)
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
         return Console(
             file=stream,
@@ -106,6 +110,13 @@ class CLIProgressRenderer:
         except (LookupError, UnicodeEncodeError):
             return False
         return True
+
+    @staticmethod
+    def _is_interactive(stream: IO[str]) -> bool:
+        try:
+            return bool(stream.isatty())
+        except (AttributeError, OSError, ValueError):
+            return False
 
     @property
     def rendering_mode(self) -> str:

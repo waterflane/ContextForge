@@ -143,6 +143,14 @@ def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
     assert response.value == _Answer(answer="works")
     assert response.finish_reason == "stop"
     assert response.usage == ModelUsage(input_tokens=11, output_tokens=7)
+    assert response.diagnostic is not None
+    assert response.diagnostic.model_generations == 1
+    assert response.diagnostic.repair_generations == 0
+    assert response.diagnostic.provider_discovery_calls == 1
+    assert response.diagnostic.provider_capability_calls == 0
+    assert response.diagnostic.transport_attempts == 1
+    assert response.diagnostic.total_provider_http_calls == 2
+    assert response.diagnostic.total_provider_calls == 2
 
 
 def test_list_models_parses_exact_ids_without_starting_a_completion() -> None:
@@ -342,6 +350,11 @@ def test_retry_classification_and_bounded_retry() -> None:
     assert response.value == _Answer(answer="retried")
     assert response.diagnostic is not None
     assert response.diagnostic.retry_count == 1
+    assert response.diagnostic.model_generations == 1
+    assert response.diagnostic.repair_generations == 0
+    assert response.diagnostic.provider_discovery_calls == 1
+    assert response.diagnostic.transport_attempts == 2
+    assert response.diagnostic.total_provider_http_calls == 3
     assert (
         classify_retry(ProviderUnavailableError("offline"))
         is RetryClassification.RETRYABLE
@@ -386,6 +399,7 @@ def test_auth_error_redacts_loaded_credential_and_keeps_safe_body() -> None:
 def test_structured_output_rejection_falls_back_once_and_caches_capability() -> None:
     response_modes: list[str] = []
     provider_call_counts: list[int] = []
+    diagnostics = []
 
     async def transport(
         method: str,
@@ -414,11 +428,21 @@ def test_structured_output_rejection_falls_back_once_and_caches_capability() -> 
         for _ in range(2):
             response = await provider.complete_structured(_request())
             assert response.diagnostic is not None
+            diagnostics.append(response.diagnostic)
             provider_call_counts.append(response.diagnostic.total_provider_calls)
 
     asyncio.run(exercise())
     assert response_modes == ["json_schema", "plain_json", "plain_json"]
     assert provider_call_counts == [3, 1]
+    assert diagnostics[0].model_generations == 1
+    assert diagnostics[0].repair_generations == 0
+    assert diagnostics[0].provider_discovery_calls == 1
+    assert diagnostics[0].transport_attempts == 2
+    assert diagnostics[0].total_provider_http_calls == 3
+    assert diagnostics[1].model_generations == 1
+    assert diagnostics[1].provider_discovery_calls == 0
+    assert diagnostics[1].transport_attempts == 1
+    assert diagnostics[1].total_provider_http_calls == 1
 
 
 def test_unsupported_explicit_json_object_continues_plain_without_repair_count() -> (
@@ -462,6 +486,12 @@ def test_unsupported_explicit_json_object_continues_plain_without_repair_count()
     assert response.diagnostic is not None
     assert response.diagnostic.json_repair_attempt == 1
     assert response.diagnostic.total_provider_calls == 4
+    assert response.diagnostic.model_generations == 1
+    assert response.diagnostic.repair_generations == 1
+    assert response.diagnostic.provider_discovery_calls == 1
+    assert response.diagnostic.provider_capability_calls == 0
+    assert response.diagnostic.transport_attempts == 3
+    assert response.diagnostic.total_provider_http_calls == 4
     assert response_modes == ["json_object", "plain_json", "json_schema"]
     rejected = next(
         item

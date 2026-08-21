@@ -2,5 +2,5 @@
 
 APP_NAME = "ContextForge"
 APP_SLUG = "contextforge"
-APP_TAGLINE = "Build deterministic context packages from local repositories."
-__version__ = "0.4.1"
+APP_TAGLINE = "Build bounded, reviewable repository context for coding agents."
+__version__ = "0.4.2"

@@ -1,4 +1,8 @@
 # ContextForge v0.3.0 — Context Packages
+> [!NOTE]
+> Historical implementation plan. It is retained for design context and is
+> not current user documentation or a release procedure.
+
 
 Status: approved plan, implemented through the CLI adapter stage. Section 18
 records the final public CLI spellings where implementation differs from the

@@ -1,18 +1,26 @@
-**1. Current Architecture**
+# Historical plan: repository scanning
 
-ContextForge is currently a small modular monolith foundation.
+> [!NOTE]
+> This completed implementation plan is retained as a historical design record.
+> It describes an early repository state and is not current user or contributor
+> documentation.
 
-- [pyproject.toml](C:/Programming/Projects/ContextForge/pyproject.toml): Python 3.12+, Hatch build, strict mypy, Ruff, pytest. Runtime deps are `fastapi`, `pydantic`, `pydantic-settings`, and `typer`.
-- [src/contextforge/core](C:/Programming/Projects/ContextForge/src/contextforge/core): shared domain-ish models, currently only `HealthStatus` and `VersionInfo`.
-- [src/contextforge/cli/main.py](C:/Programming/Projects/ContextForge/src/contextforge/cli/main.py): thin Typer app with `version` and `doctor`.
-- [src/contextforge/config.py](C:/Programming/Projects/ContextForge/src/contextforge/config.py): Pydantic settings with `app_name`, `environment`, `log_level`.
-- [src/contextforge/logging.py](C:/Programming/Projects/ContextForge/src/contextforge/logging.py): minimal stdlib logging setup.
-- [src/contextforge/api](C:/Programming/Projects/ContextForge/src/contextforge/api): FastAPI factory and `/health`, `/version` routes.
-- [src/contextforge/repositories](C:/Programming/Projects/ContextForge/src/contextforge/repositories): currently only a placeholder `RepositoryAnalyzer` protocol.
-- `context`, `prompts`, `storage`, and `models` are future-facing boundaries with minimal placeholder contracts.
-- [tests](C:/Programming/Projects/ContextForge/tests): top-level pytest tests for API, CLI, config, and metadata.
-- [docs/architecture/overview.md](C:/Programming/Projects/ContextForge/docs/architecture/overview.md) and ADR-001 require core independence, thin interfaces, and no premature abstractions.
-- [CI](C:/Programming/Projects/ContextForge/.github/workflows/ci.yml): installs `.[dev]`, then runs Ruff lint, Ruff format check, mypy, and pytest on Python 3.12 and 3.13.
+**1. Current Architecture At The Time**
+
+ContextForge was a small modular monolith foundation.
+
+- `pyproject.toml`: Python 3.12+, Hatch build, strict mypy, Ruff, and pytest.
+- `src/contextforge/core`: shared domain models.
+- `src/contextforge/cli/main.py`: the initial thin Typer application.
+- `src/contextforge/config.py`: the initial Pydantic settings.
+- `src/contextforge/logging.py`: the initial standard-library logging setup.
+- `src/contextforge/api`: the FastAPI factory and health/version routes.
+- `src/contextforge/repositories`: the original repository-analysis boundary.
+- `context`, `prompts`, `storage`, and `models`: future-facing boundaries
+  at the time this plan was written.
+- `tests`: the initial API, CLI, configuration, and metadata tests.
+- `docs/architecture/overview.md` and ADR-001: the core-independence guidance.
+- `.github/workflows/ci.yml`: the original Python 3.12/3.13 validation workflow.
 
 **2. Proposed Final File Tree For This Stage**
 
