@@ -16,7 +16,8 @@ orientation, or any other personal characteristic.
 - Be honest about uncertainty, authorship, licensing, and conflicts of
   interest.
 - Respect privacy and remove sensitive repository data from public examples.
-- Help keep Issues and pull requests focused, reproducible, and useful.
+- Help keep Issues, Discussions, and pull requests focused, reproducible, and
+  useful.
 
 ## Unacceptable behavior
 
@@ -59,8 +60,14 @@ abuse-reporting tools and avoid escalating the interaction in public. GitHub's
 instructions are available at
 <https://docs.github.com/en/site-policy/acceptable-use-policies/github-abuse-or-harassment-policies>.
 
-ContextForge does not operate a private conduct-reporting inbox. Do not include
-sensitive personal information in public Issues or pull requests. Security
+To report conduct that occurred in a ContextForge-controlled space, contact the
+maintainer privately at <contextforgerepo@gmail.com>. Include links and only the
+minimum context needed to investigate. Do not send credentials, private source
+code, or unrelated personal information.
+
+Reports will be handled confidentially to the extent practicable. If a report
+concerns the maintainer, or the reporter is not comfortable contacting the
+project directly, use GitHub's abuse-reporting and support channels. Security
 vulnerabilities follow the separate private process in [SECURITY.md](SECURITY.md);
 that channel is not a general conduct-reporting channel.
 

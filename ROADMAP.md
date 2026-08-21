@@ -41,6 +41,22 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Add structured diagnostics without mixing logs, progress, and command
   output streams.
 
+### v0.4.2 first public release (release candidate validated)
+
+- [x] Prepare the `contextforge-repo` PyPI distribution while preserving the
+  `contextforge` import package and the `contextforge` and `ctxf` commands.
+- [x] Stabilize bounded discovery in fresh, indexed, and hybrid modes, including
+  candidate coverage, role-aware ranking, typed model actions, and minimal
+  deterministic fallback.
+- [x] Add versioned discovery benchmark manifests and text, Markdown, and
+  schema-versioned JSON benchmark reports without changing the existing public
+  discovery formats.
+- [x] Validate the ASP discovery suite in three consecutive complete runs with
+  fixed source, index, model, and context-window provenance.
+- [x] Add locked distribution builds, clean-install validation, SBOM generation,
+  Trusted Publishing workflows, and public contribution/security policies.
+- [ ] Publish the reviewed signed release through TestPyPI and PyPI.
+
 ## Later
 
 - Full multi-root workspaces.

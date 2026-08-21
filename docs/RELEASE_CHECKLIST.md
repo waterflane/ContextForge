@@ -16,6 +16,9 @@ index API token is stored in repository secrets.
 - [ ] Update the separate Wiki repository when public behavior or commands
       changed; before changing visibility, replace its installation command with
       `python -m pip install contextforge-repo`.
+- [ ] Confirm GitHub Discussions is enabled, its Q&A category accepts ordinary
+      usage questions, and the README links to it.
+- [ ] Confirm the private conduct address in `CODE_OF_CONDUCT.md` is monitored.
 - [ ] Complete the full-history secret scan outside the source tree.
 
 ## Validate offline

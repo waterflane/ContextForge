@@ -23,6 +23,7 @@ commands.
   <a href="#cli-overview">CLI</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="https://github.com/waterflane/ContextForge/wiki">Wiki</a> ·
+  <a href="https://github.com/waterflane/ContextForge/discussions">Discussions</a> ·
   <a href="CONTRIBUTING.md">Contribution policy</a>
 </p>
 
@@ -374,9 +375,9 @@ orchestration are not implemented.
 
 ## Support and contributions
 
-Use GitHub Issues for reproducible bugs and focused feature suggestions when
-Issues are enabled. Do not post secrets, repository source, full prompts, or
-private logs.
+Use the Q&A category in GitHub Discussions for usage and support questions.
+Use GitHub Issues for reproducible bugs and focused feature suggestions. Do not
+post secrets, repository source, full prompts, or private logs in either place.
 
 External contributions are welcome through a fork and pull request into `dev`.
 Discuss large changes in an Issue before implementation. Merges require owner

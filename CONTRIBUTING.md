@@ -6,7 +6,10 @@ easiest to review.
 
 ## Before you start
 
-- Search existing Issues and pull requests before opening a new one.
+- Search existing Issues, Discussions, and pull requests before opening a new
+  one.
+- Use the Q&A category in GitHub Discussions for usage and support questions;
+  keep Issues focused on reproducible bugs and scoped improvements.
 - Open an Issue before starting a large feature, architecture change, new
   dependency, or behavior-breaking change.
 - Never include credentials, private repository content, prompts, or
@@ -45,6 +48,10 @@ git diff --check
 Tests must not require Ollama, LM Studio, remote model APIs, credentials, or
 network access. Use `provider none` for structural-only behavior or the
 deterministic fake provider where a provider contract is required.
+
+GitHub may hold Actions runs from first-time fork contributors for maintainer
+approval. An `Awaiting approval` status does not mean that the pull request or
+CI configuration is broken.
 
 Changes should preserve the project's architectural boundaries: core and
 application code must not depend on CLI, FastAPI, Rich, Typer, or concrete

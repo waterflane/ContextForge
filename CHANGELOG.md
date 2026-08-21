@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.4.2] - 2026-08-15
+## [0.4.2] - 2026-08-21
 
 ### Added
 
@@ -24,6 +24,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the `contextforge` import package and the `contextforge` and `ctxf` commands.
 - Opened the contribution workflow to fork-based pull requests targeting
   `dev`, with owner review through CODEOWNERS and Apache-2.0 inbound terms.
+- Enabled GitHub Discussions for ordinary usage questions and Q&A, and added a
+  private project conduct-reporting address with a GitHub abuse-reporting
+  fallback.
 - Replaced the editable-install-only CI path with locked, provider-independent
   lint, type, test, distribution, and clean-install validation.
 - Added owner-triggered OIDC publication for TestPyPI and PyPI, draft GitHub
