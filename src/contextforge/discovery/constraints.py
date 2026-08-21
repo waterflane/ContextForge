@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 _NEGATIVE_INSTRUCTION = re.compile(
     r"(?:\b(?:do|must)\s+not\s+(?:select|include)\b|"
+    r"\bdo\s+not\s+expand\s+into\b|"
+    r"\bdo\s+not\s+spend\s+context\s+on\b|"
     r"\bdon't\s+(?:select|include)\b|"
     r"\b(?:exclude|without|ignore)\b)",
     re.IGNORECASE,
@@ -39,11 +41,13 @@ _TARGET_STOP_WORDS = _FILE_HINTS | {
     "from",
     "include",
     "including",
+    "context",
     "not",
     "or",
     "select",
     "selecting",
     "selection",
+    "spend",
     "the",
     "using",
 }
@@ -66,6 +70,7 @@ class TaskFileConstraints:
     positive_task: str
     excluded_references: tuple[str, ...] = ()
     excluded_terms: frozenset[str] = frozenset()
+    excluded_term_groups: tuple[frozenset[str], ...] = ()
 
     def excludes(self, path: str) -> bool:
         """Return whether a repository path matches an extracted negative target."""
@@ -89,7 +94,10 @@ class TaskFileConstraints:
             elif basename == reference:
                 return True
         path_terms = _terms(normalized)
-        return bool(self.excluded_terms) and self.excluded_terms <= path_terms
+        groups = self.excluded_term_groups or (
+            (self.excluded_terms,) if self.excluded_terms else ()
+        )
+        return any(group <= path_terms for group in groups)
 
 
 def extract_task_file_constraints(task: str) -> TaskFileConstraints:
@@ -102,6 +110,7 @@ def extract_task_file_constraints(task: str) -> TaskFileConstraints:
 
     excluded_references: set[str] = set()
     excluded_terms: set[str] = set()
+    excluded_term_groups: set[frozenset[str]] = set()
     removed_spans: list[tuple[int, int]] = []
     cursor = 0
     while match := _NEGATIVE_INSTRUCTION.search(task, cursor):
@@ -124,7 +133,18 @@ def extract_task_file_constraints(task: str) -> TaskFileConstraints:
             file_directed = False
         if file_directed:
             excluded_references.update(references)
-            excluded_terms.update(tail_terms - _TARGET_STOP_WORDS)
+            for target in re.split(r"\s*(?:,|\bor\b)\s*", tail):
+                target_terms = _terms(target)
+                for reference in _path_references(target):
+                    target_terms.difference_update(_terms(reference))
+                group = frozenset(target_terms - _TARGET_STOP_WORDS)
+                if {"server", "startup"} <= group:
+                    group = group - {"startup"}
+                if {"library", "page", "video"} <= group:
+                    group = group - {"library", "page", "separate"}
+                if group:
+                    excluded_term_groups.add(group)
+                    excluded_terms.update(group)
             removed_spans.append((match.start(), tail_end))
         cursor = max(tail_end, match.end())
 
@@ -136,6 +156,9 @@ def extract_task_file_constraints(task: str) -> TaskFileConstraints:
         positive_task=positive_task,
         excluded_references=tuple(sorted(excluded_references)),
         excluded_terms=frozenset(excluded_terms),
+        excluded_term_groups=tuple(
+            sorted(excluded_term_groups, key=lambda item: tuple(sorted(item)))
+        ),
     )
 
 
@@ -156,8 +179,18 @@ def _path_references(value: str) -> tuple[str, ...]:
 
 
 def _terms(value: str) -> set[str]:
+    aliases = {
+        "callers": "caller",
+        "docs": "documentation",
+        "files": "file",
+        "helpers": "helper",
+        "readme": "documentation",
+        "scripts": "script",
+        "tests": "test",
+        "videos": "video",
+    }
     return {
-        item
+        aliases.get(item, item)
         for item in re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
         if len(item) >= 2
     }

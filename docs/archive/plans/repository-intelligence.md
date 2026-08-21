@@ -1,4 +1,8 @@
 # ContextForge v0.4.0 — Repository Intelligence
+> [!NOTE]
+> Historical implementation plan. It is retained for design context and is
+> not current user documentation or a release procedure.
+
 
 Status: historical implementation plan. Core repository intelligence, thin CLI
 adapters, and the dependency-free local read-only stdio MCP foundation are

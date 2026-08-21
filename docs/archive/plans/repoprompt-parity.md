@@ -1,4 +1,8 @@
 # ContextForge RepoPrompt Feature-Parity Direction
+> [!NOTE]
+> Historical implementation plan. It is retained for design context and is
+> not current user documentation or a release procedure.
+
 
 Status: companion to
 [ContextForge v0.4.0 — Repository Intelligence](repository-intelligence.md).

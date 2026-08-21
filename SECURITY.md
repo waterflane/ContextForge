@@ -2,16 +2,22 @@
 
 ## Supported versions
 
-ContextForge is pre-1.0 software. Security fixes are expected to target the
-latest released version.
+ContextForge is pre-1.0 software. Security fixes target the latest release.
+
+| Version | Supported |
+| --- | --- |
+| Latest `0.4.x` release | Yes |
+| `0.3.x` and earlier | No |
 
 ## Reporting a vulnerability
 
 Please do not open public issues for security vulnerabilities.
 
-Report suspected vulnerabilities privately through the repository's security
-advisory flow when available. If that is not available, contact the maintainers
-using the private channel listed in the repository profile.
+Use GitHub's
+[private vulnerability reporting form](https://github.com/waterflane/ContextForge/security/advisories/new).
+The form sends the report privately to the repository owner. If the form is not
+available, do not publish exploit details in an Issue; open a minimal public
+Issue asking for private vulnerability reporting to be enabled.
 
 Include:
 
@@ -19,6 +25,9 @@ Include:
 - reproduction steps;
 - impact assessment;
 - any relevant logs or environment details without secrets.
+
+The maintainer will acknowledge a report when practicable, investigate it, and
+coordinate disclosure and release timing with the reporter.
 
 ## Scope
 
@@ -60,7 +69,7 @@ environment-variable name. It rejects inline credentials, sensitive query
 parameters, unknown fields, and non-local endpoints when `local_only=true`.
 When `local_only=false`, a remote endpoint is still rejected unless
 `external_data_policy="allow_repository"`; `deny` and `allow_selected` do not
-authorize remote transport in v0.4.0. Repository-wide authorization can send
+authorize remote transport in the current `0.4.x` release. Repository-wide authorization can send
 any selectable snapshot file, including files with secret-like names, so users
 must review ignore rules and provider retention before enabling it. ContextForge
 does not claim complete secret detection.

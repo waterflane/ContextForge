@@ -160,6 +160,10 @@ byte rejection, resource reads, and the absence of write/sampling capability.
 
 ## Local API
 
+The HTTP API is currently a development interface, not a separately supported
+production service. Uvicorn is therefore installed by the `dev` extra and is
+not a runtime dependency of the published CLI distribution.
+
 ```bash
 uvicorn contextforge.api.app:create_app --factory
 ```

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/contextforge-banner.png" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
+  <img src="https://raw.githubusercontent.com/waterflane/ContextForge/main/docs/assets/contextforge-banner.png" width="100%" alt="ContextForge — Build bounded, reviewable context for coding agents.">
 </p>
 
 <h1 align="center">ContextForge</h1>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/waterflane/ContextForge/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/waterflane/ContextForge/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.12 or newer" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&amp;logoColor=white"></a>
-  <a href="LICENSE"><img alt="License: CC BY-NC-SA 4.0" src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-6f42c1"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0b6bcb"></a>
 </p>
 
 <p align="center"><strong>Build bounded, reviewable repository context for coding agents.</strong></p>
@@ -23,14 +23,15 @@ commands.
   <a href="#cli-overview">CLI</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="https://github.com/waterflane/ContextForge/wiki">Wiki</a> ·
+  <a href="https://github.com/waterflane/ContextForge/discussions">Discussions</a> ·
   <a href="CONTRIBUTING.md">Contribution policy</a>
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Package version `0.4.2` is represented by
-> the source metadata. Discovery benchmarking is experimental and its results
-> should be reviewed alongside the recorded provider, model, configuration, and
-> source snapshot.
+> ContextForge is pre-alpha software. Version `0.4.2` is the first public-release
+> candidate. Discovery benchmarking is experimental and its results should be
+> reviewed alongside the recorded provider, model, configuration, and source
+> snapshot.
 
 ## Why ContextForge
 
@@ -75,8 +76,26 @@ contextforge context create . \
 
 ## Installation
 
-ContextForge requires Python 3.12 or newer. Install the checked-out source in a
-virtual environment:
+ContextForge requires Python 3.12 or newer. Install the published distribution:
+
+```bash
+python -m pip install contextforge-repo
+```
+
+For an isolated command-line installation, use either tool manager:
+
+```bash
+pipx install contextforge-repo
+# or
+uv tool install contextforge-repo
+```
+
+The PyPI distribution is named `contextforge-repo`; the import package remains
+`contextforge`, and the installed commands remain `contextforge` and `ctxf`.
+The similarly named `context-forge-cli` distribution is a different,
+unaffiliated project.
+
+To install a checked-out source tree instead:
 
 ```bash
 git clone https://github.com/waterflane/ContextForge.git
@@ -192,10 +211,15 @@ The primary supported environment variables are:
   `CONTEXTFORGE_LOG_FILE`, and `CONTEXTFORGE_LOG_COMPONENTS`.
 
 The default provider is local Ollama at
-`http://127.0.0.1:11434/api/chat` using model `qwen2.5-coder`. Use
+`http://127.0.0.1:11434/api/chat` using model `qwen2.5-coder:7b`. Use
 `--provider none` for structural-only indexing. The `openai-compatible`
 provider and its `lmstudio` CLI alias require an exact model ID and a suitable
 `base_url`.
+
+Model-backed discovery requires the configured provider to be running with the
+named model available. ContextForge's configured `context_window` must not
+exceed the window actually loaded by that provider; inspect the resolved policy
+before a long run with `contextforge diagnostics provider PATH`.
 
 Credential configuration stores only the name of an environment variable in
 `credential_env`; the credential value is resolved at request time. See the
@@ -260,6 +284,8 @@ is available.
 > [!NOTE]
 > `benchmark discovery` is experimental in `0.4.2`; model-backed repeatability
 > measurements are observations for the recorded fixture state, not guarantees.
+> Start the configured provider first and use the same context-window value in
+> ContextForge and the provider runtime.
 
 ```powershell
 contextforge benchmark discovery 'C:\Repositories' `
@@ -274,7 +300,8 @@ The runner is repository/index read-only, disables configured file logging, and
 records complete, failed, and cancelled runs in the result. Exit code `3` means
 the command produced a complete benchmark report containing at least one task,
 expectation, or budget failure. Do not discard stdout or the requested output
-file when handling that code.
+file when handling that code. Every run remains bounded by manifest limits,
+provider retry limits, operation timeouts, and the configured context window.
 
 ## Output formats and streams
 
@@ -334,8 +361,8 @@ python -m pytest
 ```
 
 Build validation and owner-only publication steps are in the
-[release checklist](docs/RELEASE_CHECKLIST.md). The project does not publish
-automatically from the current CI workflow.
+[release checklist](docs/RELEASE_CHECKLIST.md). Release publication is an
+owner-triggered workflow protected by GitHub environments and PyPI OIDC.
 
 ## Project status
 
@@ -348,17 +375,18 @@ orchestration are not implemented.
 
 ## Support and contributions
 
-Use GitHub Issues for reproducible bugs and focused feature suggestions when
-Issues are enabled. Do not post secrets, repository source, full prompts, or
-private logs.
+Use the Q&A category in GitHub Discussions for usage and support questions.
+Use GitHub Issues for reproducible bugs and focused feature suggestions. Do not
+post secrets, repository source, full prompts, or private logs in either place.
 
-External pull requests are not currently accepted. Unsolicited implementation
-pull requests may be closed; this policy may change later. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+External contributions are welcome through a fork and pull request into `dev`.
+Discuss large changes in an Issue before implementation. Merges require owner
+approval and passing CI; contributors do not need direct repository write
+access. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-ContextForge is licensed under the
-[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
-License](LICENSE). The license is non-commercial and is not an OSI-approved
-software license; review its terms before redistribution or integration.
+ContextForge `0.4.2` and later are licensed under the
+[Apache License 2.0](LICENSE). Earlier tagged releases remain available under
+the license included in those release snapshots. See [NOTICE](NOTICE) for the
+project attribution notice.

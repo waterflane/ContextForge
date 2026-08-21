@@ -1,14 +1,15 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27,<1.28"]
 build-backend = "hatchling.build"
 
 [project]
-name = "contextforge"
+name = "contextforge-repo"
 dynamic = ["version"]
-description = "Assemble precise, reviewable repository context for coding agents."
+description = "Build bounded, reviewable repository context for coding agents."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
   { name = "waterflane" }
 ]
@@ -24,7 +25,6 @@ classifiers = [
   "Environment :: Console",
   "Framework :: FastAPI",
   "Intended Audience :: Developers",
-  "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -35,6 +35,7 @@ dependencies = [
   "pathspec>=0.12.0,<1.0.0",
   "pydantic>=2.11.0,<3.0.0",
   "pydantic-settings>=2.10.0,<3.0.0",
+  "rich>=13.9.0,<16.0.0",
   "typer>=0.16.0,<1.0.0",
 ]
 
@@ -45,16 +46,24 @@ dev = [
   "pytest>=8.4.0,<9.0.0",
   "pytest-cov>=6.0.0,<7.0.0",
   "ruff>=0.12.0,<1.0.0",
-  "uvicorn>=0.35.0,<1.0.0",
+  "uvicorn>=0.52.1,<1.0.0",
+]
+release = [
+  "build>=1.2.2,<2.0.0",
+  "check-wheel-contents>=0.6.1,<1.0.0",
+  "cyclonedx-bom>=6.0.0,<8.0.0",
+  "pip-audit>=2.9.0,<3.0.0",
+  "pip-licenses>=5.0.0,<6.0.0",
+  "twine>=6.1.0,<7.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/waterflane/contextforge"
-Repository = "https://github.com/waterflane/contextforge"
-Issues = "https://github.com/waterflane/contextforge/issues"
-Changelog = "https://github.com/waterflane/contextforge/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/waterflane/contextforge/wiki"
-Security = "https://github.com/waterflane/contextforge/security/policy"
+Homepage = "https://github.com/waterflane/ContextForge"
+Repository = "https://github.com/waterflane/ContextForge"
+Issues = "https://github.com/waterflane/ContextForge/issues"
+Changelog = "https://github.com/waterflane/ContextForge/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/waterflane/ContextForge/wiki"
+Security = "https://github.com/waterflane/ContextForge/security/policy"
 
 [project.scripts]
 contextforge = "contextforge.cli.main:run"
@@ -77,7 +86,7 @@ exclude = [
   "/.vscode",
   "/.coverage",
   "/.coverage.*",
-  "/docs/plans",
+  "/docs/archive/plans",
   "/htmlcov",
   "/build",
   "/dist",
@@ -89,6 +98,16 @@ exclude = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/contextforge"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/README.md",
+  "/pyproject.toml",
+  "/src/contextforge",
+]
 
 [tool.ruff]
 line-length = 88

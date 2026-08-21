@@ -19,7 +19,7 @@ the loopback interface:
 [models]
 provider = "ollama"
 endpoint = "http://127.0.0.1:11434/api/chat"
-model = "qwen2.5-coder"
+model = "qwen2.5-coder:7b"
 timeout_seconds = 360
 connect_timeout_seconds = 10
 read_timeout_seconds = 300
