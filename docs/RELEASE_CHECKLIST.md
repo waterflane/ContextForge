@@ -97,7 +97,8 @@ uv run contextforge benchmark discovery 'C:\Repositories' `
 
 - [ ] Merge the reviewed release pull request from `dev` into `main`.
 - [ ] Verify the exact merge commit contains the intended version and changelog.
-- [ ] Create a signed annotated `vX.Y.Z` tag on that exact commit.
+- [ ] Create a signed annotated `vX.Y.Z` tag on that exact commit, or
+      `vX.Y.Z.postN` for a PEP 440 post release.
 - [ ] Push the tag without rewriting earlier tags.
 - [ ] Synchronize `dev` with the released `main`.
 

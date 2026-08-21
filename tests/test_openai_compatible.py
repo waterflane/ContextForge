@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from click import unstyle
 from pydantic import BaseModel, ConfigDict
 from typer.testing import CliRunner
 
@@ -658,10 +659,11 @@ def test_cli_help_and_provider_selection_include_base_url(tmp_path: Path) -> Non
     )
 
     assert help_result.exit_code == 0
-    assert "--base-url" in help_result.output
-    assert "--request-timeout" in help_result.output
-    assert "--context-window" in help_result.output
-    assert "--max-output-tokens" in help_result.output
+    help_output = unstyle(help_result.output)
+    assert "--base-url" in help_output
+    assert "--request-timeout" in help_output
+    assert "--context-window" in help_output
+    assert "--max-output-tokens" in help_output
     assert selected.exit_code == 1
     assert "OpenAI-compatible base URL must be an HTTP URL" in selected.output
 
