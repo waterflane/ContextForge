@@ -57,8 +57,6 @@ This roadmap describes broad milestones only. It does not promise dates.
   Trusted Publishing workflows, and public contribution/security policies.
 - [x] Correct ANSI-sensitive CLI help validation for consistent Linux and
   Windows release CI.
-- [ ] Publish the reviewed signed `v0.4.2.post1` release through TestPyPI and
-  PyPI.
 
 ## v0.5: Generic local integration bridge (release prepared)
 
@@ -69,7 +67,6 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Keep repository truth, source identity verification, path policy, and
   read-only guarantees inside ContextForge while consumers own model selection.
 - [x] Keep MCP independent and preserve its existing read-only protocol.
-- [ ] Publish or tag 0.5.0 after review and explicit release approval.
 
 ## Later
 

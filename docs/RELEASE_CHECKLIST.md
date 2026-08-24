@@ -13,6 +13,8 @@ index API token is stored in repository secrets.
 - [ ] Confirm the supported Python versions in `pyproject.toml` and CI.
 - [ ] Confirm `contextforge-repo` is still unregistered on both PyPI and
       TestPyPI, and both Trusted Publisher configurations match `release.yml`.
+- [ ] Confirm the SHA-pinned PyPI publishing action supports the Core Metadata
+      version emitted by the current build backend.
 - [ ] Update the separate Wiki repository when public behavior or commands
       changed; before changing visibility, replace its installation command with
       `python -m pip install contextforge-repo`.
