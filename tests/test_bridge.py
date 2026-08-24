@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import io
 import json
 import queue
@@ -96,11 +97,23 @@ class _RecordingOutput:
 
 
 class _Harness:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        shutdown_timeout_seconds: float | None = None,
+    ) -> None:
         self.input = _QueueInput()
         self.output = _RecordingOutput()
         self.stderr = io.StringIO()
-        self.server = BridgeServer(workspace)
+        self.server = (
+            BridgeServer(workspace)
+            if shutdown_timeout_seconds is None
+            else BridgeServer(
+                workspace,
+                shutdown_timeout_seconds=shutdown_timeout_seconds,
+            )
+        )
         self.task: asyncio.Task[None] | None = None
 
     async def start(self, *, negotiated: bool = True) -> None:
@@ -334,6 +347,211 @@ def test_bridge_cancellation_reaches_application_operation(
         await harness.close()
 
     asyncio.run(exercise())
+
+
+def test_bridge_shutdown_cooperatively_cancels_active_operation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    (tmp_path / "alpha.py").write_text("alpha = 1\n", encoding="utf-8")
+    started = threading.Event()
+    observed = threading.Event()
+
+    def cooperative_prepare(
+        source: Any, request: Any, *, cancellation: asyncio.Event | None = None
+    ) -> Any:
+        del source, request
+        assert cancellation is not None
+        started.set()
+        while not cancellation.is_set():
+            time.sleep(0.001)
+        observed.set()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        bridge_module, "prepare_discovery_candidates", cooperative_prepare
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path, shutdown_timeout_seconds=0.2)
+        await harness.start()
+        digest = await _snapshot(harness)
+        harness.input.send(
+            _request(
+                "slow",
+                "discover",
+                {
+                    "expected_snapshot_digest": digest,
+                    "task": "alpha",
+                    "mode": "fresh",
+                },
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 5)
+        started_at = time.monotonic()
+        harness.input.send(_request("shutdown", "shutdown"))
+        assert harness.task is not None
+        await asyncio.wait_for(harness.task, timeout=1)
+        elapsed = time.monotonic() - started_at
+        frames = [json.loads(chunk) for chunk in harness.output.chunks]
+        shutdown = next(frame for frame in frames if frame["id"] == "shutdown")
+        cancelled = next(frame for frame in frames if frame["id"] == "slow")
+        assert shutdown["result"] == {"shutdown": True}
+        assert cancelled["error"]["data"]["code"] == "REQUEST_CANCELLED"
+        assert "result" not in cancelled
+        assert observed.is_set()
+        assert elapsed < 0.5
+        assert harness.stderr.getvalue() == ""
+        assert all(
+            json.loads(chunk)["jsonrpc"] == "2.0" for chunk in harness.output.chunks
+        )
+
+    asyncio.run(exercise())
+
+
+def test_bridge_shutdown_is_bounded_when_task_ignores_first_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        harness = _Harness(tmp_path, shutdown_timeout_seconds=0.02)
+        await harness.start()
+        cooperative = asyncio.Event()
+        first_task_cancel = asyncio.Event()
+        second_task_cancel = asyncio.Event()
+        blocker = asyncio.Event()
+
+        async def stubborn_operation() -> None:
+            try:
+                await blocker.wait()
+            except asyncio.CancelledError:
+                first_task_cancel.set()
+                try:
+                    await blocker.wait()
+                except asyncio.CancelledError:
+                    second_task_cancel.set()
+                    raise
+
+        task = asyncio.create_task(stubborn_operation())
+        active_type = cast(Any, bridge_module)._ActiveRequest
+        harness.server._active[("str", "stubborn")] = active_type(
+            cancellation=cooperative,
+            task=task,
+        )
+        await asyncio.sleep(0)
+        started_at = time.monotonic()
+        harness.input.send(_request("shutdown", "shutdown"))
+        shutdown = (await harness.response(1))[0]
+        assert harness.task is not None
+        await asyncio.wait_for(harness.task, timeout=0.5)
+        elapsed = time.monotonic() - started_at
+        await asyncio.wait_for(second_task_cancel.wait(), timeout=0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert shutdown["result"] == {"shutdown": True}
+        assert cooperative.is_set()
+        assert first_task_cancel.is_set()
+        assert task.done()
+        assert elapsed < 0.5
+        stderr = harness.stderr.getvalue()
+        assert "shutdown deadline expired" in stderr
+        assert "Traceback" not in stderr
+        assert len(harness.output.chunks) == 1
+        assert json.loads(harness.output.chunks[0])["jsonrpc"] == "2.0"
+
+    asyncio.run(exercise())
+
+
+def test_bridge_eof_cleanup_is_bounded_for_non_cooperative_task(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        harness = _Harness(tmp_path, shutdown_timeout_seconds=0.02)
+        await harness.start()
+        cooperative = asyncio.Event()
+        first_task_cancel = asyncio.Event()
+        second_task_cancel = asyncio.Event()
+        blocker = asyncio.Event()
+
+        async def stubborn_operation() -> None:
+            try:
+                await blocker.wait()
+            except asyncio.CancelledError:
+                first_task_cancel.set()
+                try:
+                    await blocker.wait()
+                except asyncio.CancelledError:
+                    second_task_cancel.set()
+                    raise
+
+        task = asyncio.create_task(stubborn_operation())
+        active_type = cast(Any, bridge_module)._ActiveRequest
+        harness.server._active[("str", "stubborn-eof")] = active_type(
+            cancellation=cooperative,
+            task=task,
+        )
+        await asyncio.sleep(0)
+        started_at = time.monotonic()
+        harness.input.close()
+        assert harness.task is not None
+        await asyncio.wait_for(harness.task, timeout=0.5)
+        elapsed = time.monotonic() - started_at
+        await asyncio.wait_for(second_task_cancel.wait(), timeout=0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cooperative.is_set()
+        assert first_task_cancel.is_set()
+        assert task.done()
+        assert elapsed < 0.5
+        assert harness.output.chunks == []
+        stderr = harness.stderr.getvalue()
+        assert "shutdown deadline expired" in stderr
+        assert "Traceback" not in stderr
+
+    asyncio.run(exercise())
+
+
+def test_bridge_sync_runner_does_not_reawait_abandoned_task(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    cancellation_count = 0
+    retained: list[asyncio.Task[None]] = []
+
+    async def fake_serve(
+        workspace: Any,
+        input_stream: Any,
+        output_stream: Any,
+        error_stream: Any,
+    ) -> None:
+        del workspace, input_stream, output_stream, error_stream
+
+        async def repeatedly_non_cooperative() -> None:
+            nonlocal cancellation_count
+            blocker = asyncio.Event()
+            while True:
+                try:
+                    await blocker.wait()
+                except asyncio.CancelledError:
+                    cancellation_count += 1
+
+        task = asyncio.create_task(repeatedly_non_cooperative())
+        retained.append(task)
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(bridge_module, "serve_stdio_bridge", fake_serve)
+    started_at = time.monotonic()
+    bridge_module.run_stdio_bridge(tmp_path, io.BytesIO(), io.BytesIO(), io.StringIO())
+    elapsed = time.monotonic() - started_at
+    assert cancellation_count == 2
+    assert not retained[0].done()
+    assert elapsed < 0.5
+    retained.clear()
+    gc.collect()
+    captured = capsys.readouterr()
+    assert "Task was destroyed" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import unicodedata
 from collections import OrderedDict
@@ -65,6 +66,8 @@ JSONRPC_VERSION = "2.0"
 MAX_JSONRPC_MESSAGE_BYTES = 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_PREPARATIONS = 128
+DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+FORCED_CANCELLATION_TIMEOUT_SECONDS = 0.1
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -167,11 +170,19 @@ class _BoundedDiagnostics:
 class BridgeServer:
     """Workspace-bound persistent ContextForge bridge protocol v1 server."""
 
-    def __init__(self, workspace: str | Path) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        shutdown_timeout_seconds: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> None:
         root = Path(workspace).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise NotADirectoryError(str(root))
+        if not math.isfinite(shutdown_timeout_seconds) or shutdown_timeout_seconds <= 0:
+            raise ValueError("shutdown_timeout_seconds must be finite and positive")
         self.workspace = root
+        self.shutdown_timeout_seconds = shutdown_timeout_seconds
         self.workspace_identity = _workspace_identity(root)
         self.config_digest = hashlib.sha256(
             canonical_json_bytes(
@@ -223,14 +234,70 @@ class BridgeServer:
                     break
                 await self._accept_request(frame, inline=False)
         finally:
-            self._shutting_down = True
-            active = tuple(self._active.values())
-            for request in active:
+            self._begin_shutdown()
+            await self._drain_active_requests()
+
+    def _begin_shutdown(self) -> None:
+        """Stop new work and request cooperative cancellation of active work."""
+
+        self._shutting_down = True
+        current = asyncio.current_task()
+        for request in tuple(self._active.values()):
+            if request.task is not current:
                 request.cancellation.set()
-            if active:
-                await asyncio.gather(
-                    *(request.task for request in active), return_exceptions=True
-                )
+
+    async def _drain_active_requests(self) -> None:
+        """Drain active work within the fixed graceful-shutdown budget."""
+
+        current = asyncio.current_task()
+        tasks = {
+            request.task
+            for request in tuple(self._active.values())
+            if request.task is not current and not request.task.done()
+        }
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=self.shutdown_timeout_seconds,
+        )
+        for task in done:
+            self._consume_task_result(task)
+        if not pending:
+            self._forget_active_tasks(tasks)
+            return
+        self._diagnostics.write(
+            f"bridge shutdown deadline expired with {len(pending)} active request(s)"
+        )
+        for task in pending:
+            task.cancel()
+        done, pending = await asyncio.wait(
+            pending,
+            timeout=FORCED_CANCELLATION_TIMEOUT_SECONDS,
+        )
+        for task in done:
+            self._consume_task_result(task)
+        for task in pending:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+        self._forget_active_tasks(tasks)
+
+    def _consume_task_result(self, task: asyncio.Task[None]) -> None:
+        """Consume a shutdown outcome and retain a safe unexpected-failure signal."""
+
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            self._diagnostics.write(
+                "bridge active request ended unexpectedly during shutdown"
+            )
+
+    def _forget_active_tasks(self, tasks: set[asyncio.Task[None]]) -> None:
+        """Detach drained or abandoned requests from the bridge lifecycle."""
+
+        for key, request in tuple(self._active.items()):
+            if request.task in tasks:
+                self._active.pop(key, None)
 
     def _decode_frame(self, line: bytes) -> dict[str, Any] | BridgeFault:
         try:
@@ -454,7 +521,7 @@ class BridgeServer:
         if method == "package":
             return await self._package(_require_type(raw, PackageParams), cancellation)
         if method == "shutdown":
-            self._shutting_down = True
+            self._begin_shutdown()
             return {"shutdown": True}
         raise BridgeFault(
             METHOD_NOT_FOUND,
@@ -867,6 +934,32 @@ async def serve_stdio_bridge(
     await BridgeServer(workspace).serve(input_stream, output_stream, error_stream)
 
 
+def run_stdio_bridge(
+    workspace: str | Path,
+    input_stream: BinaryIO,
+    output_stream: BinaryIO,
+    error_stream: TextIO | None = None,
+) -> None:
+    """Run stdio without re-awaiting requests abandoned by bounded shutdown."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            serve_stdio_bridge(workspace, input_stream, output_stream, error_stream)
+        )
+    finally:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+            # The bridge has already applied both bounded cancellation phases.
+            # Loop closure is intentional for these lifecycle-abandoned tasks.
+            task_with_lifecycle_flag: Any = task
+            task_with_lifecycle_flag._log_destroy_pending = False
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 async def _read_bounded_line(stream: BinaryIO) -> tuple[bytes | None, bool]:
     chunk = await asyncio.to_thread(stream.readline, MAX_JSONRPC_MESSAGE_BYTES + 1)
     if not chunk:
@@ -982,5 +1075,6 @@ __all__ = [
     "JSONRPC_VERSION",
     "MAX_JSONRPC_MESSAGE_BYTES",
     "BridgeServer",
+    "run_stdio_bridge",
     "serve_stdio_bridge",
 ]

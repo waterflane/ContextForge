@@ -5,6 +5,7 @@ from .server import (
     JSONRPC_VERSION,
     MAX_JSONRPC_MESSAGE_BYTES,
     BridgeServer,
+    run_stdio_bridge,
     serve_stdio_bridge,
 )
 
@@ -14,5 +15,6 @@ __all__ = [
     "JSONRPC_VERSION",
     "MAX_JSONRPC_MESSAGE_BYTES",
     "BridgeServer",
+    "run_stdio_bridge",
     "serve_stdio_bridge",
 ]

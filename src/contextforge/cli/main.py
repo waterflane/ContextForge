@@ -1,6 +1,5 @@
 """ContextForge command-line interface."""
 
-import asyncio
 import sys
 from enum import StrEnum
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Annotated, BinaryIO, Never, cast
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
-from contextforge.bridge import serve_stdio_bridge
+from contextforge.bridge import run_stdio_bridge
 from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
 from contextforge.cli.diagnostics_commands import diagnostics_app
@@ -310,9 +309,7 @@ def bridge(
     input_stream = cast(BinaryIO, getattr(sys.stdin, "buffer", sys.stdin))
     output_stream = cast(BinaryIO, getattr(sys.stdout, "buffer", sys.stdout))
     try:
-        asyncio.run(
-            serve_stdio_bridge(workspace, input_stream, output_stream, sys.stderr)
-        )
+        run_stdio_bridge(workspace, input_stream, output_stream, sys.stderr)
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         _exit_with_error(str(exc), code=1)
 

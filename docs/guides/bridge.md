@@ -137,6 +137,15 @@ close stdin and wait for the child process. Clean stdin EOF also stops the
 bridge. Abrupt process termination is safe with respect to repository and index
 state because bridge operations are read-only.
 
+Shutdown and clean EOF use the same bounded drain. The bridge first stops
+accepting work, signals every active request's cooperative cancellation event,
+and waits at most 5 seconds. Any request task still pending then receives direct
+asyncio cancellation and gets at most another 0.1 seconds for cleanup. After
+that 5.1-second maximum drain budget, the bridge detaches any remaining task and
+does not wait for it again. These internal v1 limits are fixed rather than CLI
+configurable. A timed-out request cannot return a partial success, and the
+shutdown response remains a normal serialized JSON-RPC frame.
+
 ## Security and read-only boundary
 
 Run the bridge only as a child process of a trusted local consumer. It inherits
