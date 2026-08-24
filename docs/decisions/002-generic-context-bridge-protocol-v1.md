@@ -2,8 +2,7 @@
 
 ## Status
 
-Accepted for the ContextForge 0.5.0 foundation. Transport implementation is
-deferred.
+Accepted and implemented for the ContextForge 0.5.0 foundation.
 
 ## Context
 
@@ -14,9 +13,9 @@ Duplicating repository scanning, index freshness checks, path authorization, or
 source reads in each integration would create competing definitions of
 repository truth and weaken the existing security boundary.
 
-The first bridge layer therefore needs stable messages and application
-operations, but does not yet need a stdio server, an NDJSON loop, working-set
-state, selector models, or session memory.
+The bridge is a persistent workspace-bound process started with
+`contextforge bridge --stdio --workspace PATH`. It uses JSON-RPC 2.0 over
+UTF-8 NDJSON and retains only bounded preparation state in memory.
 
 ## Decision
 
@@ -85,12 +84,20 @@ the index.
 
 ## Transport isolation
 
-The protocol models and JSON Schema do not implement framing, process lifetime,
-stdio, NDJSON, sockets, or MCP. A future adapter will own framing and I/O and
-will translate messages into the same application functions. Transport failures
-must remain outside repository discovery logic and must not expose Python
-tracebacks, secrets, absolute paths in result DTOs, or partially constructed
-context.
+Protocol v1 exposes `hello`, `status`, `snapshot`, `discover`, `expand`, `read`,
+`package`, `$/cancelRequest`, and `shutdown`. Standard input is bounded UTF-8
+NDJSON and standard output contains only serialized JSON-RPC response frames.
+Diagnostics are bounded and written only to standard error. Independent
+requests may run concurrently, while all response writes are serialized.
+
+Repository-sensitive methods require `expected_snapshot_digest` after
+`snapshot`. Drift is returned as typed `SOURCE_IDENTITY_CHANGED`, never as a
+partial result. Cancellation IDs are JSON-RPC request IDs and cancellation is
+carried into the application operation through its cooperative event.
+
+The adapter never exposes shell execution, source writes, Git mutation,
+arbitrary subprocesses, path-policy bypasses, or direct index mutation. Package
+results remain in memory and are returned in the response.
 
 ## Model ownership
 

@@ -307,9 +307,11 @@ def package_verified_context(
     verified: VerifiedContext,
     *,
     include_tree: bool = True,
+    cancellation: asyncio.Event | None = None,
 ) -> ContextPackage:
     """Re-verify and package one immutable verified-context DTO."""
 
+    _raise_if_cancelled(cancellation)
     snapshot = _snapshot(source)
     if calculate_source_snapshot_digest(snapshot) != verified.source_snapshot_digest:
         raise DiscoveryPreparationMismatchError(
@@ -368,6 +370,7 @@ def package_verified_context(
         raise DiscoveryPreparationMismatchError(
             "verified content changed before package construction"
         )
+    _raise_if_cancelled(cancellation)
     return package
 
 

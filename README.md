@@ -183,6 +183,7 @@ mutating operations.
 | `contextforge diagnostics config [PATH]` | Explain effective configuration | Read-only |
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
+| `contextforge bridge --stdio --workspace PATH` | Run persistent JSON-RPC bridge v1 | Verified read-only workspace session |
 | `contextforge benchmark discovery PATH` | Run manifest-driven discovery benchmarks | Repository/index read-only; experimental |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,

@@ -14,7 +14,8 @@ and Python distribution versions follow PEP 440.
   deterministic candidate preparation, read-only expansion, verified source
   reads, and canonical context packaging.
 - Added the generic ContextForge bridge protocol v1 ADR, transport-neutral
-  message models, and JSON Schema without adding a stdio or NDJSON server.
+  application messages, JSON Schema, and a persistent workspace-bound JSON-RPC
+  2.0 service over bounded UTF-8 NDJSON stdio.
 
 ### Changed
 

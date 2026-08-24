@@ -1,13 +1,15 @@
 """ContextForge command-line interface."""
 
+import asyncio
 import sys
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Never
+from typing import Annotated, BinaryIO, Never, cast
 
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.bridge import serve_stdio_bridge
 from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
 from contextforge.cli.diagnostics_commands import diagnostics_app
@@ -161,7 +163,8 @@ def cli(
             log_format=None if log_format is None else log_format.value,
             log_file=log_file,
             component_filter=selected_components,
-            no_log_file=no_log_file or ctx.invoked_subcommand == "benchmark",
+            no_log_file=no_log_file
+            or ctx.invoked_subcommand in {"benchmark", "bridge"},
             no_color=no_color,
             verbosity=verbose,
         )
@@ -266,6 +269,38 @@ def doctor() -> None:
     typer.echo("ContextForge is installed.")
     typer.echo(f"Environment: {settings.environment}")
     typer.echo(f"Log level: {settings.log_level}")
+
+
+@app.command()
+def bridge(
+    stdio: Annotated[
+        bool,
+        typer.Option("--stdio", help="Serve JSON-RPC 2.0 as UTF-8 NDJSON on stdio."),
+    ] = False,
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            help="Bind the bridge to this read-only repository workspace.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+) -> None:
+    """Run the persistent generic ContextForge bridge protocol v1."""
+
+    if not stdio:
+        _exit_with_error("bridge v1 requires --stdio", code=2)
+    input_stream = cast(BinaryIO, getattr(sys.stdin, "buffer", sys.stdin))
+    output_stream = cast(BinaryIO, getattr(sys.stdout, "buffer", sys.stdout))
+    try:
+        asyncio.run(
+            serve_stdio_bridge(workspace, input_stream, output_stream, sys.stderr)
+        )
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
+        _exit_with_error(str(exc), code=1)
 
 
 @app.command()
