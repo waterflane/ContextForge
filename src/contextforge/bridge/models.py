@@ -24,7 +24,9 @@ class BridgeParams(BaseModel):
 
 
 class HelloParams(BridgeParams):
-    protocol_version: Literal["1.0"] = "1.0"
+    protocol_version: str = Field(
+        min_length=1, max_length=32, pattern=r"^[0-9]+\.[0-9]+$"
+    )
     client_name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
@@ -76,7 +78,6 @@ class ExpandParams(BridgeParams):
     operation: ExpansionOperation
     arguments: dict[str, Any] = Field(default_factory=dict)
     budget_usage: DiscoveryBudgetUsage = Field(default_factory=DiscoveryBudgetUsage)
-    action_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class BridgeSelectionItem(BaseModel):
@@ -124,14 +125,18 @@ class PackageParams(ReadParams):
     include_tree: bool = True
 
 
-class CancelParams(BridgeParams):
+class CancelParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     id: str | int
 
     @field_validator("id")
     @classmethod
     def validate_id(cls, value: str | int) -> str | int:
-        if isinstance(value, bool) or (isinstance(value, str) and not value):
-            raise ValueError("id must be a non-empty string or integer")
+        if isinstance(value, bool) or (
+            isinstance(value, str) and (not value or len(value) > 200)
+        ):
+            raise ValueError("id must be a bounded non-empty string or integer")
         return value
 
 

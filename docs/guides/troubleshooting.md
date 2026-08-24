@@ -32,3 +32,52 @@ leaving the lower ContextForge override in place.
 The budget record decomposes system, user, source, selected index, schema,
 requested output, protocol overhead, and safety margin so the total can be
 reproduced numerically without exposing the prompt.
+
+## Bridge exits, hangs, or returns no parseable response
+
+Confirm the installed command and protocol help first:
+
+```bash
+contextforge --version
+contextforge bridge --help
+```
+
+Start with `--stdio` and send exactly one UTF-8 JSON object plus LF per request.
+The first application request must be `hello` with
+`{"protocol_version":"1.0"}`. `PROTOCOL_NEGOTIATION_REQUIRED` means a
+repository request arrived before a successful hello.
+`INCOMPATIBLE_PROTOCOL_VERSION` means the client must stop and use one of the
+reported `supported_protocol_versions`; do not guess compatibility from the
+Python package version.
+
+Read responses only from stdout and correlate by JSON-RPC `id`; concurrent
+responses may be out of order. Read stderr separately for bounded diagnostics.
+Do not combine stderr into stdout, add terminal prompts to stdin, pretty-print a
+request across lines, or buffer a request without its final LF. The maximum v1
+frame size is reported by `hello` and oversized frames fail with
+`MESSAGE_TOO_LARGE`.
+
+## Bridge reports SOURCE_IDENTITY_CHANGED
+
+The repository no longer matches the digest returned by `snapshot`, or a
+selected candidate's optional `path`/`source_sha256` assertion changed. Discard
+the preparation and any excerpts derived from it, call `snapshot` again, then
+repeat discovery and selection. Do not substitute the new digest into an old
+request: candidates and ranges belong to the old repository truth.
+
+For reproducible runs, pause formatters, generators, checkout operations, and
+other processes that rewrite the workspace. The bridge detects identity drift
+but is not a sandbox against a hostile same-account writer.
+
+## Cancellation did not stop immediately
+
+`$/cancelRequest` is cooperative and targets the JSON-RPC request `id`. The
+operation may finish before cancellation is observed. A cancelled operation
+returns `REQUEST_CANCELLED` and never a partial successful read or package.
+After shutdown begins, new work fails with `SHUTTING_DOWN`.
+
+## Bridge cannot find a preparation
+
+`UNKNOWN_PREPARATION` means the ID belongs to another bridge process/snapshot or
+was evicted from the bounded in-memory cache. Call `snapshot` and `discover`
+again in the same process. Preparation state is intentionally not persisted.

@@ -22,6 +22,24 @@ from contextforge.bridge.models import (
 )
 
 
+def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
+    root = Path(__file__).resolve().parents[1]
+    schema = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert schema["$defs"]["helloRequest"]["properties"]["params"]["required"] == [
+        "protocol_version"
+    ]
+    expand = schema["$defs"]["expandRequest"]["properties"]["params"]
+    assert expand["additionalProperties"] is False
+    assert "action_id" not in expand["properties"]
+    assert "tool_name" not in expand["properties"]
+    assert schema["$defs"]["discoverResult"]["additionalProperties"] is False
+
+
 class _QueueInput:
     def __init__(self) -> None:
         self._lines: queue.Queue[bytes] = queue.Queue()
@@ -85,7 +103,8 @@ class _Harness:
         self.server = BridgeServer(workspace)
         self.task: asyncio.Task[None] | None = None
 
-    async def start(self) -> None:
+    async def start(self, *, negotiated: bool = True) -> None:
+        self.server._protocol_negotiated = negotiated
         self.task = asyncio.create_task(
             self.server.serve(
                 cast(Any, self.input), cast(Any, self.output), self.stderr
@@ -139,10 +158,11 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
     async def exercise() -> None:
         harness = _Harness(tmp_path)
         await harness.start()
-        harness.input.send(_request("hello", "hello"))
+        harness.input.send(_request("hello", "hello", {"protocol_version": "1.0"}))
         hello = (await harness.response(1))[0]
         assert hello["jsonrpc"] == "2.0"
         assert hello["result"]["protocol_version"] == "1.0"
+        assert hello["result"]["supported_protocol_versions"] == ["1.0"]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
         assert "shell" in hello["result"]["policy"]
@@ -157,6 +177,41 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
         assert all(
             json.loads(chunk)["jsonrpc"] == "2.0" for chunk in harness.output.chunks
         )
+
+    asyncio.run(exercise())
+
+
+def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+
+        harness.input.send(_request("early", "snapshot"))
+        early = (await harness.response(1))[-1]
+        assert early["error"]["data"]["code"] == "PROTOCOL_NEGOTIATION_REQUIRED"
+
+        harness.input.send(_request("missing", "hello"))
+        missing = (await harness.response(2))[-1]
+        assert missing["error"]["data"]["code"] == "INVALID_PARAMS"
+
+        harness.input.send(
+            _request("incompatible", "hello", {"protocol_version": "2.0"})
+        )
+        incompatible = (await harness.response(3))[-1]
+        assert incompatible["error"]["data"] == {
+            "code": "INCOMPATIBLE_PROTOCOL_VERSION",
+            "requested_protocol_version": "2.0",
+            "supported_protocol_versions": ["1.0"],
+        }
+
+        harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))
+        compatible = (await harness.response(4))[-1]
+        assert compatible["result"]["protocol_version"] == "1.0"
+
+        harness.input.send(_request("snapshot", "snapshot"))
+        snapshot = (await harness.response(5))[-1]
+        assert len(snapshot["result"]["snapshot_digest"]) == 64
+        await harness.close()
 
     asyncio.run(exercise())
 
@@ -295,6 +350,14 @@ def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(
         discovered = await _discover(harness, digest)
         result = discovered["result"]
         assert result["model_provider_used"] is False
+        assert {
+            "schema_version",
+            "task",
+            "pinned_paths",
+            "excluded_paths",
+            "strict",
+            "budget",
+        }.isdisjoint(result)
         assert [item["rank"] for item in result["candidates"]] == sorted(
             item["rank"] for item in result["candidates"]
         )
@@ -315,7 +378,9 @@ def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(
         )
         expanded = (await harness.response(3))[-1]
         assert expanded["result"]["operation"] == "text"
-        assert expanded["result"]["observation"]["ok"] is True
+        assert expanded["result"]["ok"] is True
+        assert "observation" not in expanded["result"]
+        assert "tool_name" not in expanded["result"]
 
         item = {
             "candidate_id": candidate["candidate_id"],
@@ -337,6 +402,9 @@ def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(
         read = (await harness.response(4))[-1]
         assert read["result"]["files"][0]["path"] == "alpha.py"
         assert read["result"]["files"][0]["blocks"][0]["text"] == "def alpha():\n"
+        assert {"schema_version", "task", "mode", "index_generation_id"}.isdisjoint(
+            read["result"]
+        )
 
         harness.input.send(
             _request(
@@ -461,8 +529,7 @@ def test_bridge_clean_eof_produces_no_spurious_frame(tmp_path: Path) -> None:
 
 
 def test_bridge_cli_stdio_keeps_stdout_protocol_only(tmp_path: Path) -> None:
-    frames = [_request("shutdown", "shutdown")]
-    result = subprocess.run(
+    process = subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -472,17 +539,33 @@ def test_bridge_cli_stdio_keeps_stdout_protocol_only(tmp_path: Path) -> None:
             "--workspace",
             str(tmp_path),
         ],
-        input="".join(json.dumps(frame) + "\n" for frame in frames),
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         encoding="utf-8",
-        check=False,
     )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    output = []
+    for frame in (
+        _request("hello", "hello", {"protocol_version": "1.0"}),
+        _request("snapshot", "snapshot"),
+        _request("shutdown", "shutdown"),
+    ):
+        process.stdin.write(json.dumps(frame) + "\n")
+        process.stdin.flush()
+        output.append(json.loads(process.stdout.readline()))
+    process.stdin.close()
+    returncode = process.wait(timeout=10)
+    assert process.stderr is not None
+    stderr = process.stderr.read()
 
-    assert result.returncode == 0, result.stderr
-    output = [json.loads(line) for line in result.stdout.splitlines()]
-    assert [frame["id"] for frame in output] == ["shutdown"]
+    assert returncode == 0, stderr
+    assert [frame["id"] for frame in output] == ["hello", "snapshot", "shutdown"]
+    assert output[0]["result"]["protocol_version"] == "1.0"
+    assert len(output[1]["result"]["snapshot_digest"]) == 64
     assert all(frame["jsonrpc"] == "2.0" for frame in output)
-    assert result.stderr == ""
+    assert stderr == ""
 
 
 def test_bridge_validates_jsonrpc_envelopes_and_cancel_params(tmp_path: Path) -> None:
@@ -496,6 +579,13 @@ def test_bridge_validates_jsonrpc_envelopes_and_cancel_params(tmp_path: Path) ->
             {"jsonrpc": "2.0", "id": [], "method": "hello", "params": {}},
             {"jsonrpc": "2.0", "method": "hello", "params": {}},
             {"jsonrpc": "2.0", "id": "params", "method": "hello", "params": []},
+            {"jsonrpc": "2.0", "id": "missing-params", "method": "snapshot"},
+            {
+                "jsonrpc": "2.0",
+                "id": "x" * 201,
+                "method": "snapshot",
+                "params": {},
+            },
         ]
         for frame in invalid_frames:
             harness.input.send(frame)
@@ -506,10 +596,10 @@ def test_bridge_validates_jsonrpc_envelopes_and_cancel_params(tmp_path: Path) ->
         assert frames[3]["id"] is None
 
         harness.input.send(_request("cancel", "$/cancelRequest", {"id": "not-active"}))
-        cancelled = (await harness.response(8))[-1]
+        cancelled = (await harness.response(10))[-1]
         assert cancelled["result"] == {"cancelled": False}
         harness.input.send(_request("bad-cancel", "$/cancelRequest", {"id": True}))
-        invalid_cancel = (await harness.response(9))[-1]
+        invalid_cancel = (await harness.response(11))[-1]
         assert invalid_cancel["error"]["data"]["code"] == "INVALID_PARAMS"
         await harness.close()
 
@@ -655,6 +745,9 @@ def test_bridge_repository_error_paths_are_typed_and_all_or_nothing(
         )
         status = (await harness.response(10))[-1]
         assert status["result"]["source_identity_changed"] is True
+        assert {"schema_version", "repository_identity"}.isdisjoint(
+            status["result"]["index"]
+        )
         await harness.close()
 
     asyncio.run(exercise())

@@ -28,8 +28,8 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.4.2.post1` is the corrected
-> first public-release candidate. Discovery benchmarking is experimental and
+> ContextForge is pre-alpha software. Version `0.5.0` adds the stable generic
+> local bridge v1. Discovery benchmarking is experimental and
 > its results should be reviewed alongside the recorded provider, model,
 > configuration, and source snapshot.
 
@@ -190,6 +190,9 @@ Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
 repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.
 Detailed syntax, defaults, streams, side effects, mistakes, and examples are in
 the [Wiki CLI reference](https://github.com/waterflane/ContextForge/wiki/CLI-Overview).
+The local integration contract is documented in the
+[bridge v1 guide](docs/guides/bridge.md), with a runnable
+[generic client](examples/generic_bridge_client.py).
 
 ## Configuration
 

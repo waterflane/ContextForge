@@ -15,6 +15,24 @@ from contextforge.core.validation import Sha256, validate_portable_relative_path
 DISCOVERY_SCHEMA_VERSION: Literal[1] = 1
 DISCOVERY_APPLICATION_SCHEMA_VERSION: Literal[1] = 1
 
+DiscoveryExpansionOperation = Literal[
+    "get_repository_overview",
+    "list_tree",
+    "search_index",
+    "search_symbols",
+    "search_text",
+    "get_file_summary",
+    "get_symbol_summary",
+    "find_imports",
+    "find_importers",
+    "find_references",
+    "find_callers",
+    "find_related_tests",
+    "read_file",
+    "read_lines",
+    "get_context_budget",
+]
+
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 ConfidenceValue = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
@@ -348,17 +366,9 @@ class DiscoveryExpansionRequest(DiscoveryModel):
 
     schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
     preparation_id: Sha256
-    action_id: str
-    tool_name: str
+    operation: DiscoveryExpansionOperation
     arguments: dict[str, Any] = Field(default_factory=dict)
     budget_usage: DiscoveryBudgetUsage = Field(default_factory=DiscoveryBudgetUsage)
-
-    @field_validator("action_id", "tool_name")
-    @classmethod
-    def validate_identifier(cls, value: str) -> str:
-        if not _IDENTIFIER.fullmatch(value):
-            raise ValueError("operation identifiers must be bounded and portable")
-        return value
 
 
 class DiscoveryExpansionResult(DiscoveryModel):
@@ -366,8 +376,20 @@ class DiscoveryExpansionResult(DiscoveryModel):
 
     schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
     preparation_id: Sha256
-    observation: DiscoveryObservation
+    operation: DiscoveryExpansionOperation
+    ok: bool
+    code: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    truncated: bool = False
+    made_progress: bool = True
     budget_usage: DiscoveryBudgetUsage
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("result code must be bounded and portable")
+        return value
 
 
 class DiscoverySelectionItem(DiscoveryModel):
@@ -721,6 +743,7 @@ __all__ = [
     "DiscoveryCandidatePreparation",
     "DiscoveryCandidateRecord",
     "DiscoveryExpansionRequest",
+    "DiscoveryExpansionOperation",
     "DiscoveryExpansionResult",
     "DiscoveryLineRange",
     "DiscoveryMode",

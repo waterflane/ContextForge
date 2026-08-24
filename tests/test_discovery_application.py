@@ -35,12 +35,6 @@ from contextforge.models import (
     ModelRequest,
     ProviderConfiguration,
 )
-from contextforge.protocol import (
-    BridgeCancellation,
-    BridgeError,
-    BridgeRequest,
-    BridgeResponse,
-)
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 
@@ -165,8 +159,7 @@ def test_expansion_reuses_path_policy_and_returns_verified_source_identity(
         preparation,
         DiscoveryExpansionRequest(
             preparation_id=preparation.preparation_id,
-            action_id="read-alpha",
-            tool_name="read_file",
+            operation="read_file",
             arguments={"path": candidate.path},
         ),
     )
@@ -175,16 +168,18 @@ def test_expansion_reuses_path_policy_and_returns_verified_source_identity(
         preparation,
         DiscoveryExpansionRequest(
             preparation_id=preparation.preparation_id,
-            action_id="reject-traversal",
-            tool_name="read_file",
+            operation="read_file",
             arguments={"path": "../secret"},
         ),
     )
 
-    assert result.observation.ok
-    assert result.observation.data["source_sha256"] == candidate.source_sha256
+    assert result.ok
+    assert result.data["source_sha256"] == candidate.source_sha256
     assert result.budget_usage.model_calls == 0
-    assert invalid.observation.code == "invalid_input"
+    assert invalid.code == "invalid_input"
+    assert "action_id" not in result.model_dump()
+    assert "tool_name" not in result.model_dump()
+    assert "step" not in result.model_dump()
 
 
 def test_expansion_carries_budget_usage_and_enforces_step_limit(tmp_path: Path) -> None:
@@ -202,8 +197,7 @@ def test_expansion_carries_budget_usage_and_enforces_step_limit(tmp_path: Path) 
         preparation,
         DiscoveryExpansionRequest(
             preparation_id=preparation.preparation_id,
-            action_id="overview",
-            tool_name="get_repository_overview",
+            operation="get_repository_overview",
         ),
     )
     assert first.budget_usage.steps == 1
@@ -213,8 +207,7 @@ def test_expansion_carries_budget_usage_and_enforces_step_limit(tmp_path: Path) 
             preparation,
             DiscoveryExpansionRequest(
                 preparation_id=preparation.preparation_id,
-                action_id="again",
-                tool_name="get_repository_overview",
+                operation="get_repository_overview",
                 budget_usage=first.budget_usage,
             ),
         )
@@ -323,33 +316,3 @@ def test_existing_model_assisted_discovery_remains_compatible(tmp_path: Path) ->
     assert result.status == "complete"
     assert result.final_selection is not None
     assert result.budget_usage.model_calls == 1
-
-
-def test_transport_neutral_protocol_messages_are_closed_and_all_or_nothing(
-    tmp_path: Path,
-) -> None:
-    request = BridgeRequest(
-        request_id="request-1",
-        operation="prepare_discovery_candidates",
-        repository_root=str(tmp_path),
-        payload={"request": {"task": "Find service"}},
-        cancellation_id="cancel-1",
-    )
-    cancellation = BridgeCancellation(cancellation_id="cancel-1")
-    success = BridgeResponse(request_id=request.request_id, ok=True, result={})
-    failure = BridgeResponse(
-        request_id=request.request_id,
-        ok=False,
-        error=BridgeError(code="stale_snapshot", message="Snapshot changed."),
-    )
-
-    assert request.protocol_version == "1.0"
-    assert cancellation.kind == "cancel"
-    assert success.error is None
-    assert failure.result is None
-    with pytest.raises(ValidationError):
-        BridgeResponse(request_id="request-1", ok=True, result={}, error=failure.error)
-    with pytest.raises(ValidationError):
-        BridgeResponse(request_id="request-1", ok=False)
-    with pytest.raises(ValidationError):
-        BridgeRequest.model_validate({**request.model_dump(), "transport": "stdio"})

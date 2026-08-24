@@ -23,6 +23,7 @@ from contextforge.discovery.models import (
     CompletenessWarning,
     DiscoveryBudgetUsage,
     DiscoveryCandidatePreparation,
+    DiscoveryExpansionOperation,
     DiscoveryExpansionRequest,
     DiscoveryExpansionResult,
     DiscoveryMode,
@@ -43,24 +44,22 @@ from contextforge.repositories import ProjectSnapshot, scan_repository
 
 DiscoverySource = ProjectSnapshot | str | Path
 
-DISCOVERY_EXPANSION_TOOLS = frozenset(
-    {
-        "get_repository_overview",
-        "list_tree",
-        "search_index",
-        "search_symbols",
-        "search_text",
-        "get_file_summary",
-        "get_symbol_summary",
-        "find_imports",
-        "find_importers",
-        "find_references",
-        "find_callers",
-        "find_related_tests",
-        "read_file",
-        "read_lines",
-        "get_context_budget",
-    }
+DISCOVERY_EXPANSION_OPERATIONS: tuple[DiscoveryExpansionOperation, ...] = (
+    "get_repository_overview",
+    "list_tree",
+    "search_index",
+    "search_symbols",
+    "search_text",
+    "get_file_summary",
+    "get_symbol_summary",
+    "find_imports",
+    "find_importers",
+    "find_references",
+    "find_callers",
+    "find_related_tests",
+    "read_file",
+    "read_lines",
+    "get_context_budget",
 )
 
 
@@ -169,10 +168,6 @@ def expand_discovery(
         raise DiscoveryPreparationMismatchError(
             "expansion does not reference the supplied preparation"
         )
-    if expansion.tool_name not in DISCOVERY_EXPANSION_TOOLS:
-        raise DiscoveryApplicationError(
-            "operation is not part of the public read-only expansion contract"
-        )
     _raise_if_cancelled(cancellation)
     snapshot = _snapshot(source)
     current = prepare_discovery_candidates(snapshot, _request(preparation))
@@ -183,16 +178,26 @@ def expand_discovery(
     if session.budget.steps >= preparation.budget.max_steps:
         raise DiscoveryApplicationError("maximum discovery steps exceeded")
     session.budget.steps += 1
+    action_id = hashlib.sha256(
+        canonical_json_bytes(
+            {"operation": expansion.operation, "arguments": expansion.arguments}
+        )
+    ).hexdigest()[:32]
     observation = executor.execute(
         step=session.budget.steps,
-        action_id=expansion.action_id,
-        tool_name=expansion.tool_name,
+        action_id=action_id,
+        tool_name=expansion.operation,
         arguments=expansion.arguments,
     )
     _raise_if_cancelled(cancellation)
     return DiscoveryExpansionResult(
         preparation_id=preparation.preparation_id,
-        observation=observation,
+        operation=expansion.operation,
+        ok=observation.ok,
+        code=observation.code,
+        data=observation.data,
+        truncated=observation.truncated,
+        made_progress=observation.made_progress,
         budget_usage=session.budget.usage(),
     )
 
@@ -485,7 +490,7 @@ def _raise_if_cancelled(cancellation: asyncio.Event | None) -> None:
 
 
 __all__ = [
-    "DISCOVERY_EXPANSION_TOOLS",
+    "DISCOVERY_EXPANSION_OPERATIONS",
     "DiscoveryApplicationError",
     "DiscoveryPreparationMismatchError",
     "DiscoverySelectionError",

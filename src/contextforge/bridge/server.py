@@ -24,6 +24,7 @@ from contextforge.context import (
 )
 from contextforge.core.validation import validate_portable_relative_path
 from contextforge.discovery import (
+    DiscoveryExpansionOperation,
     DiscoveryExpansionRequest,
     DiscoveryRequest,
     DiscoverySelection,
@@ -50,6 +51,7 @@ from .models import (
     CancelParams,
     DiscoverParams,
     ExpandParams,
+    ExpansionOperation,
     HelloParams,
     PackageParams,
     ReadParams,
@@ -57,9 +59,9 @@ from .models import (
     SnapshotParams,
     StatusParams,
 )
+from .protocol import BRIDGE_PROTOCOL_VERSION, SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
 
 JSONRPC_VERSION = "2.0"
-BRIDGE_PROTOCOL_VERSION = "1.0"
 MAX_JSONRPC_MESSAGE_BYTES = 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_PREPARATIONS = 128
@@ -75,6 +77,8 @@ MESSAGE_TOO_LARGE = -32002
 DUPLICATE_REQUEST_ID = -32003
 REQUEST_TIMEOUT = -32004
 SHUTTING_DOWN = -32005
+INCOMPATIBLE_PROTOCOL_VERSION = -32006
+PROTOCOL_NEGOTIATION_REQUIRED = -32007
 
 _METHOD_MODELS: dict[str, type[BaseModel]] = {
     "hello": HelloParams,
@@ -88,7 +92,7 @@ _METHOD_MODELS: dict[str, type[BaseModel]] = {
     "shutdown": ShutdownParams,
 }
 
-_EXPANSION_TOOLS = {
+_EXPANSION_TOOLS: dict[ExpansionOperation, DiscoveryExpansionOperation] = {
     "symbol": "search_symbols",
     "text": "search_text",
     "callers": "find_callers",
@@ -182,6 +186,7 @@ class BridgeServer:
         self._writer: _SerializedWriter | None = None
         self._diagnostics = _BoundedDiagnostics(None)
         self._shutting_down = False
+        self._protocol_negotiated = False
 
     async def serve(
         self,
@@ -310,6 +315,7 @@ class BridgeServer:
         raw_params: dict[str, Any],
         cancellation: asyncio.Event,
     ) -> None:
+        negotiated_protocol = False
         try:
             model = _METHOD_MODELS[method]
             try:
@@ -319,6 +325,32 @@ class BridgeServer:
             except ValidationError as exc:
                 await self._write_validation_error(request_id, exc)
                 return
+            if method == "hello":
+                hello = _require_type(params, HelloParams)
+                if hello.protocol_version not in SUPPORTED_BRIDGE_PROTOCOL_VERSIONS:
+                    raise BridgeFault(
+                        INCOMPATIBLE_PROTOCOL_VERSION,
+                        "INCOMPATIBLE_PROTOCOL_VERSION",
+                        "The requested bridge protocol version is not supported.",
+                        data={
+                            "requested_protocol_version": hello.protocol_version,
+                            "supported_protocol_versions": list(
+                                SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
+                            ),
+                        },
+                    )
+                negotiated_protocol = True
+            elif method != "shutdown" and not self._protocol_negotiated:
+                raise BridgeFault(
+                    PROTOCOL_NEGOTIATION_REQUIRED,
+                    "PROTOCOL_NEGOTIATION_REQUIRED",
+                    "Call hello with a supported protocol_version first.",
+                    data={
+                        "supported_protocol_versions": list(
+                            SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
+                        )
+                    },
+                )
             timeout_ms = getattr(params, "timeout_ms", None)
             operation = self._dispatch(method, params, cancellation)
             if timeout_ms is None:
@@ -337,6 +369,8 @@ class BridgeServer:
                     ) from None
             if cancellation.is_set():
                 raise asyncio.CancelledError
+            if negotiated_protocol:
+                self._protocol_negotiated = True
             await self._write_result(request_id, result)
         except asyncio.CancelledError:
             await self._write_error(
@@ -431,6 +465,7 @@ class BridgeServer:
     def _hello(self) -> dict[str, Any]:
         return {
             "protocol_version": BRIDGE_PROTOCOL_VERSION,
+            "supported_protocol_versions": list(SUPPORTED_BRIDGE_PROTOCOL_VERSIONS),
             "contextforge_version": __version__,
             "capabilities": {
                 "methods": [
@@ -453,7 +488,6 @@ class BridgeServer:
             },
             "workspace": {
                 "identity": self.workspace_identity,
-                "name": self.workspace.name,
             },
             "policy": {
                 "repository_access": "read_only_verified_snapshot",
@@ -488,7 +522,26 @@ class BridgeServer:
                 params.expected_snapshot_digest is not None
                 and params.expected_snapshot_digest != digest
             ),
-            "index": report.to_dict(),
+            "index": {
+                "initialized": report.initialized,
+                "index_schema": report.index_schema,
+                "active_generation_id": report.active_generation_id,
+                "indexed_files": report.indexed_files,
+                "stale_files": list(report.stale_files),
+                "failed_files": list(report.failed_files),
+                "deleted_records": list(report.deleted_records),
+                "added_files": list(report.added_files),
+                "changed_files": list(report.changed_files),
+                "provider_id": report.provider_id,
+                "model_id": report.model_id,
+                "prompt_versions": list(report.prompt_versions),
+                "global_maps": {
+                    "overview": report.overview_status,
+                    "architecture": report.architecture_status,
+                    "features": report.feature_status,
+                },
+                "lock_status": report.lock_status,
+            },
         }
 
     async def _snapshot(self, cancellation: asyncio.Event) -> dict[str, Any]:
@@ -501,7 +554,6 @@ class BridgeServer:
         self._snapshot_digest = digest
         return {
             "snapshot_digest": digest,
-            "source_snapshot_digest": digest,
             "file_count": len(snapshot.files),
             "source_bytes": sum(item.size_bytes for item in snapshot.files),
             "languages": dict(sorted(snapshot.summary.languages.items())),
@@ -528,10 +580,22 @@ class BridgeServer:
             cancellation=cancellation,
         )
         self._remember_preparation(preparation)
-        result = preparation.model_dump(mode="json")
-        result["config_digest"] = self.config_digest
-        result["model_provider_used"] = False
-        return result
+        return {
+            "preparation_id": preparation.preparation_id,
+            "source_snapshot_digest": preparation.source_snapshot_digest,
+            "mode": preparation.mode.value,
+            "index_generation_id": preparation.index_generation_id,
+            "index_status": preparation.index_status,
+            "candidates": [
+                item.model_dump(mode="json") for item in preparation.candidates
+            ],
+            "total_candidate_count": preparation.total_candidate_count,
+            "stale_index_paths": list(preparation.stale_index_paths),
+            "warnings": [item.model_dump(mode="json") for item in preparation.warnings],
+            "budget_usage": preparation.budget_usage.model_dump(mode="json"),
+            "config_digest": self.config_digest,
+            "model_provider_used": False,
+        }
 
     async def _expand(
         self, params: ExpandParams, cancellation: asyncio.Event
@@ -542,18 +606,9 @@ class BridgeServer:
         preparation = self._require_preparation(params.preparation_id)
         tool_name = _EXPANSION_TOOLS[params.operation]
         self._validate_expansion_arguments(tool_name, params.arguments)
-        action_id = (
-            params.action_id
-            or hashlib.sha256(
-                canonical_json_bytes(
-                    {"operation": params.operation, "arguments": params.arguments}
-                )
-            ).hexdigest()[:32]
-        )
         expansion = DiscoveryExpansionRequest(
             preparation_id=preparation.preparation_id,
-            action_id=action_id,
-            tool_name=tool_name,
+            operation=tool_name,
             arguments=params.arguments,
             budget_usage=params.budget_usage,
         )
@@ -564,9 +619,16 @@ class BridgeServer:
             expansion,
             cancellation=cancellation,
         )
-        values = result.model_dump(mode="json")
-        values["operation"] = params.operation
-        return values
+        return {
+            "preparation_id": result.preparation_id,
+            "operation": params.operation,
+            "ok": result.ok,
+            "code": result.code,
+            "data": result.data,
+            "truncated": result.truncated,
+            "made_progress": result.made_progress,
+            "budget_usage": result.budget_usage.model_dump(mode="json"),
+        }
 
     async def _read(
         self, params: ReadParams, cancellation: asyncio.Event
@@ -583,9 +645,13 @@ class BridgeServer:
             selection,
             cancellation=cancellation,
         )
-        result = verified.model_dump(mode="json")
-        result["selection_id"] = self._selection_id(preparation, params.items)
-        return result
+        return {
+            "preparation_id": verified.preparation_id,
+            "selection_id": self._selection_id(preparation, params.items),
+            "source_snapshot_digest": verified.source_snapshot_digest,
+            "files": [item.model_dump(mode="json") for item in verified.files],
+            "budget_usage": verified.budget_usage.model_dump(mode="json"),
+        }
 
     async def _package(
         self, params: PackageParams, cancellation: asyncio.Event
@@ -790,9 +856,6 @@ class BridgeServer:
         return self._writer
 
 
-ContextForgeBridge = BridgeServer
-
-
 async def serve_stdio_bridge(
     workspace: str | Path,
     input_stream: BinaryIO,
@@ -843,9 +906,7 @@ def _validate_envelope(
             "The requested method is not supported.",
         )
     request_id = frame.get("id")
-    if request_id is not None and (
-        isinstance(request_id, bool) or not isinstance(request_id, (str, int))
-    ):
+    if request_id is not None and not _valid_rpc_id(request_id):
         raise BridgeFault(
             INVALID_REQUEST,
             "INVALID_REQUEST",
@@ -857,7 +918,13 @@ def _validate_envelope(
             "INVALID_REQUEST",
             "Requests require a non-null correlation id.",
         )
-    params = frame.get("params", {})
+    if "params" not in frame:
+        raise BridgeFault(
+            INVALID_PARAMS,
+            "INVALID_PARAMS",
+            "Method parameters must be present as an object.",
+        )
+    params = frame["params"]
     if not isinstance(params, dict):
         raise BridgeFault(
             INVALID_PARAMS,
@@ -869,9 +936,17 @@ def _validate_envelope(
 
 def _safe_frame_id(frame: dict[str, Any]) -> str | int | None:
     value = frame.get("id")
-    if isinstance(value, bool) or not isinstance(value, (str, int)):
+    if not _valid_rpc_id(value):
         return None
     return value
+
+
+def _valid_rpc_id(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return 0 < len(value) <= 200
+    return isinstance(value, int)
 
 
 def _id_key(value: str | int) -> tuple[str, str | int]:
@@ -904,10 +979,8 @@ def _validation_details(exc: ValidationError | ValueError) -> list[dict[str, Any
 
 __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
-    "ContextForgeBridge",
     "JSONRPC_VERSION",
     "MAX_JSONRPC_MESSAGE_BYTES",
-    "BridgeFault",
     "BridgeServer",
     "serve_stdio_bridge",
 ]

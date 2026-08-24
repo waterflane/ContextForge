@@ -37,6 +37,20 @@ result while progress and logs use stderr. See
 [Discovery output and benchmarks](discovery.md) for the canonical-result,
 renderer, benchmark, warning, counter, and repeatability contracts.
 
+## Local bridge
+
+```bash
+contextforge bridge --stdio --workspace /path/to/repository
+```
+
+`--stdio` is required in protocol v1. The bridge reads one UTF-8 JSON-RPC 2.0
+request per stdin line and writes one response per stdout line. Stdout is
+protocol-only; bounded diagnostics use stderr. The client must negotiate
+protocol `1.0` with `hello` before repository requests. The workspace is fixed
+for the process lifetime and all bridge capabilities are model-free and
+read-only. See the [bridge v1 guide](bridge.md) for the method, cancellation,
+snapshot, security, and shutdown contracts.
+
 ## Read-only diagnostics
 
 ```bash

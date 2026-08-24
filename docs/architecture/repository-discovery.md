@@ -75,6 +75,10 @@ ranking, path policy, budgets, index freshness checks, and verified source tools
 as model-assisted discovery. They never require or invoke a `ModelProvider`.
 Prepared and verified DTOs contain portable paths and source identities but no
 repository root, filesystem handle, mutable executor, or `DiscoverySession`.
+The public expansion DTO names a closed `operation` and returns explicit
+`ok`, `code`, `data`, truncation, progress, and budget fields. Internal
+model-assisted `action_id`, `tool_name`, step counters, and
+`DiscoveryObservation` objects do not cross this application boundary.
 
 The existing model-assisted entry point remains asynchronous:
 
@@ -90,10 +94,13 @@ models include `DiscoveryRequest`, `DiscoveryMode`,
 `CompletenessWarning`, and `DiscoveryRunRecord`. Typed failures carry a run
 record whose `final_selection` is always absent.
 
-The transport-neutral bridge envelope is described by
-[ADR-002](../decisions/002-generic-context-bridge-protocol-v1.md) and the
-[protocol v1 JSON Schema](../schemas/contextforge-bridge-v1.schema.json). No
-stdio or NDJSON transport is implemented in this layer.
+The trusted-local stdio adapter is described by
+[ADR-002](../decisions/002-generic-context-bridge-protocol-v1.md), the
+[bridge guide](../guides/bridge.md), and the
+[protocol v1 JSON Schema](../schemas/contextforge-bridge-v1.schema.json).
+JSON-RPC, NDJSON framing, protocol negotiation, concurrency, cancellation, and
+process lifetime remain entirely in `contextforge.bridge`, not in the
+application DTOs or discovery core.
 
 ## Tool and security boundary
 

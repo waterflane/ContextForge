@@ -29,14 +29,17 @@ ContextForge defines a generic bridge protocol v1 around four operations:
 
 The Python application API uses frozen, closed Pydantic DTOs. It never returns
 `DiscoverySession`, `DiscoveryKnowledge`, `DiscoveryToolExecutor`, filesystem
-handles, or mutable budget trackers. The protocol envelope is generic and
-transport-neutral. DeepSeek Harness can consume it, but no message, operation,
-or Python type is named for or coupled to that harness.
+handles, mutable budget trackers, or internal model-action observations. The
+bridge projects those DTOs into an independent closed JSON-RPC contract; it does
+not serialize application models wholesale. Any local harness can consume it,
+but no message, operation, or Python type is named for or coupled to a specific
+harness.
 
 ## Ownership of repository truth
 
-ContextForge owns repository truth for every operation. The caller identifies a
-repository root or passes an already verified in-process `ProjectSnapshot`.
+ContextForge owns repository truth for every operation. An in-process caller
+identifies a repository root or passes an already verified `ProjectSnapshot`;
+a bridge client is restricted to the workspace fixed when the process starts.
 ContextForge scans according to its existing ignore/protection policy, produces
 portable case-sensitive paths and source identities, and authorizes all reads
 against that inventory. Index records and model-generated semantics are hints;
@@ -75,12 +78,11 @@ caller cannot lower already charged preparation usage.
 
 ## Cancellation
 
-Protocol v1 assigns an optional `cancellation_id` to a request and defines a
-separate cancellation message. Cancellation is cooperative and all-or-nothing:
-no cancelled read or package operation returns a partial successful artifact.
-Transport adapters will map cancellation IDs to application cancellation
-signals. They must not interpret cancellation as permission to mutate source or
-the index.
+Protocol v1 uses the JSON-RPC request `id` as its cancellation identity and
+defines `$/cancelRequest` with that target ID. Cancellation is cooperative and
+all-or-nothing: no cancelled read or package operation returns a partial
+successful artifact. The bridge maps request IDs to application cancellation
+signals. Cancellation is never permission to mutate source or the index.
 
 ## Transport isolation
 
@@ -94,6 +96,12 @@ Repository-sensitive methods require `expected_snapshot_digest` after
 `snapshot`. Drift is returned as typed `SOURCE_IDENTITY_CHANGED`, never as a
 partial result. Cancellation IDs are JSON-RPC request IDs and cancellation is
 carried into the application operation through its cooperative event.
+
+The process is a trusted-local integration transport. It provides no network
+listener, authentication, authorization, encryption, tenant isolation, or
+sandbox boundary. It inherits the invoking user's read access, so only trusted
+local consumers may launch it. Stdout responses and stderr diagnostics are
+sensitive local streams and must not be exposed through an untrusted broker.
 
 The adapter never exposes shell execution, source writes, Git mutation,
 arbitrary subprocesses, path-policy bypasses, or direct index mutation. Package
@@ -110,10 +118,13 @@ compatible in-process workflow and continues to own its provider lifecycle.
 ## Compatibility and versioning
 
 Protocol version `1.0` is independent of the Python package version and of the
-discovery/context package schema versions. V1 messages are closed: unknown
-fields and unknown operations are rejected. Within v1, new optional fields may
-be added only when old readers can safely ignore them through a negotiated
-minor-version capability; otherwise the protocol major version changes.
+discovery/context package schema versions. The client must call `hello` with an
+explicit version before repository work. Missing negotiation and unsupported
+versions are typed failures, and `hello` reports the selected and supported
+versions. V1 messages are closed: unknown fields and unknown operations are
+rejected. Within v1, new optional fields may be added only when old readers can
+safely ignore them through a negotiated minor-version capability; otherwise
+the protocol major version changes.
 Required-field changes, changed path or budget semantics, weaker verification,
 or changed success/failure meaning require a new major version.
 
@@ -125,8 +136,10 @@ safe, and never share a result payload.
 ## Consequences
 
 - Harnesses and IDEs can orchestrate discovery without a Python-side model.
-- Existing CLI 0.4.x commands and model-assisted discovery remain unchanged.
+- Existing model-assisted discovery semantics remain unchanged.
 - Repository truth, immutable index generations, verification, and path policy
   remain centralized.
 - Stateful transport concerns and richer working-set/session behavior remain
   explicitly deferred.
+- Read-only MCP remains a separate adapter with its own protocol and lifecycle;
+  bridge availability does not change MCP methods or discovery semantics.

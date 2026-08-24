@@ -275,13 +275,22 @@ def doctor() -> None:
 def bridge(
     stdio: Annotated[
         bool,
-        typer.Option("--stdio", help="Serve JSON-RPC 2.0 as UTF-8 NDJSON on stdio."),
+        typer.Option(
+            "--stdio",
+            help=(
+                "Required in v1. Read UTF-8 NDJSON requests from stdin and write "
+                "only JSON-RPC 2.0 responses to stdout."
+            ),
+        ),
     ] = False,
     workspace: Annotated[
         Path,
         typer.Option(
             "--workspace",
-            help="Bind the bridge to this read-only repository workspace.",
+            help=(
+                "Repository root to bind for the lifetime of this verified "
+                "read-only local integration session."
+            ),
             exists=True,
             file_okay=False,
             dir_okay=True,
@@ -289,7 +298,12 @@ def bridge(
         ),
     ] = Path("."),
 ) -> None:
-    """Run the persistent generic ContextForge bridge protocol v1."""
+    """Run trusted-local, model-free ContextForge bridge protocol v1.
+
+    The client must negotiate protocol 1.0 with hello before repository calls.
+    Stdout is protocol-only; bounded diagnostics use stderr. The bridge never
+    writes source or index state and never selects or invokes a model.
+    """
 
     if not stdio:
         _exit_with_error("bridge v1 requires --stdio", code=2)

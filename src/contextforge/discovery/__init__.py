@@ -1,7 +1,7 @@
 """Public model-free and model-assisted repository discovery API."""
 
 from contextforge.discovery.application import (
-    DISCOVERY_EXPANSION_TOOLS,
+    DISCOVERY_EXPANSION_OPERATIONS,
     DiscoveryApplicationError,
     DiscoveryPreparationMismatchError,
     DiscoverySelectionError,
@@ -22,6 +22,7 @@ from contextforge.discovery.models import (
     DiscoveryCandidate,
     DiscoveryCandidatePreparation,
     DiscoveryCandidateRecord,
+    DiscoveryExpansionOperation,
     DiscoveryExpansionRequest,
     DiscoveryExpansionResult,
     DiscoveryLineRange,
@@ -69,7 +70,7 @@ from contextforge.discovery.tools import (
 
 __all__ = [
     "DISCOVERY_APPLICATION_SCHEMA_VERSION",
-    "DISCOVERY_EXPANSION_TOOLS",
+    "DISCOVERY_EXPANSION_OPERATIONS",
     "DISCOVERY_SCHEMA_VERSION",
     "DISCOVERY_SYSTEM_INSTRUCTIONS",
     "DISCOVERY_TOOL_SCHEMAS",
@@ -86,6 +87,7 @@ __all__ = [
     "DiscoveryCandidateRecord",
     "DiscoveryError",
     "DiscoveryExpansionRequest",
+    "DiscoveryExpansionOperation",
     "DiscoveryExpansionResult",
     "DiscoveryKnowledge",
     "DiscoveryLimitError",
