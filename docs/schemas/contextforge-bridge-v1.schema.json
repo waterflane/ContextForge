@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/contextforge-bridge-v1.schema.json",
+  "title": "ContextForge Generic Bridge Protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/cancellation" },
+    { "$ref": "#/$defs/response" }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "kind",
+        "request_id",
+        "operation",
+        "repository_root",
+        "payload"
+      ],
+      "properties": {
+        "protocol_version": { "const": "1.0" },
+        "kind": { "const": "request" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "operation": {
+          "enum": [
+            "prepare_discovery_candidates",
+            "expand_discovery",
+            "read_verified_context",
+            "package_verified_context"
+          ]
+        },
+        "repository_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "payload": { "type": "object" },
+        "cancellation_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/identifier" },
+            { "type": "null" }
+          ],
+          "default": null
+        }
+      }
+    },
+    "cancellation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "kind", "cancellation_id"],
+      "properties": {
+        "protocol_version": { "const": "1.0" },
+        "kind": { "const": "cancel" },
+        "cancellation_id": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/identifier" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "kind",
+        "request_id",
+        "ok",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "protocol_version": { "const": "1.0" },
+        "kind": { "const": "response" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "ok": { "type": "boolean" },
+        "result": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "error": {
+          "anyOf": [
+            { "$ref": "#/$defs/error" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "ok": { "const": true } } },
+          "then": {
+            "properties": {
+              "result": { "type": "object" },
+              "error": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "result": { "type": "null" },
+              "error": { "$ref": "#/$defs/error" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

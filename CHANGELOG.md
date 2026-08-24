@@ -8,6 +8,20 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+### Added
+
+- Added immutable, model-free repository discovery application contracts for
+  deterministic candidate preparation, read-only expansion, verified source
+  reads, and canonical context packaging.
+- Added the generic ContextForge bridge protocol v1 ADR, transport-neutral
+  message models, and JSON Schema without adding a stdio or NDJSON server.
+
+### Changed
+
+- Kept model-assisted discovery on the existing provider-backed path while
+  sharing its snapshot, mode, ranking, stale-index, path, and budget semantics
+  with the new public preparation API.
+
 ## [0.4.2.post1] - 2026-08-21
 
 ### Fixed

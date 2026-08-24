@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from enum import StrEnum
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from contextforge.core.validation import Sha256, validate_portable_relative_path
 
 DISCOVERY_SCHEMA_VERSION: Literal[1] = 1
+DISCOVERY_APPLICATION_SCHEMA_VERSION: Literal[1] = 1
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -264,6 +266,268 @@ class DiscoveryCandidateRecord(DiscoveryModel):
         return validate_portable_relative_path(value)
 
 
+class PreparedDiscoveryCandidate(DiscoveryModel):
+    """Portable deterministic candidate offered to an external orchestrator."""
+
+    candidate_id: str
+    path: str
+    language: str
+    rank: PositiveInt
+    score: float = Field(ge=0.0, allow_inf_nan=False)
+    ranking_signals: tuple[str, ...] = Field(min_length=1, max_length=10)
+    source_sha256: Sha256
+    source_size_bytes: NonNegativeInt
+    evidence_origin: Literal["snapshot", "fresh", "indexed", "hybrid"]
+    structural_evidence: bool
+    semantic_evidence: bool
+
+    @field_validator("candidate_id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("candidate_id must be a bounded portable identifier")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def validate_candidate_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+
+class DiscoveryCandidatePreparation(DiscoveryModel):
+    """Immutable model-free discovery input pinned to repository truth."""
+
+    schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
+    preparation_id: Sha256
+    task: str = Field(min_length=1, max_length=20_000)
+    mode: DiscoveryMode
+    pinned_paths: tuple[str, ...] = ()
+    excluded_paths: tuple[str, ...] = ()
+    strict: bool = False
+    source_snapshot_digest: Sha256
+    index_generation_id: Sha256 | None = None
+    index_status: Literal["not_used", "unavailable", "current", "stale"]
+    candidates: tuple[PreparedDiscoveryCandidate, ...]
+    total_candidate_count: NonNegativeInt
+    stale_index_paths: tuple[str, ...] = ()
+    warnings: tuple[CompletenessWarning, ...] = ()
+    budget: DiscoveryBudget
+    budget_usage: DiscoveryBudgetUsage
+
+    @field_validator("stale_index_paths")
+    @classmethod
+    def validate_stale_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        paths = tuple(validate_portable_relative_path(path) for path in value)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("stale index paths must be unique and canonical")
+        return paths
+
+    @field_validator("pinned_paths", "excluded_paths")
+    @classmethod
+    def validate_manual_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        paths = tuple(validate_portable_relative_path(path) for path in value)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("manual paths must be unique and canonical")
+        return paths
+
+    @model_validator(mode="after")
+    def validate_candidates(self) -> DiscoveryCandidatePreparation:
+        identifiers = tuple(item.candidate_id for item in self.candidates)
+        ranks = tuple(item.rank for item in self.candidates)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("prepared candidate IDs must be unique")
+        if ranks != tuple(sorted(ranks)):
+            raise ValueError("prepared candidates must use canonical rank order")
+        if self.total_candidate_count < len(self.candidates):
+            raise ValueError("total candidate count cannot be below serialized count")
+        return self
+
+
+class DiscoveryExpansionRequest(DiscoveryModel):
+    """One stateless read-only evidence operation over a preparation."""
+
+    schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
+    preparation_id: Sha256
+    action_id: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    budget_usage: DiscoveryBudgetUsage = Field(default_factory=DiscoveryBudgetUsage)
+
+    @field_validator("action_id", "tool_name")
+    @classmethod
+    def validate_identifier(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("operation identifiers must be bounded and portable")
+        return value
+
+
+class DiscoveryExpansionResult(DiscoveryModel):
+    """Immutable result of one deterministic discovery expansion."""
+
+    schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
+    preparation_id: Sha256
+    observation: DiscoveryObservation
+    budget_usage: DiscoveryBudgetUsage
+
+
+class DiscoverySelectionItem(DiscoveryModel):
+    """One prepared candidate selected by a caller, optionally by line range."""
+
+    candidate_id: str
+    ranges: tuple[DiscoveryLineRange, ...] = ()
+
+    @field_validator("candidate_id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("candidate_id must be a bounded portable identifier")
+        return value
+
+    @field_validator("ranges")
+    @classmethod
+    def validate_ranges(
+        cls, value: tuple[DiscoveryLineRange, ...]
+    ) -> tuple[DiscoveryLineRange, ...]:
+        previous_end = 0
+        for item in value:
+            if item.start_line <= previous_end:
+                raise ValueError("selection ranges must be sorted and disjoint")
+            previous_end = item.end_line
+        return value
+
+
+class DiscoverySelection(DiscoveryModel):
+    """Caller-owned selection over a specific deterministic preparation."""
+
+    schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
+    preparation_id: Sha256
+    items: tuple[DiscoverySelectionItem, ...] = Field(min_length=1)
+    budget_usage: DiscoveryBudgetUsage = Field(default_factory=DiscoveryBudgetUsage)
+
+    @field_validator("items")
+    @classmethod
+    def validate_items(
+        cls, value: tuple[DiscoverySelectionItem, ...]
+    ) -> tuple[DiscoverySelectionItem, ...]:
+        identifiers = tuple(item.candidate_id for item in value)
+        if identifiers != tuple(sorted(set(identifiers))):
+            raise ValueError("selection items must be unique and canonical")
+        return value
+
+
+class VerifiedContextBlock(DiscoveryModel):
+    """One verified canonical source block."""
+
+    start_line: PositiveInt | None = None
+    end_line: PositiveInt | None = None
+    text: str
+    line_count: NonNegativeInt
+    size_bytes: NonNegativeInt
+    sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> VerifiedContextBlock:
+        if (self.start_line is None) != (self.end_line is None):
+            raise ValueError("verified block bounds must both be set or absent")
+        if (
+            self.start_line is not None
+            and self.end_line is not None
+            and self.end_line < self.start_line
+        ):
+            raise ValueError("verified block end must not precede start")
+        if "\r" in self.text:
+            raise ValueError("verified text must use canonical LF newlines")
+        encoded = self.text.encode("utf-8")
+        if self.size_bytes != len(encoded):
+            raise ValueError("verified block size does not match UTF-8 content")
+        if self.sha256 != hashlib.sha256(encoded).hexdigest():
+            raise ValueError("verified block hash does not match content")
+        line_count = (
+            0
+            if not self.text
+            else self.text.count("\n") + (not self.text.endswith("\n"))
+        )
+        if self.line_count != line_count:
+            raise ValueError("verified block line count does not match content")
+        if (
+            self.start_line is not None
+            and self.end_line is not None
+            and self.line_count != self.end_line - self.start_line + 1
+        ):
+            raise ValueError("verified block line count does not match range")
+        return self
+
+
+class VerifiedContextFile(DiscoveryModel):
+    """One snapshot-owned file whose selected content was re-read and verified."""
+
+    candidate_id: str
+    path: str
+    language: str | None = None
+    source_size_bytes: NonNegativeInt
+    source_sha256: Sha256
+    source_line_count: NonNegativeInt
+    blocks: tuple[VerifiedContextBlock, ...] = Field(min_length=1)
+    included_line_count: NonNegativeInt
+    included_content_bytes: NonNegativeInt
+
+    @field_validator("path")
+    @classmethod
+    def validate_file_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+    @field_validator("candidate_id")
+    @classmethod
+    def validate_candidate_id(cls, value: str) -> str:
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError("candidate_id must be a bounded portable identifier")
+        return value
+
+    @model_validator(mode="after")
+    def validate_content(self) -> VerifiedContextFile:
+        if self.included_line_count != sum(item.line_count for item in self.blocks):
+            raise ValueError("included line count does not match verified blocks")
+        if self.included_content_bytes != sum(item.size_bytes for item in self.blocks):
+            raise ValueError("included byte count does not match verified blocks")
+        if self.included_content_bytes > self.source_size_bytes:
+            raise ValueError("verified content cannot exceed source size")
+        ranged = any(item.start_line is not None for item in self.blocks)
+        if ranged and any(item.start_line is None for item in self.blocks):
+            raise ValueError("verified file cannot mix full and ranged blocks")
+        if not ranged and len(self.blocks) != 1:
+            raise ValueError("verified full source requires exactly one block")
+        return self
+
+
+class VerifiedContext(DiscoveryModel):
+    """All-or-nothing verified source content ready for deterministic packaging."""
+
+    schema_version: Literal[1] = DISCOVERY_APPLICATION_SCHEMA_VERSION
+    preparation_id: Sha256
+    task: str = Field(min_length=1, max_length=20_000)
+    mode: DiscoveryMode
+    source_snapshot_digest: Sha256
+    index_generation_id: Sha256 | None = None
+    files: tuple[VerifiedContextFile, ...] = Field(min_length=1)
+    budget_usage: DiscoveryBudgetUsage
+
+    @model_validator(mode="after")
+    def validate_files(self) -> VerifiedContext:
+        identifiers = tuple(item.candidate_id for item in self.files)
+        paths = tuple(item.path for item in self.files)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("verified candidate IDs must be unique")
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("verified paths must be unique and canonical")
+        if self.budget_usage.context_files != len(self.files):
+            raise ValueError("context file usage does not match verified files")
+        if self.budget_usage.context_bytes != sum(
+            item.included_content_bytes for item in self.files
+        ):
+            raise ValueError("context byte usage does not match verified files")
+        return self
+
+
 class CompletenessWarning(DiscoveryModel):
     """Advisory missing-context or static-analysis limitation."""
 
@@ -446,6 +710,7 @@ class DiscoveryRunRecord(DiscoveryModel):
 
 
 __all__ = [
+    "DISCOVERY_APPLICATION_SCHEMA_VERSION",
     "DISCOVERY_SCHEMA_VERSION",
     "CompletenessWarning",
     "DiscoveryAction",
@@ -453,14 +718,23 @@ __all__ = [
     "DiscoveryBudget",
     "DiscoveryBudgetUsage",
     "DiscoveryCandidate",
+    "DiscoveryCandidatePreparation",
     "DiscoveryCandidateRecord",
+    "DiscoveryExpansionRequest",
+    "DiscoveryExpansionResult",
     "DiscoveryLineRange",
     "DiscoveryMode",
     "DiscoveryObservation",
     "DiscoveryRequest",
     "DiscoveryRunRecord",
+    "DiscoverySelection",
+    "DiscoverySelectionItem",
     "DiscoveryState",
     "IndexedContextSelection",
+    "PreparedDiscoveryCandidate",
     "FinalContextSelection",
     "SelectionReason",
+    "VerifiedContext",
+    "VerifiedContextBlock",
+    "VerifiedContextFile",
 ]

@@ -212,7 +212,7 @@ class ReadOnlyMCPFoundation:
         # required later for the explicitly named suggest_context tool.
         session = DiscoverySession(
             self.snapshot,
-            provider,  # type: ignore[arg-type]
+            provider,
             request,
             git_diff_provider=self.git_provider,
         )
