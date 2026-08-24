@@ -28,10 +28,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.4.2.post2` is the current
-> first public-release candidate, including packaging-workflow corrections.
-> Discovery benchmarking is experimental and its results should be reviewed
-> alongside the recorded provider, model, configuration, and source snapshot.
+> ContextForge is pre-alpha software. Version `0.5.0` adds the stable generic
+> local bridge v1. Discovery benchmarking is experimental and
+> its results should be reviewed alongside the recorded provider, model,
+> configuration, and source snapshot.
 
 ## Why ContextForge
 
@@ -183,12 +183,16 @@ mutating operations.
 | `contextforge diagnostics config [PATH]` | Explain effective configuration | Read-only |
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
+| `contextforge bridge --stdio --workspace PATH` | Run persistent JSON-RPC bridge v1 | Verified read-only workspace session |
 | `contextforge benchmark discovery PATH` | Run manifest-driven discovery benchmarks | Repository/index read-only; experimental |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
 repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.
 Detailed syntax, defaults, streams, side effects, mistakes, and examples are in
 the [Wiki CLI reference](https://github.com/waterflane/ContextForge/wiki/CLI-Overview).
+The local integration contract is documented in the
+[bridge v1 guide](docs/guides/bridge.md), with a runnable
+[generic client](examples/generic_bridge_client.py).
 
 ## Configuration
 

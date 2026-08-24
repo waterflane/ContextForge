@@ -3,11 +3,12 @@
 import sys
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Never
+from typing import Annotated, BinaryIO, Never, cast
 
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.bridge import run_stdio_bridge
 from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
 from contextforge.cli.diagnostics_commands import diagnostics_app
@@ -161,7 +162,8 @@ def cli(
             log_format=None if log_format is None else log_format.value,
             log_file=log_file,
             component_filter=selected_components,
-            no_log_file=no_log_file or ctx.invoked_subcommand == "benchmark",
+            no_log_file=no_log_file
+            or ctx.invoked_subcommand in {"benchmark", "bridge"},
             no_color=no_color,
             verbosity=verbose,
         )
@@ -266,6 +268,50 @@ def doctor() -> None:
     typer.echo("ContextForge is installed.")
     typer.echo(f"Environment: {settings.environment}")
     typer.echo(f"Log level: {settings.log_level}")
+
+
+@app.command()
+def bridge(
+    stdio: Annotated[
+        bool,
+        typer.Option(
+            "--stdio",
+            help=(
+                "Required in v1. Read UTF-8 NDJSON requests from stdin and write "
+                "only JSON-RPC 2.0 responses to stdout."
+            ),
+        ),
+    ] = False,
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Repository root to bind for the lifetime of this verified "
+                "read-only local integration session."
+            ),
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+) -> None:
+    """Run trusted-local, model-free ContextForge bridge protocol v1.
+
+    The client must negotiate protocol 1.0 with hello before repository calls.
+    Stdout is protocol-only; bounded diagnostics use stderr. The bridge never
+    writes source or index state and never selects or invokes a model.
+    """
+
+    if not stdio:
+        _exit_with_error("bridge v1 requires --stdio", code=2)
+    input_stream = cast(BinaryIO, getattr(sys.stdin, "buffer", sys.stdin))
+    output_stream = cast(BinaryIO, getattr(sys.stdout, "buffer", sys.stdout))
+    try:
+        run_stdio_bridge(workspace, input_stream, output_stream, sys.stderr)
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
+        _exit_with_error(str(exc), code=1)
 
 
 @app.command()

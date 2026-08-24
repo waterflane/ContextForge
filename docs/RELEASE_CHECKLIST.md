@@ -37,13 +37,16 @@ uv run pytest
 uv build
 uv run twine check dist/*
 uv run check-wheel-contents dist/*.whl
+uv run python scripts/validate_distribution.py dist
 ```
 
 Inspect wheel and sdist contents. They may contain only package source,
 `pyproject.toml`, README, LICENSE, NOTICE, CHANGELOG, required packaging
 metadata, and Hatch's backend-required `.gitignore` build-control file. They
 must not contain tests, Wiki files, planning notes, GitHub metadata, caches,
-local state, logs, reports, credentials, or heavy images.
+local state, logs, reports, credentials, temporary bridge files, local paths,
+or development artifacts. Both archives must contain the complete
+`contextforge.bridge` package.
 
 Install the wheel and sdist in separate clean Python 3.12 and 3.13 environments.
 Verify only package metadata, importability, and version entry points:
@@ -53,7 +56,13 @@ python -c "import contextforge"
 contextforge --version
 ctxf --version
 python -m contextforge --version
+contextforge bridge --help
 ```
+
+Run an interactive subprocess smoke test that negotiates bridge protocol `1.0`,
+captures a real `snapshot`, and performs clean `shutdown`. Confirm every stdout
+line is JSON-RPC, stderr is separate, and the bound fixture workspace is byte-for-byte
+unchanged. Run the independent MCP stdio tests in the full pytest suite.
 
 Release validation must not require Ollama, LM Studio, a remote model API, an
 API server, or model-backed smoke tests. Tests use structural-only behavior or

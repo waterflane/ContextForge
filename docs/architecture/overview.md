@@ -27,6 +27,8 @@ The project is organized as a modular monolith with these boundaries:
 - `repositories`: repository and language analysis adapters;
 - `storage`: storage adapters;
 - `models`: model-provider adapters;
+- `bridge`: trusted-local JSON-RPC/NDJSON transport over the model-free
+  application boundary;
 - `cli`: command-line interface;
 - `api`: local HTTP API;
 - future IDE integrations outside the core.
@@ -61,7 +63,8 @@ a deterministic fake, and a local Ollama adapter. Incremental model-assisted
 [file and symbol semantic analysis](semantic-analysis.md) stores interpretations
 separately from source facts. Bounded hierarchical
 [repository architecture and feature maps](repository-maps.md) preserve the
-same facts-versus-interpretation boundary. Model-guided repository discovery is
+same facts-versus-interpretation boundary. Model-free and model-assisted
+repository discovery are
 documented in [Repository discovery](repository-discovery.md), and its
 review-to-package integration and pure prompt compiler are documented in
 [Context handoffs and prompt compilation](context-handoffs.md). ContextForge
@@ -75,7 +78,12 @@ decisions, request budgets, and causal errors for CLI and future interfaces
 without turning progress refreshes into logs. Thin Typer commands expose index and context workflows,
 while a bounded read-only MCP
 adapter exposes the same core APIs without shell, source-write, Git-mutation,
-or index-mutation capabilities.
+or index-mutation capabilities. The independent
+[generic bridge v1](../guides/bridge.md) is a second local stdio adapter. It
+binds one workspace, keeps repository truth and source verification inside
+ContextForge, and lets the consumer own model selection and orchestration. MCP
+and bridge do not depend on one another and neither introduces transport logic
+into the Python core.
 
 ## Excluded from v0.1.0
 
@@ -97,3 +105,5 @@ repository intelligence, bounded discovery, handoffs, and read-only MCP are
 implemented in v0.4. Version 0.4.1 adds maintenance-level progress,
 diagnostics, nested-ignore, and CLI usability improvements; it does not claim
 future GUI, remote transport, orchestration, or source-mutation functionality.
+Version 0.5.0 adds the trusted-local, model-free, read-only bridge v1 without
+changing the existing model-assisted discovery or MCP semantics.

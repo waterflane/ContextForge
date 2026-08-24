@@ -184,7 +184,7 @@ class DiscoverySession:
     def __init__(
         self,
         snapshot: ProjectSnapshot,
-        provider: ModelProvider,
+        provider: ModelProvider | None,
         request: DiscoveryRequest,
         *,
         git_diff_provider: GitDiffProvider | None = None,
@@ -390,7 +390,7 @@ class DiscoverySession:
                     "candidate_count_after_filtering": len(self._ranked_candidates),
                     "candidate_count_after_ranking": len(self._ranked_candidates),
                     "complete_index_considered_for_one_request": False,
-                    "synthesis_provider": self.provider.provider_id,
+                    "synthesis_provider": self._require_provider().provider_id,
                     "synthesis_mode": "provider",
                 },
             )
@@ -1345,7 +1345,7 @@ class DiscoverySession:
         total_deadline = asyncio.timeout(remaining)
         try:
             async with total_deadline:
-                response = await self.provider.complete_structured(
+                response = await self._require_provider().complete_structured(
                     request, cancellation=self.cancellation
                 )
         except TimeoutError as exc:
@@ -2147,6 +2147,11 @@ class DiscoverySession:
         if self._executor is None:
             raise RuntimeError("discovery tools are not initialized")
         return self._executor
+
+    def _require_provider(self) -> ModelProvider:
+        if self.provider is None:
+            raise RuntimeError("model-assisted discovery requires a ModelProvider")
+        return self.provider
 
 
 async def discover_repository(

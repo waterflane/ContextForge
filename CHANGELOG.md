@@ -8,13 +8,41 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
-## [0.4.2.post2] - 2026-08-21
+## [0.5.0] - 2026-08-24
 
-### Fixed
+### Added
 
-- Updated the SHA-pinned PyPI publishing action to a release that supports
-  Core Metadata 2.4, matching the metadata generated for ContextForge wheels
-  and source distributions.
+- Added immutable, model-free repository discovery application contracts for
+  deterministic candidate preparation, read-only expansion, verified source
+  reads, and canonical context packaging.
+- Added the generic ContextForge bridge protocol v1 ADR, normative JSON Schema,
+  persistent workspace-bound JSON-RPC 2.0 service over bounded UTF-8 NDJSON
+  stdio, and a runnable generic client example.
+- Added explicit protocol negotiation and compatibility failures for missing or
+  unsupported v1 handshakes, cooperative JSON-RPC request cancellation, typed
+  source-identity drift, deterministic preparation/selection identities, and
+  bounded concurrent requests with serialized responses.
+- Added bridge architecture, CLI, troubleshooting, security, stream,
+  cancellation, read-only, repository-truth, and source-verification guidance.
+
+### Changed
+
+- Kept model-assisted discovery on the existing provider-backed path while
+  sharing its snapshot, mode, ranking, stale-index, path, and budget semantics
+  with the new public preparation API.
+- Stabilized the public model-free expansion DTO around closed operations and
+  explicit result fields. Removed the unused competing bridge envelope and
+  stopped JSON-RPC responses from serializing internal model actions, tool
+  names, steps, request echoes, or whole application DTOs.
+- Kept the read-only MCP server independent and unchanged while adding the
+  separate bridge transport.
+
+### Security
+
+- Defined bridge v1 as a trusted-local integration transport rather than an
+  authentication, sandbox, network, or multi-tenant boundary. The fixed
+  workspace permits verified reads only: no provider/network access, shell,
+  arbitrary subprocess, source/Git/index mutation, or disk artifact publish.
 
 ## [0.4.2.post1] - 2026-08-21
 
