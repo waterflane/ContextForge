@@ -6,8 +6,8 @@ ContextForge is pre-1.0 software. Security fixes target the latest release.
 
 | Version | Supported |
 | --- | --- |
-| Latest `0.4.x` release | Yes |
-| `0.3.x` and earlier | No |
+| Latest `0.5.x` release | Yes |
+| `0.4.x` and earlier | No |
 
 ## Reporting a vulnerability
 
@@ -98,3 +98,22 @@ discovery executor as in-process callers. It advertises only read-only tools
 and resources: no sampling, remote transport, subscriptions, source/index
 mutation, shell/process execution, Git mutation, or agent orchestration.
 Protocol output is isolated on stdout; diagnostics use stderr.
+
+The ContextForge bridge is also a local stdio transport for trusted
+integrations, not a network service, sandbox, authorization layer, or
+multi-tenant boundary. The process inherits the invoking user's ability to read
+the bound workspace. Only launch clients you trust with repository excerpts,
+candidate metadata, index provenance, and context packages. Do not expose the
+bridge through a socket, web endpoint, shared pipe, privilege boundary, or
+untrusted process broker without adding authentication, authorization,
+isolation, and transport limits outside ContextForge.
+
+Bridge v1 is model-free and has no network, provider, shell, subprocess,
+source-write, Git-mutation, or index-mutation capability. Its package operation
+returns an in-memory artifact and does not publish a file. `snapshot`,
+`expected_snapshot_digest`, per-file SHA-256 identities, stable source reads,
+and `SOURCE_IDENTITY_CHANGED` prevent stale or substituted excerpts from being
+accepted as current repository truth. They detect changes; they do not turn a
+hostile same-account process into a safe peer. Stdout is reserved for bounded
+JSON-RPC frames and bounded diagnostics use stderr; both can contain sensitive
+repository-derived information and must be protected accordingly.

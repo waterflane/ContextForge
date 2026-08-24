@@ -60,6 +60,17 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [ ] Publish the reviewed signed `v0.4.2.post1` release through TestPyPI and
   PyPI.
 
+## v0.5: Generic local integration bridge (release prepared)
+
+- [x] Expose immutable model-free candidate, expansion, verified-read, and
+  package application contracts without changing model-assisted discovery.
+- [x] Add a persistent workspace-bound JSON-RPC 2.0 bridge over UTF-8 NDJSON
+  stdio with explicit protocol v1 negotiation and cancellation.
+- [x] Keep repository truth, source identity verification, path policy, and
+  read-only guarantees inside ContextForge while consumers own model selection.
+- [x] Keep MCP independent and preserve its existing read-only protocol.
+- [ ] Publish or tag 0.5.0 after review and explicit release approval.
+
 ## Later
 
 - Full multi-root workspaces.
@@ -67,8 +78,8 @@ This roadmap describes broad milestones only. It does not promise dates.
 - Optional supplementary retrieval strategies that do not replace complete
   allowed-tree/text access.
 - Graphical workspace review UI.
-- External coding-agent integrations that consume handoffs under their own
-  authority.
+- Richer external integrations that consume bridge results and handoffs under
+  their own authority.
 
 Autonomous edits, coding-agent orchestration, Git worktree management, and Git
 mutation are not part of the current roadmap.

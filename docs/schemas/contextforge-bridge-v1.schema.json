@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/contextforge-bridge-v1.schema.json",
+  "title": "ContextForge trusted-local bridge protocol v1",
+  "description": "Closed JSON-RPC 2.0 frames transported as one UTF-8 JSON object plus LF per stdio message.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/success" },
+    { "$ref": "#/$defs/failure" }
+  ],
+  "$defs": {
+    "id": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "integer" }
+      ]
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "timeout": { "type": "integer", "minimum": 1, "maximum": 900000 },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_steps": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "max_model_calls": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "max_files_read": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "max_source_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_tool_result_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_context_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
+        "max_context_files": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "max_preselected_candidates": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 900 },
+        "repeated_action_warning": { "type": "integer", "minimum": 2, "maximum": 4 },
+        "repeated_action_limit": { "type": "integer", "minimum": 3, "maximum": 10 }
+      }
+    },
+    "budgetUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "steps", "model_calls", "model_generations", "repair_generations",
+        "provider_discovery_calls", "provider_capability_calls",
+        "transport_attempts", "total_provider_http_calls",
+        "provider_http_calls", "files_read", "source_bytes",
+        "tool_result_bytes", "context_bytes", "context_files"
+      ],
+      "properties": {
+        "steps": { "type": "integer", "minimum": 0 },
+        "model_calls": { "type": "integer", "minimum": 0 },
+        "model_generations": { "type": "integer", "minimum": 0 },
+        "repair_generations": { "type": "integer", "minimum": 0 },
+        "provider_discovery_calls": { "type": "integer", "minimum": 0 },
+        "provider_capability_calls": { "type": "integer", "minimum": 0 },
+        "transport_attempts": { "type": "integer", "minimum": 0 },
+        "total_provider_http_calls": { "type": "integer", "minimum": 0 },
+        "provider_http_calls": { "type": "integer", "minimum": 0 },
+        "files_read": { "type": "integer", "minimum": 0 },
+        "source_bytes": { "type": "integer", "minimum": 0 },
+        "tool_result_bytes": { "type": "integer", "minimum": 0 },
+        "context_bytes": { "type": "integer", "minimum": 0 },
+        "context_files": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "lineRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_line", "end_line"],
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "selectionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id"],
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "path": { "$ref": "#/$defs/portablePath" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "ranges": { "type": "array", "items": { "$ref": "#/$defs/lineRange" } }
+      }
+    },
+    "request": {
+      "oneOf": [
+        { "$ref": "#/$defs/helloRequest" },
+        { "$ref": "#/$defs/statusRequest" },
+        { "$ref": "#/$defs/snapshotRequest" },
+        { "$ref": "#/$defs/discoverRequest" },
+        { "$ref": "#/$defs/expandRequest" },
+        { "$ref": "#/$defs/readRequest" },
+        { "$ref": "#/$defs/packageRequest" },
+        { "$ref": "#/$defs/cancelRequest" },
+        { "$ref": "#/$defs/shutdownRequest" }
+      ]
+    },
+    "helloRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "hello" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["protocol_version"],
+          "properties": {
+            "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$", "maxLength": 32 },
+            "client_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "statusRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "status" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "snapshotRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "snapshot" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "timeout_ms": { "$ref": "#/$defs/timeout" } }
+        }
+      }
+    },
+    "discoverRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "discover" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expected_snapshot_digest", "task"],
+          "properties": {
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "task": { "type": "string", "minLength": 1, "maxLength": 20000 },
+            "mode": { "enum": ["fresh", "indexed", "hybrid"] },
+            "pinned_paths": { "type": "array", "items": { "$ref": "#/$defs/portablePath" }, "uniqueItems": true },
+            "excluded_paths": { "type": "array", "items": { "$ref": "#/$defs/portablePath" }, "uniqueItems": true },
+            "strict": { "type": "boolean" },
+            "budget": { "$ref": "#/$defs/budget" },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "expandRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "expand" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expected_snapshot_digest", "preparation_id", "operation"],
+          "properties": {
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "preparation_id": { "$ref": "#/$defs/sha256" },
+            "operation": { "enum": ["symbol", "text", "callers", "importers", "related_tests"] },
+            "arguments": { "type": "object" },
+            "budget_usage": { "$ref": "#/$defs/budgetUsage" },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "readRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "read" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expected_snapshot_digest", "preparation_id", "items"],
+          "properties": {
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "preparation_id": { "$ref": "#/$defs/sha256" },
+            "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/selectionItem" } },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "packageRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "package" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expected_snapshot_digest", "preparation_id", "items"],
+          "properties": {
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "preparation_id": { "$ref": "#/$defs/sha256" },
+            "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/selectionItem" } },
+            "include_tree": { "type": "boolean" },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "cancelRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "$/cancelRequest" },
+        "params": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" }
+          }
+        }
+      }
+    },
+    "shutdownRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "shutdown" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "timeout_ms": { "$ref": "#/$defs/timeout" } }
+        }
+      }
+    },
+    "helloResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contextforge_version", "supported_protocol_versions", "capabilities", "workspace", "policy"],
+      "properties": {
+        "protocol_version": { "const": "1.0" },
+        "contextforge_version": { "type": "string" },
+        "supported_protocol_versions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
+        "capabilities": { "type": "object" },
+        "workspace": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identity"],
+          "properties": { "identity": { "$ref": "#/$defs/sha256" } }
+        },
+        "policy": { "type": "object" }
+      }
+    },
+    "statusResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ready", "snapshot_digest", "current_snapshot_digest", "source_identity_changed", "index"],
+      "properties": {
+        "ready": { "type": "boolean" },
+        "snapshot_digest": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "current_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "source_identity_changed": { "type": "boolean" },
+        "index": { "type": "object" }
+      }
+    },
+    "snapshotResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_digest", "file_count", "source_bytes", "languages"],
+      "properties": {
+        "snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "source_bytes": { "type": "integer", "minimum": 0 },
+        "languages": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "path", "language", "rank", "score", "ranking_signals", "source_sha256", "source_size_bytes", "evidence_origin", "structural_evidence", "semantic_evidence"],
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "path": { "$ref": "#/$defs/portablePath" },
+        "language": { "type": "string" },
+        "rank": { "type": "integer", "minimum": 1 },
+        "score": { "type": "number", "minimum": 0 },
+        "ranking_signals": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string" } },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "source_size_bytes": { "type": "integer", "minimum": 0 },
+        "evidence_origin": { "enum": ["snapshot", "fresh", "indexed", "hybrid"] },
+        "structural_evidence": { "type": "boolean" },
+        "semantic_evidence": { "type": "boolean" }
+      }
+    },
+    "discoverResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preparation_id", "source_snapshot_digest", "mode", "index_generation_id", "index_status", "candidates", "total_candidate_count", "stale_index_paths", "warnings", "budget_usage", "config_digest", "model_provider_used"],
+      "properties": {
+        "preparation_id": { "$ref": "#/$defs/sha256" },
+        "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "mode": { "enum": ["fresh", "indexed", "hybrid"] },
+        "index_generation_id": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "index_status": { "enum": ["not_used", "unavailable", "current", "stale"] },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+        "total_candidate_count": { "type": "integer", "minimum": 0 },
+        "stale_index_paths": { "type": "array", "items": { "$ref": "#/$defs/portablePath" }, "uniqueItems": true },
+        "warnings": { "type": "array", "items": { "type": "object" } },
+        "budget_usage": { "$ref": "#/$defs/budgetUsage" },
+        "config_digest": { "$ref": "#/$defs/sha256" },
+        "model_provider_used": { "const": false }
+      }
+    },
+    "expandResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preparation_id", "operation", "ok", "code", "data", "truncated", "made_progress", "budget_usage"],
+      "properties": {
+        "preparation_id": { "$ref": "#/$defs/sha256" },
+        "operation": { "enum": ["symbol", "text", "callers", "importers", "related_tests"] },
+        "ok": { "type": "boolean" },
+        "code": { "type": "string" },
+        "data": { "type": "object" },
+        "truncated": { "type": "boolean" },
+        "made_progress": { "type": "boolean" },
+        "budget_usage": { "$ref": "#/$defs/budgetUsage" }
+      }
+    },
+    "verifiedBlock": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start_line", "end_line", "text", "line_count", "size_bytes", "sha256"],
+      "properties": {
+        "start_line": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "end_line": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "text": { "type": "string" },
+        "line_count": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "verifiedFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "path", "language", "source_size_bytes", "source_sha256", "source_line_count", "blocks", "included_line_count", "included_content_bytes"],
+      "properties": {
+        "candidate_id": { "type": "string" },
+        "path": { "$ref": "#/$defs/portablePath" },
+        "language": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+        "source_size_bytes": { "type": "integer", "minimum": 0 },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "source_line_count": { "type": "integer", "minimum": 0 },
+        "blocks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/verifiedBlock" } },
+        "included_line_count": { "type": "integer", "minimum": 0 },
+        "included_content_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "readResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preparation_id", "selection_id", "source_snapshot_digest", "files", "budget_usage"],
+      "properties": {
+        "preparation_id": { "$ref": "#/$defs/sha256" },
+        "selection_id": { "$ref": "#/$defs/sha256" },
+        "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "files": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/verifiedFile" } },
+        "budget_usage": { "$ref": "#/$defs/budgetUsage" }
+      }
+    },
+    "packageResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selection_id", "package"],
+      "properties": {
+        "selection_id": { "$ref": "#/$defs/sha256" },
+        "package": {
+          "type": "object",
+          "description": "Canonical ContextPackage schema 1, which is independently closed and verified.",
+          "required": ["schema_version", "title", "project", "tree", "files", "statistics"],
+          "properties": { "schema_version": { "const": 1 } }
+        }
+      }
+    },
+    "cancelResult": {
+      "type": "object", "additionalProperties": false, "required": ["cancelled"],
+      "properties": { "cancelled": { "type": "boolean" } }
+    },
+    "shutdownResult": {
+      "type": "object", "additionalProperties": false, "required": ["shutdown"],
+      "properties": { "shutdown": { "const": true } }
+    },
+    "success": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "oneOf": [
+            { "$ref": "#/$defs/helloResult" },
+            { "$ref": "#/$defs/statusResult" },
+            { "$ref": "#/$defs/snapshotResult" },
+            { "$ref": "#/$defs/discoverResult" },
+            { "$ref": "#/$defs/expandResult" },
+            { "$ref": "#/$defs/readResult" },
+            { "$ref": "#/$defs/packageResult" },
+            { "$ref": "#/$defs/cancelResult" },
+            { "$ref": "#/$defs/shutdownResult" }
+          ]
+        }
+      }
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "error": {
+          "type": "object", "additionalProperties": false,
+          "required": ["code", "message", "data"],
+          "properties": {
+            "code": { "type": "integer" },
+            "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "data": {
+              "type": "object", "required": ["code"],
+              "properties": {
+                "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# Model-guided repository discovery
+# Repository discovery
 
 ## Implemented boundary
 
@@ -60,18 +60,47 @@ contracts are documented in the
 
 ## Public API
 
-The main entry point is asynchronous:
+The model-free application boundary exposes four synchronous operations over
+immutable DTOs:
+
+```python
+prepared = prepare_discovery_candidates(snapshot, request)
+expanded = expand_discovery(snapshot, prepared, expansion)
+verified = read_verified_context(snapshot, prepared, selection)
+package = package_verified_context(snapshot, verified)
+```
+
+Candidate preparation and expansion reuse the same mode-aware knowledge loader,
+ranking, path policy, budgets, index freshness checks, and verified source tools
+as model-assisted discovery. They never require or invoke a `ModelProvider`.
+Prepared and verified DTOs contain portable paths and source identities but no
+repository root, filesystem handle, mutable executor, or `DiscoverySession`.
+The public expansion DTO names a closed `operation` and returns explicit
+`ok`, `code`, `data`, truncation, progress, and budget fields. Internal
+model-assisted `action_id`, `tool_name`, step counters, and
+`DiscoveryObservation` objects do not cross this application boundary.
+
+The existing model-assisted entry point remains asynchronous:
 
 ```python
 record = await discover_repository(snapshot, provider, request)
 ```
 
 `DiscoverySession` exposes the same lifecycle for callers that need in-progress
-state. Core closed models include `DiscoveryRequest`, `DiscoveryMode`,
+state inside trusted Python integrations. It is not a bridge DTO. Core closed
+models include `DiscoveryRequest`, `DiscoveryMode`,
 `DiscoveryAction`, `DiscoveryObservation`, `DiscoveryState`, `DiscoveryBudget`,
 `DiscoveryCandidate`, `SelectionReason`, `FinalContextSelection`,
 `CompletenessWarning`, and `DiscoveryRunRecord`. Typed failures carry a run
 record whose `final_selection` is always absent.
+
+The trusted-local stdio adapter is described by
+[ADR-002](../decisions/002-generic-context-bridge-protocol-v1.md), the
+[bridge guide](../guides/bridge.md), and the
+[protocol v1 JSON Schema](../schemas/contextforge-bridge-v1.schema.json).
+JSON-RPC, NDJSON framing, protocol negotiation, concurrency, cancellation, and
+process lifetime remain entirely in `contextforge.bridge`, not in the
+application DTOs or discovery core.
 
 ## Tool and security boundary
 

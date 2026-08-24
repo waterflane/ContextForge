@@ -14,17 +14,33 @@ EXPECTED_LICENSE = "Apache-2.0"
 VERSION_PATTERN = re.compile(r'^__version__ = "(?P<version>[^"]+)"$', re.MULTILINE)
 FORBIDDEN_PARTS = {
     ".contextforge",
+    ".agents",
+    ".coverage",
     ".env",
     ".git",
     ".github",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".uv-cache",
+    ".venv",
+    ".review-fixture",
     "__pycache__",
+    "build",
     "docs",
     "htmlcov",
     "tests",
+    "dist",
     "wiki",
+}
+FORBIDDEN_CONTENT_PATTERNS = {
+    "workspace absolute path": re.compile(
+        rb"C:[\\/]+Programming[\\/]+Projects[\\/]+ContextForge", re.IGNORECASE
+    ),
+    "developer home path": re.compile(rb"C:[\\/]+Users[\\/]+water", re.IGNORECASE),
+    "private key": re.compile(rb"BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY"),
+    "AWS access key": re.compile(rb"AKIA[0-9A-Z]{16}"),
+    "provider credential": re.compile(rb"sk-[A-Za-z0-9_-]{20,}"),
 }
 
 
@@ -65,6 +81,14 @@ def _has_forbidden_part(path: PurePosixPath) -> bool:
     )
 
 
+def _validate_content(archive_name: str, member_name: str, payload: bytes) -> None:
+    for description, pattern in FORBIDDEN_CONTENT_PATTERNS.items():
+        if pattern.search(payload):
+            raise ValueError(
+                f"{archive_name}: {description} found in packaged {member_name}"
+            )
+
+
 def _validate_wheel(path: Path, version: str) -> None:
     with zipfile.ZipFile(path) as archive:
         names = [PurePosixPath(name) for name in archive.namelist()]
@@ -80,6 +104,18 @@ def _validate_wheel(path: Path, version: str) -> None:
                 raise ValueError(f"{path.name}: unexpected wheel path {name}")
             if _has_forbidden_part(name):
                 raise ValueError(f"{path.name}: forbidden wheel path {name}")
+            if name.parts and not str(name).endswith("/"):
+                _validate_content(path.name, str(name), archive.read(str(name)))
+        required_bridge = {
+            PurePosixPath("contextforge/bridge/__init__.py"),
+            PurePosixPath("contextforge/bridge/models.py"),
+            PurePosixPath("contextforge/bridge/protocol.py"),
+            PurePosixPath("contextforge/bridge/server.py"),
+        }
+        if not required_bridge.issubset(names):
+            raise ValueError(f"{path.name}: bridge package is incomplete")
+        if PurePosixPath("contextforge/protocol.py") in names:
+            raise ValueError(f"{path.name}: obsolete bridge envelope was packaged")
 
 
 def _validate_sdist(path: Path, version: str) -> None:
@@ -124,6 +160,24 @@ def _validate_sdist(path: Path, version: str) -> None:
                 raise ValueError(f"{path.name}: unexpected sdist path {relative}")
             if _has_forbidden_part(relative):
                 raise ValueError(f"{path.name}: forbidden sdist path {relative}")
+            if member.isfile():
+                member_file = archive.extractfile(member)
+                if member_file is None:
+                    raise ValueError(f"{path.name}: could not read {relative}")
+                _validate_content(path.name, str(relative), member_file.read())
+        relative_names = {
+            PurePosixPath(*PurePosixPath(member.name).parts[1:]) for member in members
+        }
+        required_bridge = {
+            PurePosixPath("src/contextforge/bridge/__init__.py"),
+            PurePosixPath("src/contextforge/bridge/models.py"),
+            PurePosixPath("src/contextforge/bridge/protocol.py"),
+            PurePosixPath("src/contextforge/bridge/server.py"),
+        }
+        if not required_bridge.issubset(relative_names):
+            raise ValueError(f"{path.name}: bridge package is incomplete")
+        if PurePosixPath("src/contextforge/protocol.py") in relative_names:
+            raise ValueError(f"{path.name}: obsolete bridge envelope was packaged")
 
 
 def main() -> None:

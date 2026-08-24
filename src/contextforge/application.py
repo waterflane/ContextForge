@@ -23,6 +23,12 @@ from contextforge.discovery import (
     discover_repository,
     render_context_suggestion,
 )
+from contextforge.discovery.application import (
+    expand_discovery,
+    package_verified_context,
+    prepare_discovery_candidates,
+    read_verified_context,
+)
 from contextforge.filesystem import FileTooLargeError, StableReadError, read_file_stably
 from contextforge.git import GitDiffRequest
 from contextforge.handoff import (
@@ -1400,8 +1406,12 @@ __all__ = [
     "canonical_json",
     "clean_repository_index",
     "create_automatic_handoff",
+    "expand_discovery",
     "inspect_repository_index",
     "load_task_handoff",
+    "package_verified_context",
+    "prepare_discovery_candidates",
+    "read_verified_context",
     "render_context_suggestion",
     "render_handoff_review",
     "suggest_repository_context",
