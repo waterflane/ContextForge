@@ -58,6 +58,7 @@ max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
 semantic_max_output_tokens = 512
+reasoning_effort = "off"
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -66,6 +67,12 @@ store_raw_responses = false
 [models.structured_response]
 max_repair_attempts = 5
 ```
+
+Structured repository operations default to `reasoning_effort = "off"` so
+reasoning-capable OpenAI-compatible models reserve their bounded output for the
+required JSON. Values `low`, `medium`, `high`, and `provider_default` are also
+accepted. A server that explicitly rejects the parameter is retried once with
+its provider default and emits a safe diagnostic warning.
 
 Generic OpenAI-compatible APIs do not standardize context-window discovery.
 ContextForge therefore uses a conservative 4,096-token default unless

@@ -356,19 +356,46 @@ class OpenAICompatibleModelProvider:
             payload["response_format"] = {"type": "json_object"}
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
+        if self.configuration.reasoning_effort != "provider_default":
+            payload["reasoning_effort"] = self.configuration.reasoning_effort
         response = await self._request(
             "POST",
             _endpoint(self.configuration.endpoint, "chat/completions"),
             _json_bytes(payload),
             credential,
         )
+        reasoning_fallback = False
+        if "reasoning_effort" in payload and _reasoning_effort_rejected(response):
+            reasoning_fallback = True
+            payload.pop("reasoning_effort")
+            emit(
+                "provider",
+                "provider.reasoning_effort.rejected",
+                "Provider rejected reasoning_effort; retrying with provider default.",
+                level=LogLevel.WARNING,
+                request_id=request.operation_id,
+                error_code="reasoning_effort_unsupported",
+                fallback_selected=True,
+                data={"fallback": "provider_default"},
+            )
+            response = await self._request(
+                "POST",
+                _endpoint(self.configuration.endpoint, "chat/completions"),
+                _json_bytes(payload),
+                credential,
+            )
         _raise_for_status(
             response,
             operation="chat completion",
             model_id=self.configuration.model_id,
             structured_mode=mode,
         )
-        return _parse_chat_completion(response.body)
+        parsed = _parse_chat_completion(response.body)
+        return (
+            _with_provider_http_calls(parsed, 1, transport_attempts=1)
+            if reasoning_fallback
+            else parsed
+        )
 
     async def _default_transport(
         self,
@@ -638,6 +665,19 @@ def _optional_non_negative_int(value: object, label: str) -> int | None:
             f"OpenAI-compatible response contained invalid {label}"
         )
     return value
+
+
+def _reasoning_effort_rejected(response: OpenAICompatibleHTTPResponse) -> bool:
+    if response.status not in {400, 422}:
+        return False
+    detail = _safe_error_detail(response.body)
+    if detail is None:
+        return False
+    lowered = detail.casefold()
+    return "reasoning_effort" in lowered or (
+        "reasoning effort" in lowered
+        and any(marker in lowered for marker in ("unknown", "unsupported", "invalid"))
+    )
 
 
 def _raise_for_status(

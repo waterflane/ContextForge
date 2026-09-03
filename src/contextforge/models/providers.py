@@ -132,6 +132,9 @@ class ProviderConfiguration(ProviderModel):
         le=MAX_JSON_REPAIR_ATTEMPTS,
         strict=True,
     )
+    reasoning_effort: Literal[
+        "off", "low", "medium", "high", "provider_default"
+    ] = "off"
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     credential_env: str | None = None
