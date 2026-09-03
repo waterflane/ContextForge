@@ -175,7 +175,7 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
         hello = (await harness.response(1))[0]
         assert hello["jsonrpc"] == "2.0"
         assert hello["result"]["protocol_version"] == "1.0"
-        assert hello["result"]["supported_protocol_versions"] == ["1.0"]
+        assert hello["result"]["supported_protocol_versions"] == ["1.0", "1.1"]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
         assert "shell" in hello["result"]["policy"]
@@ -214,7 +214,7 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         assert incompatible["error"]["data"] == {
             "code": "INCOMPATIBLE_PROTOCOL_VERSION",
             "requested_protocol_version": "2.0",
-            "supported_protocol_versions": ["1.0"],
+            "supported_protocol_versions": ["1.0", "1.1"],
         }
 
         harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))
@@ -641,6 +641,82 @@ def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(
         assert package["files"][0]["source_sha256"] == candidate["source_sha256"]
         assert source.read_bytes() == initial
         assert not (tmp_path / ".contextforge").exists()
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v11_expansion_candidate_can_be_read(tmp_path: Path) -> None:
+    (tmp_path / "alpha.py").write_text("alpha = 1\n", encoding="utf-8")
+    (tmp_path / "beta.ts").write_text(
+        "export function uniqueBeta() { return 2; }\n", encoding="utf-8"
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "1.1"}))
+        hello = (await harness.response(1))[-1]
+        assert hello["result"]["capabilities"]["expansion_candidates"] is True
+        digest = await _snapshot(harness, 2)
+        harness.input.send(
+            _request(
+                "discover",
+                "discover",
+                {
+                    "expected_snapshot_digest": digest,
+                    "task": "Find alpha",
+                    "mode": "fresh",
+                    "budget": {"max_preselected_candidates": 1},
+                },
+            )
+        )
+        discovered = (await harness.response(3))[-1]
+        assert "beta.ts" not in {
+            item["path"] for item in discovered["result"]["candidates"]
+        }
+        preparation_id = discovered["result"]["preparation_id"]
+
+        harness.input.send(
+            _request(
+                "expand",
+                "expand",
+                {
+                    "expected_snapshot_digest": digest,
+                    "preparation_id": preparation_id,
+                    "operation": "text",
+                    "arguments": {"query": "uniqueBeta", "case_sensitive": True},
+                },
+            )
+        )
+        expanded = (await harness.response(4))[-1]["result"]
+        candidate = next(
+            item for item in expanded["candidates"] if item["path"] == "beta.ts"
+        )
+        assert candidate["evidence_kind"] == "exact_text"
+        assert candidate["ranges"] == [{"start_line": 1, "end_line": 1}]
+
+        harness.input.send(
+            _request(
+                "read",
+                "read",
+                {
+                    "expected_snapshot_digest": digest,
+                    "preparation_id": preparation_id,
+                    "items": [
+                        {
+                            "candidate_id": candidate["candidate_id"],
+                            "path": candidate["path"],
+                            "source_sha256": candidate["source_sha256"],
+                            "ranges": candidate["ranges"],
+                        }
+                    ],
+                },
+            )
+        )
+        read = (await harness.response(5))[-1]
+        assert read["result"]["files"][0]["path"] == "beta.ts"
+        assert "uniqueBeta" in read["result"]["files"][0]["blocks"][0]["text"]
         await harness.close()
 
     asyncio.run(exercise())

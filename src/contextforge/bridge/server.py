@@ -39,11 +39,21 @@ from contextforge.discovery.application import (
     prepare_discovery_candidates,
     read_verified_context,
 )
-from contextforge.discovery.models import DiscoveryCandidatePreparation
+from contextforge.discovery.models import (
+    DiscoveryCandidatePreparation,
+    PreparedDiscoveryCandidate,
+)
 from contextforge.discovery.tools import TOOL_INPUT_MODELS
 from contextforge.intelligence import (
     calculate_source_snapshot_digest,
     canonical_json_bytes,
+    load_file_code_map,
+    load_manifest,
+)
+from contextforge.project_config import (
+    ProjectConfigError,
+    load_project_configuration,
+    resolve_provider_configuration,
 )
 from contextforge.repositories import ProjectSnapshot, ScanOptions, scan_repository
 
@@ -168,7 +178,7 @@ class _BoundedDiagnostics:
 
 
 class BridgeServer:
-    """Workspace-bound persistent ContextForge bridge protocol v1 server."""
+    """Workspace-bound persistent ContextForge bridge protocol server."""
 
     def __init__(
         self,
@@ -198,6 +208,7 @@ class BridgeServer:
         self._diagnostics = _BoundedDiagnostics(None)
         self._shutting_down = False
         self._protocol_negotiated = False
+        self._protocol_version: str | None = None
 
     async def serve(
         self,
@@ -407,6 +418,7 @@ class BridgeServer:
                         },
                     )
                 negotiated_protocol = True
+                self._protocol_version = hello.protocol_version
             elif method != "shutdown" and not self._protocol_negotiated:
                 raise BridgeFault(
                     PROTOCOL_NEGOTIATION_REQUIRED,
@@ -531,7 +543,7 @@ class BridgeServer:
 
     def _hello(self) -> dict[str, Any]:
         return {
-            "protocol_version": BRIDGE_PROTOCOL_VERSION,
+            "protocol_version": self._protocol_version or BRIDGE_PROTOCOL_VERSION,
             "supported_protocol_versions": list(SUPPORTED_BRIDGE_PROTOCOL_VERSIONS),
             "contextforge_version": __version__,
             "capabilities": {
@@ -552,6 +564,7 @@ class BridgeServer:
                 "concurrent_requests": True,
                 "serialized_responses": True,
                 "max_message_bytes": MAX_JSONRPC_MESSAGE_BYTES,
+                "expansion_candidates": self._protocol_version == "1.1",
             },
             "workspace": {
                 "identity": self.workspace_identity,
@@ -574,14 +587,20 @@ class BridgeServer:
         if cancellation.is_set():
             raise asyncio.CancelledError
         digest = calculate_source_snapshot_digest(snapshot)
+        provider_configuration = None
+        try:
+            project = load_project_configuration(self.workspace)
+            provider_configuration = resolve_provider_configuration(project)
+        except (ProjectConfigError, ValueError):
+            pass
         report = await asyncio.to_thread(
             inspect_repository_index,
             self.workspace,
-            provider_configuration=None,
+            provider_configuration=provider_configuration,
         )
         if cancellation.is_set():
             raise asyncio.CancelledError
-        return {
+        result: dict[str, Any] = {
             "ready": not self._shutting_down,
             "snapshot_digest": self._snapshot_digest,
             "current_snapshot_digest": digest,
@@ -610,6 +629,11 @@ class BridgeServer:
                 "lock_status": report.lock_status,
             },
         }
+        if self._protocol_version == "1.1":
+            result["index"]["coverage"] = await asyncio.to_thread(
+                self._index_coverage
+            )
+        return result
 
     async def _snapshot(self, cancellation: asyncio.Event) -> dict[str, Any]:
         snapshot = await asyncio.to_thread(scan_repository, self.workspace)
@@ -619,12 +643,13 @@ class BridgeServer:
         if digest != self._snapshot_digest:
             self._preparations.clear()
         self._snapshot_digest = digest
-        return {
+        response = {
             "snapshot_digest": digest,
             "file_count": len(snapshot.files),
             "source_bytes": sum(item.size_bytes for item in snapshot.files),
             "languages": dict(sorted(snapshot.summary.languages.items())),
         }
+        return response
 
     async def _discover(
         self, params: DiscoverParams, cancellation: asyncio.Event
@@ -647,7 +672,7 @@ class BridgeServer:
             cancellation=cancellation,
         )
         self._remember_preparation(preparation)
-        return {
+        response = {
             "preparation_id": preparation.preparation_id,
             "source_snapshot_digest": preparation.source_snapshot_digest,
             "mode": preparation.mode.value,
@@ -663,6 +688,7 @@ class BridgeServer:
             "config_digest": self.config_digest,
             "model_provider_used": False,
         }
+        return response
 
     async def _expand(
         self, params: ExpandParams, cancellation: asyncio.Event
@@ -686,7 +712,7 @@ class BridgeServer:
             expansion,
             cancellation=cancellation,
         )
-        return {
+        response = {
             "preparation_id": result.preparation_id,
             "operation": params.operation,
             "ok": result.ok,
@@ -696,6 +722,11 @@ class BridgeServer:
             "made_progress": result.made_progress,
             "budget_usage": result.budget_usage.model_dump(mode="json"),
         }
+        if self._protocol_version == "1.1":
+            response["candidates"] = self._register_expansion_candidates(
+                snapshot, preparation, params.operation, result.data
+            )
+        return response
 
     async def _read(
         self, params: ReadParams, cancellation: asyncio.Event
@@ -784,6 +815,127 @@ class BridgeServer:
             )
         self._preparations.move_to_end(preparation_id)
         return preparation
+
+    def _register_expansion_candidates(
+        self,
+        snapshot: ProjectSnapshot,
+        preparation: DiscoveryCandidatePreparation,
+        operation: ExpansionOperation,
+        data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if operation not in {"text", "symbol"}:
+            return []
+        raw_items = data.get("items")
+        if not isinstance(raw_items, list):
+            return []
+        files = {item.path: item for item in snapshot.files}
+        candidates = {item.path: item for item in preparation.candidates}
+        additions: list[PreparedDiscoveryCandidate] = []
+        response: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
+                continue
+            try:
+                path = validate_portable_relative_path(raw["path"])
+            except ValueError:
+                continue
+            if path in seen or path not in files:
+                continue
+            seen.add(path)
+            project_file = files[path]
+            line = raw.get("line")
+            ranges: list[dict[str, int]] = []
+            if type(line) is int and line > 0:
+                line_count = len(
+                    (snapshot.root / path).read_text(encoding="utf-8").splitlines()
+                )
+                ranges.append(
+                    {
+                        "start_line": max(1, line - 2),
+                        "end_line": min(max(1, line_count), line + 8),
+                    }
+                )
+            candidate = candidates.get(path)
+            if candidate is None:
+                identifier = "x-" + hashlib.sha256(
+                    f"{preparation.preparation_id}:{path}".encode()
+                ).hexdigest()[:16]
+                candidate = PreparedDiscoveryCandidate(
+                    candidate_id=identifier,
+                    path=path,
+                    language=project_file.language or "text",
+                    rank=len(preparation.candidates) + len(additions) + 1,
+                    score=0.0,
+                    ranking_signals=(f"expanded_{operation}_evidence",),
+                    source_sha256=project_file.sha256,
+                    source_size_bytes=project_file.size_bytes,
+                    evidence_origin="fresh",
+                    structural_evidence=False,
+                    semantic_evidence=False,
+                )
+                additions.append(candidate)
+                candidates[path] = candidate
+            response.append(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "path": path,
+                    "language": candidate.language,
+                    "kind": "line_ranges" if ranges else "codemap",
+                    "ranges": ranges,
+                    "source_sha256": candidate.source_sha256,
+                    "evidence_kind": (
+                        "verified_symbol" if operation == "symbol" else "exact_text"
+                    ),
+                    "confidence": 1.0,
+                }
+            )
+        if additions:
+            updated = preparation.model_copy(
+                update={
+                    "candidates": preparation.candidates + tuple(additions),
+                    "total_candidate_count": (
+                        preparation.total_candidate_count + len(additions)
+                    ),
+                }
+            )
+            self._preparations[preparation.preparation_id] = updated
+        return response
+
+    def _index_coverage(self) -> dict[str, int]:
+        coverage = {
+            "total_files": 0,
+            "parsed_files": 0,
+            "fallback_files": 0,
+            "semantic_complete_files": 0,
+            "semantic_disabled_files": 0,
+            "semantic_failed_files": 0,
+            "verified_symbols": 0,
+        }
+        try:
+            manifest = load_manifest(self.workspace)
+        except Exception:
+            return coverage
+        coverage["total_files"] = len(manifest.files)
+        for state in manifest.files:
+            if state.semantic_status == "complete":
+                coverage["semantic_complete_files"] += 1
+            elif state.semantic_status == "disabled":
+                coverage["semantic_disabled_files"] += 1
+            elif state.semantic_status == "failed":
+                coverage["semantic_failed_files"] += 1
+            try:
+                code_map = load_file_code_map(
+                    self.workspace, state.path, manifest=manifest
+                )
+            except Exception:
+                continue
+            if code_map.parse_status == "unsupported":
+                coverage["fallback_files"] += 1
+            else:
+                coverage["parsed_files"] += 1
+            coverage["verified_symbols"] += len(code_map.symbols)
+        return coverage
 
     def _remember_preparation(self, preparation: DiscoveryCandidatePreparation) -> None:
         self._preparations[preparation.preparation_id] = preparation

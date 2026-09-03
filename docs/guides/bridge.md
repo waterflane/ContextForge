@@ -25,7 +25,7 @@ Protocol versioning is independent of the ContextForge package version and the
 context-package schema. The first application request must be:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol_version":"1.0","client_name":"example"}}
+{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol_version":"1.1","client_name":"example"}}
 ```
 
 The response reports `protocol_version`, `supported_protocol_versions`, exact
@@ -67,6 +67,13 @@ The public `expand` operations in v1 are `symbol`, `text`, `callers`,
 `importers`, and `related_tests`. Their `data` is bounded structured evidence.
 No internal discovery action IDs, tool names, mutable executors, or model-side
 session state are part of the bridge contract.
+
+Version 1.1 adds verified expansion candidates. `text` and `symbol` expansion
+results include a `candidates` array whose IDs are registered under the same
+`preparation_id`; callers may pass those IDs and ranges directly to `read` or
+`package`. Version 1.0 retains its original response shape. Version 1.1 status
+also includes index coverage counts so a structural-only or semantic-disabled
+index cannot be mistaken for a fully enriched one.
 
 ## Method contract
 
