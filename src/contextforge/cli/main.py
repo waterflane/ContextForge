@@ -299,7 +299,7 @@ def bridge(
 ) -> None:
     """Run trusted-local, model-free ContextForge bridge protocol v1.
 
-    The client must negotiate protocol 1.0 with hello before repository calls.
+    The client must negotiate protocol 1.0 or 1.1 with hello before repository calls.
     Stdout is protocol-only; bounded diagnostics use stderr. The bridge never
     writes source or index state and never selects or invokes a model.
     """
