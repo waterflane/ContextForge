@@ -145,6 +145,39 @@ def test_unacceptable_finish_states_enter_repair_policy(finish_reason: str) -> N
     }
 
 
+def test_truncation_retries_once_at_larger_budget_without_json_repair() -> None:
+    budgets: list[int | None] = []
+
+    def responder(request: ModelRequest, index: int) -> ProviderTransportResponse:
+        budgets.append(request.max_output_tokens)
+        if index == 0:
+            return ProviderTransportResponse(text="{", finish_reason="length")
+        return ProviderTransportResponse(text=_valid(), finish_reason="stop")
+
+    provider = FakeModelProvider(
+        _configuration(max_json_repair_attempts=0), responder=responder
+    )
+    request = _request()
+    request = ModelRequest(
+        operation_id=request.operation_id,
+        purpose=request.purpose,
+        system_instructions=request.system_instructions,
+        analysis_task=request.analysis_task,
+        trusted_code_map_facts=request.trusted_code_map_facts,
+        untrusted_sources=request.untrusted_sources,
+        response_model=request.response_model,
+        max_output_tokens=128,
+        max_output_tokens_ceiling=256,
+    )
+
+    response = asyncio.run(provider.complete_structured(request))
+
+    assert budgets == [128, 256]
+    assert response.diagnostic is not None
+    assert response.diagnostic.json_repair_attempt == 0
+    assert response.diagnostic.model_generations == 2
+
+
 def test_internal_conversion_failure_is_repairable_and_safe() -> None:
     def reject(_: BaseModel) -> None:
         raise ValueError("bounded internal conversion failed")

@@ -1508,6 +1508,7 @@ def _request(
         response_model=response_model,
         untrusted_contexts=contexts,
         max_output_tokens=selected_output_budget,
+        max_output_tokens_ceiling=options.max_output_tokens,
         max_response_bytes=options.max_response_bytes,
         metadata={
             "analyzer_version": SEMANTIC_ANALYZER_VERSION,

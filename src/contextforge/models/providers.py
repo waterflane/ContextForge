@@ -416,6 +416,7 @@ class ModelRequest:
     response_schema_version: int = SUPPORTED_RESPONSE_SCHEMA_VERSION
     schema_mode: Literal["json_schema", "json_object", "plain_json"] = "json_schema"
     max_output_tokens: int | None = None
+    max_output_tokens_ceiling: int | None = None
     temperature: float = 0.0
     max_response_bytes: int | None = None
     allow_fenced_json: bool = True
@@ -474,6 +475,18 @@ class ModelRequest:
             type(self.max_output_tokens) is not int or self.max_output_tokens <= 0
         ):
             raise ValueError("max_output_tokens must be a positive integer or None")
+        if self.max_output_tokens_ceiling is not None and (
+            type(self.max_output_tokens_ceiling) is not int
+            or self.max_output_tokens_ceiling <= 0
+            or (
+                self.max_output_tokens is not None
+                and self.max_output_tokens_ceiling < self.max_output_tokens
+            )
+        ):
+            raise ValueError(
+                "max_output_tokens_ceiling must be positive and not below "
+                "max_output_tokens"
+            )
         if (
             isinstance(self.temperature, bool)
             or not math.isfinite(self.temperature)
@@ -1113,6 +1126,7 @@ class ProviderRuntime:
         active_request = request
         request_id = request.operation_id
         last_response_issue_fingerprint: str | None = None
+        truncation_retry_attempted = False
 
         def counter_data() -> dict[str, Any]:
             return {
@@ -1132,6 +1146,7 @@ class ProviderRuntime:
                     "repair_strategy", "initial"
                 ),
                 "schema_mode": active_request.schema_mode,
+                "truncation_retry_attempted": truncation_retry_attempted,
             }
 
         emit(
@@ -1557,6 +1572,74 @@ class ProviderRuntime:
             if isinstance(error, StructuredResponseError):
                 issues = error.issues
                 issue_data = _safe_issue_data(issues)
+                current_output_tokens = active_request.max_output_tokens
+                output_ceiling = active_request.max_output_tokens_ceiling
+                truncated = any(issue.code == "truncated_response" for issue in issues)
+                if (
+                    truncated
+                    and not truncation_retry_attempted
+                    and current_output_tokens is not None
+                    and output_ceiling is not None
+                    and current_output_tokens < output_ceiling
+                ):
+                    increased_output_tokens = min(
+                        output_ceiling,
+                        max(current_output_tokens + 1, current_output_tokens * 2),
+                    )
+                    expanded_request = replace(
+                        active_request, max_output_tokens=increased_output_tokens
+                    )
+                    expanded_budget = estimate_request_context(
+                        expanded_request,
+                        self.configuration,
+                        include_native_schema=(
+                            expanded_request.schema_mode == "json_schema"
+                        ),
+                    )
+                    if expanded_budget.fits:
+                        truncation_retry_attempted = True
+                        active_request = expanded_request
+                        transport_attempt = 1
+                        emit(
+                            "provider",
+                            "provider.truncation.retry_scheduled",
+                            "Retrying a truncated structured response with a larger "
+                            "output budget.",
+                            level=LogLevel.WARNING,
+                            operation_id=request.operation_id,
+                            request_id=request_id,
+                            parent_operation_id=request.parent_operation_id,
+                            top_level_operation_id=request.top_level_operation_id,
+                            phase_id="response_validation",
+                            retry_scheduled=True,
+                            data={
+                                **counter_data(),
+                                "previous_output_token_budget": current_output_tokens,
+                                "output_token_budget": increased_output_tokens,
+                                "output_token_ceiling": output_ceiling,
+                                "structured_repair": False,
+                            },
+                        )
+                        progress.report(
+                            "provider_retry",
+                            "Response was truncated; retrying with a larger output "
+                            "budget.",
+                            percentage=0,
+                            completed=0,
+                            total=1,
+                            planned_units=1,
+                            lifecycle_state="truncation_retry",
+                            safe_error_code="truncated_response",
+                            safe_error_message=(
+                                "Provider stopped before the structured response "
+                                "completed."
+                            ),
+                            current_attempt=1,
+                            max_attempts=1,
+                            metadata=counter_data(),
+                            **common_progress,
+                        )
+                        continue
                 response_issue_fingerprint = structured_validation_fingerprint(issues)
                 repeated_failure = (
                     last_response_issue_fingerprint == response_issue_fingerprint
