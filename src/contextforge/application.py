@@ -46,10 +46,12 @@ from contextforge.intelligence import (
     GENERIC_SEMANTIC_ANALYZER_VERSION,
     GLOBAL_MAP_PROMPT_VERSION,
     INDEX_SCHEMA_VERSION,
+    POLYGLOT_ANALYZER,
     PYTHON_ANALYZER,
     SEMANTIC_ANALYZER_ID,
     SEMANTIC_ANALYZER_VERSION,
     SEMANTIC_PROMPT_VERSION,
+    SUPPORTED_POLYGLOT_LANGUAGES,
     ArchitectureMap,
     GlobalMapAnalysisOptions,
     GlobalMapBuildResult,
@@ -733,12 +735,18 @@ def _inspect_repository_index(
     for path in sorted(set(current) & set(indexed)):
         state = indexed[path]
         structural_expected = (
-            PYTHON_ANALYZER if current[path].language == "Python" else FALLBACK_ANALYZER
+            PYTHON_ANALYZER
+            if current[path].language == "Python"
+            else POLYGLOT_ANALYZER
+            if current[path].language in SUPPORTED_POLYGLOT_LANGUAGES
+            else FALLBACK_ANALYZER
         )
         if state.analyzer != structural_expected:
             stale.add(path)
         semantic_expected = _semantic_identity(
-            provider_configuration, generic=current[path].language != "Python"
+            provider_configuration,
+            generic=current[path].language not in SUPPORTED_POLYGLOT_LANGUAGES
+            and current[path].language != "Python",
         )
         if semantic_expected is not None and (
             state.semantic_status != "complete"

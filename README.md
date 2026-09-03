@@ -41,7 +41,8 @@ commands.
 - **Reviewable selection.** Choose exact files, directories, GitWildMatch
   patterns, or line ranges—or ask a configured model for a bounded suggestion.
 - **Local repository intelligence.** Store immutable structural and optional
-  semantic index generations under `.contextforge/index`.
+  semantic index generations under `.contextforge/index`, with verified symbols
+  for Python, JavaScript/TypeScript, Java, C#, Go, Rust, C/C++, PHP, and Ruby.
 - **Portable artifacts.** Export Markdown or JSON context packages, JSON task
   handoffs, and compiled Markdown prompts.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,

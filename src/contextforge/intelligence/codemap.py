@@ -24,7 +24,7 @@ RESOLVER_VERSION = "2"
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 Resolution = Literal["internal", "external", "unresolved"]
-ParseStatus = Literal["parsed", "unsupported", "parse_error"]
+ParseStatus = Literal["parsed", "partial", "unsupported", "parse_error"]
 Visibility = Literal["public", "private", "explicit_export", "unknown"]
 
 
@@ -36,11 +36,18 @@ class SymbolKind(StrEnum):
     """Source declaration kinds approved for verified CodeMaps."""
 
     MODULE = "module"
+    NAMESPACE = "namespace"
     CLASS = "class"
+    INTERFACE = "interface"
+    STRUCT = "struct"
+    ENUM = "enum"
+    TRAIT = "trait"
     FUNCTION = "function"
     ASYNC_FUNCTION = "async_function"
     METHOD = "method"
+    CONSTRUCTOR = "constructor"
     VARIABLE = "variable"
+    CONSTANT = "constant"
     TYPE_ALIAS = "type_alias"
 
 
@@ -265,10 +272,16 @@ class SymbolRecord(IndexModel):
             SymbolKind.FUNCTION,
             SymbolKind.ASYNC_FUNCTION,
             SymbolKind.METHOD,
+            SymbolKind.CONSTRUCTOR,
         } and (self.parameters or self.return_annotation is not None):
             raise ValueError("only callable symbols can declare parameters")
-        if self.kind != SymbolKind.CLASS and self.contained_methods:
-            raise ValueError("only classes can contain method IDs")
+        if self.kind not in {
+            SymbolKind.CLASS,
+            SymbolKind.INTERFACE,
+            SymbolKind.STRUCT,
+            SymbolKind.TRAIT,
+        } and self.contained_methods:
+            raise ValueError("only type declarations can contain method IDs")
         if tuple(self.contained_methods) != tuple(sorted(self.contained_methods)):
             raise ValueError("contained method IDs must be canonical")
         if tuple(self.configuration_keys) != tuple(
@@ -396,7 +409,7 @@ class FileCodeMap(IndexModel):
                 source_range.end_line > max(self.line_count, 1)
             ):
                 raise ValueError("source range exceeds the canonical source line count")
-        if self.parse_status != "parsed" and (
+        if self.parse_status in {"unsupported", "parse_error"} and (
             self.module_docstring is not None
             or self.imports
             or self.exports

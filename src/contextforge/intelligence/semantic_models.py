@@ -152,6 +152,31 @@ class SymbolSemanticAnalysis(IndexModel):
         return value
 
 
+class InferredRegionRecord(IndexModel):
+    """Model-proposed source region kept separate from verified declarations."""
+
+    record_kind: Literal["model_inferred_region"] = "model_inferred_region"
+    region_id: str
+    label: str = Field(min_length=1, max_length=200)
+    kind: Literal["callable", "type", "section", "block", "unknown"]
+    source_range: SourceRange
+    summary: ClaimText
+    confidence: SemanticConfidence
+    analyzer_prompt_version: str
+    provider_id: str
+    model_id: str
+    source_sha256: Sha256
+
+    @field_validator(
+        "region_id", "analyzer_prompt_version", "provider_id", "model_id"
+    )
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        if not value or len(value) > 200 or "\x00" in value:
+            raise ValueError("inferred-region identity must be bounded text")
+        return value
+
+
 class FileSemanticAnalysis(IndexModel):
     """Complete, separately persisted semantic interpretation of one source file."""
 
@@ -196,6 +221,9 @@ class FileSemanticAnalysis(IndexModel):
     )
     uncertainty: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
     symbols: tuple[SymbolSemanticAnalysis, ...] = Field(default=(), max_length=500)
+    inferred_regions: tuple[InferredRegionRecord, ...] = Field(
+        default=(), max_length=500
+    )
 
     @field_validator("path")
     @classmethod
@@ -227,6 +255,18 @@ class FileSemanticAnalysis(IndexModel):
             {item.symbol_id for item in self.symbols}
         ) != len(self.symbols):
             raise ValueError("semantic symbols must be unique and canonical")
+        region_keys = tuple(
+            (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.region_id,
+            )
+            for item in self.inferred_regions
+        )
+        if region_keys != tuple(sorted(region_keys)) or len(
+            {item.region_id for item in self.inferred_regions}
+        ) != len(self.inferred_regions):
+            raise ValueError("inferred regions must be unique and canonical")
         return self
 
 
@@ -259,6 +299,7 @@ __all__ = [
     "DataFlowDescription",
     "EvidenceReference",
     "FileSemanticAnalysis",
+    "InferredRegionRecord",
     "SemanticConfidence",
     "SideEffectDescription",
     "SymbolSemanticAnalysis",

@@ -29,6 +29,10 @@ from contextforge.intelligence.models import (
     SchemaVersionMetadata,
     analyzer_identity_key,
 )
+from contextforge.intelligence.polyglot import (
+    POLYGLOT_ANALYZER,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+)
 from contextforge.intelligence.python import (
     DEFAULT_CODEMAP_SOURCE_LIMIT,
     PYTHON_ANALYZER,
@@ -303,7 +307,11 @@ def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
 
 
 def _analyzer_for(project_file: ProjectFile) -> AnalyzerIdentity:
-    return PYTHON_ANALYZER if project_file.language == "Python" else FALLBACK_ANALYZER
+    if project_file.language == "Python":
+        return PYTHON_ANALYZER
+    if project_file.language in SUPPORTED_POLYGLOT_LANGUAGES:
+        return POLYGLOT_ANALYZER
+    return FALLBACK_ANALYZER
 
 
 def _record_location(path: str) -> str:
@@ -318,6 +326,7 @@ def _build_options_digest(max_source_bytes: int) -> str:
                 "codemap_schema_version": CODEMAP_SCHEMA_VERSION,
                 "fallback_analyzer": FALLBACK_ANALYZER.model_dump(mode="json"),
                 "max_source_bytes": max_source_bytes,
+                "polyglot_analyzer": POLYGLOT_ANALYZER.model_dump(mode="json"),
                 "python_analyzer": PYTHON_ANALYZER.model_dump(mode="json"),
                 "resolver_version": RESOLVER_VERSION,
             }

@@ -6,6 +6,10 @@ from collections.abc import Callable
 
 from contextforge.intelligence.codemap import FileCodeMap
 from contextforge.intelligence.fallback import extract_fallback_code_map
+from contextforge.intelligence.polyglot import (
+    SUPPORTED_POLYGLOT_LANGUAGES,
+    extract_polyglot_code_map,
+)
 from contextforge.intelligence.python import (
     DEFAULT_CODEMAP_SOURCE_LIMIT,
     extract_python_code_map,
@@ -13,8 +17,14 @@ from contextforge.intelligence.python import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 CodeMapExtractor = Callable[..., FileCodeMap]
-SUPPORTED_CODEMAP_LANGUAGES = ("Python",)
-_EXTRACTORS: dict[str, CodeMapExtractor] = {"Python": extract_python_code_map}
+SUPPORTED_CODEMAP_LANGUAGES = ("Python", *SUPPORTED_POLYGLOT_LANGUAGES)
+_EXTRACTORS: dict[str, CodeMapExtractor] = {
+    "Python": extract_python_code_map,
+    **{
+        language: extract_polyglot_code_map
+        for language in SUPPORTED_POLYGLOT_LANGUAGES
+    },
+}
 
 
 def extract_code_map(
