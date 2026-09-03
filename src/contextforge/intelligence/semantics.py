@@ -22,6 +22,7 @@ from contextforge.intelligence.codemap import (
     SymbolKind,
     SymbolRecord,
 )
+from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.manifest import (
     build_index_manifest,
@@ -45,6 +46,7 @@ from contextforge.intelligence.semantic_models import (
     DataFlowDescription,
     EvidenceReference,
     FileSemanticAnalysis,
+    InferredRegionRecord,
     SemanticConfidence,
     SideEffectDescription,
     SymbolSemanticAnalysis,
@@ -84,10 +86,10 @@ from contextforge.progress import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_ANALYZER_ID = "contextforge-file-semantics"
-SEMANTIC_ANALYZER_VERSION = "3"
+SEMANTIC_ANALYZER_VERSION = "4"
 GENERIC_SEMANTIC_ANALYZER_ID = "generic-text-semantic"
-GENERIC_SEMANTIC_ANALYZER_VERSION = "1"
-SEMANTIC_PROMPT_VERSION = "3"
+GENERIC_SEMANTIC_ANALYZER_VERSION = "2"
+SEMANTIC_PROMPT_VERSION = "4"
 DETERMINISTIC_SEMANTIC_ANALYZER_ID = "contextforge-metadata-semantics"
 DETERMINISTIC_SEMANTIC_ANALYZER_VERSION = "1"
 SEMANTIC_WORK_UNIT_BYTES = 32_768
@@ -102,9 +104,14 @@ or text outside the object."""
 _ANALYZED_SYMBOL_KINDS = frozenset(
     {
         SymbolKind.CLASS,
+        SymbolKind.CONSTRUCTOR,
+        SymbolKind.ENUM,
         SymbolKind.FUNCTION,
         SymbolKind.ASYNC_FUNCTION,
+        SymbolKind.INTERFACE,
         SymbolKind.METHOD,
+        SymbolKind.STRUCT,
+        SymbolKind.TRAIT,
     }
 )
 
@@ -128,7 +135,16 @@ class _RawClaim(IndexModel):
     evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=50)
 
 
-class _RawFileAnalysis(IndexModel):
+class _RawInferredRegion(IndexModel):
+    label: Annotated[str, Field(min_length=1, max_length=200)]
+    kind: Literal["callable", "type", "section", "block", "unknown"]
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+    summary: Annotated[str, Field(min_length=1, max_length=320)]
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+
+class _RawFileClaims(IndexModel):
     primary_purpose: _RawClaim | None = None
     architectural_roles: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     major_responsibilities: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
@@ -138,6 +154,10 @@ class _RawFileAnalysis(IndexModel):
     public_entry_points: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     test_relationships: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     uncertainty: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
+
+
+class _RawFileAnalysis(_RawFileClaims):
+    inferred_regions: tuple[_RawInferredRegion, ...] = Field(default=(), max_length=64)
 
 
 class _RawSymbolAnalysis(IndexModel):
@@ -161,13 +181,13 @@ class _RawSymbolAnalysis(IndexModel):
 
 class _CombinedResponse(IndexModel):
     schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
-    file: _RawFileAnalysis
+    file: _RawFileClaims
     symbols: tuple[_RawSymbolAnalysis, ...] = Field(default=(), max_length=500)
 
 
 class _FileResponse(IndexModel):
     schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
-    file: _RawFileAnalysis
+    file: _RawFileClaims
 
 
 class _SymbolResponse(IndexModel):
@@ -186,6 +206,7 @@ class _GenericTextResponse(IndexModel):
     entry_points: tuple[_CompactItem, ...] = Field(default=(), max_length=3)
     configuration: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
     uncertainty: tuple[_CompactItem, ...] = Field(default=(), max_length=2)
+    regions: tuple[_RawInferredRegion, ...] = Field(default=(), max_length=64)
 
 
 class _ReadmeResponse(IndexModel):
@@ -1087,6 +1108,9 @@ async def analyze_file_semantics(
         _validate_raw_file_claims(
             raw_value, code_map, None, source_line_bytes=source_line_bytes
         )
+        _validate_inferred_region_ranges(
+            raw_value.inferred_regions, code_map, excerpt_ranges
+        )
         _build_file_analysis(
             raw_value,
             symbol_values,
@@ -1149,6 +1173,7 @@ async def analyze_file_semantics(
         analyzer,
         analysis_route=analysis_route,
     )
+    _validate_inferred_region_ranges(raw.inferred_regions, code_map, excerpt_ranges)
     _validate_raw_file_claims(raw, code_map, None, source_line_bytes=source_line_bytes)
     analysis = _build_file_analysis(
         raw,
@@ -1273,19 +1298,30 @@ def _bounded_source_excerpt(
         return "", (), True
     line_bytes = [len(line.encode("utf-8")) for line in lines]
     beginning = list(range(len(lines)))
-    symbol_lines = [
-        index
-        for symbol in code_map.symbols
-        for index in range(
-            max(0, symbol.declaration_range.start_line - 2),
-            min(len(lines), symbol.declaration_range.start_line + 1),
+    symbol_spans = [
+        (
+            max(0, symbol.declaration_range.start_line - 1),
+            min(len(lines) - 1, symbol.declaration_range.end_line - 1),
         )
+        for symbol in code_map.symbols
     ]
+    symbol_lines: list[int] = []
+    maximum_span = max((end - start + 1 for start, end in symbol_spans), default=0)
+    for offset in range(maximum_span):
+        for start, end in symbol_spans:
+            forward = start + offset
+            backward = end - offset
+            if forward <= end:
+                symbol_lines.append(forward)
+            if backward >= start and backward != forward:
+                symbol_lines.append(backward)
     ending = list(range(len(lines) - 1, -1, -1))
+    symbol_budget = (max_bytes * 3 // 4) if symbol_lines else 0
+    edge_budget = (max_bytes - symbol_budget) // 2
     priorities = (
-        (beginning, max_bytes // 2),
-        (symbol_lines, max_bytes // 4),
-        (ending, max_bytes - (max_bytes // 2 + max_bytes // 4)),
+        (symbol_lines, symbol_budget),
+        (beginning, edge_budget),
+        (ending, max_bytes - symbol_budget - edge_budget),
     )
     selected: set[int] = set()
     used = 0
@@ -1421,7 +1457,10 @@ def _compact_response_to_raw(
     if analysis_route == "rich_model_analysis":
         if not isinstance(value, _CombinedResponse):
             raise StructuredResponseError("model returned the wrong source schema")
-        return value.file, _convert_symbols(value.symbols, code_map, analyzer)
+        return (
+            _RawFileAnalysis.model_validate(value.file.model_dump(mode="python")),
+            _convert_symbols(value.symbols, code_map, analyzer),
+        )
     if isinstance(value, _ReadmeResponse):
         raw = _RawFileAnalysis(
             primary_purpose=_compact_claim(value.project_purpose),
@@ -1448,6 +1487,7 @@ def _compact_response_to_raw(
             public_entry_points=tuple(map(_compact_claim, value.entry_points)),
             configuration_dependencies=tuple(map(_compact_claim, value.configuration)),
             uncertainty=tuple(map(_compact_claim, value.uncertainty)),
+            inferred_regions=value.regions,
         )
     else:
         raise StructuredResponseError("model returned the wrong generic text schema")
@@ -1594,7 +1634,93 @@ def _build_file_analysis(
                 ),
             )
         ),
+        inferred_regions=_inferred_regions(raw.inferred_regions, code_map, analyzer),
     )
+
+
+def _inferred_regions(
+    values: tuple[_RawInferredRegion, ...],
+    code_map: FileCodeMap,
+    analyzer: AnalyzerIdentity,
+) -> tuple[InferredRegionRecord, ...]:
+    result: list[InferredRegionRecord] = []
+    for value in values:
+        source_range = SourceRange(
+            start_line=value.start_line,
+            start_column=0,
+            end_line=value.end_line,
+            end_column=0,
+        )
+        result.append(
+            InferredRegionRecord(
+                region_id=hashlib.sha256(
+                    canonical_json_bytes(
+                        [
+                            code_map.path,
+                            value.label,
+                            value.kind,
+                            value.start_line,
+                            value.end_line,
+                            code_map.source_sha256,
+                        ]
+                    )
+                ).hexdigest(),
+                label=value.label,
+                kind=value.kind,
+                source_range=source_range,
+                summary=value.summary,
+                confidence=SemanticConfidence(
+                    value=value.confidence,
+                    rationale="Model-inferred region within supplied verified source.",
+                ),
+                analyzer_prompt_version=analyzer.analysis_prompt_version,
+                provider_id=(
+                    analyzer.model_identity.provider_id
+                    if analyzer.model_identity is not None
+                    else "unknown"
+                ),
+                model_id=(
+                    analyzer.model_identity.model_id
+                    if analyzer.model_identity is not None
+                    else "unknown"
+                ),
+                source_sha256=code_map.source_sha256,
+            )
+        )
+    return tuple(
+        sorted(
+            result,
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.region_id,
+            ),
+        )
+    )
+
+
+def _validate_inferred_region_ranges(
+    values: tuple[_RawInferredRegion, ...],
+    code_map: FileCodeMap,
+    excerpt_ranges: tuple[SourceRange, ...],
+) -> None:
+    previous_end = 0
+    for value in sorted(values, key=lambda item: (item.start_line, item.end_line)):
+        if value.end_line < value.start_line or value.end_line > code_map.line_count:
+            raise StructuredResponseError(
+                "model returned an inferred region outside verified source"
+            )
+        if value.start_line <= previous_end:
+            raise StructuredResponseError("model returned overlapping inferred regions")
+        if not any(
+            source_range.start_line <= value.start_line
+            and value.end_line <= source_range.end_line
+            for source_range in excerpt_ranges
+        ):
+            raise StructuredResponseError(
+                "model returned an inferred region outside the supplied excerpt"
+            )
+        previous_end = value.end_line
 
 
 def _convert_symbols(
@@ -1992,7 +2118,7 @@ def _semantic_route(project_file: ProjectFile) -> SemanticRoute:
         return "skipped"
     if project_file.size_bytes == 0 or filename in _METADATA_FILENAMES:
         return "deterministic_metadata_summary"
-    if project_file.language == "Python":
+    if project_file.language in SUPPORTED_CODEMAP_LANGUAGES:
         return "rich_model_analysis"
     return "generic_model_analysis"
 

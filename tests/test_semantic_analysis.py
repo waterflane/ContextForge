@@ -270,7 +270,7 @@ def q(a):
     assert analysis.primary_purpose.provider_id == "fake"
     assert analysis.primary_purpose.model_id == "semantic-v1"
     assert analysis.primary_purpose.source_sha256 == analysis.source_sha256
-    assert analysis.primary_purpose.analyzer_prompt_version == "3"
+    assert analysis.primary_purpose.analyzer_prompt_version == "4"
     assert analysis.primary_purpose.evidence[0].path == "src/модуль.py"
     assert analysis.primary_purpose.confidence.value == 0.9
     assert {item.kind for item in analysis.symbols} == {"class", "method", "function"}
@@ -603,14 +603,12 @@ def test_invalid_utf8_is_planned_without_a_provider_call(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("path", "language"),
     [
-        ("app.js", "JavaScript"),
         ("README.md", "Markdown"),
         ("page.html", "HTML"),
         ("style.css", "CSS"),
         ("script.ps1", "PowerShell"),
         ("build.cmd", "Batch"),
         ("schema.json", "JSON"),
-        ("module.ts", "TypeScript"),
         ("script.sh", "Shell"),
         ("settings.toml", "TOML"),
         ("workflow.yaml", "YAML"),
@@ -636,6 +634,69 @@ def test_meaningful_non_ast_files_use_generic_model_semantics(
     assert provider.call_count == 1
 
 
+def test_generic_semantics_persist_separate_inferred_regions(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {"workflow.dsl": "stage prepare\n  do work\nstage publish\n"},
+    )
+
+    def with_regions(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        payload["regions"] = [
+            {
+                "label": "prepare stage",
+                "kind": "block",
+                "start_line": 1,
+                "end_line": 2,
+                "summary": "Prepares work before publication.",
+                "confidence": 0.8,
+            },
+            {
+                "label": "publish stage",
+                "kind": "section",
+                "start_line": 3,
+                "end_line": 3,
+                "summary": "Publishes the prepared result.",
+                "confidence": 0.7,
+            },
+        ]
+        return json.dumps(payload)
+
+    result = _build_semantics(snapshot, _provider(responder=with_regions))
+
+    analysis = result.analyses[0]
+    assert analysis.symbols == ()
+    assert [item.label for item in analysis.inferred_regions] == [
+        "prepare stage",
+        "publish stage",
+    ]
+    assert all(
+        item.record_kind == "model_inferred_region"
+        and item.source_sha256 == analysis.source_sha256
+        for item in analysis.inferred_regions
+    )
+
+
+def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {
+            "progress.ts": (
+                "export function preparationProgressStage() { return 'index'; }\n"
+            )
+        },
+    )
+
+    result = _build_semantics(snapshot, _provider())
+
+    analysis = result.analyses[0]
+    assert analysis.analysis_route == "rich_model_analysis"
+    assert [item.name for item in analysis.symbols] == [
+        "preparationProgressStage"
+    ]
+    assert analysis.inferred_regions == ()
+
+
 @pytest.mark.parametrize(
     ("path", "expected_budget"),
     [
@@ -643,7 +704,7 @@ def test_meaningful_non_ast_files_use_generic_model_semantics(
         ("README.md", 160),
         ("notes.txt", 160),
         ("config.json", 160),
-        ("app.js", 192),
+        ("app.js", 256),
         ("app.py", 256),
     ],
 )
@@ -855,7 +916,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
         snapshot,
         prompt_provider,
         run_id="semantic-prompt",
-        options=SemanticAnalysisOptions(prompt_version="4"),
+        options=SemanticAnalysisOptions(prompt_version="5"),
     )
     model_provider = _provider(model="semantic-v2")
     model = _build_semantics(snapshot, model_provider, run_id="semantic-model")
@@ -868,7 +929,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
     )
 
     assert prompt_provider.call_count == 1
-    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "4"
+    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "5"
     assert model_provider.call_count == 1
     identity = model.analyses[0].semantic_analyzer.model_identity
     assert identity is not None
