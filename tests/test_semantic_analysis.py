@@ -677,6 +677,55 @@ def test_generic_semantics_persist_separate_inferred_regions(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.parametrize(
+    "regions",
+    [
+        [
+            {
+                "label": "outside",
+                "kind": "block",
+                "start_line": 1,
+                "end_line": 99,
+                "summary": "Escapes the verified source.",
+                "confidence": 0.5,
+            }
+        ],
+        [
+            {
+                "label": "first",
+                "kind": "section",
+                "start_line": 1,
+                "end_line": 2,
+                "summary": "First region.",
+                "confidence": 0.5,
+            },
+            {
+                "label": "overlap",
+                "kind": "section",
+                "start_line": 2,
+                "end_line": 2,
+                "summary": "Overlapping region.",
+                "confidence": 0.5,
+            },
+        ],
+    ],
+)
+def test_invalid_inferred_regions_never_publish(
+    tmp_path: Path, regions: list[dict[str, object]]
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"workflow.dsl": "one\ntwo\n"})
+
+    def invalid(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        payload["regions"] = regions
+        return json.dumps(payload)
+
+    result = _build_semantics(snapshot, _provider(responder=invalid))
+
+    assert result.failed_paths == ("workflow.dsl",)
+    assert result.manifest.files[0].semantic_status == "failed"
+
+
 def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> None:
     snapshot = _snapshot_with_facts(
         tmp_path,

@@ -105,3 +105,21 @@ def test_typescript_symbol_range_matches_source_line(tmp_path: Path) -> None:
     )
 
     assert symbol.declaration_range.start_line == 148
+
+
+def test_tsx_async_and_visibility_metadata_are_verified(tmp_path: Path) -> None:
+    (tmp_path / "component.tsx").write_text(
+        "export async function loadData() { return 1; }\n"
+        "class Service { private stop() {} public start() {} }\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    symbols = {item.name: item for item in code_map.symbols}
+
+    assert symbols["loadData"].kind == "async_function"
+    assert symbols["loadData"].is_async is True
+    assert symbols["loadData"].visibility == "explicit_export"
+    assert symbols["stop"].visibility == "private"
+    assert symbols["start"].parent_symbol_id == symbols["Service"].symbol_id

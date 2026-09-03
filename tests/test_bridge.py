@@ -60,6 +60,7 @@ def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None
         "semantic_disabled_files": 2,
         "semantic_failed_files": 0,
         "verified_symbols": 1,
+        "inferred_regions": 0,
     }
 
 

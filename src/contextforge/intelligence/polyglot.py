@@ -299,7 +299,17 @@ def _is_async(node: Node, source: bytes) -> bool:
 def _visibility(
     node: Node, source: bytes
 ) -> Literal["public", "private", "explicit_export", "unknown"]:
-    prefix = source[node.start_byte : min(node.end_byte, node.start_byte + 160)]
+    visibility_node = (
+        node.parent
+        if node.parent is not None
+        and node.parent.type in {"export_statement", "export_declaration"}
+        else node
+    )
+    prefix = source[
+        visibility_node.start_byte : min(
+            visibility_node.end_byte, visibility_node.start_byte + 160
+        )
+    ]
     words = set(prefix.decode("utf-8", errors="ignore").replace("(", " ").split())
     if "private" in words or "protected" in words:
         return "private"
