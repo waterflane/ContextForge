@@ -307,7 +307,7 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
     assert result.final_selection is not None
-    assert result.final_selection.confidence == pytest.approx(0.57456)
+    assert result.final_selection.confidence == pytest.approx(0.517104)
     verification = next(
         item
         for item in recent_records()

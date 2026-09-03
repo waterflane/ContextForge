@@ -21,6 +21,8 @@ from contextforge.bridge.models import (
     DiscoverParams,
     ReadParams,
 )
+from contextforge.intelligence import acquire_index_lock, build_structural_index
+from contextforge.repositories import scan_repository
 
 
 def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
@@ -39,6 +41,26 @@ def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
     assert "action_id" not in expand["properties"]
     assert "tool_name" not in expand["properties"]
     assert schema["$defs"]["discoverResult"]["additionalProperties"] is False
+
+
+def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None:
+    (tmp_path / "parsed.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "fallback.txt").write_text("plain text\n", encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "bridge-coverage") as lock:
+        build_structural_index(snapshot, lock)
+
+    coverage = BridgeServer(tmp_path)._index_coverage()
+
+    assert coverage == {
+        "total_files": 2,
+        "parsed_files": 1,
+        "fallback_files": 1,
+        "semantic_complete_files": 0,
+        "semantic_disabled_files": 2,
+        "semantic_failed_files": 0,
+        "verified_symbols": 1,
+    }
 
 
 class _QueueInput:
