@@ -48,6 +48,7 @@ from contextforge.intelligence import (
     calculate_source_snapshot_digest,
     canonical_json_bytes,
     load_file_code_map,
+    load_file_semantic_analysis,
     load_manifest,
 )
 from contextforge.project_config import (
@@ -911,6 +912,7 @@ class BridgeServer:
             "semantic_disabled_files": 0,
             "semantic_failed_files": 0,
             "verified_symbols": 0,
+            "inferred_regions": 0,
         }
         try:
             manifest = load_manifest(self.workspace)
@@ -935,6 +937,14 @@ class BridgeServer:
             else:
                 coverage["parsed_files"] += 1
             coverage["verified_symbols"] += len(code_map.symbols)
+            if state.semantic_status == "complete":
+                try:
+                    analysis = load_file_semantic_analysis(
+                        self.workspace, state.path, manifest=manifest
+                    )
+                except Exception:
+                    continue
+                coverage["inferred_regions"] += len(analysis.inferred_regions)
         return coverage
 
     def _remember_preparation(self, preparation: DiscoveryCandidatePreparation) -> None:

@@ -2239,7 +2239,7 @@ def _rank_candidate_records(
     candidate_paths = (
         set(current_files) | set(knowledge.code_maps) | set(knowledge.semantic_analyses)
     )
-    match_counts: dict[str, tuple[int, int, int, int, int]] = {}
+    match_counts: dict[str, tuple[int, int, int, int, int, int]] = {}
     for path in candidate_paths:
         code_map = knowledge.code_maps.get(path)
         path_matches = len(task_tokens & _ranking_tokens(path))
@@ -2252,11 +2252,17 @@ def _rank_candidate_records(
         }
         summary = knowledge.semantic_analyses.get(path)
         summary_tokens = set() if summary is None else _semantic_ranking_tokens(summary)
+        inferred_tokens = {
+            token
+            for region in (() if summary is None else summary.inferred_regions)
+            for token in _ranking_tokens(f"{region.label} {region.summary}")
+        }
         exact_matches, exact_declarations = exact_identifier_matches.get(path, (0, 0))
         match_counts[path] = (
             path_matches,
             len(task_tokens & symbol_tokens),
             len(task_tokens & summary_tokens),
+            len(task_tokens & inferred_tokens),
             exact_matches,
             exact_declarations,
         )
@@ -2280,6 +2286,7 @@ def _rank_candidate_records(
             path_matches,
             symbol_matches,
             summary_matches,
+            inferred_matches,
             exact_matches,
             exact_declarations,
         ) = match_counts[path]
@@ -2288,6 +2295,7 @@ def _rank_candidate_records(
             + path_matches * 12.0
             + symbol_matches * 8.0
             + summary_matches * 6.0
+            + inferred_matches * 7.0
             + exact_matches * 20.0
             + exact_declarations * 240.0
         )
@@ -2301,6 +2309,8 @@ def _rank_candidate_records(
             signals.append(f"task_symbol_token_matches={symbol_matches}")
         if summary_matches:
             signals.append(f"task_summary_token_matches={summary_matches}")
+        if inferred_matches:
+            signals.append(f"task_inferred_region_matches={inferred_matches}")
         if exact_matches:
             signals.append(f"exact_source_identifier_matches={exact_matches}")
         if exact_declarations:
@@ -2764,7 +2774,13 @@ def _semantic_ranking_tokens(summary: Any) -> set[str]:
         elif isinstance(value, (list, tuple)):
             for child in value:
                 visit(child, key=key)
-        elif isinstance(value, str) and key in {"claim", "name", "qualified_name"}:
+        elif isinstance(value, str) and key in {
+            "claim",
+            "label",
+            "name",
+            "qualified_name",
+            "summary",
+        }:
             texts.append(value)
 
     visit(payload)
