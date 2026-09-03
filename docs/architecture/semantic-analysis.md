@@ -30,6 +30,7 @@ max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
 semantic_max_output_tokens = 512
+reasoning_effort = "off"
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -60,13 +61,11 @@ model analysis, deterministic metadata summary, reusable record, skipped,
 unsupported binary, oversized, invalid encoding, or preflight failure.
 `.contextforge` paths never enter this plan.
 
-Python files use rich model analysis. Meaningful readable JavaScript/JSX,
-TypeScript/TSX, Markdown, HTML, CSS, PowerShell, batch, JSON, TOML, YAML, XML,
-shell, and other text files use generic schema-bound model analysis without a
-rich structural extractor. Their placeholder uses `generic-text-structure`
-with reason `no_structural_extractor`; successful semantics use the distinct
-`generic-text-semantic` identity and `generic_model_analysis` route, never an
-unsupported-language fallback.
+Python plus JavaScript/JSX, TypeScript/TSX, Java, C#, Go, Rust, C, C++, PHP,
+and Ruby use rich model analysis over verified declarations. Python retains its
+standard-library AST extractor; the other languages use bundled Tree-sitter
+grammars and require no runtime download. Other meaningful readable text uses
+generic schema-bound analysis over `generic-text-structure` facts.
 
 `.gitignore`, `.gitattributes`, `.editorconfig`, `.env.example`, `.env.sample`,
 lock files, `.gitkeep`, and empty files use deterministic metadata summaries and
@@ -87,7 +86,9 @@ tree, global maps, feature maps, unrelated files, or prior responses.
 The maximum candidate excerpt is 65,536 UTF-8 bytes, but it is not a dispatch
 target. Smaller files are sent completely only when the complete request fits.
 Larger or over-budget requests use a deterministic line-preserving selection weighted
-toward the beginning, verified declarations, and ending. Selection works on
+toward verified symbol bodies, the beginning, and the ending. Symbol bodies are
+sampled fairly from both ends rather than reducing every function to its declaration.
+Selection works on
 decoded text and whole encoded lines, with a codepoint-safe prefix fallback, so
 it cannot create invalid UTF-8. Structural metadata is reduced after source
 when necessary. Every resulting request must fit messages, schema, output,
@@ -102,7 +103,7 @@ limited by the caller's lower ceiling, are:
 - small README, Markdown, TXT, and configuration: 160 tokens, or 192 for a
   larger document;
 - generic source: 192 tokens when small, otherwise 256;
-- Python rich analysis: 256 for trivial files, 320 for normal files, and at
+- rich symbol analysis: 256 for trivial files, 320 for normal files, and at
   most 512 for large or structurally complex files.
 
 README requests only project purpose, entry points, setup, and major
@@ -121,6 +122,12 @@ SHA-256. Unknown symbols, facts, stale hashes, invalid ranges, unknown fields,
 malformed JSON, non-finite confidence, and oversized responses are rejected.
 Symbol evidence must also fall within that symbol's verified declaration range,
 including when a small-file response analyzes all symbols in one request.
+
+For an unsupported language or meaningful file without verified declarations,
+the generic model may additionally return `InferredRegionRecord` values with a
+label, kind, summary, confidence, and source range. These remain model-derived
+and are never promoted to `SymbolRecord`. Ranges must be ordered, non-overlapping,
+inside the supplied excerpt, and bound to the current source SHA-256.
 
 A completed interpretation is checkpointed atomically in staging only after
 the entire response validates. Publication copies structural facts unchanged,
