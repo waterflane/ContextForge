@@ -349,6 +349,48 @@ def test_ranking_tokens_normalize_conservative_aliases_and_stopwords() -> None:
     }
 
 
+def test_exact_camel_case_declaration_outranks_usages_without_codemap(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "progress.ts").write_text(
+        "export function preparationProgressStage(value: string) { return value; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "client.ts").write_text(
+        "preparationProgressStage(a); preparationProgressStage(b);\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+    task = "Что делает preparationProgressStage?"
+    records = _rank_candidate_records(
+        knowledge,
+        task=task,
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+    selected = _facet_aware_preselection(
+        records,
+        _detect_intent_facets(task),
+        _rank_candidates_by_facet(
+            knowledge, records, _detect_intent_facets(task)
+        ),
+        limit=8,
+    )
+
+    assert records[0].path == "src/progress.ts"
+    assert "exact_source_declarations=1" in records[0].ranking_signals
+    assert [item.path for item in selected] == [
+        "src/progress.ts",
+        "src/client.ts",
+    ]
+
+
 def test_role_scoring_does_not_turn_index_coverage_into_test_request(
     tmp_path: Path,
 ) -> None:

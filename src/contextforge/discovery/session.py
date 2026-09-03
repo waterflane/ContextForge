@@ -303,6 +303,24 @@ class DiscoverySession:
             self._facet_rankings,
             limit=limit,
         )
+        if self._preselected_candidates and not any(
+            _record_has_relevance(record)
+            or any(
+                signal.startswith(("task_", "exact_source_"))
+                for signal in record.ranking_signals
+            )
+            for record in self._preselected_candidates
+        ):
+            self.warnings.append(
+                CompletenessWarning(
+                    code="low-relevance-candidates",
+                    message=(
+                        "No candidate has direct task, symbol, source, or role "
+                        "evidence; inspect or expand before selecting context."
+                    ),
+                    confidence=1.0,
+                )
+            )
         if self._ranked_candidates and limit > 0 and not self._preselected_candidates:
             emit(
                 "retrieval",
@@ -2189,6 +2207,7 @@ def _rank_candidate_records(
     """Rank every current text file and assign stable short request IDs."""
 
     task_tokens = _ranking_tokens(task)
+    exact_identifier_matches = _exact_identifier_matches(knowledge.snapshot, task)
     tests_requested = bool(task_tokens & {"test", "regression"})
     pinned = set(pinned_paths)
     excluded = set(excluded_paths)
@@ -2220,7 +2239,7 @@ def _rank_candidate_records(
     candidate_paths = (
         set(current_files) | set(knowledge.code_maps) | set(knowledge.semantic_analyses)
     )
-    match_counts: dict[str, tuple[int, int, int]] = {}
+    match_counts: dict[str, tuple[int, int, int, int, int]] = {}
     for path in candidate_paths:
         code_map = knowledge.code_maps.get(path)
         path_matches = len(task_tokens & _ranking_tokens(path))
@@ -2233,10 +2252,13 @@ def _rank_candidate_records(
         }
         summary = knowledge.semantic_analyses.get(path)
         summary_tokens = set() if summary is None else _semantic_ranking_tokens(summary)
+        exact_matches, exact_declarations = exact_identifier_matches.get(path, (0, 0))
         match_counts[path] = (
             path_matches,
             len(task_tokens & symbol_tokens),
             len(task_tokens & summary_tokens),
+            exact_matches,
+            exact_declarations,
         )
     relevant_implementations = {
         path
@@ -2254,8 +2276,21 @@ def _rank_candidate_records(
         project_file = current_files.get(path)
         if path in excluded or project_file is None:
             continue
-        path_matches, symbol_matches, summary_matches = match_counts[path]
-        score = 1.0 + path_matches * 12.0 + symbol_matches * 8.0 + summary_matches * 6.0
+        (
+            path_matches,
+            symbol_matches,
+            summary_matches,
+            exact_matches,
+            exact_declarations,
+        ) = match_counts[path]
+        score = (
+            1.0
+            + path_matches * 12.0
+            + symbol_matches * 8.0
+            + summary_matches * 6.0
+            + exact_matches * 20.0
+            + exact_declarations * 240.0
+        )
         signals: list[str] = []
         if path in pinned:
             score += 10_000.0
@@ -2266,6 +2301,10 @@ def _rank_candidate_records(
             signals.append(f"task_symbol_token_matches={symbol_matches}")
         if summary_matches:
             signals.append(f"task_summary_token_matches={summary_matches}")
+        if exact_matches:
+            signals.append(f"exact_source_identifier_matches={exact_matches}")
+        if exact_declarations:
+            signals.append(f"exact_source_declarations={exact_declarations}")
         if path in knowledge.semantic_analyses:
             score += 0.5
             signals.append("current_semantic_record")
@@ -2472,6 +2511,26 @@ def _facet_aware_preselection(
 
     if limit <= 0:
         return ()
+    exact_records = tuple(
+        record
+        for record in records
+        if any(
+            signal.startswith("exact_source_identifier_matches=")
+            for signal in record.ranking_signals
+        )
+    )
+    if any(
+        any(
+            signal.startswith("exact_source_declarations=")
+            for signal in record.ranking_signals
+        )
+        for record in exact_records
+    ):
+        selected = [
+            record for record in records if "manual_pin" in record.ranking_signals
+        ]
+        selected.extend(record for record in exact_records if record not in selected)
+        return tuple(selected[:limit])
     selected_paths: set[str] = set()
     for facet in facets:
         if not facet.substantial or len(selected_paths) >= limit:
@@ -2613,12 +2672,83 @@ def _ranking_tokens(value: str) -> set[str]:
         "verify",
         "verifying",
     }
-    raw = re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
+    expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    expanded = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", expanded)
+    expanded = re.sub(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])", " ", expanded)
+    raw = re.findall(r"[a-z0-9]+", expanded.casefold().replace("_", " "))
     return {
         aliases.get(item, item)
         for item in raw
         if len(item) >= 2 and item not in ignored
     }
+
+
+_IDENTIFIER_TERM = re.compile(r"(?<![\w$])([A-Za-z_$][A-Za-z0-9_$]*)(?![\w$])")
+_MAX_EXACT_SCAN_BYTES = 16 * 1024 * 1024
+
+
+def _exact_identifier_matches(
+    snapshot: ProjectSnapshot, task: str
+) -> dict[str, tuple[int, int]]:
+    """Find bounded, case-sensitive identifier evidence in current source.
+
+    Code-like terms are intentionally conservative: mixed-case, underscored,
+    dollar-prefixed, or explicitly quoted/backticked identifiers qualify. This
+    avoids turning ordinary prose into a repository-wide substring search.
+    """
+
+    explicit = {
+        match.group(1)
+        for match in re.finditer(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]", task)
+    }
+    terms = {
+        match.group(1)
+        for match in _IDENTIFIER_TERM.finditer(task)
+        if (
+            match.group(1) in explicit
+            or "_" in match.group(1)
+            or "$" in match.group(1)
+            or any(character.isupper() for character in match.group(1)[1:])
+        )
+        and len(match.group(1)) >= 3
+    }
+    if not terms:
+        return {}
+    patterns = {
+        term: re.compile(rf"(?<![\w$]){re.escape(term)}(?![\w$])") for term in terms
+    }
+    declaration_patterns = {
+        term: (
+            re.compile(
+                rf"\b(?:async\s+)?(?:function|class|interface|struct|enum|trait|def|fn|func)\s+{re.escape(term)}\b"
+            ),
+            re.compile(
+                rf"\b{re.escape(term)}\s*(?:=|:)\s*(?:async\s*)?(?:function\b|\([^\n)]*\)\s*=>)"
+            ),
+        )
+        for term in terms
+    }
+    matches: dict[str, tuple[int, int]] = {}
+    scanned = 0
+    for project_file in snapshot.files:
+        if not project_file.is_text or scanned >= _MAX_EXACT_SCAN_BYTES:
+            continue
+        if project_file.size_bytes > _MAX_EXACT_SCAN_BYTES - scanned:
+            continue
+        try:
+            source = (snapshot.root / project_file.path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        scanned += project_file.size_bytes
+        count = sum(len(pattern.findall(source)) for pattern in patterns.values())
+        if count:
+            declarations = sum(
+                len(pattern.findall(source))
+                for term_patterns in declaration_patterns.values()
+                for pattern in term_patterns
+            )
+            matches[project_file.path] = (count, declarations)
+    return matches
 
 
 def _semantic_ranking_tokens(summary: Any) -> set[str]:
