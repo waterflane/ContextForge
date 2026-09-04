@@ -10,7 +10,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -22,6 +22,7 @@ from contextforge.context import (
     read_selected_text_file,
 )
 from contextforge.intelligence import (
+    CODEMAP_SCHEMA_VERSION,
     FileCodeMap,
     IndexManifest,
     IndexManifestNotFoundError,
@@ -38,6 +39,7 @@ from contextforge.intelligence import (
 )
 from contextforge.logging import LogLevel, emit
 from contextforge.models import (
+    ContextWindowExceededError,
     DuplicateCandidateIdIssue,
     InvalidFieldValueIssue,
     InvalidRepositoryPathIssue,
@@ -51,6 +53,7 @@ from contextforge.models import (
     UnknownCandidateIdIssue,
     UntrustedModelContext,
     ValidationIssue,
+    estimate_request_context,
     provider_error_details,
     structured_validation_fingerprint,
 )
@@ -884,7 +887,8 @@ class DiscoverySession:
         for record in candidates:
             project_file = files.get(record.path)
             ranges = (
-                () if record.path in pinned
+                ()
+                if record.path in pinned
                 else candidate_ranges.get(record.candidate_id, ())
             )
             candidate_size = (
@@ -1028,13 +1032,17 @@ class DiscoverySession:
                     stale.add(state.path)
                     continue
                 try:
-                    code_maps[state.path] = load_file_code_map(
+                    code_map = load_file_code_map(
                         self.snapshot.root, state.path, manifest=manifest
                     )
+                    if code_map.schema_version != CODEMAP_SCHEMA_VERSION:
+                        stale.add(state.path)
+                        continue
+                    code_maps[state.path] = code_map
                 except IndexManifestReadError:
                     stale.add(state.path)
                     continue
-                if state.semantic_status == "complete":
+                if state.semantic_status in {"complete", "partial"}:
                     try:
                         semantics[state.path] = load_file_semantic_analysis(
                             self.snapshot.root, state.path, manifest=manifest
@@ -1189,7 +1197,9 @@ class DiscoverySession:
         )
         return _KnowledgeResult(knowledge, _unique_warnings(warnings))
 
-    async def _request_actions(self) -> tuple[DiscoveryAction, ...]:
+    async def _request_actions(
+        self, *, context_retry: bool = True
+    ) -> tuple[DiscoveryAction, ...]:
         self._stage = "budget_calculation"
         observations = [
             item.model_dump(mode="json") for item in self.observations[-20:]
@@ -1203,9 +1213,20 @@ class DiscoverySession:
                 separators=(",", ":"),
                 allow_nan=False,
             )
-            contexts = (
-                UntrustedModelContext.from_text("discovery-observations", context_text),
+            byte_limit = min(
+                1_000_000, self._require_provider().configuration.context_window * 3
             )
+            while observations and len(context_text.encode("utf-8")) > byte_limit:
+                observations.pop(0)
+                context_text = json.dumps(
+                    observations, ensure_ascii=False, sort_keys=True
+                )
+            if observations:
+                contexts = (
+                    UntrustedModelContext.from_text(
+                        "discovery-observations", context_text
+                    ),
+                )
         knowledge = self._require_knowledge()
         allowed_paths = [item.path for item in self.snapshot.files]
         serialized_candidates = [
@@ -1242,7 +1263,11 @@ class DiscoverySession:
         compact_selection = self.request.mode in {
             DiscoveryMode.INDEXED,
             DiscoveryMode.HYBRID,
-        }
+        } or _evidence_complete_question(
+            knowledge,
+            self._preselected_candidates,
+            self._task_file_constraints.positive_task,
+        )
         if not compact_selection:
             trusted["tool_schemas"] = _compact_tool_schemas()
         serialized_candidate_count = len(serialized_candidates)
@@ -1347,6 +1372,28 @@ class DiscoverySession:
                 None if compact_selection else self._handle_structured_failure
             ),
         )
+        # Drop whole oldest observations, never slice JSON or source excerpts.
+        # Candidate evidence and current selection remain in trusted facts.
+        configuration = self._require_provider().configuration
+        while (
+            observations and not estimate_request_context(request, configuration).fits
+        ):
+            observations.pop(0)
+            request = replace(
+                request,
+                untrusted_contexts=(
+                    (
+                        UntrustedModelContext.from_text(
+                            "discovery-observations",
+                            json.dumps(
+                                observations, ensure_ascii=False, sort_keys=True
+                            ),
+                        ),
+                    )
+                    if observations
+                    else ()
+                ),
+            )
         remaining = self._remaining_seconds()
         emit(
             "synthesis",
@@ -1408,6 +1455,12 @@ class DiscoverySession:
             diagnostic = exc.diagnostic
             if diagnostic is not None:
                 self.budget.charge_provider(diagnostic)
+            if (
+                context_retry
+                and isinstance(exc, ContextWindowExceededError)
+                and exc.server_context_window is not None
+            ):
+                return await self._request_actions(context_retry=False)
             self._provider_request_dispatched = bool(
                 diagnostic is not None and diagnostic.total_provider_http_calls > 0
             )
@@ -2803,7 +2856,70 @@ def _exact_identifier_terms(task: str) -> set[str]:
         )
         and len(match.group(1)) >= 3
     }
+    simple = re.fullmatch(
+        r"\s*(?:(?:explain|what does|что делает|объясни)\s+)?"
+        r"([A-Za-z_$][A-Za-z0-9_$]*(?:[.:][A-Za-z_$][A-Za-z0-9_$]*)*)"
+        r"\s*[?!.]?\s*",
+        task,
+        re.IGNORECASE,
+    )
+    if simple is not None and len(simple.group(1)) >= 3:
+        terms.add(simple.group(1))
     return terms
+
+
+def _evidence_complete_question(
+    knowledge: DiscoveryKnowledge,
+    records: tuple[DiscoveryCandidateRecord, ...],
+    task: str,
+) -> bool:
+    """Only simple definition questions may bypass investigative tools."""
+    terms = _exact_identifier_terms(task)
+    if not terms:
+        return False
+    remainder = task
+    for term in sorted(terms, key=len, reverse=True):
+        remainder = re.sub(
+            r"(?<![\w$])" + re.escape(term) + r"(?![\w$])", " ", remainder
+        )
+    words = set(re.findall(r"\w+", remainder.casefold()))
+    if not words <= {
+        "explain",
+        "what",
+        "does",
+        "do",
+        "how",
+        "works",
+        "work",
+        "the",
+        "function",
+        "method",
+        "class",
+        "please",
+        "is",
+        "что",
+        "делает",
+        "как",
+        "работает",
+        "объясни",
+        "функция",
+        "функцию",
+        "метод",
+        "класс",
+        "пожалуйста",
+    }:
+        return False
+    available = {record.path for record in records}
+    return all(
+        sum(
+            symbol.name == term or symbol.qualified_name == term
+            for path, code_map in knowledge.code_maps.items()
+            if path in available
+            for symbol in code_map.symbols
+        )
+        == 1
+        for term in terms
+    )
 
 
 def _verified_identifier_ranges(
@@ -2817,7 +2933,8 @@ def _verified_identifier_ranges(
     result: dict[str, tuple[DiscoveryLineRange, ...]] = {}
     files = {item.path: item for item in knowledge.snapshot.files}
     pattern = re.compile(
-        r"(?<![\w$])(?:" + "|".join(re.escape(term) for term in sorted(terms))
+        r"(?<![\w$])(?:"
+        + "|".join(re.escape(term) for term in sorted(terms))
         + r")(?![\w$])"
     )
     for record in records:

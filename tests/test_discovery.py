@@ -25,6 +25,7 @@ from contextforge.discovery import (
     DiscoveryLimitError,
     DiscoveryLineRange,
     DiscoveryMode,
+    DiscoveryObservation,
     DiscoveryProtocolError,
     DiscoveryRequest,
     DiscoverySession,
@@ -39,7 +40,10 @@ from contextforge.discovery import (
     discover_repository,
     review_completeness,
 )
-from contextforge.discovery.session import _result_confidence
+from contextforge.discovery.session import (
+    _evidence_complete_question,
+    _result_confidence,
+)
 from contextforge.intelligence import (
     AnalyzerIdentity,
     FileSemanticAnalysis,
@@ -350,6 +354,130 @@ def test_hybrid_uses_compact_selection_over_current_index_candidates(
     assert result.final_selection is not None
     assert result.final_selection.selected[0].path == "x.py"
     assert result.budget_usage.model_calls == 1
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Explain preparationProgressStage",
+        "Что делает preparationProgressStage?",
+    ],
+)
+def test_fresh_exact_question_uses_compact_selection(tmp_path: Path, task: str) -> None:
+    snapshot = _snapshot(
+        tmp_path,
+        {
+            "progress.ts": (
+                "export function preparationProgressStage() { return 'index'; }\n"
+            ),
+        },
+    )
+
+    def responder(request: ModelRequest, _: int) -> str:
+        assert request.response_model.__name__ == "IndexedContextSelection"
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "Verified definition.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task=task, mode="fresh"),
+        )
+    )
+    assert result.final_selection is not None
+    assert result.final_selection.selected[0].kind == "line_ranges"
+    assert result.budget_usage.model_calls == 1
+
+
+@pytest.mark.parametrize(
+    "task,compact",
+    [
+        ("Explain run", True),
+        ("run", True),
+        ("Explain Reader", True),
+        ("Explain run and its callers", False),
+        ("Explain missing", False),
+    ],
+)
+def test_fresh_compact_gate_is_conservative(
+    tmp_path: Path, task: str, compact: bool
+) -> None:
+    snapshot = _snapshot(
+        tmp_path, {"a.py": "def run():\n    pass\nclass Reader:\n    pass\n"}
+    )
+    session = DiscoverySession(
+        snapshot, None, DiscoveryRequest(task=task, mode="fresh")
+    )
+    session.prepare_read_only_tools()
+    assert (
+        _evidence_complete_question(
+            session._require_knowledge(), session._preselected_candidates, task
+        )
+        == compact
+    )
+
+
+def test_large_observation_history_is_dropped_at_record_boundaries(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "def run():\n    return 1\n"})
+
+    def responder(request: ModelRequest, _: int) -> str:
+        for context in request.untrusted_contexts:
+            history = json.loads(context.text)
+            assert isinstance(history, list)
+            assert history[-1]["data"]["marker"] == "latest"
+            assert len(context.text.encode("utf-8")) < 12000
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "definition",
+            }
+        )
+
+    session = DiscoverySession(
+        snapshot,
+        FakeModelProvider(_configuration(), responder=responder),
+        DiscoveryRequest(task="Explain run", mode="fresh"),
+    )
+    session.prepare_read_only_tools()
+    for index in range(20):
+        session.observations.append(
+            DiscoveryObservation(
+                step=index + 1,
+                action_id=f"old-{index}",
+                tool_name="read_file",
+                ok=True,
+                code="ok",
+                data={"source": "x" * 100_000},
+            )
+        )
+    session.observations.append(
+        DiscoveryObservation(
+            step=21,
+            action_id="latest",
+            tool_name="get_context_budget",
+            ok=True,
+            code="ok",
+            data={"marker": "latest"},
+        )
+    )
+    session._started = session.clock()
+    actions = asyncio.run(session._request_actions())
+    assert actions[-1].kind == "finalize"
 
 
 def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> None:

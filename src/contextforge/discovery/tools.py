@@ -514,7 +514,8 @@ class DiscoveryToolExecutor:
             analysis = self.knowledge.semantic_analyses.get(path)
             if (
                 analysis is not None
-                and query in analysis.model_dump_json().casefold()
+                and query
+                in analysis.model_dump_json(exclude={"chunk_checkpoints"}).casefold()
                 and (not allowed_kinds or "model_interpretation" in allowed_kinds)
             ):
                 hits.append(
@@ -643,7 +644,9 @@ class DiscoveryToolExecutor:
         }
         analysis = self.knowledge.semantic_analyses.get(project_file.path)
         if analysis is not None:
-            data["interpretation"] = analysis.model_dump(mode="json")
+            data["interpretation"] = analysis.model_dump(
+                mode="json", exclude={"chunk_checkpoints"}
+            )
         return _bounded_data(data, MAX_SUMMARY_RESULT_BYTES)
 
     def _symbol_summary(self, raw: ToolInput) -> _ToolResult:
@@ -664,7 +667,9 @@ class DiscoveryToolExecutor:
                 None,
             )
             data["interpretation"] = (
-                semantic.model_dump(mode="json") if semantic is not None else None
+                semantic.model_dump(mode="json", exclude={"chunk_checkpoints"})
+                if semantic is not None
+                else None
             )
         return _bounded_data(data, MAX_SUMMARY_RESULT_BYTES)
 

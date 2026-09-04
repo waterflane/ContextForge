@@ -378,9 +378,7 @@ def test_exact_camel_case_declaration_outranks_usages_without_codemap(
     selected = _facet_aware_preselection(
         records,
         _detect_intent_facets(task),
-        _rank_candidates_by_facet(
-            knowledge, records, _detect_intent_facets(task)
-        ),
+        _rank_candidates_by_facet(knowledge, records, _detect_intent_facets(task)),
         limit=8,
     )
 
