@@ -132,9 +132,9 @@ class ProviderConfiguration(ProviderModel):
         le=MAX_JSON_REPAIR_ATTEMPTS,
         strict=True,
     )
-    reasoning_effort: Literal[
-        "off", "low", "medium", "high", "provider_default"
-    ] = "off"
+    reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
+        "off"
+    )
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     credential_env: str | None = None
@@ -901,8 +901,14 @@ class UnsupportedResponseSchemaError(StructuredResponseError):
 class ContextWindowExceededError(ModelProviderError):
     """Raised locally when a known request cannot fit the configured context."""
 
-    def __init__(self, budget: RequestContextBudget | None = None) -> None:
+    def __init__(
+        self,
+        budget: RequestContextBudget | None = None,
+        *,
+        server_context_window: int | None = None,
+    ) -> None:
         self.budget = budget
+        self.server_context_window = server_context_window
         message = "model request exceeds configured context window"
         if budget is not None:
             message += (

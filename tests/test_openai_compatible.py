@@ -15,6 +15,7 @@ from contextforge.cli.main import app
 from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    ContextWindowExceededError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -98,6 +99,49 @@ def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:
             }
         ).encode(),
     )
+
+
+@pytest.mark.parametrize(
+    "message, limit",
+    [
+        ("maximum context length is 8264 tokens; requested 22427", 8264),
+        ("maximum prompt length is 8,264 tokens", 8264),
+        ("context window exceeded by 12345 tokens", None),
+    ],
+)
+def test_server_context_limit_is_typed_and_only_decreases(
+    message: str, limit: int | None
+) -> None:
+    posts = 0
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        maximum: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        nonlocal posts
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        posts += 1
+        return OpenAICompatibleHTTPResponse(
+            status=400,
+            body=json.dumps(
+                {
+                    "error": {"message": message},
+                }
+            ).encode(),
+        )
+
+    provider = OpenAICompatibleModelProvider(
+        _configuration(context_window=262144), transport=transport
+    )
+    with pytest.raises(ContextWindowExceededError) as error:
+        asyncio.run(provider.complete_structured(_request()))
+    assert posts == 1
+    assert error.value.server_context_window == limit
+    assert provider.configuration.context_window == (limit or 262144)
 
 
 def test_exact_urls_model_schema_and_successful_response_parsing() -> None:

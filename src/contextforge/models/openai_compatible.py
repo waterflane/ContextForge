@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import ssl
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -123,9 +124,28 @@ class OpenAICompatibleModelProvider:
         *,
         cancellation: asyncio.Event | None = None,
     ) -> ModelResponse:
-        return await self._runtime.execute(
-            request, self._complete_once, cancellation=cancellation
-        )
+        try:
+            return await self._runtime.execute(
+                request, self._complete_once, cancellation=cancellation
+            )
+        except ContextWindowExceededError as exc:
+            limit = exc.server_context_window
+            if limit is not None and 1024 <= limit < self.configuration.context_window:
+                self.configuration = self.configuration.model_copy(
+                    update={
+                        "context_window": limit,
+                        "context_window_source": "server runtime limit",
+                    }
+                )
+                self._runtime.configuration = self.configuration
+                emit(
+                    "provider",
+                    "provider.context.runtime_limit",
+                    "Server reported a smaller runtime context; rebuild the request.",
+                    level=LogLevel.WARNING,
+                    data={"runtime_context_window": limit},
+                )
+            raise
 
     async def list_models(
         self, *, cancellation: asyncio.Event | None = None
@@ -180,6 +200,7 @@ class OpenAICompatibleModelProvider:
             ProviderTimeoutError,
             StructuredOutputJsonObjectUnsupportedError,
             StructuredOutputSchemaUnsupportedError,
+            ContextWindowExceededError,
         ) as exc:
             exc.add_http_accounting(
                 provider_discovery_calls=verification_calls,
@@ -712,10 +733,20 @@ def _raise_for_status(
                 "context window",
                 "maximum context",
                 "too many tokens",
+                "maximum prompt",
             )
         )
     ):
-        raise ContextWindowExceededError()
+        # Only parse an explicitly labelled limit, never unrelated token counts.
+        match = re.search(
+            r"(?:maximum (?:context length|prompt(?:\s*\+\s*generation)? length)"
+            r"|context (?:window|size|length))\s*(?:is|of|:|=)?\s*([0-9][0-9,]*)",
+            lowered,
+        )
+        limit = int(match.group(1).replace(",", "")) if match else None
+        if limit is not None and not 1024 <= limit <= 2_000_000:
+            limit = None
+        raise ContextWindowExceededError(server_context_window=limit)
     structured_mode_rejected = status in {400, 422} and any(
         marker in lowered
         for marker in (
