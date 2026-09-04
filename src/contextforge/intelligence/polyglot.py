@@ -23,7 +23,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="3",
+    analyzer_version="4",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -69,6 +69,7 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
         "generator_function_declaration": SymbolKind.FUNCTION,
         "interface_declaration": SymbolKind.INTERFACE,
         "internal_module": SymbolKind.NAMESPACE,
+        "function_signature": SymbolKind.FUNCTION,
         "method_definition": SymbolKind.METHOD,
         "method_signature": SymbolKind.METHOD,
         "type_alias_declaration": SymbolKind.TYPE_ALIAS,
@@ -89,6 +90,7 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
         "local_function_statement": SymbolKind.FUNCTION,
         "method_declaration": SymbolKind.METHOD,
         "namespace_declaration": SymbolKind.NAMESPACE,
+        "file_scoped_namespace_declaration": SymbolKind.NAMESPACE,
         "record_declaration": SymbolKind.STRUCT,
         "struct_declaration": SymbolKind.STRUCT,
     },
@@ -172,6 +174,7 @@ def extract_polyglot_code_map(
     tree = parser.parse(source_bytes)
     diagnostics = _diagnostics(tree.root_node)
     drafts: list[_Draft] = []
+    omitted: list[ParserDiagnostic] = []
 
     def visit(node: Node, parent_index: int | None) -> None:
         next_parent = parent_index
@@ -181,6 +184,22 @@ def extract_polyglot_code_map(
             verified = not ancestor.is_error and not ancestor.is_missing
             ancestor = ancestor.parent
         kind = _KINDS.get(language_name, {}).get(node.type)
+        if language_name in {"C", "C++"} and node.type == "function_declarator":
+            prototype_name = node.child_by_field_name("declarator")
+            ancestor = node.parent
+            while ancestor is not None and ancestor.type in {
+                "pointer_declarator",
+                "reference_declarator",
+            }:
+                ancestor = ancestor.parent
+            if (
+                ancestor is not None
+                and ancestor.type in {"declaration", "field_declaration"}
+                and prototype_name is not None
+                and prototype_name.type
+                in {"identifier", "field_identifier", "qualified_identifier"}
+            ):
+                kind = SymbolKind.FUNCTION
         if node.type in {"class_specifier", "struct_specifier", "enum_specifier"} and (
             node.child_by_field_name("body") is None
             and (
@@ -229,8 +248,22 @@ def extract_polyglot_code_map(
                         kind = SymbolKind.ASYNC_FUNCTION
                     next_parent = len(drafts)
                     drafts.append(_Draft(node, name[:500], kind, parent_index))
+            elif len(omitted) < 20:
+                omitted.append(
+                    ParserDiagnostic(
+                        code="unsupported_declaration",
+                        severity="warning",
+                        message=f"No verified name extracted for {node.type}",
+                        range=_range(node),
+                    )
+                )
         for child in node.named_children:
             visit(child, next_parent)
+            if child.type == "file_scoped_namespace_declaration":
+                next_parent = next(
+                    (i for i, draft in enumerate(drafts) if draft.node == child),
+                    next_parent,
+                )
 
     visit(tree.root_node, None)
     for draft in drafts:
@@ -245,6 +278,7 @@ def extract_polyglot_code_map(
                     SymbolKind.CLASS,
                     SymbolKind.STRUCT,
                     SymbolKind.TYPE_ALIAS,
+                    SymbolKind.ENUM,
                 }
             ]
             if len(owners) == 1:
@@ -306,6 +340,15 @@ def extract_polyglot_code_map(
             for child in drafts
             if child.parent_index == index
             and child.kind in {SymbolKind.METHOD, SymbolKind.CONSTRUCTOR}
+            # An anonymous object returned inside a callable has lexical
+            # ancestry, but does not turn that callable into a method owner.
+            and draft.kind
+            not in {
+                SymbolKind.FUNCTION,
+                SymbolKind.ASYNC_FUNCTION,
+                SymbolKind.METHOD,
+                SymbolKind.CONSTRUCTOR,
+            }
         )
         symbols.append(
             SymbolRecord(
@@ -335,10 +378,19 @@ def extract_polyglot_code_map(
         source_size_bytes=project_file.size_bytes,
         language=project_file.language,
         analyzer=POLYGLOT_ANALYZER,
-        parse_status="partial" if diagnostics else "parsed",
+        parse_status="partial" if diagnostics or omitted else "parsed",
         line_count=selected.source_line_count,
         symbols=tuple(symbols),
-        diagnostics=diagnostics,
+        diagnostics=tuple(
+            sorted(
+                (*diagnostics, *omitted),
+                key=lambda item: (
+                    item.range.start_line if item.range else 0,
+                    item.range.start_column if item.range else 0,
+                    item.code,
+                ),
+            )
+        ),
     )
 
 
@@ -347,11 +399,17 @@ def _binding(
     language: str,
     source: bytes,
 ) -> tuple[Node, SymbolKind, Node | None] | None:
-    if language in {"JavaScript", "TypeScript"} and node.type == "variable_declarator":
+    if language in {"JavaScript", "TypeScript"} and node.type in {
+        "variable_declarator",
+        "public_field_definition",
+        "field_definition",
+    }:
         name = node.child_by_field_name("name")
-        if name is None or name.type != "identifier":
+        if name is None or name.type not in {"identifier", "property_identifier"}:
             return None
         value = node.child_by_field_name("value")
+        while value is not None and value.type == "parenthesized_expression":
+            value = next(iter(value.named_children), None)
         if value is not None and value.type in {
             "arrow_function",
             "function_expression",
@@ -362,6 +420,8 @@ def _binding(
                 if _is_async(value, source)
                 else SymbolKind.FUNCTION
             )
+            if node.type != "variable_declarator":
+                kind = SymbolKind.METHOD
             return name, kind, value
         declaration = node.parent
         constant = declaration is not None and _text(
@@ -470,6 +530,8 @@ def _method_owner(node: Node, language: str, source: bytes) -> str | None:
             and parent.parent.type == "impl_item"
         ):
             owner = parent.parent.child_by_field_name("type")
+            while owner is not None and owner.type == "generic_type":
+                owner = owner.child_by_field_name("type")
             if owner is not None and owner.type == "type_identifier":
                 return _text(source, owner)
     return None

@@ -1,5 +1,28 @@
 # Repository intelligence storage
 
+## Declaration extraction and coverage
+
+Polyglot analyzer version 4 supports named object methods, enum/module methods,
+JS/TS callable class fields and parenthesized initializers, ambient TS functions,
+C/C++ prototypes, generic Rust impl owners, and C# file-scoped namespaces.
+Contained method IDs must refer to actual callable children of their owner.
+Anonymous returned objects retain lexical ancestry without turning their
+enclosing function into a type or object owner.
+
+Parser/validation failures are isolated per file as a `parse_error` CodeMap
+with an `extractor_error` diagnostic and no claimed declarations. The manifest
+record is complete as a stored diagnostic, not as successful extraction; such
+records are always retried. Source-read/freshness and publication failures still
+abort. Old analyzer records are not reused on rebuild; old generations remain
+readable and publication remains atomic.
+
+`parsed` means syntactically parsed, not exhaustive coverage of a language.
+Recognized declarations without a supported name produce a partial diagnostic.
+Call/import capability is separate: current Python static extraction is
+supported, current polyglot extraction is unsupported for those relationships,
+and unknown/old analyzers have unknown coverage. Mixed repositories report
+partial coverage; zero observed calls never proves absence of dynamic calls.
+
 ## Implemented boundary
 
 ContextForge has deterministic local storage for structural facts and separate

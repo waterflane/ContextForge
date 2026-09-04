@@ -495,8 +495,14 @@ def test_codemap_models_reject_false_resolution_and_noncanonical_shapes() -> Non
             }
         )
     assert variable.source_range == source_range
-    with pytest.raises(ValidationError, match="only type declarations"):
-        SymbolRecord(**{**variable.model_dump(), "contained_methods": ("method",)})
+    with pytest.raises(ValidationError, match="only declaration owners"):
+        SymbolRecord(
+            **{
+                **variable.model_dump(),
+                "kind": SymbolKind.FUNCTION,
+                "contained_methods": ("method",),
+            }
+        )
     with pytest.raises(ValidationError, match="canonical"):
         SymbolRecord(
             **{

@@ -282,11 +282,17 @@ class SymbolRecord(IndexModel):
                 SymbolKind.INTERFACE,
                 SymbolKind.STRUCT,
                 SymbolKind.TRAIT,
+                SymbolKind.ENUM,
+                SymbolKind.MODULE,
+                SymbolKind.NAMESPACE,
+                SymbolKind.TYPE_ALIAS,
+                SymbolKind.CONSTANT,
+                SymbolKind.VARIABLE,
             }
             and self.contained_methods
         ):
-            raise ValueError("only type declarations can contain method IDs")
-        if tuple(self.contained_methods) != tuple(sorted(self.contained_methods)):
+            raise ValueError("only declaration owners can contain method IDs")
+        if tuple(self.contained_methods) != tuple(sorted(set(self.contained_methods))):
             raise ValueError("contained method IDs must be canonical")
         if tuple(self.configuration_keys) != tuple(
             sorted(set(self.configuration_keys))
@@ -345,6 +351,7 @@ class FileCodeMap(IndexModel):
         if len(symbol_ids) != len(set(symbol_ids)):
             raise ValueError("symbol IDs must be unique")
         known = set(symbol_ids)
+        by_id = {symbol.symbol_id: symbol for symbol in self.symbols}
         for symbol in self.symbols:
             if (
                 symbol.parent_symbol_id is not None
@@ -355,6 +362,13 @@ class FileCodeMap(IndexModel):
                 raise ValueError("a symbol cannot contain itself")
             if any(method not in known for method in symbol.contained_methods):
                 raise ValueError("contained method ID is absent from the CodeMap")
+            for method in symbol.contained_methods:
+                child = by_id[method]
+                if child.parent_symbol_id != symbol.symbol_id or child.kind not in {
+                    SymbolKind.METHOD,
+                    SymbolKind.CONSTRUCTOR,
+                }:
+                    raise ValueError("contained method does not belong to its owner")
             for call in symbol.direct_calls:
                 if (
                     call.target_file_path == self.path

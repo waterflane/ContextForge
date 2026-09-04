@@ -263,6 +263,7 @@ def _reuse_code_map(
         if (
             code_map.schema_version == CODEMAP_SCHEMA_VERSION
             and _map_matches_state(code_map, state)
+            and not any(item.code == "extractor_error" for item in code_map.diagnostics)
         )
         else None
     )
