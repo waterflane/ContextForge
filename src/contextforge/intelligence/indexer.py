@@ -225,7 +225,9 @@ def load_file_code_map(
         raise IndexManifestReadError(
             "published CodeMap does not match its schema"
         ) from exc
-    if not _map_matches_state(code_map, state):
+    if code_map.schema_version != active.schema_version or not _map_matches_state(
+        code_map, state
+    ):
         raise IndexManifestReadError(
             "CodeMap identity does not match its manifest state"
         )
@@ -241,6 +243,7 @@ def _reuse_code_map(
     expected_analyzer = _analyzer_for(project_file)
     if (
         previous is None
+        or previous.schema_versions != SchemaVersionMetadata()
         or state is None
         or state.source_sha256 != project_file.sha256
         or state.source_size_bytes != project_file.size_bytes
@@ -255,12 +258,19 @@ def _reuse_code_map(
         )
     except (ValueError, IndexManifestReadError):
         return None
-    return code_map if _map_matches_state(code_map, state) else None
+    return (
+        code_map
+        if (
+            code_map.schema_version == CODEMAP_SCHEMA_VERSION
+            and _map_matches_state(code_map, state)
+        )
+        else None
+    )
 
 
 def _map_matches_state(code_map: FileCodeMap, state: IndexedFileState) -> bool:
     return (
-        code_map.schema_version == CODEMAP_SCHEMA_VERSION
+        code_map.schema_version in {1, CODEMAP_SCHEMA_VERSION}
         and code_map.path == state.path
         and code_map.source_sha256 == state.source_sha256
         and code_map.source_size_bytes == state.source_size_bytes

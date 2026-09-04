@@ -14,7 +14,7 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-SEMANTIC_SCHEMA_VERSION: Literal[1] = 1
+SEMANTIC_SCHEMA_VERSION: Literal[2] = 2
 
 ClaimText = Annotated[str, Field(min_length=1, max_length=2_000)]
 RationaleText = Annotated[str, Field(min_length=1, max_length=1_000)]
@@ -34,7 +34,7 @@ class EvidenceReference(IndexModel):
     path: str
     source_sha256: Sha256
     source_range: SourceRange | None = None
-    fact_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    fact_ids: tuple[str, ...] = Field(default=(), max_length=1_280)
 
     @field_validator("path")
     @classmethod
@@ -115,7 +115,7 @@ class DataFlowDescription(_ClaimDescription):
 class SymbolSemanticAnalysis(IndexModel):
     """Attributed interpretation of one verified function, method, or class."""
 
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = SEMANTIC_SCHEMA_VERSION
     record_kind: Literal["model_symbol_interpretation"] = "model_symbol_interpretation"
     symbol_id: str
     name: str
@@ -123,26 +123,32 @@ class SymbolSemanticAnalysis(IndexModel):
     kind: SymbolKind
     declaration_range: SourceRange
     behavioral_purpose: BehaviorDescription | None = None
-    inputs: tuple[DataFlowDescription, ...] = Field(default=(), max_length=20)
-    outputs: tuple[DataFlowDescription, ...] = Field(default=(), max_length=20)
-    state_changes: tuple[SideEffectDescription, ...] = Field(default=(), max_length=20)
-    exceptions: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
-    external_calls: tuple[SideEffectDescription, ...] = Field(default=(), max_length=20)
+    inputs: tuple[DataFlowDescription, ...] = Field(default=(), max_length=1_280)
+    outputs: tuple[DataFlowDescription, ...] = Field(default=(), max_length=1_280)
+    state_changes: tuple[SideEffectDescription, ...] = Field(
+        default=(), max_length=1_280
+    )
+    exceptions: tuple[BehaviorDescription, ...] = Field(default=(), max_length=1_280)
+    external_calls: tuple[SideEffectDescription, ...] = Field(
+        default=(), max_length=1_280
+    )
     filesystem_effects: tuple[SideEffectDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     network_effects: tuple[SideEffectDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     database_effects: tuple[SideEffectDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
-    preconditions: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
-    postconditions: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
+    preconditions: tuple[BehaviorDescription, ...] = Field(default=(), max_length=1_280)
+    postconditions: tuple[BehaviorDescription, ...] = Field(
+        default=(), max_length=1_280
+    )
     security_sensitive_behavior: tuple[BehaviorDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
-    uncertainty: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
+    uncertainty: tuple[BehaviorDescription, ...] = Field(default=(), max_length=1_280)
 
     @field_validator("symbol_id", "name", "qualified_name")
     @classmethod
@@ -167,9 +173,7 @@ class InferredRegionRecord(IndexModel):
     model_id: str
     source_sha256: Sha256
 
-    @field_validator(
-        "region_id", "analyzer_prompt_version", "provider_id", "model_id"
-    )
+    @field_validator("region_id", "analyzer_prompt_version", "provider_id", "model_id")
     @classmethod
     def validate_identity_text(cls, value: str) -> str:
         if not value or len(value) > 200 or "\x00" in value:
@@ -177,10 +181,17 @@ class InferredRegionRecord(IndexModel):
         return value
 
 
+class SemanticChunkCheckpoint(IndexModel):
+    """Validated chunk result retained with the published file interpretation."""
+
+    cache_key: Sha256
+    analysis_json: str = Field(max_length=4_000_000)
+
+
 class FileSemanticAnalysis(IndexModel):
     """Complete, separately persisted semantic interpretation of one source file."""
 
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = SEMANTIC_SCHEMA_VERSION
     record_kind: Literal[
         "model_file_interpretation", "deterministic_metadata_interpretation"
     ] = "model_file_interpretation"
@@ -197,32 +208,40 @@ class FileSemanticAnalysis(IndexModel):
     codemap_analyzer: AnalyzerIdentity
     semantic_analyzer: AnalyzerIdentity
     analysis_options_digest: Sha256
+    chunks_planned: int = Field(default=0, ge=0, le=64)
+    chunks_completed: int = Field(default=0, ge=0, le=64)
+    covered_ranges: tuple[SourceRange, ...] = Field(default=(), max_length=64)
+    coverage_complete: bool = True
+    coverage_warnings: tuple[DiagnosticText, ...] = Field(default=(), max_length=128)
+    chunk_checkpoints: tuple[SemanticChunkCheckpoint, ...] = Field(
+        default=(), max_length=64
+    )
     primary_purpose: BehaviorDescription | None = None
     architectural_roles: tuple[BehaviorDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     major_responsibilities: tuple[BehaviorDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     external_interactions: tuple[SideEffectDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     configuration_dependencies: tuple[DataFlowDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     major_side_effects: tuple[SideEffectDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     public_entry_points: tuple[BehaviorDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
     test_relationships: tuple[BehaviorDescription, ...] = Field(
-        default=(), max_length=20
+        default=(), max_length=1_280
     )
-    uncertainty: tuple[BehaviorDescription, ...] = Field(default=(), max_length=20)
-    symbols: tuple[SymbolSemanticAnalysis, ...] = Field(default=(), max_length=500)
+    uncertainty: tuple[BehaviorDescription, ...] = Field(default=(), max_length=1_280)
+    symbols: tuple[SymbolSemanticAnalysis, ...] = Field(default=(), max_length=32_000)
     inferred_regions: tuple[InferredRegionRecord, ...] = Field(
-        default=(), max_length=500
+        default=(), max_length=32_000
     )
 
     @field_validator("path")
@@ -243,6 +262,12 @@ class FileSemanticAnalysis(IndexModel):
 
     @model_validator(mode="after")
     def validate_symbol_order(self) -> FileSemanticAnalysis:
+        if self.chunks_completed > self.chunks_planned:
+            raise ValueError("completed chunks cannot exceed planned chunks")
+        if len(self.covered_ranges) != self.chunks_completed:
+            raise ValueError("covered ranges must match completed chunks")
+        if self.coverage_complete and self.chunks_completed != self.chunks_planned:
+            raise ValueError("complete coverage requires every planned chunk")
         keys = tuple(
             (
                 item.declaration_range.start_line,

@@ -59,6 +59,9 @@ def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None
         "semantic_complete_files": 0,
         "semantic_disabled_files": 2,
         "semantic_failed_files": 0,
+        "semantic_partial_files": 0,
+        "semantic_chunks_planned": 0,
+        "semantic_chunks_completed": 0,
         "verified_symbols": 1,
         "inferred_regions": 0,
     }

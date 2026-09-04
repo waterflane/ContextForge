@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 import contextforge.intelligence.semantics as semantics_module
 import contextforge.intelligence.store as store_module
+from contextforge.bridge import BridgeServer
 from contextforge.intelligence import (
     AnalysisDiagnostic,
     BehaviorDescription,
@@ -23,18 +25,22 @@ from contextforge.intelligence import (
     acquire_index_lock,
     build_semantic_index,
     build_structural_index,
+    load_file_code_map,
     load_file_semantic_analysis,
     load_generation_manifest,
     load_manifest,
 )
 from contextforge.models import (
+    ContextWindowExceededError,
     FakeModelProvider,
     FakeScript,
     ModelRequest,
     ProviderCancelledError,
     ProviderConfiguration,
+    ProviderRequestError,
     ProviderTimeoutError,
 )
+from contextforge.models.providers import RequestContextBudget, estimate_request_context
 from contextforge.progress import ProgressEvent
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
@@ -146,7 +152,7 @@ def _symbol_payload(
 
 def _valid_response(request: ModelRequest, _: int) -> str:
     category = request.trusted_code_map_facts.get("file_category")
-    if request.metadata.get("analyzer_kind") == "generic-text-semantic":
+    if request.response_model.__name__ != "_CombinedResponse":
         if category == "readme":
             payload = {
                 "schema_version": 1,
@@ -195,7 +201,9 @@ def _valid_response(request: ModelRequest, _: int) -> str:
         raw_symbols = request.trusted_code_map_facts.get("symbols", [])
         assert isinstance(raw_symbols, list)
         symbols = [
-            _symbol_payload(item, item["declaration_range"])
+            _symbol_payload(
+                item, _intersection(item["declaration_range"], _first_range(request))
+            )
             for item in raw_symbols
             if item["kind"] in {"class", "function", "async_function", "method"}
         ]
@@ -205,6 +213,22 @@ def _valid_response(request: ModelRequest, _: int) -> str:
             "symbols": symbols,
         }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _intersection(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    start = max(
+        (left["start_line"], left["start_column"]),
+        (right["start_line"], right["start_column"]),
+    )
+    end = min(
+        (left["end_line"], left["end_column"]), (right["end_line"], right["end_column"])
+    )
+    return {
+        "start_line": start[0],
+        "start_column": start[1],
+        "end_line": end[0],
+        "end_column": end[1],
+    }
 
 
 def _provider(
@@ -740,9 +764,7 @@ def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> Non
 
     analysis = result.analyses[0]
     assert analysis.analysis_route == "rich_model_analysis"
-    assert [item.name for item in analysis.symbols] == [
-        "preparationProgressStage"
-    ]
+    assert [item.name for item in analysis.symbols] == ["preparationProgressStage"]
     assert analysis.inferred_regions == ()
 
 
@@ -753,7 +775,7 @@ def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> Non
         ("README.md", 160),
         ("notes.txt", 160),
         ("config.json", 160),
-        ("app.js", 256),
+        ("app.js", 192),
         ("app.py", 256),
     ],
 )
@@ -905,10 +927,8 @@ def _valid_response_for_script(path: str) -> str:
     return json.dumps(
         {
             "schema_version": 1,
-            "file": {
-                "primary_purpose": _claim("recovered purpose"),
-            },
-            "symbols": [],
+            "summary": "recovered purpose",
+            "key_points": [],
         }
     )
 
@@ -1163,7 +1183,7 @@ def test_bounded_concurrency_and_file_limit_statuses(tmp_path: Path) -> None:
     assert ("a.py", "complete") in statuses
 
 
-def test_large_file_uses_one_deterministic_excerpt_request(tmp_path: Path) -> None:
+def test_large_file_uses_bounded_chunks_with_complete_coverage(tmp_path: Path) -> None:
     body = "".join(f"    value += {index}\n" for index in range(80))
     source = f"def calculate(value):\n{body}    return value\n"
     snapshot = _snapshot_with_facts(tmp_path, {"large.py": source})
@@ -1183,12 +1203,16 @@ def test_large_file_uses_one_deterministic_excerpt_request(tmp_path: Path) -> No
     )
 
     assert result.failed_paths == ()
-    assert result.request_count == len(requests) == 1
+    assert result.request_count == len(requests) > 1
+    assert result.analyses[0].coverage_complete
+    assert all(
+        len(item.untrusted_sources[0].text.encode("utf-8")) <= 300 for item in requests
+    )
     request = requests[0]
     excerpt = request.untrusted_sources[0].text
     assert len(excerpt.encode("utf-8")) <= 300
     assert excerpt.startswith("def calculate")
-    assert "return value" in excerpt
+    assert "return value" in requests[-1].untrusted_sources[0].text
     assert request.metadata["input_truncated"] == "true"
     assert int(request.metadata["estimated_input_tokens"]) > 0
     assert request.max_output_tokens is not None
@@ -1216,13 +1240,15 @@ def test_large_file_excerpt_is_deterministic_and_utf8_safe(tmp_path: Path) -> No
         options=options,
     )
 
-    assert len(excerpts) == 2
-    assert excerpts[0] == excerpts[1]
-    assert len(excerpts[0].encode("utf-8")) <= 101
-    excerpts[0].encode("utf-8").decode("utf-8")
+    assert len(excerpts) > 2
+    midpoint = len(excerpts) // 2
+    assert excerpts[:midpoint] == excerpts[midpoint:]
+    assert all(len(item.encode("utf-8")) <= 101 for item in excerpts)
+    for excerpt in excerpts:
+        excerpt.encode("utf-8").decode("utf-8")
 
 
-def test_many_symbols_still_use_one_bounded_file_request(tmp_path: Path) -> None:
+def test_many_symbols_use_bounded_file_chunks(tmp_path: Path) -> None:
     source = (
         "\n".join(f"def q{index}():\n    return {index}" for index in range(8)) + "\n"
     )
@@ -1235,7 +1261,178 @@ def test_many_symbols_still_use_one_bounded_file_request(tmp_path: Path) -> None
     )
 
     assert result.failed_paths == ()
-    assert result.request_count == provider.call_count == 1
+    assert result.request_count == provider.call_count > 1
+    assert result.analyses[0].coverage_complete
+
+
+def test_partial_chunks_resume_across_published_generations(tmp_path: Path) -> None:
+    source = "ordinary line\n" * 20 + "FAIL_MARKER\n" + "ordinary line\n" * 20
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": source})
+
+    def failing(request: ModelRequest, index: int) -> str:
+        if "FAIL_MARKER" in request.untrusted_sources[0].text:
+            raise ProviderRequestError("deliberate test failure")
+        return _valid_response(request, index)
+
+    options = SemanticAnalysisOptions(max_source_bytes_per_request=128)
+    partial = _build_semantics(snapshot, _provider(responder=failing), options=options)
+    analysis = partial.analyses[0]
+    assert not analysis.coverage_complete
+    assert 0 < analysis.chunks_completed < analysis.chunks_planned
+    assert len(analysis.chunk_checkpoints) == analysis.chunks_completed
+    assert partial.manifest.files[0].semantic_status == "partial"
+    coverage = BridgeServer(tmp_path)._index_coverage()
+    assert coverage["semantic_partial_files"] == 1
+    assert coverage["semantic_complete_files"] == 0
+    assert coverage["semantic_chunks_completed"] == analysis.chunks_completed
+    provider = _provider()
+    complete = _build_semantics(
+        snapshot, provider, options=options, run_id="resume-chunks"
+    )
+    assert complete.analyses[0].coverage_complete
+    assert provider.call_count == analysis.chunks_planned - analysis.chunks_completed
+
+
+def test_source_changed_during_model_work_is_not_published_as_claims(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "original text\n"})
+
+    def changing(request: ModelRequest, index: int) -> str:
+        (tmp_path / "notes.txt").write_text("changed text\n", encoding="utf-8")
+        return _valid_response(request, index)
+
+    result = _build_semantics(snapshot, _provider(responder=changing))
+    assert result.failed_paths == ("notes.txt",)
+    assert not result.analyses
+
+
+def test_chunk_merge_preserves_conflicting_claims(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "def run():\n    return 1\n"})
+    first = _build_semantics(snapshot, _provider()).analyses[0]
+    assert first.primary_purpose is not None
+    first_symbol = first.symbols[0]
+    assert first_symbol.behavioral_purpose is not None
+    alternative_purpose = first.primary_purpose.model_copy(
+        update={"claim": "alternative purpose"}
+    )
+    alternative_symbol = first_symbol.model_copy(
+        update={
+            "behavioral_purpose": first_symbol.behavioral_purpose.model_copy(
+                update={"claim": "alternative behavior"}
+            ),
+        }
+    )
+    second = first.model_copy(
+        update={
+            "primary_purpose": alternative_purpose,
+            "symbols": (alternative_symbol,),
+        }
+    )
+    merged = semantics_module._merge_chunk_analyses([first, second], [])
+    assert alternative_purpose in merged.major_responsibilities
+    assert any(
+        claim.claim == "alternative behavior" for claim in merged.symbols[0].uncertainty
+    )
+
+
+def test_chunk_merge_deduplicates_and_warns_about_overlapping_regions(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path, {"notes.txt": "a section\nanother line\n"}
+    )
+    base = _build_semantics(snapshot, _provider()).analyses[0]
+    code_map = load_file_code_map(tmp_path, "notes.txt")
+    raw = semantics_module._RawInferredRegion(
+        label="first",
+        kind="section",
+        start_line=1,
+        end_line=1,
+        summary="first region",
+        confidence=0.8,
+    )
+    region = semantics_module._inferred_regions(
+        (raw,), code_map, base.semantic_analyzer
+    )[0]
+    first = base.model_copy(update={"inferred_regions": (region,)})
+    other = region.model_copy(
+        update={"region_id": "b" * 64, "summary": "other interpretation"}
+    )
+    second = base.model_copy(update={"inferred_regions": (other,)})
+    warnings: list[str] = []
+    merged = semantics_module._merge_chunk_analyses([first, first, second], warnings)
+    assert merged.inferred_regions == (region,)
+    assert warnings == ["inferred-region-overlap:first-valid-retained"]
+
+
+def test_context_preflight_replans_chunks_without_sending_oversized_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "text\n" * 60})
+    estimate = estimate_request_context
+
+    def bounded(
+        request: ModelRequest, configuration: ProviderConfiguration
+    ) -> RequestContextBudget:
+        budget = estimate(request, configuration)
+        if len(request.untrusted_sources[0].text.encode("utf-8")) > 128:
+            return replace(budget, configured_context_window=1)
+        return budget
+
+    monkeypatch.setattr(semantics_module, "estimate_request_context", bounded)
+    sizes: list[int] = []
+
+    def capture(request: ModelRequest, index: int) -> str:
+        sizes.append(len(request.untrusted_sources[0].text.encode("utf-8")))
+        return _valid_response(request, index)
+
+    result = _build_semantics(
+        snapshot,
+        _provider(responder=capture),
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=512,
+        ),
+    )
+    assert result.analyses[0].coverage_complete
+    assert len(sizes) > 1 and max(sizes) <= 128
+
+
+def test_server_context_refusal_rebuilds_once_without_json_repair(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "some text\n"})
+    calls = 0
+
+    def refusal(request: ModelRequest, index: int) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ContextWindowExceededError(server_context_window=2048)
+        return _valid_response(request, index)
+
+    result = _build_semantics(snapshot, _provider(responder=refusal))
+    assert result.analyses[0].coverage_complete
+    assert calls == 2
+
+
+def test_chunk_cap_reports_partial_coverage(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "a line of text\n" * 100})
+    result = _build_semantics(
+        snapshot,
+        _provider(),
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=128,
+            max_chunks_per_file=2,
+        ),
+    )
+    assert result.analyses[0].chunks_completed == 2
+    assert not result.analyses[0].coverage_complete
+    assert (
+        "semantic-chunk-limit:source-coverage-incomplete"
+        in result.analyses[0].coverage_warnings
+    )
 
 
 def test_request_byte_limit_fails_before_calling_provider(tmp_path: Path) -> None:

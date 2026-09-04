@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.intelligence.chunks import plan_source_chunks
 from contextforge.intelligence.codemap import FileCodeMap
 from contextforge.intelligence.fallback import extract_fallback_code_map
 from contextforge.intelligence.polyglot import (
@@ -21,8 +23,7 @@ SUPPORTED_CODEMAP_LANGUAGES = ("Python", *SUPPORTED_POLYGLOT_LANGUAGES)
 _EXTRACTORS: dict[str, CodeMapExtractor] = {
     "Python": extract_python_code_map,
     **{
-        language: extract_polyglot_code_map
-        for language in SUPPORTED_POLYGLOT_LANGUAGES
+        language: extract_polyglot_code_map for language in SUPPORTED_POLYGLOT_LANGUAGES
     },
 }
 
@@ -36,10 +37,26 @@ def extract_code_map(
     """Dispatch one snapshot-owned file to Python or the verified fallback."""
 
     extractor = _EXTRACTORS.get(project_file.language or "", extract_fallback_code_map)
-    return extractor(
+    code_map = extractor(
         snapshot,
         project_file,
         max_source_bytes=max_source_bytes,
+    )
+    selected = read_selected_text_file(
+        snapshot,
+        project_file,
+        limits=ReaderLimits(
+            max_files=1,
+            max_source_bytes=max_source_bytes,
+            max_content_bytes=max_source_bytes,
+        ),
+    )
+    chunks, truncated = plan_source_chunks(selected.blocks[0].text, code_map)
+    return code_map.model_copy(
+        update={
+            "source_regions": tuple(chunk.source_range for chunk in chunks),
+            "source_regions_truncated": truncated,
+        }
     )
 
 

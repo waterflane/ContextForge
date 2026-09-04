@@ -18,7 +18,7 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-CODEMAP_SCHEMA_VERSION: Literal[1] = 1
+CODEMAP_SCHEMA_VERSION: Literal[2] = 2
 RESOLVER_VERSION = "2"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
@@ -237,7 +237,7 @@ class RelationshipRecord(IndexModel):
 class SymbolRecord(IndexModel):
     """Verified declaration and directly contained syntax facts."""
 
-    schema_version: Literal[1] = RECORD_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = RECORD_SCHEMA_VERSION
     record_kind: Literal["verified_symbol"] = "verified_symbol"
     symbol_id: str
     name: str
@@ -275,12 +275,16 @@ class SymbolRecord(IndexModel):
             SymbolKind.CONSTRUCTOR,
         } and (self.parameters or self.return_annotation is not None):
             raise ValueError("only callable symbols can declare parameters")
-        if self.kind not in {
-            SymbolKind.CLASS,
-            SymbolKind.INTERFACE,
-            SymbolKind.STRUCT,
-            SymbolKind.TRAIT,
-        } and self.contained_methods:
+        if (
+            self.kind
+            not in {
+                SymbolKind.CLASS,
+                SymbolKind.INTERFACE,
+                SymbolKind.STRUCT,
+                SymbolKind.TRAIT,
+            }
+            and self.contained_methods
+        ):
             raise ValueError("only type declarations can contain method IDs")
         if tuple(self.contained_methods) != tuple(sorted(self.contained_methods)):
             raise ValueError("contained method IDs must be canonical")
@@ -308,7 +312,7 @@ class SymbolRecord(IndexModel):
 class FileCodeMap(IndexModel):
     """Complete model-free structural projection for one snapshot file."""
 
-    schema_version: Literal[1] = CODEMAP_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = CODEMAP_SCHEMA_VERSION
     record_kind: Literal["verified_file_codemap"] = "verified_file_codemap"
     path: str
     source_sha256: Sha256
@@ -317,6 +321,8 @@ class FileCodeMap(IndexModel):
     analyzer: AnalyzerIdentity
     parse_status: ParseStatus
     line_count: NonNegativeInt
+    source_regions: tuple[SourceRange, ...] = ()
+    source_regions_truncated: bool = False
     module_docstring: str | None = None
     imports: tuple[ImportRecord, ...] = ()
     exports: tuple[ExportRecord, ...] = ()

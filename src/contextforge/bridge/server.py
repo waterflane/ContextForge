@@ -631,9 +631,7 @@ class BridgeServer:
             },
         }
         if self._protocol_version == "1.1":
-            result["index"]["coverage"] = await asyncio.to_thread(
-                self._index_coverage
-            )
+            result["index"]["coverage"] = await asyncio.to_thread(self._index_coverage)
         return result
 
     async def _snapshot(self, cancellation: asyncio.Event) -> dict[str, Any]:
@@ -859,9 +857,12 @@ class BridgeServer:
                 )
             candidate = candidates.get(path)
             if candidate is None:
-                identifier = "x-" + hashlib.sha256(
-                    f"{preparation.preparation_id}:{path}".encode()
-                ).hexdigest()[:16]
+                identifier = (
+                    "x-"
+                    + hashlib.sha256(
+                        f"{preparation.preparation_id}:{path}".encode()
+                    ).hexdigest()[:16]
+                )
                 candidate = PreparedDiscoveryCandidate(
                     candidate_id=identifier,
                     path=path,
@@ -911,6 +912,9 @@ class BridgeServer:
             "semantic_complete_files": 0,
             "semantic_disabled_files": 0,
             "semantic_failed_files": 0,
+            "semantic_partial_files": 0,
+            "semantic_chunks_planned": 0,
+            "semantic_chunks_completed": 0,
             "verified_symbols": 0,
             "inferred_regions": 0,
         }
@@ -922,6 +926,8 @@ class BridgeServer:
         for state in manifest.files:
             if state.semantic_status == "complete":
                 coverage["semantic_complete_files"] += 1
+            elif state.semantic_status == "partial":
+                coverage["semantic_partial_files"] += 1
             elif state.semantic_status == "disabled":
                 coverage["semantic_disabled_files"] += 1
             elif state.semantic_status == "failed":
@@ -937,7 +943,7 @@ class BridgeServer:
             else:
                 coverage["parsed_files"] += 1
             coverage["verified_symbols"] += len(code_map.symbols)
-            if state.semantic_status == "complete":
+            if state.semantic_status in {"complete", "partial"}:
                 try:
                     analysis = load_file_semantic_analysis(
                         self.workspace, state.path, manifest=manifest
@@ -945,6 +951,14 @@ class BridgeServer:
                 except Exception:
                     continue
                 coverage["inferred_regions"] += len(analysis.inferred_regions)
+                coverage["semantic_chunks_planned"] += analysis.chunks_planned
+                coverage["semantic_chunks_completed"] += analysis.chunks_completed
+                if (
+                    not analysis.coverage_complete
+                    and state.semantic_status == "complete"
+                ):
+                    coverage["semantic_complete_files"] -= 1
+                    coverage["semantic_partial_files"] += 1
         return coverage
 
     def _remember_preparation(self, preparation: DiscoveryCandidatePreparation) -> None:
