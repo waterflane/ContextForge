@@ -44,7 +44,8 @@ suite uses `FakeModelProvider` and requires no model or network.
 
 Keep local-model concurrency low. The semantic builder additionally bounds
 scheduled files, simultaneous file tasks, request and response bytes, source
-bytes per file, one model request per file, provider retries, and cancellation.
+bytes per chunk, up to 64 logical model requests per file, provider retries,
+and cancellation. Full coverage is the default; lower caller limits are explicit.
 Provider limits may be stricter than analysis limits.
 
 `--request-timeout` overrides the per-attempt deadline for one index command;
@@ -64,8 +65,9 @@ unsupported binary, oversized, invalid encoding, or preflight failure.
 Python plus JavaScript/JSX, TypeScript/TSX, Java, C#, Go, Rust, C, C++, PHP,
 and Ruby use rich model analysis over verified declarations. Python retains its
 standard-library AST extractor; the other languages use bundled Tree-sitter
-grammars and require no runtime download. Other meaningful readable text uses
-generic schema-bound analysis over `generic-text-structure` facts.
+grammars and require no runtime download. Routing is based on declarations in
+each supplied chunk: chunks without declarations use generic region analysis,
+including chunks in otherwise supported languages.
 
 `.gitignore`, `.gitattributes`, `.editorconfig`, `.env.example`, `.env.sample`,
 lock files, `.gitkeep`, and empty files use deterministic metadata summaries and
@@ -83,19 +85,21 @@ path, language and category, bounded source or excerpt, minimal file-local
 facts, and a compact closed response schema. It never contains the repository
 tree, global maps, feature maps, unrelated files, or prior responses.
 
-The maximum candidate excerpt is 65,536 UTF-8 bytes, but it is not a dispatch
-target. Smaller files are sent completely only when the complete request fits.
-Larger or over-budget requests use a deterministic line-preserving selection weighted
-toward verified symbol bodies, the beginning, and the ending. Symbol bodies are
-sampled fairly from both ends rather than reducing every function to its declaration.
-Selection works on
-decoded text and whole encoded lines, with a codepoint-safe prefix fallback, so
-it cannot create invalid UTF-8. Structural metadata is reduced after source
-when necessary. Every resulting request must fit messages, schema, output,
-wrapper, and safety reserve within the configured model context. Progress
-records the cost breakdown and truncation state without exposing source.
+Chunks contain at most 65,536 UTF-8 bytes and follow verified symbol boundaries,
+including source between symbols. Oversized regions split on lines with up to
+eight overlapping lines. Oversized individual lines split at UTF-8 boundaries
+and retain byte-column coordinates. Small neighboring regions share a request.
+The provider context budget may require smaller chunks. At most 64 chunks are
+processed in source order; the cap never silently implies full coverage.
 
-Each file makes at most one provider request. Adaptive output caps, also
+Successful chunks are checkpointed with source SHA, range, fact digest,
+provider/model/prompt identity and analysis options. Published partial results
+retain checkpoints, so a subsequent run only requests missing chunks. Claims
+are merged deterministically without another synthesis request; conflicting
+interpretations retain provenance. Overlapping inferred regions keep the first
+valid region and emit a warning. Internal checkpoints are not tool observations.
+
+Adaptive output caps per request, also
 limited by the caller's lower ceiling, are:
 
 - deterministic metadata/control files: no provider output;
@@ -129,8 +133,11 @@ label, kind, summary, confidence, and source range. These remain model-derived
 and are never promoted to `SymbolRecord`. Ranges must be ordered, non-overlapping,
 inside the supplied excerpt, and bound to the current source SHA-256.
 
-A completed interpretation is checkpointed atomically in staging only after
-the entire response validates. Publication copies structural facts unchanged,
+A completed chunk is checkpointed atomically in staging only after
+the entire response validates. File records expose `chunks_planned`,
+`chunks_completed`, `covered_ranges`, `coverage_complete`, and safe coverage
+warnings. A file with successful and failed chunks retains successful claims
+but reports `semantic_status=partial` and incomplete coverage. Publication copies structural facts unchanged,
 binds interpretation digests into a new immutable generation, and switches the
 active pointer atomically. A failed or cancelled run cannot expose a partial
 record as complete.
@@ -145,7 +152,7 @@ analyzed; deleted files disappear from the next generation. A rename is
 handled safely as deletion plus addition because paths participate in IDs and
 evidence, so its semantics are reanalyzed rather than silently rebound.
 
-The build lifecycle distinguishes `pending`, `analyzing`, `complete`, `failed`,
+The build lifecycle distinguishes `pending`, `analyzing`, `complete`, `partial`, `failed`,
 `stale`, `skipped`, and `disabled`. Only terminal states are published in a
 manifest. By default, individual failures are recorded and other files
 continue; strict mode refuses semantic publication on any failure.

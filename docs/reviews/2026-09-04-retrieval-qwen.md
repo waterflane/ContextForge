@@ -1,5 +1,9 @@
 # Retrieval and Qwen review, 2026-09-04
 
+Historical review. The remaining findings below are addressed by the subsequent
+[implementation and validation report](2026-09-04-remaining-defects.md); the
+original observations are retained here unchanged.
+
 Scope: local `waterflane/polyglot-symbol-index`, plus read-only checks against
 `dsh-contextforge` and the user-provided loopback provider. No external repository
 was edited and no Git refs were pushed.

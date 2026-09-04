@@ -33,6 +33,14 @@ until a caller-selected hard budget is exhausted.
 The index is never source truth. A source identity mismatch during investigation
 or final verification aborts without returning a partial successful selection.
 
+Simple exact-symbol questions in `fresh` use the compact candidate-ID contract
+when each requested identifier has one verified declaration among available
+candidates. Broader or ambiguous questions retain the investigative tool loop.
+The server supplies ranges and source identity; the model cannot introduce new
+IDs or paths through this compact contract. If request history exceeds the
+context budget, oldest complete observations are dropped, never sliced JSON or
+source. Selected candidates and exact evidence remain available.
+
 The three modes intentionally do not promise identical selections. Their
 available evidence differs, and more than one entry point, test, configuration
 file, or supporting document can validly cover the task. Mode-specific quality

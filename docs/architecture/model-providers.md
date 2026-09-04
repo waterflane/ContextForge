@@ -88,6 +88,15 @@ provider/model value such as 98,304 is not silently substituted for a
 ContextForge `config.toml` value of 16,384; diagnostics show both and identify
 `config.toml` as the effective source.
 
+An architectural maximum advertised by `/models` is not the server's loaded
+context allocation. An explicit server context refusal is a typed
+`context_window_exceeded`, not a JSON-repair opportunity. If the refusal names
+an unambiguous smaller limit, the OpenAI-compatible provider lowers its in-memory
+window for this instance. Discovery and semantic callers rebuild the request
+once against that limit; they never modify configuration files. Ambiguous
+errors retain the configured window and fail safely. Semantic preflight may
+split remaining source chunks further; successful checkpoints remain reusable.
+
 Connection, response-read, and complete-operation defaults are 10, 300, and
 360 seconds. The retained `timeout_seconds` value is a compatibility operation
 ceiling. `ProviderConfiguration` also enforces a response cap in

@@ -78,7 +78,15 @@ Mutation APIs require an active `IndexWriteLock`. Readers do not take the lock.
 `load_index_record()` accepts a caller-pinned manifest so a multi-record reader
 does not need to reopen the active pointer between reads.
 
-## Manifest schema version 1
+## Manifest schema version 2
+
+New index pointers, manifests, records, CodeMaps and semantic records use v2.
+The separate legacy loader permits read-only v1 inspection and preserves its
+original digest. Legacy records are stale and are never reused in a v2 build.
+Build/update publishes only a consistent generation. The application workflow
+keeps intermediate structural, semantic and map generations private until the
+final atomic pointer switch; a failure leaves the previous pointer untouched.
+Old generations are not deleted by migration.
 
 Persisted models are frozen Pydantic models with unknown fields forbidden.
 Canonical manifest JSON is UTF-8, sorted-key compact JSON with LF termination.
@@ -105,7 +113,12 @@ except the self-referential `generation_id` field. File-record content is bound
 through each record's SHA-256. API keys, bearer tokens, headers, and credential
 objects are not fields in any persisted schema and unknown fields are rejected.
 
-## CodeMap schema version 1
+## CodeMap schema version 2
+
+CodeMaps also retain bounded deterministic `source_regions` and
+`source_regions_truncated`, including when no model is configured. These are
+source partitions, not inferred symbols. Structural reads are bounded to
+16 MiB by default; semantic coverage has its separate 64-chunk limit.
 
 `FileCodeMap` is a closed, frozen, model-free record containing the portable
 path, raw-source SHA-256 and byte size, language, analyzer identity, parse

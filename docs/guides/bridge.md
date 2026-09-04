@@ -155,6 +155,12 @@ shutdown response remains a normal serialized JSON-RPC frame.
 
 ## Security and read-only boundary
 
+Bridge 1.1 coverage includes `semantic_partial_files`,
+`semantic_chunks_planned`, and `semantic_chunks_completed`. Partial files do
+not count toward `semantic_complete_files`. Bridge 1.0 keeps its existing
+response shape. Chunk cache payloads are internal and are not returned in
+semantic tool summaries or packaged source.
+
 Run the bridge only as a child process of a trusted local consumer. It inherits
 the user's filesystem read authority and intentionally returns repository data.
 It provides no authentication, authorization, encryption, tenant isolation, or
