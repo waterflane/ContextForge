@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from contextforge.intelligence.coverage import relationship_coverage
+from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
+
 from .models import CompletenessWarning, DiscoveryCandidate
 from .tools import DiscoveryKnowledge, GitDiffResult
 
@@ -19,6 +22,25 @@ def review_completeness(
 
     selected_paths = {item.path for item in selected if item.path is not None}
     warnings: list[CompletenessWarning] = []
+    coverage = relationship_coverage(
+        knowledge.code_maps,
+        tuple(
+            item.path
+            for item in knowledge.snapshot.files
+            if item.language in SUPPORTED_CODEMAP_LANGUAGES
+        ),
+    )
+    if any(coverage["file_counts"].values()) and coverage["status"] != "supported":
+        warnings.append(
+            CompletenessWarning(
+                code="relationship-coverage-incomplete",
+                message="Static call/import coverage is "
+                + str(coverage["status"])
+                + "; empty results do not establish absence of callers "
+                "or dependencies.",
+                confidence=0.3,
+            )
+        )
     imports: dict[str, set[str]] = defaultdict(set)
     importers: dict[str, set[str]] = defaultdict(set)
     callers: dict[str, set[str]] = defaultdict(set)

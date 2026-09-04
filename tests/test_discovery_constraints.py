@@ -350,7 +350,7 @@ def test_ranking_tokens_normalize_conservative_aliases_and_stopwords() -> None:
     }
 
 
-def test_exact_camel_case_declaration_outranks_usages_without_codemap(
+def test_text_matches_without_codemap_do_not_claim_verified_declarations(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "src").mkdir()
@@ -382,11 +382,15 @@ def test_exact_camel_case_declaration_outranks_usages_without_codemap(
         limit=8,
     )
 
-    assert records[0].path == "src/progress.ts"
-    assert "exact_source_declarations=1" in records[0].ranking_signals
+    assert records[0].path == "src/client.ts"
+    assert not any(
+        signal.startswith("exact_source_declarations=")
+        for record in records
+        for signal in record.ranking_signals
+    )
     assert [item.path for item in selected] == [
-        "src/progress.ts",
         "src/client.ts",
+        "src/progress.ts",
     ]
     session = DiscoverySession(
         snapshot,

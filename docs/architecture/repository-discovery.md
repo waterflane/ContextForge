@@ -13,7 +13,7 @@ package construction to the existing builder.
 
 Every session is pinned to a caller-supplied `ProjectSnapshot`. Initial index,
 symbol, text, or semantic matches are hints only. The trusted model request
-contains the complete allowed portable path inventory, and tree, text, and
+contains a bounded allowed portable path inventory; tree, text, and
 verified-read tools remain capable of reaching every permitted snapshot file
 until a caller-selected hard budget is exhausted.
 
@@ -35,11 +35,41 @@ or final verification aborts without returning a partial successful selection.
 
 Simple exact-symbol questions in `fresh` use the compact candidate-ID contract
 when each requested identifier has one verified declaration among available
-candidates. Broader or ambiguous questions retain the investigative tool loop.
+candidates and its known dependencies are available. Broader, ambiguous or
+dependency-incomplete questions retain the investigative tool loop. Hybrid
+investigation uses the caller's model-call budget rather than an internal
+one-generation ceiling.
 The server supplies ranges and source identity; the model cannot introduce new
 IDs or paths through this compact contract. If request history exceeds the
 context budget, oldest complete observations are dropped, never sliced JSON or
-source. Selected candidates and exact evidence remain available.
+source. Optional directory inventories can also shrink; investigative requests
+may omit source excerpts and use read tools instead. Selected candidates, IDs,
+warnings and evidence origins remain available.
+
+Compact selection and `select_candidates` accept optional `symbol_ids` from the
+supplied verified candidates; legacy file-ID selections remain valid. The model
+chooses functions and constants, and the server resolves/merges their ranges.
+Bounded source excerpts are untrusted contexts, separate from symbol identities.
+AST references in Python and JS/TS identify unique same-file dependencies,
+including later constants such as `INDEX_PHASES`; unresolved references remain
+explicit. Selection alone no longer forces finalization. A final dependency
+review allows another investigation and preserves warnings if gaps remain.
+Source hashes are refreshed before success even when an earlier read is cached.
+
+Ranking groups are mandatory pins, exact verified declarations, exact text
+occurrences, then approximate matches, with numeric scores only within a group.
+Comments and strings cannot claim declaration evidence. Identifier extraction
+and ranking support Unicode while exact matching remains case-sensitive.
+Missing exact identifiers permit model-selected alternatives with
+`exact-identifier-not-found` and `low-relevance-candidates` warnings and confidence
+at most 0.35. A limited search is labelled separately. Approximate preselection
+and fallback are capped at three unpinned files and prefer callable ranges.
+
+`find_callers`, `find_references`, `find_imports`, and `find_importers` include a
+`coverage` object with status, scope, file counts and limitations. Status is
+`supported`, `partial`, `unsupported`, or `unknown`; zero matches/unresolved calls
+describes only observed static facts. Repository relationship limitations appear
+in final warnings without requesting futile repeated model reviews.
 
 The three modes intentionally do not promise identical selections. Their
 available evidence differs, and more than one entry point, test, configuration

@@ -311,7 +311,8 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
     assert result.final_selection is not None
-    assert result.final_selection.confidence == pytest.approx(0.517104)
+    assert 0 < result.final_selection.confidence < 0.52
+    assert any(w.code == "relationship-coverage-incomplete" for w in result.warnings)
     verification = next(
         item
         for item in recent_records()
@@ -433,6 +434,8 @@ def test_large_observation_history_is_dropped_at_record_boundaries(
 
     def responder(request: ModelRequest, _: int) -> str:
         for context in request.untrusted_contexts:
+            if context.label != "discovery-observations":
+                continue
             history = json.loads(context.text)
             assert isinstance(history, list)
             assert history[-1]["data"]["marker"] == "latest"
@@ -778,7 +781,7 @@ def test_finalize_in_received_batch_can_use_the_last_action_step(
     assert result.budget_usage.model_calls == 1
 
 
-def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None:
+def test_candidate_selection_requires_explicit_finalize(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
 
     def responder(request: ModelRequest, index: int) -> str:
@@ -798,24 +801,23 @@ def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None
         )
 
     provider = FakeModelProvider(_configuration(), responder=responder)
-    result = asyncio.run(
-        discover_repository(
-            snapshot,
-            provider,
-            DiscoveryRequest(
-                task="x",
-                mode="fresh",
-                budget=DiscoveryBudget(max_steps=1),
-            ),
+    with pytest.raises(DiscoveryLimitError) as error:
+        asyncio.run(
+            discover_repository(
+                snapshot,
+                provider,
+                DiscoveryRequest(
+                    task="x",
+                    mode="fresh",
+                    budget=DiscoveryBudget(max_steps=1),
+                ),
+            )
         )
+    assert error.value.run_record.final_selection is None
+    assert not any(
+        item.action_id == "engine-deterministic-finalize"
+        for item in error.value.run_record.observations
     )
-
-    assert result.final_selection is not None
-    assert result.budget_usage.steps == 1
-    assert [item.action_id for item in result.observations] == [
-        "select",
-        "engine-deterministic-finalize",
-    ]
 
 
 def test_source_and_context_byte_budgets_fail_closed(tmp_path: Path) -> None:

@@ -635,6 +635,7 @@ class IndexedContextSelection(DiscoveryModel):
 
     schema_version: Literal[1] = DISCOVERY_SCHEMA_VERSION
     candidate_ids: tuple[str, ...] = Field(min_length=1, max_length=10)
+    symbol_ids: tuple[str, ...] = Field(default=(), max_length=100)
     summary: str = Field(min_length=1, max_length=2_000)
 
     @field_validator("candidate_ids")

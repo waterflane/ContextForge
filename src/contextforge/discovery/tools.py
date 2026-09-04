@@ -30,8 +30,11 @@ from contextforge.intelligence import (
     calculate_source_snapshot_digest,
 )
 from contextforge.intelligence.codemap import SymbolRecord
+from contextforge.intelligence.coverage import relationship_coverage
+from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
+from .dependencies import SymbolDependencies, symbol_dependencies
 from .models import (
     DiscoveryBudget,
     DiscoveryBudgetUsage,
@@ -139,6 +142,7 @@ class AddContextInput(ToolInput):
 
 class SelectCandidatesInput(ToolInput):
     candidate_ids: tuple[str, ...] = Field(min_length=1, max_length=10)
+    symbol_ids: tuple[str, ...] = Field(default=(), max_length=100)
     summary: str | None = Field(default=None, min_length=1, max_length=2_000)
 
 
@@ -656,6 +660,12 @@ class DiscoveryToolExecutor:
             return _ToolResult({}, code="not_found", ok=False)
         path, symbol = found
         data: dict[str, Any] = {"path": path, "fact": symbol.model_dump(mode="json")}
+        dependencies, _ = self.inspect_symbol_dependencies(path, symbol)
+        data["dependencies"] = {
+            "symbol_ids": dependencies.symbol_ids,
+            "unresolved_names": dependencies.unresolved_names,
+            "supported": dependencies.supported,
+        }
         analysis = self.knowledge.semantic_analyses.get(path)
         if analysis is not None:
             semantic = next(
@@ -673,6 +683,28 @@ class DiscoveryToolExecutor:
             )
         return _bounded_data(data, MAX_SUMMARY_RESULT_BYTES)
 
+    def inspect_symbol_dependencies(
+        self, path: str, symbol: SymbolRecord
+    ) -> tuple[SymbolDependencies, str]:
+        """Read through the same source validation, cache and budget as model tools."""
+        project_file = self._require_path(path)
+        if project_file.size_bytes > MAX_READ_FILE_BYTES:
+            return SymbolDependencies(supported=False), ""
+        try:
+            selected = self._read(project_file)
+        except ToolBudgetExceededError:
+            return SymbolDependencies(supported=False), ""
+        source = selected.blocks[0].text
+        result = symbol_dependencies(source, self.knowledge.code_maps[path], symbol)
+        lines = source.splitlines(keepends=True)
+        excerpt = "".join(
+            lines[
+                symbol.declaration_range.start_line
+                - 1 : symbol.declaration_range.end_line
+            ]
+        )
+        return result, excerpt
+
     def _find_imports(self, raw: ToolInput) -> _ToolResult:
         value = _as(raw, PagedPathInput)
         path = self._require_path(value.path).path
@@ -680,7 +712,9 @@ class DiscoveryToolExecutor:
         if code_map is None:
             return _ToolResult({}, code="unavailable", ok=False)
         items = [item.model_dump(mode="json") for item in code_map.imports]
-        return self._page("find_imports", value, items, MAX_SEARCH_RESULT_BYTES)
+        return self._with_coverage(
+            self._page("find_imports", value, items, MAX_SEARCH_RESULT_BYTES), (path,)
+        )
 
     def _find_importers(self, raw: ToolInput) -> _ToolResult:
         value = _as(raw, PagedPathInput)
@@ -691,7 +725,9 @@ class DiscoveryToolExecutor:
             for item in code_map.imports
             if item.target_file_path == path
         ]
-        return self._page("find_importers", value, items, MAX_SEARCH_RESULT_BYTES)
+        return self._with_coverage(
+            self._page("find_importers", value, items, MAX_SEARCH_RESULT_BYTES)
+        )
 
     def _find_references(self, raw: ToolInput) -> _ToolResult:
         value = _as(raw, PagedSymbolInput)
@@ -706,7 +742,29 @@ class DiscoveryToolExecutor:
             for relationship in code_map.relationships
             if relationship.target.symbol_id == value.symbol_id
         ]
-        return self._page("find_references", value, items, MAX_SEARCH_RESULT_BYTES)
+        return self._with_coverage(
+            self._page("find_references", value, items, MAX_SEARCH_RESULT_BYTES)
+        )
+
+    def _with_coverage(
+        self, result: _ToolResult, paths: tuple[str, ...] | None = None
+    ) -> _ToolResult:
+        if paths is None:
+            paths = tuple(
+                item.path
+                for item in self.knowledge.snapshot.files
+                if item.language in SUPPORTED_CODEMAP_LANGUAGES
+            )
+        return _ToolResult(
+            {
+                **result.data,
+                "coverage": relationship_coverage(self.knowledge.code_maps, paths),
+            },
+            code=result.code,
+            ok=result.ok,
+            truncated=result.truncated,
+            made_progress=result.made_progress,
+        )
 
     def _find_callers(self, raw: ToolInput) -> _ToolResult:
         value = _as(raw, PagedSymbolInput)
@@ -730,10 +788,12 @@ class DiscoveryToolExecutor:
             for call in symbol.direct_calls
         )
         result = self._page("find_callers", value, items, MAX_SEARCH_RESULT_BYTES)
-        return _ToolResult(
-            {**result.data, "unresolved_calls_in_repository": unresolved},
-            truncated=result.truncated,
-            made_progress=result.made_progress,
+        return self._with_coverage(
+            _ToolResult(
+                {**result.data, "unresolved_calls_in_repository": unresolved},
+                truncated=result.truncated,
+                made_progress=result.made_progress,
+            )
         )
 
     def _find_related_tests(self, raw: ToolInput) -> _ToolResult:
@@ -954,6 +1014,19 @@ class DiscoveryToolExecutor:
         value = _as(raw, SelectCandidatesInput)
         if len(value.candidate_ids) != len(set(value.candidate_ids)):
             raise ValueError("candidate IDs must be unique")
+        if len(value.symbol_ids) != len(set(value.symbol_ids)):
+            raise ValueError("symbol IDs must be unique")
+        selected_paths = {
+            self._candidate_records[item].path
+            for item in value.candidate_ids
+            if item in self._candidate_records
+        }
+        selected_symbols: dict[str, list[SymbolRecord]] = {}
+        for symbol_id in value.symbol_ids:
+            found = self._find_symbol(symbol_id)
+            if found is None or found[0] not in selected_paths:
+                raise ValueError("symbol ID is outside the selected candidates")
+            selected_symbols.setdefault(found[0], []).append(found[1])
         changed = False
         selected: list[dict[str, Any]] = []
         previous_selection = dict(self._selected)
@@ -965,6 +1038,29 @@ class DiscoveryToolExecutor:
             previous = self._selected.get(record.path)
             signals = ", ".join(record.ranking_signals)
             ranges = self._candidate_ranges.get(record.candidate_id, ())
+            if record.path in selected_symbols and record.path not in self._pinned:
+                spans = sorted(
+                    [
+                        (s.declaration_range.start_line, s.declaration_range.end_line)
+                        for s in selected_symbols[record.path]
+                    ]
+                    + [
+                        (span.start_line, span.end_line)
+                        for span in (() if previous is None else previous.ranges)
+                    ]
+                )
+                merged: list[DiscoveryLineRange] = []
+                for start, end in spans:
+                    if merged and start <= merged[-1].end_line + 1:
+                        merged[-1] = DiscoveryLineRange(
+                            start_line=merged[-1].start_line,
+                            end_line=max(end, merged[-1].end_line),
+                        )
+                    else:
+                        merged.append(
+                            DiscoveryLineRange(start_line=start, end_line=end)
+                        )
+                ranges = tuple(merged)
             candidate = DiscoveryCandidate(
                 candidate_id=record.candidate_id,
                 kind=(
@@ -1056,6 +1152,7 @@ class DiscoveryToolExecutor:
         *,
         line_ranges: tuple[LineRange, ...] = (),
         max_content_bytes: int,
+        revalidate: bool = False,
     ) -> SelectedTextFile:
         """Return one snapshot-verified read, reusing identical source selections."""
 
@@ -1064,11 +1161,14 @@ class DiscoveryToolExecutor:
             tuple((item.start, item.end) for item in line_ranges),
         )
         cached = self._source_cache.get(key)
-        if cached is not None:
+        if cached is not None and not revalidate:
             if cached.included_content_bytes > max_content_bytes:
                 raise ToolBudgetExceededError("selected content exceeds byte limit")
             return cached
-        self.budget.charge_read(project_file.size_bytes)
+        # Refreshing the hash of an already charged snapshot read does not
+        # expose additional source bytes to the model.
+        if cached is None:
+            self.budget.charge_read(project_file.size_bytes)
         self.read_paths.add(project_file.path)
         selected = read_selected_text_file(
             self.knowledge.snapshot,

@@ -366,8 +366,8 @@ def test_fallback_is_complete_with_exact_nonprovider_counters(tmp_path: Path) ->
     assert result.failure_code is None
     assert result.final_selection is not None
     assert tuple(item.path for item in result.final_selection.selected) == ("main.py",)
-    assert result.budget_usage.files_read == 2
-    assert result.budget_usage.source_bytes == 2 * len(b"VALUE = 1\n")
+    assert result.budget_usage.files_read == 3
+    assert result.budget_usage.source_bytes == 3 * len(b"VALUE = 1\n")
     assert result.budget_usage.tool_result_bytes == 0
     assert result.budget_usage.context_bytes == len(b"VALUE = 1\n")
     assert result.budget_usage.context_files == 1
