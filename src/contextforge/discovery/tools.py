@@ -139,6 +139,7 @@ class AddContextInput(ToolInput):
 
 class SelectCandidatesInput(ToolInput):
     candidate_ids: tuple[str, ...] = Field(min_length=1, max_length=10)
+    summary: str | None = Field(default=None, min_length=1, max_length=2_000)
 
 
 class RemoveContextInput(ToolInput):
@@ -308,6 +309,7 @@ class DiscoveryToolExecutor:
         excluded_paths: tuple[str, ...] = (),
         git_diff_provider: GitDiffProvider | None = None,
         candidate_records: Mapping[str, DiscoveryCandidateRecord] | None = None,
+        candidate_ranges: Mapping[str, tuple[DiscoveryLineRange, ...]] | None = None,
     ) -> None:
         self.knowledge = knowledge
         self.budget = budget
@@ -318,6 +320,7 @@ class DiscoveryToolExecutor:
         self._removed: dict[str, str] = {}
         self._git_diff_provider = git_diff_provider
         self._candidate_records = dict(candidate_records or {})
+        self._candidate_ranges = dict(candidate_ranges or {})
         self.read_paths: set[str] = set()
         self._source_cache: dict[
             tuple[str, tuple[tuple[int, int], ...]], SelectedTextFile
@@ -956,14 +959,20 @@ class DiscoveryToolExecutor:
             project_file = self._require_path(record.path)
             previous = self._selected.get(record.path)
             signals = ", ".join(record.ranking_signals)
+            ranges = self._candidate_ranges.get(record.candidate_id, ())
             candidate = DiscoveryCandidate(
                 candidate_id=record.candidate_id,
                 kind=(
-                    "related_test"
-                    if _looks_like_test_path(record.path)
-                    else "full_file"
+                    "line_ranges"
+                    if ranges
+                    else (
+                        "related_test"
+                        if _looks_like_test_path(record.path)
+                        else "full_file"
+                    )
                 ),
                 path=record.path,
+                ranges=ranges,
                 reason=SelectionReason(
                     summary=(f"Ranked candidate #{record.rank}; signals: {signals}."),
                     discovery_source="model-selected:indexed-candidate-id",
@@ -971,6 +980,7 @@ class DiscoveryToolExecutor:
                 ),
                 confidence=min(0.99, 0.5 + record.score / (2 * (record.score + 1))),
                 source_sha256=project_file.sha256,
+                manually_pinned=record.path in self._pinned,
                 model_selected=True,
             )
             self._selected[record.path] = candidate

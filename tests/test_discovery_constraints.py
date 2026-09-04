@@ -22,6 +22,7 @@ from contextforge.discovery import (
 )
 from contextforge.discovery.constraints import extract_task_file_constraints
 from contextforge.discovery.session import (
+    DiscoverySession,
     _detect_intent_facets,
     _facet_aware_preselection,
     _rank_candidate_records,
@@ -389,6 +390,84 @@ def test_exact_camel_case_declaration_outranks_usages_without_codemap(
         "src/progress.ts",
         "src/client.ts",
     ]
+    session = DiscoverySession(
+        snapshot,
+        None,
+        DiscoveryRequest(task=task, mode=DiscoveryMode.FRESH),
+    )
+    executor, _ = session.prepare_read_only_tools()
+    observation = executor.execute(
+        step=1,
+        action_id="select-definition",
+        tool_name="select_candidates",
+        arguments={
+            "candidate_ids": [
+                item.candidate_id for item in session._preselected_candidates
+            ]
+        },
+    )
+    candidate = observation.data["candidates"][0]
+    assert candidate["kind"] == "line_ranges"
+    assert candidate["ranges"] == [{"start_line": 1, "end_line": 1}]
+    usage = observation.data["candidates"][1]
+    assert usage["path"] == "src/client.ts"
+    assert usage["kind"] == "line_ranges"
+    assert usage["ranges"] == [{"start_line": 1, "end_line": 1}]
+
+
+def test_exact_identifier_selection_preserves_full_file_manual_pin(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "progress.ts").write_text(
+        "export function preparationProgressStage() {}\n", encoding="utf-8"
+    )
+    session = DiscoverySession(
+        scan_repository(tmp_path),
+        None,
+        DiscoveryRequest(
+            task="Explain preparationProgressStage",
+            mode=DiscoveryMode.FRESH,
+            pinned_paths=("progress.ts",),
+        ),
+    )
+    executor, _ = session.prepare_read_only_tools()
+    executor.execute(
+        step=1,
+        action_id="select-pinned",
+        tool_name="select_candidates",
+        arguments={"candidate_ids": [session._preselected_candidates[0].candidate_id]},
+    )
+
+    assert executor.selected[0].kind == "full_file"
+    assert executor.selected[0].ranges == ()
+    assert executor.selected[0].manually_pinned is True
+
+
+def test_exact_identifier_scan_rejects_content_changed_after_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "progress.ts"
+    source.write_text("export function originalName() {}\n", encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    source.write_text(
+        "export function preparationProgressStage() {}\n", encoding="utf-8"
+    )
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+
+    records = _rank_candidate_records(
+        knowledge,
+        task="Что делает preparationProgressStage?",
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+
+    assert not any(
+        signal.startswith("exact_source_") for signal in records[0].ranking_signals
+    )
 
 
 def test_role_scoring_does_not_turn_index_coverage_into_test_request(

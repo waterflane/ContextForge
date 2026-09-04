@@ -15,7 +15,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from contextforge.context import LineRange
+from contextforge.context import (
+    ContextReaderError,
+    LineRange,
+    ReaderLimits,
+    read_selected_text_file,
+)
 from contextforge.intelligence import (
     FileCodeMap,
     IndexManifest,
@@ -60,6 +65,7 @@ from .models import (
     DiscoveryActionBatch,
     DiscoveryCandidate,
     DiscoveryCandidateRecord,
+    DiscoveryLineRange,
     DiscoveryMode,
     DiscoveryObservation,
     DiscoveryRequest,
@@ -345,6 +351,15 @@ class DiscoverySession:
             candidate_records={
                 item.candidate_id: item for item in self._preselected_candidates
             },
+            candidate_ranges=_verified_identifier_ranges(
+                loaded.knowledge,
+                tuple(
+                    item
+                    for item in self._preselected_candidates
+                    if item.path not in self.request.pinned_paths
+                ),
+                self._task_file_constraints.positive_task,
+            ),
         )
         if len(self.request.pinned_paths) > self.request.budget.max_context_files:
             self.warnings.append(
@@ -859,12 +874,22 @@ class DiscoverySession:
             if item.path in pinned and item.path not in candidate_paths
         )
         candidates.sort(key=lambda item: (item.path not in pinned, item.rank))
+        candidate_ranges = _verified_identifier_ranges(
+            self._require_knowledge(), tuple(candidates), constraints.positive_task
+        )
         maximum_files = max(
             self.request.budget.max_context_files,
             len(self.request.pinned_paths),
         )
         for record in candidates:
             project_file = files.get(record.path)
+            ranges = (
+                () if record.path in pinned
+                else candidate_ranges.get(record.candidate_id, ())
+            )
+            candidate_size = (
+                0 if ranges else (project_file.size_bytes if project_file else 0)
+            )
             if (
                 project_file is None
                 or project_file.is_text is not True
@@ -879,21 +904,26 @@ class DiscoverySession:
                     & set(record.ranking_signals)
                 )
                 or len(selected) >= maximum_files
-                or selected_bytes + project_file.size_bytes
+                or selected_bytes + candidate_size
                 > self.request.budget.max_context_bytes
             ):
                 continue
-            selected_bytes += project_file.size_bytes
+            selected_bytes += candidate_size
             signals = ", ".join(record.ranking_signals)
             selected.append(
                 DiscoveryCandidate(
                     candidate_id=record.candidate_id,
                     kind=(
-                        "related_test"
-                        if _looks_like_test_path(record.path)
-                        else "full_file"
+                        "line_ranges"
+                        if ranges
+                        else (
+                            "related_test"
+                            if _looks_like_test_path(record.path)
+                            else "full_file"
+                        )
                     ),
                     path=record.path,
+                    ranges=ranges,
                     reason=SelectionReason(
                         summary=(
                             f"Deterministic rank #{record.rank}; signals: {signals}."
@@ -1301,6 +1331,7 @@ class DiscoverySession:
                 IndexedContextSelection if compact_selection else DiscoveryActionBatch
             ),
             max_output_tokens=512,
+            max_output_tokens_ceiling=1_024,
             temperature=0.0,
             max_response_bytes=512 * 1024,
             metadata={"mode": self.request.mode.value, "run_id": self.run_id[:32]},
@@ -2707,21 +2738,7 @@ def _exact_identifier_matches(
     avoids turning ordinary prose into a repository-wide substring search.
     """
 
-    explicit = {
-        match.group(1)
-        for match in re.finditer(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]", task)
-    }
-    terms = {
-        match.group(1)
-        for match in _IDENTIFIER_TERM.finditer(task)
-        if (
-            match.group(1) in explicit
-            or "_" in match.group(1)
-            or "$" in match.group(1)
-            or any(character.isupper() for character in match.group(1)[1:])
-        )
-        and len(match.group(1)) >= 3
-    }
+    terms = _exact_identifier_terms(task)
     if not terms:
         return {}
     patterns = {
@@ -2745,11 +2762,20 @@ def _exact_identifier_matches(
             continue
         if project_file.size_bytes > _MAX_EXACT_SCAN_BYTES - scanned:
             continue
-        try:
-            source = (snapshot.root / project_file.path).read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
         scanned += project_file.size_bytes
+        try:
+            selected = read_selected_text_file(
+                snapshot,
+                project_file,
+                limits=ReaderLimits(
+                    max_files=1,
+                    max_source_bytes=max(project_file.size_bytes, 1),
+                    max_content_bytes=max(project_file.size_bytes * 2, 1),
+                ),
+            )
+        except (ContextReaderError, OSError):
+            continue
+        source = selected.blocks[0].text
         count = sum(len(pattern.findall(source)) for pattern in patterns.values())
         if count:
             declarations = sum(
@@ -2759,6 +2785,94 @@ def _exact_identifier_matches(
             )
             matches[project_file.path] = (count, declarations)
     return matches
+
+
+def _exact_identifier_terms(task: str) -> set[str]:
+    explicit = {
+        match.group(1)
+        for match in re.finditer(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]", task)
+    }
+    terms = {
+        match.group(1)
+        for match in _IDENTIFIER_TERM.finditer(task)
+        if (
+            match.group(1) in explicit
+            or "_" in match.group(1)
+            or "$" in match.group(1)
+            or any(character.isupper() for character in match.group(1)[1:])
+        )
+        and len(match.group(1)) >= 3
+    }
+    return terms
+
+
+def _verified_identifier_ranges(
+    knowledge: DiscoveryKnowledge,
+    records: tuple[DiscoveryCandidateRecord, ...],
+    task: str,
+) -> dict[str, tuple[DiscoveryLineRange, ...]]:
+    terms = _exact_identifier_terms(task)
+    if not terms:
+        return {}
+    result: dict[str, tuple[DiscoveryLineRange, ...]] = {}
+    files = {item.path: item for item in knowledge.snapshot.files}
+    pattern = re.compile(
+        r"(?<![\w$])(?:" + "|".join(re.escape(term) for term in sorted(terms))
+        + r")(?![\w$])"
+    )
+    for record in records:
+        code_map = knowledge.code_maps.get(record.path)
+        ranges = sorted(
+            {
+                (
+                    symbol.declaration_range.start_line,
+                    symbol.declaration_range.end_line,
+                )
+                for symbol in (() if code_map is None else code_map.symbols)
+                if symbol.name in terms or symbol.qualified_name in terms
+            }
+        )
+        if not ranges and any(
+            signal.startswith("exact_source_identifier_matches=")
+            for signal in record.ranking_signals
+        ):
+            project_file = files.get(record.path)
+            if project_file is None or project_file.size_bytes > _MAX_EXACT_SCAN_BYTES:
+                continue
+            try:
+                selected = read_selected_text_file(
+                    knowledge.snapshot,
+                    project_file,
+                    limits=ReaderLimits(
+                        max_files=1,
+                        max_source_bytes=max(project_file.size_bytes, 1),
+                        max_content_bytes=max(project_file.size_bytes * 2, 1),
+                    ),
+                )
+            except (ContextReaderError, OSError):
+                continue
+            lines = selected.blocks[0].text.splitlines()
+            ranges = [
+                (max(1, index - 3), min(len(lines), index + 3))
+                for index, line in enumerate(lines, start=1)
+                if pattern.search(line)
+            ]
+        if not ranges:
+            continue
+        merged: list[DiscoveryLineRange] = []
+        for start_line, end_line in ranges[:10]:
+            if merged and start_line <= merged[-1].end_line + 1:
+                previous = merged[-1]
+                merged[-1] = DiscoveryLineRange(
+                    start_line=previous.start_line,
+                    end_line=max(previous.end_line, end_line),
+                )
+            else:
+                merged.append(
+                    DiscoveryLineRange(start_line=start_line, end_line=end_line)
+                )
+        result[record.candidate_id] = tuple(merged)
+    return result
 
 
 def _semantic_ranking_tokens(summary: Any) -> set[str]:
