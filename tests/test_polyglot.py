@@ -75,6 +75,14 @@ def test_polyglot_extracts_verified_declarations(
     assert code_map.parse_status == "parsed"
     assert expected <= {symbol.name for symbol in code_map.symbols}
     assert all(symbol.declaration_range.start_line >= 1 for symbol in code_map.symbols)
+    (tmp_path / filename).write_text(source + "\n???\n", encoding="utf-8")
+    damaged = scan_repository(tmp_path)
+    partial = extract_code_map(damaged, damaged.files[0])
+    assert partial.parse_status == "partial"
+    assert partial.diagnostics
+    # Recovery may wrap the declaration immediately preceding the bad tokens in
+    # ERROR. Such nodes must be discarded too, not promoted as verified siblings.
+    assert expected & {symbol.name for symbol in partial.symbols}
 
 
 def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> None:
@@ -93,8 +101,7 @@ def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> No
 
 def test_typescript_symbol_range_matches_source_line(tmp_path: Path) -> None:
     source = (
-        "\n" * 147
-        + "export function preparationProgressStage() { return 'index'; }\n"
+        "\n" * 147 + "export function preparationProgressStage() { return 'index'; }\n"
     )
     (tmp_path / "progress.ts").write_text(source, encoding="utf-8")
     snapshot = scan_repository(tmp_path)
@@ -143,3 +150,94 @@ def test_public_modifier_is_not_conflated_with_explicit_export(tmp_path: Path) -
 
     assert service.visibility == "public"
     assert run.visibility == "public"
+
+
+@pytest.mark.parametrize("suffix", ["c", "cpp"])
+def test_c_declarators_do_not_take_names_from_return_types_or_bodies(
+    tmp_path: Path, suffix: str
+) -> None:
+    (tmp_path / f"declarations.{suffix}").write_text(
+        "struct Result { int value; };\n"
+        "struct { int anonymousValue; } instance;\n"
+        "struct Result create(void) { struct Result result; return result; }\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    symbols = extract_code_map(snapshot, snapshot.files[0]).symbols
+    assert len([symbol for symbol in symbols if symbol.kind == "struct"]) == 1
+    assert any(
+        symbol.name == "create" and symbol.kind == "function" for symbol in symbols
+    )
+    assert not any(
+        symbol.name == "anonymousValue" and symbol.kind == "struct"
+        for symbol in symbols
+    )
+
+
+@pytest.mark.parametrize("suffix", ["js", "ts", "tsx"])
+def test_named_callable_bindings_and_variables(tmp_path: Path, suffix: str) -> None:
+    (tmp_path / f"bindings.{suffix}").write_text(
+        "export const loadData = async () => { return 1; };\r\n"
+        "const compute = function internal() { return 2; };\r\n"
+        "let изменяемое = 3; const LIMIT = 4;\r\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    symbols = {symbol.name: symbol for symbol in code_map.symbols}
+    assert symbols["loadData"].kind == "async_function"
+    assert symbols["loadData"].is_async
+    assert symbols["loadData"].body_range is not None
+    assert symbols["compute"].kind == "function"
+    assert "internal" not in symbols
+    assert symbols["изменяемое"].kind == "variable"
+    assert symbols["LIMIT"].kind == "constant"
+
+
+@pytest.mark.parametrize(
+    "filename,source",
+    [
+        ("sample.go", "package x\nconst LIMIT=1\nvar value=2\n"),
+        ("sample.rs", "const LIMIT: i32=1; static value:i32=2;"),
+        ("sample.c", "const int LIMIT=1; int value;"),
+        ("sample.cpp", "const int LIMIT=1; int value;"),
+        ("Sample.cs", "class Box { const int LIMIT=1; int value; }"),
+        ("Sample.java", "class Box { static final int LIMIT=1; int value; }"),
+        ("sample.php", "<?php class Box { const LIMIT=1; public $value=2; }"),
+        ("sample.rb", "LIMIT=1\nvalue=2\n"),
+    ],
+)
+def test_polyglot_constants_and_variables(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    symbols = {
+        symbol.name: symbol
+        for symbol in extract_code_map(snapshot, snapshot.files[0]).symbols
+    }
+    assert symbols["LIMIT"].kind == "constant"
+    variable = symbols.get("value", symbols.get("$value"))
+    assert variable is not None and variable.kind == "variable"
+
+
+@pytest.mark.parametrize(
+    "filename,source",
+    [
+        ("sample.go", "package x\nfunc (b *Box) run() {}\ntype Box struct{}\n"),
+        ("sample.rs", "impl Box { fn run(&self) {} }\nstruct Box;"),
+        ("sample.cpp", "class Box { public: void run() {} };"),
+    ],
+)
+def test_receiver_and_impl_methods_belong_to_types(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    symbols = {
+        symbol.name: symbol
+        for symbol in extract_code_map(snapshot, snapshot.files[0]).symbols
+    }
+    assert symbols["run"].kind == "method"
+    assert symbols["run"].qualified_name == "Box.run"
+    assert symbols["run"].parent_symbol_id == symbols["Box"].symbol_id

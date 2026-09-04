@@ -23,7 +23,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="2",
+    analyzer_version="3",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -136,6 +136,7 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
     },
 }
 
+
 @dataclass(slots=True)
 class _Draft:
     node: Node
@@ -144,6 +145,7 @@ class _Draft:
     parent_index: int | None
     symbol_id: str = ""
     qualified_name: str = ""
+    callable_node: Node | None = None
 
 
 def extract_polyglot_code_map(
@@ -173,8 +175,52 @@ def extract_polyglot_code_map(
 
     def visit(node: Node, parent_index: int | None) -> None:
         next_parent = parent_index
+        verified = not node.has_error
+        ancestor = node.parent
+        while verified and ancestor is not None:
+            verified = not ancestor.is_error and not ancestor.is_missing
+            ancestor = ancestor.parent
         kind = _KINDS.get(language_name, {}).get(node.type)
-        if kind is not None and not node.has_error:
+        if node.type in {"class_specifier", "struct_specifier", "enum_specifier"} and (
+            node.child_by_field_name("body") is None
+            and (
+                node.parent is None
+                or node.parent.type != "declaration"
+                or node.parent.child_by_field_name("declarator") is not None
+            )
+        ):
+            kind = None  # A type reference is not another declaration.
+        if language_name == "Go" and node.type == "type_spec":
+            target_type = node.child_by_field_name("type")
+            if target_type is not None:
+                kind = {
+                    "struct_type": SymbolKind.STRUCT,
+                    "interface_type": SymbolKind.INTERFACE,
+                }.get(target_type.type, kind)
+        binding = _binding(node, language_name, source_bytes)
+        if binding is not None and verified:
+            binding_name, kind, callable_node = binding
+            next_parent = len(drafts)
+            drafts.append(
+                _Draft(
+                    node,
+                    _text(source_bytes, binding_name)[:500],
+                    kind,
+                    parent_index,
+                    callable_node=callable_node,
+                )
+            )
+            # The named binding owns its callable; do not create a second symbol
+            # for a named function-expression initializer.
+            children = (
+                callable_node.named_children
+                if callable_node is not None
+                else node.named_children
+            )
+            for child in children:
+                visit(child, next_parent)
+            return
+        if kind is not None and verified:
             name_node = node.child_by_field_name("name") or _find_name_node(node)
             if name_node is not None:
                 name = _text(source_bytes, name_node).strip()
@@ -187,6 +233,33 @@ def extract_polyglot_code_map(
             visit(child, next_parent)
 
     visit(tree.root_node, None)
+    for draft in drafts:
+        owner_name = _method_owner(draft.node, language_name, source_bytes)
+        if owner_name is not None:
+            owners = [
+                index
+                for index, item in enumerate(drafts)
+                if item.name == owner_name
+                and item.kind
+                in {
+                    SymbolKind.CLASS,
+                    SymbolKind.STRUCT,
+                    SymbolKind.TYPE_ALIAS,
+                }
+            ]
+            if len(owners) == 1:
+                draft.parent_index = owners[0]
+                draft.kind = SymbolKind.METHOD
+
+    # Receiver/impl ownership can refer to a type declared later in the file.
+    def qualified_name(index: int) -> str:
+        draft = drafts[index]
+        if draft.parent_index is None:
+            return draft.name
+        return qualified_name(draft.parent_index) + "." + draft.name
+
+    for index, draft in enumerate(drafts):
+        draft.qualified_name = qualified_name(index)
     for draft in drafts:
         parent = drafts[draft.parent_index] if draft.parent_index is not None else None
         if (
@@ -207,9 +280,13 @@ def extract_polyglot_code_map(
             and draft.name == parent.name
         ):
             draft.kind = SymbolKind.CONSTRUCTOR
-        draft.qualified_name = (
-            f"{parent.qualified_name}.{draft.name}" if parent else draft.name
-        )
+        elif (
+            language_name in {"C++", "Rust"}
+            and parent is not None
+            and parent.kind in {SymbolKind.CLASS, SymbolKind.STRUCT, SymbolKind.TRAIT}
+            and draft.kind in {SymbolKind.FUNCTION, SymbolKind.ASYNC_FUNCTION}
+        ):
+            draft.kind = SymbolKind.METHOD
         source_range = _range(draft.node)
         draft.symbol_id = stable_fact_id(
             "symbol",
@@ -222,7 +299,8 @@ def extract_polyglot_code_map(
 
     symbols: list[SymbolRecord] = []
     for index, draft in enumerate(drafts):
-        body = draft.node.child_by_field_name("body")
+        callable_node = draft.callable_node or draft.node
+        body = callable_node.child_by_field_name("body")
         contained = tuple(
             child.symbol_id
             for child in drafts
@@ -237,7 +315,7 @@ def extract_polyglot_code_map(
                 kind=draft.kind,
                 is_async=(
                     draft.kind in {SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
-                    and _is_async(draft.node, source_bytes)
+                    and _is_async(callable_node, source_bytes)
                 ),
                 signature=_signature(source_bytes, draft.node, body),
                 declaration_range=_range(draft.node),
@@ -264,6 +342,139 @@ def extract_polyglot_code_map(
     )
 
 
+def _binding(
+    node: Node,
+    language: str,
+    source: bytes,
+) -> tuple[Node, SymbolKind, Node | None] | None:
+    if language in {"JavaScript", "TypeScript"} and node.type == "variable_declarator":
+        name = node.child_by_field_name("name")
+        if name is None or name.type != "identifier":
+            return None
+        value = node.child_by_field_name("value")
+        if value is not None and value.type in {
+            "arrow_function",
+            "function_expression",
+            "generator_function",
+        }:
+            kind = (
+                SymbolKind.ASYNC_FUNCTION
+                if _is_async(value, source)
+                else SymbolKind.FUNCTION
+            )
+            return name, kind, value
+        declaration = node.parent
+        constant = declaration is not None and _text(
+            source, declaration
+        ).lstrip().startswith("const ")
+        return name, SymbolKind.CONSTANT if constant else SymbolKind.VARIABLE, None
+    if language == "Rust" and node.type in {"const_item", "static_item"}:
+        name = node.child_by_field_name("name")
+        if name is not None:
+            return (
+                name,
+                SymbolKind.CONSTANT
+                if node.type == "const_item"
+                else SymbolKind.VARIABLE,
+                None,
+            )
+    if language in {"Java", "C#"} and node.type == "variable_declarator":
+        name = node.child_by_field_name("name")
+        if name is not None:
+            declaration = node.parent
+            if declaration is not None and declaration.type == "variable_declaration":
+                declaration = declaration.parent
+            header = (
+                b""
+                if declaration is None
+                else source[declaration.start_byte : node.start_byte]
+            )
+            constant = (
+                b"final" in header.split()
+                if language == "Java"
+                else b"const" in header.split()
+            )
+            return name, SymbolKind.CONSTANT if constant else SymbolKind.VARIABLE, None
+    if language == "Go" and node.type in {"var_spec", "const_spec"}:
+        name = node.child_by_field_name("name")
+        if name is not None:
+            return (
+                name,
+                SymbolKind.CONSTANT
+                if node.type == "const_spec"
+                else SymbolKind.VARIABLE,
+                None,
+            )
+    if language in {"C", "C++"}:
+        name = (
+            node.child_by_field_name("declarator")
+            if node.type == "init_declarator"
+            else (
+                node
+                if node.type in {"identifier", "field_identifier"}
+                and node.parent is not None
+                and node.parent.type in {"declaration", "field_declaration"}
+                else None
+            )
+        )
+        if name is not None and name.type in {"identifier", "field_identifier"}:
+            declaration = node.parent
+            header = (
+                b""
+                if declaration is None
+                else source[declaration.start_byte : node.start_byte]
+            )
+            return (
+                name,
+                SymbolKind.CONSTANT
+                if b"const" in header.split()
+                else SymbolKind.VARIABLE,
+                None,
+            )
+    if language == "PHP" and node.type in {"const_element", "property_element"}:
+        name = node.child_by_field_name("name") or next(iter(node.named_children), None)
+        if name is not None:
+            return (
+                name,
+                SymbolKind.CONSTANT
+                if node.type == "const_element"
+                else SymbolKind.VARIABLE,
+                None,
+            )
+    if language == "Ruby" and node.type == "assignment":
+        name = node.child_by_field_name("left")
+        if name is not None and name.type in {"constant", "identifier"}:
+            return (
+                name,
+                SymbolKind.CONSTANT if name.type == "constant" else SymbolKind.VARIABLE,
+                None,
+            )
+    return None
+
+
+def _method_owner(node: Node, language: str, source: bytes) -> str | None:
+    if language == "Go" and node.type == "method_declaration":
+        receiver = node.child_by_field_name("receiver")
+        if receiver is not None:
+            stack = [receiver]
+            while stack:
+                current = stack.pop()
+                if current.type == "type_identifier":
+                    return _text(source, current)
+                stack.extend(reversed(current.named_children))
+    if language == "Rust" and node.type == "function_item":
+        parent = node.parent
+        if (
+            parent is not None
+            and parent.parent is not None
+            and parent.parent.type == "impl_item"
+        ):
+            owner = parent.parent.child_by_field_name("type")
+            if owner is not None and owner.type == "type_identifier":
+                return _text(source, owner)
+    return None
+
+
 def _language(language_name: str, path: str) -> Language:
     module_name, function_name = _GRAMMARS[language_name]
     if language_name == "TypeScript" and path.casefold().endswith(".tsx"):
@@ -280,16 +491,17 @@ def _find_name_node(node: Node) -> Node | None:
         "identifier",
         "namespace_identifier",
         "operator_name",
+        "destructor_name",
         "property_identifier",
         "scoped_identifier",
+        "qualified_identifier",
         "type_identifier",
     }
-    stack = list(reversed(node.named_children))
-    while stack:
-        current = stack.pop()
+    current = node.child_by_field_name("declarator")
+    while current is not None:
         if current.type in preferred:
             return current
-        stack.extend(reversed(current.named_children))
+        current = current.child_by_field_name("declarator")
     return None
 
 
@@ -308,7 +520,7 @@ def _text(source: bytes, node: Node) -> str:
 
 def _signature(source: bytes, node: Node, body: Node | None) -> str:
     end = body.start_byte if body is not None else node.end_byte
-    value = source[node.start_byte:end].decode("utf-8", errors="strict").strip()
+    value = source[node.start_byte : end].decode("utf-8", errors="strict").strip()
     return " ".join(value.split())[:500] or node.type
 
 
@@ -331,9 +543,7 @@ def _visibility(
     body = node.child_by_field_name("body")
     end = body.start_byte if body is not None else node.end_byte
     prefix = source[
-        visibility_node.start_byte : min(
-            end, visibility_node.start_byte + 160
-        )
+        visibility_node.start_byte : min(end, visibility_node.start_byte + 160)
     ]
     words = set(prefix.decode("utf-8", errors="ignore").replace("(", " ").split())
     if "private" in words or "protected" in words:
