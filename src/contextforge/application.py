@@ -199,7 +199,7 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
-    semantic_max_output_tokens: int = 512,
+    semantic_max_output_tokens: int = 1024,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
     progress: ProgressObserver | None = None,

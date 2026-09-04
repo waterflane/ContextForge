@@ -294,7 +294,7 @@ def q(a):
     assert analysis.primary_purpose.provider_id == "fake"
     assert analysis.primary_purpose.model_id == "semantic-v1"
     assert analysis.primary_purpose.source_sha256 == analysis.source_sha256
-    assert analysis.primary_purpose.analyzer_prompt_version == "4"
+    assert analysis.primary_purpose.analyzer_prompt_version == "5"
     assert analysis.primary_purpose.evidence[0].path == "src/модуль.py"
     assert analysis.primary_purpose.confidence.value == 0.9
     assert {item.kind for item in analysis.symbols} == {"class", "method", "function"}
@@ -776,7 +776,7 @@ def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> Non
         ("notes.txt", 160),
         ("config.json", 160),
         ("app.js", 192),
-        ("app.py", 256),
+        ("app.py", 640),
     ],
 )
 def test_small_file_output_budgets_are_adaptive(
@@ -914,7 +914,14 @@ def test_combined_response_rejects_symbol_evidence_outside_symbol(
             invalid_response = json.dumps(payload)
         return invalid_response
 
-    result = _build_semantics(snapshot, _provider(responder=misplaced))
+    result = _build_semantics(
+        snapshot,
+        FakeModelProvider(
+            _configuration().model_copy(update={"context_window": 32768}),
+            responder=misplaced,
+        ),
+        options=SemanticAnalysisOptions(max_output_tokens=2048),
+    )
 
     assert result.failed_paths == ("app.py",)
     diagnostic = result.outcomes[0].diagnostic
@@ -985,7 +992,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
         snapshot,
         prompt_provider,
         run_id="semantic-prompt",
-        options=SemanticAnalysisOptions(prompt_version="5"),
+        options=SemanticAnalysisOptions(prompt_version="6"),
     )
     model_provider = _provider(model="semantic-v2")
     model = _build_semantics(snapshot, model_provider, run_id="semantic-model")
@@ -998,7 +1005,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
     )
 
     assert prompt_provider.call_count == 1
-    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "5"
+    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "6"
     assert model_provider.call_count == 1
     identity = model.analyses[0].semantic_analyzer.model_identity
     assert identity is not None
@@ -1216,7 +1223,7 @@ def test_large_file_uses_bounded_chunks_with_complete_coverage(tmp_path: Path) -
     assert request.metadata["input_truncated"] == "true"
     assert int(request.metadata["estimated_input_tokens"]) > 0
     assert request.max_output_tokens is not None
-    assert 192 <= request.max_output_tokens <= 512
+    assert 192 <= request.max_output_tokens <= 1024
 
 
 def test_large_file_excerpt_is_deterministic_and_utf8_safe(tmp_path: Path) -> None:
@@ -1263,6 +1270,53 @@ def test_many_symbols_use_bounded_file_chunks(tmp_path: Path) -> None:
     assert result.failed_paths == ()
     assert result.request_count == provider.call_count > 1
     assert result.analyses[0].coverage_complete
+
+
+def test_required_ids_survive_small_context_and_more_than_100_symbols(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(f"def f{i}(): return {i}" for i in range(101)) + "\n"
+    snapshot = _snapshot_with_facts(tmp_path, {"many.py": source})
+    code_map = load_file_code_map(tmp_path, "many.py")
+    requests: list[ModelRequest] = []
+
+    def capture(request: ModelRequest, index: int) -> str:
+        requests.append(request)
+        region = _first_range(request)
+        expected = {
+            s.symbol_id
+            for s in code_map.symbols
+            if (s.declaration_range.start_line, s.declaration_range.start_column)
+            < (region["end_line"], region["end_column"])
+            and (s.declaration_range.end_line, s.declaration_range.end_column)
+            > (region["start_line"], region["start_column"])
+        }
+        supplied = {s["symbol_id"] for s in request.trusted_code_map_facts["symbols"]}
+        assert expected == supplied
+        assert estimate_request_context(request, provider.configuration).fits
+        return _valid_response(request, index)
+
+    provider = FakeModelProvider(
+        _configuration().model_copy(update={"context_window": 8192}),
+        responder=capture,
+    )
+    result = _build_semantics(snapshot, provider)
+    assert result.failed_paths == (), result.outcomes
+    assert result.analyses[0].coverage_complete
+    assert len(result.analyses[0].symbols) == 101
+    assert len(requests) > 1
+
+
+def test_impossible_symbol_output_budget_does_not_dispatch(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"one.py": "def f(): return 1\n"})
+    provider = _provider()
+    result = _build_semantics(
+        snapshot, provider, options=SemanticAnalysisOptions(max_output_tokens=32)
+    )
+    assert provider.call_count == 0
+    assert result.failed_paths == ("one.py",)
+    assert result.outcomes[0].diagnostic is not None
+    assert result.outcomes[0].diagnostic.code == "symbol_output_budget_exceeded"
 
 
 def test_partial_chunks_resume_across_published_generations(tmp_path: Path) -> None:

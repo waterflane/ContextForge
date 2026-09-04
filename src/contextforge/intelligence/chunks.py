@@ -24,9 +24,16 @@ def plan_source_chunks(
     max_chunks: int = 64,
     overlap_lines: int = 8,
     start_byte: int = 0,
+    max_symbols: int | None = None,
+    required_symbol_ids: frozenset[str] | None = None,
 ) -> tuple[tuple[SourceChunk, ...], bool]:
     """Cover source in order; return whether the chunk cap left source uncovered."""
-    if max_bytes < 4 or max_chunks < 1 or overlap_lines < 0:
+    if (
+        max_bytes < 4
+        or max_chunks < 1
+        or overlap_lines < 0
+        or (max_symbols is not None and max_symbols < 1)
+    ):
         raise ValueError("invalid source chunk limits")
     raw = source.encode("utf-8")
     if not 0 <= start_byte <= len(raw) or (
@@ -46,10 +53,18 @@ def plan_source_chunks(
         return row + 1, at - line_starts[row]
 
     boundaries = {len(raw)}
+    required_ranges: list[tuple[int, int]] = []
     for symbol in code_map.symbols:
         region = symbol.declaration_range
         boundaries.add(offset(region.start_line, region.start_column))
         boundaries.add(offset(region.end_line, region.end_column))
+        if required_symbol_ids is None or symbol.symbol_id in required_symbol_ids:
+            required_ranges.append(
+                (
+                    offset(region.start_line, region.start_column),
+                    offset(region.end_line, region.end_column),
+                )
+            )
     ordered_boundaries = sorted(boundaries)
     result: list[SourceChunk] = []
     cursor = start_byte
@@ -67,6 +82,21 @@ def plan_source_chunks(
                 end = ceiling
                 while end < len(raw) and raw[end] & 0xC0 == 0x80:
                     end -= 1
+        if max_symbols is not None:
+            overlapping = [
+                (start, stop)
+                for start, stop in required_ranges
+                if start < end and stop > cursor
+            ]
+            if len(overlapping) > max_symbols:
+                possible = [
+                    start
+                    for start, _ in overlapping
+                    if covered < start < end
+                    and sum(left < start for left, _ in overlapping) <= max_symbols
+                ]
+                if possible:
+                    end = max(possible)
         if end <= covered:
             cursor = covered
             continue

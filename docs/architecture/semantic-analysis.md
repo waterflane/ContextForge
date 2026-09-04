@@ -29,7 +29,7 @@ context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 512
+semantic_max_output_tokens = 1024
 reasoning_effort = "off"
 local_only = true
 external_data_policy = "deny"
@@ -92,6 +92,16 @@ and retain byte-column coordinates. Small neighboring regions share a request.
 The provider context budget may require smaller chunks. At most 64 chunks are
 processed in source order; the cap never silently implies full coverage.
 
+Analyzer/prompt version 5 plans requests against mandatory symbol metadata and
+the response budget as well as source bytes. All required symbol IDs are always
+supplied, including beyond the former 100-fact limit. Only optional facts and
+signatures can be trimmed. Rich responses reserve up to 256 tokens of file overhead
+plus 384 per required symbol, up to the caller's ceiling (1,024 by default);
+a larger requirement splits the source before any provider call. UTF-8 splits can shrink to four bytes.
+An indivisible request or exhausted chunk allowance reports incomplete coverage
+instead of spending JSON repairs on an impossible contract. Checkpoint keys
+include final ranges, required symbol IDs and planner version.
+
 Successful chunks are checkpointed with source SHA, range, fact digest,
 provider/model/prompt identity and analysis options. Published partial results
 retain checkpoints, so a subsequent run only requests missing chunks. Claims
@@ -107,8 +117,8 @@ limited by the caller's lower ceiling, are:
 - small README, Markdown, TXT, and configuration: 160 tokens, or 192 for a
   larger document;
 - generic source: 192 tokens when small, otherwise 256;
-- rich symbol analysis: 256 for trivial files, 320 for normal files, and at
-  most 512 for large or structurally complex files.
+- rich symbol analysis: a baseline of 256/320/512 for increasing complexity,
+  raised to the per-symbol reservation when needed within the caller's ceiling.
 
 README requests only project purpose, entry points, setup, and major
 components. LICENSE requests only type, obligations, and restrictions; common

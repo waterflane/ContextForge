@@ -89,10 +89,10 @@ from contextforge.progress import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_ANALYZER_ID = "contextforge-file-semantics"
-SEMANTIC_ANALYZER_VERSION = "4"
+SEMANTIC_ANALYZER_VERSION = "5"
 GENERIC_SEMANTIC_ANALYZER_ID = "generic-text-semantic"
 GENERIC_SEMANTIC_ANALYZER_VERSION = "2"
-SEMANTIC_PROMPT_VERSION = "4"
+SEMANTIC_PROMPT_VERSION = "5"
 DETERMINISTIC_SEMANTIC_ANALYZER_ID = "contextforge-metadata-semantics"
 DETERMINISTIC_SEMANTIC_ANALYZER_VERSION = "1"
 SEMANTIC_WORK_UNIT_BYTES = 32_768
@@ -234,6 +234,10 @@ class _ConfigResponse(IndexModel):
     important_keys: tuple[_CompactItem, ...] = Field(default=(), max_length=8)
 
 
+class _ChunkOutputLimit(ContextWindowExceededError):
+    """The required symbol response cannot fit the caller's output ceiling."""
+
+
 class SemanticAnalysisError(RuntimeError):
     """Raised when semantic analysis cannot safely publish the requested result."""
 
@@ -266,7 +270,7 @@ class SemanticAnalysisOptions:
     max_request_bytes: int = 2_000_000
     max_source_bytes_per_request: int = 65_536
     max_response_bytes: int = 1_000_000
-    max_output_tokens: int = 512
+    max_output_tokens: int = 1024
     max_chunks_per_file: int = 64
     max_requests_per_file: int = 64
     max_files: int | None = None
@@ -1108,8 +1112,21 @@ async def analyze_file_semantics(
     available = provider.configuration.context_window - options.max_output_tokens - 2048
     limit = min(limit, max(64, available * 2))
     cap = min(64, options.max_chunks_per_file, options.max_requests_per_file)
+    max_symbols = max(
+        1, (options.max_output_tokens - min(256, options.max_output_tokens // 4)) // 384
+    )
+    required_ids = frozenset(
+        symbol.symbol_id
+        for symbol in code_map.symbols
+        if symbol.kind in _ANALYZED_SYMBOL_KINDS
+    )
     chunks, truncated = plan_source_chunks(
-        source, code_map, max_bytes=limit, max_chunks=cap
+        source,
+        code_map,
+        max_bytes=limit,
+        max_chunks=cap,
+        max_symbols=max_symbols,
+        required_symbol_ids=required_ids,
     )
     completed: list[tuple[SourceChunk, FileSemanticAnalysis]] = []
     warnings: list[str] = []
@@ -1135,6 +1152,12 @@ async def analyze_file_semantics(
                     "range": chunk.source_range.model_dump(mode="json"),
                     "analyzer": analyzer.model_dump(mode="json"),
                     "options": options_digest,
+                    "required_symbol_ids": [
+                        item.symbol_id
+                        for item in _chunk_symbols(code_map, chunk)
+                        if item.kind in _ANALYZED_SYMBOL_KINDS
+                    ],
+                    "chunk_planner_version": 2,
                 }
             )
         ).hexdigest()
@@ -1187,22 +1210,28 @@ async def analyze_file_semantics(
             can_retry = not dispatched or (
                 exc.server_context_window is not None and server_context_retries == 0
             )
-            if can_retry and limit > 64:
+            if can_retry and limit > 4:
                 if dispatched:
                     server_context_retries += 1
-                limit = max(64, limit // 2)
+                limit = max(4, limit // 2)
                 tail, truncated = plan_source_chunks(
                     source,
                     code_map,
                     max_bytes=limit,
                     max_chunks=cap - index,
                     start_byte=chunk.start_byte,
+                    max_symbols=max_symbols,
+                    required_symbol_ids=required_ids,
                 )
                 chunks = chunks[:index] + tail
                 continue
             if dispatched:
                 request_count += 1
-            warnings.append(f"chunk-context-limit:{index + 1}")
+            warnings.append(
+                f"chunk-output-limit:{index + 1}"
+                if isinstance(exc, _ChunkOutputLimit)
+                else f"chunk-context-limit:{index + 1}"
+            )
         except (ModelProviderError, SemanticAnalysisError, ValueError) as exc:
             last_error = exc
             request_count += 1
@@ -1329,6 +1358,20 @@ def _merge_chunk_analyses(
     return FileSemanticAnalysis.model_validate(merged)
 
 
+def _chunk_symbols(
+    code_map: FileCodeMap, chunk: SourceChunk
+) -> tuple[SymbolRecord, ...]:
+    region = chunk.source_range
+    return tuple(
+        symbol
+        for symbol in code_map.symbols
+        if (symbol.declaration_range.start_line, symbol.declaration_range.start_column)
+        < (region.end_line, region.end_column)
+        and (symbol.declaration_range.end_line, symbol.declaration_range.end_column)
+        > (region.start_line, region.start_column)
+    )
+
+
 async def _analyze_semantic_chunk(
     project_file: ProjectFile,
     code_map: FileCodeMap,
@@ -1343,14 +1386,16 @@ async def _analyze_semantic_chunk(
     cancellation: asyncio.Event | None,
 ) -> _AnalysisWork:
     region = chunk.source_range
-    chunk_symbols = tuple(
-        symbol
-        for symbol in code_map.symbols
-        if (symbol.declaration_range.start_line, symbol.declaration_range.start_column)
-        < (region.end_line, region.end_column)
-        and (symbol.declaration_range.end_line, symbol.declaration_range.end_column)
-        > (region.start_line, region.start_column)
+    chunk_symbols = _chunk_symbols(code_map, chunk)
+    required_count = sum(item.kind in _ANALYZED_SYMBOL_KINDS for item in chunk_symbols)
+    # Reserve room for IDs, a short purpose per symbol, and file-level claims.
+    required_output = (
+        min(256, options.max_output_tokens // 4) + 384 * required_count
+        if required_count
+        else 0
     )
+    if required_output > options.max_output_tokens:
+        raise _ChunkOutputLimit()
     analysis_route: Literal["rich_model_analysis", "generic_model_analysis"] = (
         "rich_model_analysis" if chunk_symbols else "generic_model_analysis"
     )
@@ -1360,11 +1405,12 @@ async def _analyze_semantic_chunk(
     response_model = _response_model(category, analysis_route)
     output_budget = _output_token_budget(
         project_file,
-        code_map,
+        chunk_map,
         category=category,
         analysis_route=analysis_route,
         ceiling=options.max_output_tokens,
     )
+    output_budget = max(output_budget, required_output)
     max_fact_items = 100
     source_line_bytes = tuple(
         len(line.encode("utf-8")) for line in source.splitlines(keepends=True)
@@ -1414,10 +1460,24 @@ async def _analyze_semantic_chunk(
             max_fact_items=max_fact_items,
         )
         trusted_facts["chunk_range"] = region.model_dump(mode="json")
+        trusted_facts["required_symbol_ids"] = [
+            symbol.symbol_id
+            for symbol in chunk_symbols
+            if symbol.kind in _ANALYZED_SYMBOL_KINDS
+        ]
         request = _request(
             code_map,
             purpose="file-semantics",
-            analysis_task=_compact_file_task(code_map.path, category, analysis_route),
+            analysis_task=_compact_file_task(code_map.path, category, analysis_route)
+            + (
+                " Return exactly one symbols entry for each required_symbol_ids value, "
+                "and no other symbols. Copy those IDs verbatim. Prioritize a short "
+                "behavioral_purpose for every required symbol and "
+                "file.primary_purpose. Omit empty/default arrays and optional fields "
+                "to fit the output budget."
+                if analysis_route == "rich_model_analysis"
+                else ""
+            ),
             trusted_facts=trusted_facts,
             source=excerpt,
             response_model=response_model,
@@ -1571,7 +1631,11 @@ def _compact_codemap_facts(
     known_license: str | None,
     max_fact_items: int = 100,
 ) -> dict[str, object]:
-    symbols = code_map.symbols[:max_fact_items]
+    symbols = tuple(
+        item
+        for index, item in enumerate(code_map.symbols)
+        if item.kind in _ANALYZED_SYMBOL_KINDS or index < max_fact_items
+    )
     imports = code_map.imports[: min(max_fact_items, 50)]
     exports = code_map.exports[: min(max_fact_items, 50)]
     return {
@@ -1587,7 +1651,7 @@ def _compact_codemap_facts(
                 "name": item.name,
                 "qualified_name": item.qualified_name,
                 "kind": item.kind,
-                "signature": item.signature,
+                "signature": item.signature if max_fact_items else None,
                 "declaration_range": item.declaration_range.model_dump(mode="json"),
             }
             for item in symbols
@@ -2438,6 +2502,11 @@ def _analyze_metadata_file(
 
 
 def _semantic_error_details(error: BaseException) -> tuple[str, str]:
+    if isinstance(error, _ChunkOutputLimit):
+        return (
+            "symbol_output_budget_exceeded",
+            "required symbol response exceeds the output token ceiling",
+        )
     if isinstance(error, ModelProviderError):
         code, safe_message = provider_error_details(error)
         if isinstance(error, StructuredResponseError):

@@ -92,7 +92,7 @@ class ProjectModelSettings(_ConfigModel):
     max_response_bytes: int = 1_000_000
     concurrency_limit: int = 2
     retry_limit: int = 2
-    semantic_max_output_tokens: int = Field(default=512, ge=96, le=32_768, strict=True)
+    semantic_max_output_tokens: int = Field(default=1024, ge=96, le=32_768, strict=True)
     reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
         "off"
     )
