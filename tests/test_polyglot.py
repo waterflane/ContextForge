@@ -110,7 +110,8 @@ def test_typescript_symbol_range_matches_source_line(tmp_path: Path) -> None:
 def test_tsx_async_and_visibility_metadata_are_verified(tmp_path: Path) -> None:
     (tmp_path / "component.tsx").write_text(
         "export async function loadData() { return 1; }\n"
-        "class Service { private stop() {} public start() {} }\n",
+        "class Service { constructor() {} private async stop() {} "
+        "public start() {} }\n",
         encoding="utf-8",
     )
     snapshot = scan_repository(tmp_path)
@@ -121,5 +122,24 @@ def test_tsx_async_and_visibility_metadata_are_verified(tmp_path: Path) -> None:
     assert symbols["loadData"].kind == "async_function"
     assert symbols["loadData"].is_async is True
     assert symbols["loadData"].visibility == "explicit_export"
+    assert symbols["constructor"].kind == "constructor"
     assert symbols["stop"].visibility == "private"
+    assert symbols["stop"].is_async is True
     assert symbols["start"].parent_symbol_id == symbols["Service"].symbol_id
+    assert symbols["Service"].visibility == "unknown"
+    assert symbols["Service"].is_async is False
+
+
+def test_public_modifier_is_not_conflated_with_explicit_export(tmp_path: Path) -> None:
+    (tmp_path / "Service.java").write_text(
+        "public class Service { public Service() {} public void run() {} }\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    service = next(item for item in code_map.symbols if item.kind == "class")
+    run = next(item for item in code_map.symbols if item.name == "run")
+
+    assert service.visibility == "public"
+    assert run.visibility == "public"

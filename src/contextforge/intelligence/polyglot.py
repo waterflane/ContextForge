@@ -23,7 +23,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="1",
+    analyzer_version="2",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -189,6 +189,24 @@ def extract_polyglot_code_map(
     visit(tree.root_node, None)
     for draft in drafts:
         parent = drafts[draft.parent_index] if draft.parent_index is not None else None
+        if (
+            draft.kind == SymbolKind.METHOD
+            and (
+                (
+                    language_name in {"JavaScript", "TypeScript"}
+                    and draft.name == "constructor"
+                )
+                or (language_name == "PHP" and draft.name == "__construct")
+                or (language_name == "Ruby" and draft.name == "initialize")
+            )
+        ) or (
+            language_name == "C++"
+            and draft.kind == SymbolKind.FUNCTION
+            and parent is not None
+            and parent.kind in {SymbolKind.CLASS, SymbolKind.STRUCT}
+            and draft.name == parent.name
+        ):
+            draft.kind = SymbolKind.CONSTRUCTOR
         draft.qualified_name = (
             f"{parent.qualified_name}.{draft.name}" if parent else draft.name
         )
@@ -217,7 +235,10 @@ def extract_polyglot_code_map(
                 name=draft.name,
                 qualified_name=draft.qualified_name,
                 kind=draft.kind,
-                is_async=draft.kind == SymbolKind.ASYNC_FUNCTION,
+                is_async=(
+                    draft.kind in {SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
+                    and _is_async(draft.node, source_bytes)
+                ),
                 signature=_signature(source_bytes, draft.node, body),
                 declaration_range=_range(draft.node),
                 body_range=None if body is None else _range(body),
@@ -292,7 +313,9 @@ def _signature(source: bytes, node: Node, body: Node | None) -> str:
 
 
 def _is_async(node: Node, source: bytes) -> bool:
-    prefix = source[node.start_byte : min(node.end_byte, node.start_byte + 80)]
+    body = node.child_by_field_name("body")
+    end = body.start_byte if body is not None else node.end_byte
+    prefix = source[node.start_byte : min(end, node.start_byte + 160)]
     return b"async" in prefix.split()
 
 
@@ -305,16 +328,20 @@ def _visibility(
         and node.parent.type in {"export_statement", "export_declaration"}
         else node
     )
+    body = node.child_by_field_name("body")
+    end = body.start_byte if body is not None else node.end_byte
     prefix = source[
         visibility_node.start_byte : min(
-            visibility_node.end_byte, visibility_node.start_byte + 160
+            end, visibility_node.start_byte + 160
         )
     ]
     words = set(prefix.decode("utf-8", errors="ignore").replace("(", " ").split())
     if "private" in words or "protected" in words:
         return "private"
-    if "public" in words or "export" in words or "pub" in words:
+    if "export" in words or "pub" in words:
         return "explicit_export"
+    if "public" in words:
+        return "public"
     return "unknown"
 
 
