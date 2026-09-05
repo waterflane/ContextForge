@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from contextforge.intelligence.coverage import relationship_coverage
-from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
+from contextforge.intelligence.coverage import (
+    relationship_coverage,
+    relationship_source_paths,
+)
 
 from .models import CompletenessWarning, DiscoveryCandidate
 from .tools import DiscoveryKnowledge, GitDiffResult
@@ -24,11 +26,7 @@ def review_completeness(
     warnings: list[CompletenessWarning] = []
     coverage = relationship_coverage(
         knowledge.code_maps,
-        tuple(
-            item.path
-            for item in knowledge.snapshot.files
-            if item.language in SUPPORTED_CODEMAP_LANGUAGES
-        ),
+        relationship_source_paths(knowledge.snapshot.files),
     )
     if any(coverage["file_counts"].values()) and coverage["status"] != "supported":
         warnings.append(

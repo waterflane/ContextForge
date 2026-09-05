@@ -235,6 +235,14 @@ def test_unshadowed_builtins_are_not_unresolved(
             "work.ts",
             "partial",
         ),
+        (
+            {
+                "work.py": "def target(): return 1\n",
+                "Caller.kt": "fun run() = target()\n",
+            },
+            "work.py",
+            "partial",
+        ),
     ],
 )
 def test_empty_callers_disclose_coverage(
@@ -514,3 +522,33 @@ def test_old_analyzer_and_unsupported_dependency_coverage(tmp_path: Path) -> Non
         }
     )
     assert relationship_coverage({"work.rs": old}, ("work.rs",))["status"] == "unknown"
+
+
+def test_unsupported_source_languages_are_counted_in_repository_coverage(
+    tmp_path: Path,
+) -> None:
+    from contextforge.intelligence.coverage import (
+        relationship_coverage,
+        relationship_source_paths,
+    )
+
+    data = knowledge(
+        tmp_path,
+        {
+            "work.py": "def target(): return 1\n",
+            "Caller.kt": "fun run() = target()\n",
+            "README.md": "target is documented here\n",
+        },
+    )
+
+    coverage = relationship_coverage(
+        data.code_maps, relationship_source_paths(data.snapshot.files)
+    )
+
+    assert coverage["status"] == "partial"
+    assert coverage["file_counts"] == {
+        "supported": 1,
+        "partial": 0,
+        "unsupported": 1,
+        "unknown": 0,
+    }

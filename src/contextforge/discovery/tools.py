@@ -30,8 +30,10 @@ from contextforge.intelligence import (
     calculate_source_snapshot_digest,
 )
 from contextforge.intelligence.codemap import SymbolRecord
-from contextforge.intelligence.coverage import relationship_coverage
-from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
+from contextforge.intelligence.coverage import (
+    relationship_coverage,
+    relationship_source_paths,
+)
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 from .dependencies import SymbolDependencies, symbol_dependencies
@@ -750,11 +752,7 @@ class DiscoveryToolExecutor:
         self, result: _ToolResult, paths: tuple[str, ...] | None = None
     ) -> _ToolResult:
         if paths is None:
-            paths = tuple(
-                item.path
-                for item in self.knowledge.snapshot.files
-                if item.language in SUPPORTED_CODEMAP_LANGUAGES
-            )
+            paths = relationship_source_paths(self.knowledge.snapshot.files)
         return _ToolResult(
             {
                 **result.data,
