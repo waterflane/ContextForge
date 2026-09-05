@@ -137,6 +137,27 @@ def test_tsx_async_and_visibility_metadata_are_verified(tmp_path: Path) -> None:
     assert symbols["Service"].is_async is False
 
 
+def test_typescript_metadata_uses_modifier_nodes_not_header_text(
+    tmp_path: Path,
+) -> None:
+    long_comment = "x" * 200
+    (tmp_path / "metadata.ts").write_text(
+        "export function run(/* private */ value: number) { return value; }\n"
+        f"class Service {{ public /* {long_comment} */ async load() {{}} }}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+
+    symbols = {
+        item.name: item
+        for item in extract_code_map(snapshot, snapshot.files[0]).symbols
+    }
+
+    assert symbols["run"].visibility == "explicit_export"
+    assert symbols["load"].visibility == "public"
+    assert symbols["load"].is_async is True
+
+
 def test_public_modifier_is_not_conflated_with_explicit_export(tmp_path: Path) -> None:
     (tmp_path / "Service.java").write_text(
         "public class Service { public Service() {} public void run() {} }\n",
@@ -172,6 +193,30 @@ def test_c_declarators_do_not_take_names_from_return_types_or_bodies(
         symbol.name == "anonymousValue" and symbol.kind == "struct"
         for symbol in symbols
     )
+
+
+@pytest.mark.parametrize("suffix", ["c", "cpp"])
+def test_c_prototypes_preserve_declaration_types_without_function_pointer_duplicates(
+    tmp_path: Path, suffix: str
+) -> None:
+    (tmp_path / f"prototypes.{suffix}").write_text(
+        "char *\nbuild_name(int id);\n"
+        "int first(void), second(int value);\n"
+        "int (*callback)(int);\n"
+        "int (*factory(void))(int);\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+
+    symbols = extract_code_map(snapshot, snapshot.files[0]).symbols
+    functions = [symbol for symbol in symbols if symbol.kind == "function"]
+    by_name = {symbol.name: symbol for symbol in functions}
+
+    assert set(by_name) == {"build_name", "first", "second", "factory"}
+    assert by_name["build_name"].declaration_range.start_line == 1
+    assert by_name["build_name"].signature == "char * build_name(int id);"
+    assert len([symbol for symbol in functions if symbol.name == "factory"]) == 1
+    assert "callback" not in by_name
 
 
 @pytest.mark.parametrize("suffix", ["js", "ts", "tsx"])

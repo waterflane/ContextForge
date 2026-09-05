@@ -178,6 +178,8 @@ def extract_polyglot_code_map(
 
     def visit(node: Node, parent_index: int | None) -> None:
         next_parent = parent_index
+        declaration_node: Node | None = None
+        prototype_name: Node | None = None
         verified = not node.has_error
         ancestor = node.parent
         while verified and ancestor is not None:
@@ -185,20 +187,8 @@ def extract_polyglot_code_map(
             ancestor = ancestor.parent
         kind = _KINDS.get(language_name, {}).get(node.type)
         if language_name in {"C", "C++"} and node.type == "function_declarator":
-            prototype_name = node.child_by_field_name("declarator")
-            ancestor = node.parent
-            while ancestor is not None and ancestor.type in {
-                "pointer_declarator",
-                "reference_declarator",
-            }:
-                ancestor = ancestor.parent
-            if (
-                ancestor is not None
-                and ancestor.type in {"declaration", "field_declaration"}
-                and prototype_name is not None
-                and prototype_name.type
-                in {"identifier", "field_identifier", "qualified_identifier"}
-            ):
+            prototype_name, declaration_node = _c_prototype(node)
+            if prototype_name is not None and declaration_node is not None:
                 kind = SymbolKind.FUNCTION
         if node.type in {"class_specifier", "struct_specifier", "enum_specifier"} and (
             node.child_by_field_name("body") is None
@@ -240,14 +230,28 @@ def extract_polyglot_code_map(
                 visit(child, next_parent)
             return
         if kind is not None and verified:
-            name_node = node.child_by_field_name("name") or _find_name_node(node)
+            name_node = (
+                prototype_name
+                or node.child_by_field_name("name")
+                or _find_name_node(node)
+            )
             if name_node is not None:
                 name = _text(source_bytes, name_node).strip()
                 if name:
                     if kind == SymbolKind.FUNCTION and _is_async(node, source_bytes):
                         kind = SymbolKind.ASYNC_FUNCTION
                     next_parent = len(drafts)
-                    drafts.append(_Draft(node, name[:500], kind, parent_index))
+                    drafts.append(
+                        _Draft(
+                            declaration_node or node,
+                            name[:500],
+                            kind,
+                            parent_index,
+                            callable_node=(
+                                node if declaration_node is not None else None
+                            ),
+                        )
+                    )
             elif len(omitted) < 20:
                 omitted.append(
                     ParserDiagnostic(
@@ -567,6 +571,32 @@ def _find_name_node(node: Node) -> Node | None:
     return None
 
 
+def _c_prototype(node: Node) -> tuple[Node | None, Node | None]:
+    """Return a declaration-owned function name without promoting function pointers."""
+
+    name = node.child_by_field_name("declarator")
+    if name is None or name.type not in {
+        "identifier",
+        "field_identifier",
+        "qualified_identifier",
+    }:
+        return None, None
+    ancestor = node.parent
+    wrappers = {
+        "array_declarator",
+        "attributed_declarator",
+        "function_declarator",
+        "parenthesized_declarator",
+        "pointer_declarator",
+        "reference_declarator",
+    }
+    while ancestor is not None and ancestor.type in wrappers:
+        ancestor = ancestor.parent
+    if ancestor is None or ancestor.type not in {"declaration", "field_declaration"}:
+        return None, None
+    return name, ancestor
+
+
 def _range(node: Node) -> SourceRange:
     return SourceRange(
         start_line=node.start_point.row + 1,
@@ -587,27 +617,13 @@ def _signature(source: bytes, node: Node, body: Node | None) -> str:
 
 
 def _is_async(node: Node, source: bytes) -> bool:
-    body = node.child_by_field_name("body")
-    end = body.start_byte if body is not None else node.end_byte
-    prefix = source[node.start_byte : min(end, node.start_byte + 160)]
-    return b"async" in prefix.split()
+    return "async" in _modifier_words(node, source)
 
 
 def _visibility(
     node: Node, source: bytes
 ) -> Literal["public", "private", "explicit_export", "unknown"]:
-    visibility_node = (
-        node.parent
-        if node.parent is not None
-        and node.parent.type in {"export_statement", "export_declaration"}
-        else node
-    )
-    body = node.child_by_field_name("body")
-    end = body.start_byte if body is not None else node.end_byte
-    prefix = source[
-        visibility_node.start_byte : min(end, visibility_node.start_byte + 160)
-    ]
-    words = set(prefix.decode("utf-8", errors="ignore").replace("(", " ").split())
+    words = _modifier_words(node, source)
     if "private" in words or "protected" in words:
         return "private"
     if "export" in words or "pub" in words:
@@ -615,6 +631,36 @@ def _visibility(
     if "public" in words:
         return "public"
     return "unknown"
+
+
+def _modifier_words(node: Node, source: bytes) -> set[str]:
+    words: set[str] = set()
+    allowed = {"async", "export", "private", "protected", "pub", "public"}
+    containers = {
+        "accessibility_modifier",
+        "modifier",
+        "modifiers",
+        "visibility_modifier",
+    }
+    if node.parent is not None and node.parent.type in {
+        "export_statement",
+        "export_declaration",
+    }:
+        words.add("export")
+    for child in node.children:
+        value = _text(source, child).strip()
+        if value in allowed:
+            words.add(value)
+        if child.type not in containers:
+            continue
+        pending = [child]
+        while pending:
+            modifier = pending.pop()
+            value = _text(source, modifier).strip()
+            if value in allowed:
+                words.add(value)
+            pending.extend(modifier.children)
+    return words
 
 
 def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
