@@ -232,9 +232,12 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 - The CLI orchestrates build, update, status, and policy-bounded cleanup for a
   single repository root. Full multi-root workspaces remain deferred.
-- Python is the only structural language extractor. Other selectable text files
-  deliberately receive file-level fallback records.
-- Python name and call resolution is conservative and incomplete for dynamic
+- Python provides declarations plus conservative call/import relationships.
+  JavaScript, TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby provide
+  verified Tree-sitter declarations; their relationship extraction remains
+  explicitly unsupported. Other selectable text files receive file-level
+  fallback records.
+- Name and call resolution remains conservative and incomplete for dynamic
   dispatch, rebinding, wildcard imports, and ambiguous module layouts.
 - File/symbol semantics, repository architecture/feature maps, and
   task-specific indexed/fresh/hybrid discovery are implemented.

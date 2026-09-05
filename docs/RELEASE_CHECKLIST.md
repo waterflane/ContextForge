@@ -11,8 +11,8 @@ index API token is stored in repository secrets.
 - [ ] Move relevant `CHANGELOG.md` entries from **Unreleased** into a dated
       version section.
 - [ ] Confirm the supported Python versions in `pyproject.toml` and CI.
-- [ ] Confirm `contextforge-repo` is still unregistered on both PyPI and
-      TestPyPI, and both Trusted Publisher configurations match `release.yml`.
+- [ ] Confirm ownership of `contextforge-repo` on PyPI and TestPyPI, and verify
+      both Trusted Publisher configurations still match `release.yml`.
 - [ ] Confirm the SHA-pinned PyPI publishing action supports the Core Metadata
       version emitted by the current build backend.
 - [ ] Update the separate Wiki repository when public behavior or commands
@@ -52,6 +52,7 @@ Install the wheel and sdist in separate clean Python 3.12 and 3.13 environments.
 Verify only package metadata, importability, and version entry points:
 
 ```bash
+python -m pip check
 python -c "import contextforge"
 contextforge --version
 ctxf --version
@@ -70,8 +71,8 @@ the deterministic fake provider.
 
 ## Validate model-backed discovery
 
-The versioned ASP discovery benchmark is a separate release gate. For v0.4.2,
-the canonical fixture is the clean ASP commit
+The versioned ASP discovery benchmark remains a separate regression gate. Its
+canonical v0.4.2 fixture is the clean ASP commit
 `f4d2e49a639ec8230aae6d7ec25974d1082edd09` with source snapshot digest
 `9ad90fc0bfe4e1d12d6116daf6fcef797693f32200a47c7a1da45a11341116f7`.
 Create a temporary copy so the developer's previous index remains untouched,

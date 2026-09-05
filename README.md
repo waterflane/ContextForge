@@ -28,8 +28,9 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.5.0` adds the stable generic
-> local bridge v1. Discovery benchmarking is experimental and
+> ContextForge is pre-alpha software. Version `0.5.1` adds verified polyglot
+> declarations, resumable semantic coverage, bridge protocol 1.1, and hardened
+> exact-symbol discovery. Discovery benchmarking is experimental and
 > its results should be reviewed alongside the recorded provider, model,
 > configuration, and source snapshot.
 
