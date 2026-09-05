@@ -174,6 +174,55 @@ def test_ast_dependencies_and_shadowing(
 
 
 @pytest.mark.parametrize(
+    ("filename", "source", "builtin_name"),
+    [
+        (
+            "work.py",
+            "def len(value): return 42\ndef run(value): return len(value)\n",
+            "len",
+        ),
+        (
+            "work.ts",
+            "export const Set = { has(value: string) { return true; } }; "
+            "export function run(value: string) { return Set.has(value); }",
+            "Set",
+        ),
+    ],
+)
+def test_shadowed_builtins_resolve_before_builtin_filtering(
+    tmp_path: Path, filename: str, source: str, builtin_name: str
+) -> None:
+    data = knowledge(tmp_path, {filename: source})
+    code_map = data.code_maps[filename]
+    by_name = {symbol.name: symbol for symbol in code_map.symbols}
+
+    result = symbol_dependencies(source, code_map, by_name["run"])
+
+    assert by_name[builtin_name].symbol_id in result.symbol_ids
+    assert not result.unresolved_names
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        ("work.py", "def run(values): return len(values)\n"),
+        ("work.ts", "function run(values: string[]) { return Set.from(values); }"),
+    ],
+)
+def test_unshadowed_builtins_are_not_unresolved(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    data = knowledge(tmp_path, {filename: source})
+    code_map = data.code_maps[filename]
+    symbol = next(item for item in code_map.symbols if item.name == "run")
+
+    result = symbol_dependencies(source, code_map, symbol)
+
+    assert not result.symbol_ids
+    assert not result.unresolved_names
+
+
+@pytest.mark.parametrize(
     ("files", "target", "expected"),
     [
         ({"work.py": "def target(): return 1\n"}, "work.py", "supported"),
@@ -343,8 +392,38 @@ def test_symbol_selection_keeps_functions_selected_in_previous_steps(
     [
         ("const LIMIT = 2; function run(x = LIMIT) { return x; }", "run", {"LIMIT"}),
         (
+            "const LIMIT = 2; function run({x = LIMIT}: {x?: number} = {}) "
+            "{ return x; }",
+            "run",
+            {"LIMIT"},
+        ),
+        (
+            "const LIMIT = 2; function run([x = LIMIT]: number[] = []) { return x; }",
+            "run",
+            {"LIMIT"},
+        ),
+        (
             "const LIMIT = 2; function run() { "
             "if (true) { let LIMIT = 1; } return LIMIT; }",
+            "run",
+            {"LIMIT"},
+        ),
+        (
+            "const LIMIT = 2; function run() { "
+            "if (true) { var LIMIT = 1; } return LIMIT; }",
+            "run",
+            set(),
+        ),
+        (
+            "const LIMIT = 2; function run() { "
+            "for (var LIMIT = 0; LIMIT < 1; LIMIT++) {} return LIMIT; }",
+            "run",
+            set(),
+        ),
+        (
+            "const LIMIT = 2; function run() { "
+            "function inner() { var LIMIT = 1; return LIMIT; } "
+            "return LIMIT + inner(); }",
             "run",
             {"LIMIT"},
         ),

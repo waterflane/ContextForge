@@ -12,6 +12,31 @@ from tree_sitter import Node, Parser
 from contextforge.intelligence.codemap import FileCodeMap, SymbolRecord
 from contextforge.intelligence.polyglot import _language
 
+_JS_BUILTINS = {
+    "undefined",
+    "NaN",
+    "Infinity",
+    "console",
+    "Math",
+    "JSON",
+    "Object",
+    "Array",
+    "String",
+    "Number",
+    "Boolean",
+    "Promise",
+    "Set",
+    "Map",
+    "Date",
+    "Error",
+    "RegExp",
+    "Symbol",
+    "BigInt",
+    "parseInt",
+    "parseFloat",
+    "isNaN",
+}
+
 
 @dataclass(frozen=True)
 class SymbolDependencies:
@@ -44,6 +69,13 @@ def symbol_dependencies(
         parent = by_id.get(parent.parent_symbol_id or "")
     found: set[str] = set()
     unresolved: set[str] = set()
+    ignored_unresolved = (
+        set(dir(builtins))
+        if code_map.language == "Python"
+        else _JS_BUILTINS
+        if code_map.language in {"JavaScript", "TypeScript"}
+        else set()
+    )
     for name in names:
         candidates = [
             item
@@ -61,6 +93,8 @@ def symbol_dependencies(
         if len(candidates) == 1:
             if candidates[0].symbol_id != symbol.symbol_id:
                 found.add(candidates[0].symbol_id)
+        elif not candidates and name in ignored_unresolved:
+            continue
         else:
             unresolved.add(name)
     return SymbolDependencies(tuple(sorted(found)), tuple(sorted(unresolved)))
@@ -120,7 +154,7 @@ def _python_names(source: str, symbol: SymbolRecord) -> set[str] | None:
         and isinstance(item.value, ast.Name)
         and item.value.id in {"self", "cls"}
     )
-    return names - set(dir(builtins))
+    return names
 
 
 def _js_names(
@@ -147,15 +181,25 @@ def _js_names(
     def text(node: Node) -> str:
         return raw[node.start_byte : node.end_byte].decode("utf-8")
 
-    def identifiers(node: Node) -> set[str]:
-        result = set()
-        pending = [node]
-        while pending:
-            child = pending.pop()
-            if child.type in {"identifier", "shorthand_property_identifier_pattern"}:
-                result.add(text(child))
-            elif child.type not in {"type_annotation", "type_arguments"}:
-                pending.extend(child.named_children)
+    def binding_identifiers(node: Node) -> set[str]:
+        if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
+            return {text(node)}
+        if node.type in {"type_annotation", "type_arguments", "type_parameters"}:
+            return set()
+        if node.type in {"required_parameter", "optional_parameter"}:
+            pattern = node.child_by_field_name("pattern")
+            return set() if pattern is None else binding_identifiers(pattern)
+        if node.type in {"assignment_pattern", "object_assignment_pattern"}:
+            left = node.child_by_field_name("left")
+            if left is None:
+                left = next(iter(node.named_children), None)
+            return set() if left is None else binding_identifiers(left)
+        if node.type in {"pair_pattern", "pair"}:
+            value = node.child_by_field_name("value")
+            return set() if value is None else binding_identifiers(value)
+        result: set[str] = set()
+        for child in node.named_children:
+            result.update(binding_identifiers(child))
         return result
 
     scopes = {
@@ -169,30 +213,26 @@ def _js_names(
         "for_statement",
         "for_in_statement",
     }
+    functions = {
+        "function_declaration",
+        "function_expression",
+        "arrow_function",
+        "method_definition",
+    }
 
     def bindings(node: Node) -> set[str]:
         result: set[str] = set()
         if node.type in {"required_parameter", "optional_parameter"}:
             pattern = node.child_by_field_name("pattern")
             if pattern is not None:
-                result.update(identifiers(pattern))
+                result.update(binding_identifiers(pattern))
         if node.type == "formal_parameters":
             for child in node.named_children:
-                if child.type in {
-                    "identifier",
-                    "object_pattern",
-                    "array_pattern",
-                    "rest_pattern",
-                }:
-                    result.update(identifiers(child))
-                elif child.type == "assignment_pattern":
-                    left = child.child_by_field_name("left")
-                    if left is not None:
-                        result.update(identifiers(left))
+                result.update(binding_identifiers(child))
         if node.type in {"arrow_function", "catch_clause"}:
             parameter = node.child_by_field_name("parameter")
             if parameter is not None:
-                result.update(identifiers(parameter))
+                result.update(binding_identifiers(parameter))
         if node.type in {
             "variable_declarator",
             "function_declaration",
@@ -200,11 +240,34 @@ def _js_names(
         }:
             name = node.child_by_field_name("name")
             if name is not None:
-                result.update(identifiers(name))
+                result.update(binding_identifiers(name))
+        return result
+
+    def function_var_bindings(root: Node) -> set[str]:
+        result: set[str] = set()
+        pending = list(root.named_children)
+        while pending:
+            node = pending.pop()
+            if node.type in functions:
+                continue
+            if node.type == "class_body":
+                continue
+            if node.type == "variable_declarator":
+                declaration = node.parent
+                if (
+                    declaration is not None
+                    and declaration.type == "variable_declaration"
+                ):
+                    name = node.child_by_field_name("name")
+                    if name is not None:
+                        result.update(binding_identifiers(name))
+            pending.extend(node.named_children)
         return result
 
     def free_names(root: Node, outer: set[str]) -> set[str]:
         local: set[str] = set()
+        if root.type in functions:
+            local.update(function_var_bindings(root))
         pending = [root]
         while pending:
             node = pending.pop()
@@ -237,28 +300,4 @@ def _js_names(
             pending.extend(node.named_children)
         return result
 
-    references = free_names(target, {symbol.name})
-    return references - {
-        "undefined",
-        "NaN",
-        "Infinity",
-        "console",
-        "Math",
-        "JSON",
-        "Object",
-        "Array",
-        "String",
-        "Number",
-        "Boolean",
-        "Promise",
-        "Set",
-        "Map",
-        "Date",
-        "Error",
-        "RegExp",
-        "Symbol",
-        "BigInt",
-        "parseInt",
-        "parseFloat",
-        "isNaN",
-    }
+    return free_names(target, {symbol.name})
