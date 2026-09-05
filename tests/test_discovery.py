@@ -854,7 +854,7 @@ def test_cancellation_before_provider_call_returns_no_partial_success(
     assert error.value.run_record.final_selection is None
 
 
-def test_total_deadline_converted_provider_cancellation_is_timeout(
+def test_strict_total_deadline_converted_provider_cancellation_is_timeout(
     tmp_path: Path,
 ) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
@@ -871,6 +871,7 @@ def test_total_deadline_converted_provider_cancellation_is_timeout(
                 DiscoveryRequest(
                     task="x",
                     mode="fresh",
+                    strict=True,
                     budget=DiscoveryBudget(timeout_seconds=0.1),
                 ),
             )
@@ -886,6 +887,35 @@ def test_total_deadline_converted_provider_cancellation_is_timeout(
     assert isinstance(provider_error, ProviderCancelledError)
     assert provider_error.diagnostic is not None
     assert provider_error.diagnostic.response_validation == "not_received"
+
+
+def test_non_strict_model_timeout_returns_reviewed_fallback(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, {"focused.py": "VALUE = 1\n"})
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=(FakeScript(_batch(_finalize()), delay_seconds=2.0),),
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(
+                task="Find focused behavior",
+                mode="fresh",
+                budget=DiscoveryBudget(timeout_seconds=1.0),
+            ),
+        )
+    )
+
+    assert result.status == "complete"
+    assert result.final_selection is not None
+    assert result.final_selection.provenance == "deterministic_fallback"
+    assert any(
+        item.code == "model-timeout-fallback"
+        for item in result.final_selection.completeness_warnings
+    )
+    assert "timed out" in result.final_selection.unknowns[0]
 
 
 def test_external_cancellation_during_provider_wait_remains_cancelled(

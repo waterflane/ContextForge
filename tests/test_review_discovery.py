@@ -349,6 +349,101 @@ def test_model_can_select_symbols_and_repair_missing_dependency(tmp_path: Path) 
     )
 
 
+def test_kotlin_declaration_hints_keep_complete_definition_files(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "BuildAgenda.kt": (
+            "class BuildAgenda { fun build(rule: RepeatRule) = rule.occursOn(today) }\n"
+        ),
+        "RepeatRule.kt": (
+            "data class RepeatRule(val intervalWeeks: Int) {\n"
+            "  fun occursOn(date: LocalDate): Boolean {\n"
+            "    val firstMonday = startDate.previousMonday()\n"
+            "    val weeks = weeksBetween(firstMonday, date.previousMonday())\n"
+            "    return weeks % intervalWeeks == 0L\n"
+            "  }\n"
+            "}\n"
+        ),
+        **{
+            f"Caller{index}.kt": "fun call(rule: RepeatRule) = rule.occursOn(today)\n"
+            for index in range(12)
+        },
+    }
+    data = knowledge(tmp_path, files)
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://offline",
+            model_id="review",
+            context_window=32768,
+            max_json_repair_attempts=5,
+        ),
+        scripts=['{"schema_version":1}'] * 3,
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            data.snapshot,
+            provider,
+            DiscoveryRequest(
+                task="Explain BuildAgenda together with RepeatRule.occursOn",
+                mode=DiscoveryMode.FRESH,
+            ),
+        )
+    )
+
+    assert result.final_selection is not None
+    selected = {item.path: item for item in result.final_selection.selected}
+    assert {"BuildAgenda.kt", "RepeatRule.kt"} <= set(selected)
+    assert selected["RepeatRule.kt"].kind == "full_file"
+
+
+def test_fallback_finalization_reviews_symbol_dependencies(tmp_path: Path) -> None:
+    source = (
+        "class ServerClock {\n"
+        "  constructor() { this.bestRoundTripMs = Infinity; "
+        "this.hasRoundTripSample = false; }\n"
+        "  record(roundTripMs) {\n"
+        "    const acceptable = !Number.isFinite(this.bestRoundTripMs);\n"
+        "    this.hasRoundTripSample = acceptable;\n"
+        "    return acceptable;\n"
+        "  }\n"
+        "}\n"
+    )
+    data = knowledge(tmp_path, {"clock-sync.js": source})
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://offline",
+            model_id="review",
+            context_window=32768,
+            max_json_repair_attempts=5,
+        ),
+        scripts=['{"schema_version":1}'] * 3,
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            data.snapshot,
+            provider,
+            DiscoveryRequest(
+                task="Explain ServerClock.record", mode=DiscoveryMode.FRESH
+            ),
+        )
+    )
+
+    assert result.final_selection is not None
+    warning = next(
+        item
+        for item in result.final_selection.completeness_warnings
+        if item.code == "symbol-dependencies-omitted"
+    )
+    assert "bestRoundTripMs" in warning.message
+    assert "hasRoundTripSample" in warning.message
+    assert any("bestRoundTripMs" in item for item in result.final_selection.unknowns)
+
+
 def test_symbol_selection_rejects_unknown_id_without_mutation(tmp_path: Path) -> None:
     data = knowledge(tmp_path, {"work.ts": "function run() {}\n"})
     session = DiscoverySession(

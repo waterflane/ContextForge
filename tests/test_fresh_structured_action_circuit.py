@@ -120,8 +120,11 @@ def test_initial_missing_actions_is_repaired_and_prompt_has_minimal_example(
     assert requests[0].response_schema["properties"]["actions"]["minItems"] == 1
     assert "required non-empty actions array" in requests[0].system_instructions
     assert '"actions":[{' in requests[0].system_instructions
+    assert '"kind":"finalize"' in requests[0].system_instructions
+    assert '"arguments":{"summary":' in requests[0].system_instructions
     assert '"actions":[]' not in requests[1].analysis_task
     assert "Minimal valid response:" in requests[1].analysis_task
+    assert '"arguments":{"summary":' in requests[1].analysis_task
     assert result.budget_usage.model_calls == 1
     assert result.budget_usage.model_generations == 1
     assert result.budget_usage.repair_generations == 1

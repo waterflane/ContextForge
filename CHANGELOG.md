@@ -8,6 +8,16 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved shadowed builtin dependencies, TypeScript destructuring defaults,
+  and JavaScript function-scoped `var` bindings during context selection.
+- Preserved complete C/C++ prototype declarations and derived polyglot async
+  and visibility metadata from syntax nodes rather than bounded source text.
+- Counted unsupported source languages in relationship coverage, prioritized
+  Kotlin declaration hints, audited fallback dependencies, and returned an
+  explicit deterministic fallback when non-strict model discovery times out.
+
 ## [0.5.0] - 2026-08-24
 
 ### Added
