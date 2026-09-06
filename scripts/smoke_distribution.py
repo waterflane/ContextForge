@@ -18,8 +18,8 @@ assert installed.metadata["Name"] == "contextforge-repo"
 assert installed.metadata["Version"] == __version__
 assert installed.metadata["License-Expression"] == "Apache-2.0"
 assert contextforge.__version__ == __version__
-assert BRIDGE_PROTOCOL_VERSION == "1.0"
-assert SUPPORTED_BRIDGE_PROTOCOL_VERSIONS == ("1.0",)
+assert BRIDGE_PROTOCOL_VERSION == "1.1"
+assert SUPPORTED_BRIDGE_PROTOCOL_VERSIONS == ("1.0", "1.1")
 assert BridgeServer.__module__ == "contextforge.bridge.server"
 assert find_spec("contextforge.protocol") is None
 

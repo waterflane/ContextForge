@@ -8,6 +8,62 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-05
+
+### Added
+
+- Added verified Tree-sitter declaration extraction for JavaScript, TypeScript,
+  Java, C#, Go, Rust, C, C++, PHP, and Ruby, including language-specific
+  ownership, signatures, modifiers, exports, and parser diagnostics.
+- Added index schema v2 source regions and resumable semantic chunk checkpoints
+  with explicit coverage, required-symbol budgeting, and partial-result
+  provenance.
+- Added bridge protocol 1.1 verified expansion candidates and index coverage
+  while retaining protocol 1.0 compatibility.
+- Added an opt-in, read-only Qwen retrieval and semantic regression script for
+  local OpenAI-compatible model servers.
+
+### Changed
+
+- Prioritized exact current-source identifiers, verified declarations, inferred
+  regions, and explicit task facets during discovery; verified symbol questions
+  now prefer compact declaration and dependency ranges.
+- Made structured providers default to reasoning disabled, retry bounded
+  truncated responses, and rebuild requests against unambiguous smaller runtime
+  context limits.
+- Expanded semantic planning so every required symbol receives response budget,
+  oversized work splits before dispatch, and validated chunks can resume after
+  interruption.
+
+### Added
+
+- Added immutable, model-free repository discovery application contracts for
+  deterministic candidate preparation, read-only expansion, verified source
+  reads, and canonical context packaging.
+- Added the generic ContextForge bridge protocol v1 ADR, normative JSON Schema,
+  persistent workspace-bound JSON-RPC 2.0 service over bounded UTF-8 NDJSON
+  stdio, and a runnable generic client example.
+- Added explicit protocol negotiation and compatibility failures for missing or
+  unsupported v1 handshakes, cooperative JSON-RPC request cancellation, typed
+  source-identity drift, deterministic preparation/selection identities, and
+  bounded concurrent requests with serialized responses.
+- Added bridge architecture, CLI, troubleshooting, security, stream,
+  cancellation, read-only, repository-truth, and source-verification guidance.
+
+### Changed
+
+- Preserved exact identifier ranges through discovery review and required
+  sufficient multi-symbol context before accepting model finalization.
+- Preserved shadowed builtin dependencies, TypeScript destructuring defaults,
+  and JavaScript function-scoped `var` bindings during context selection.
+- Preserved complete C/C++ prototype declarations and derived polyglot async
+  and visibility metadata from syntax nodes rather than bounded source text.
+- Counted unsupported source languages in relationship coverage, prioritized
+  Kotlin declaration hints, audited fallback dependencies, and returned an
+  explicit deterministic fallback when non-strict model discovery times out.
+- Corrected polyglot declaration ownership, callable classification, source
+  ranges, and coverage reporting across supported grammar variants.
+
 ## [0.5.0] - 2026-08-24
 
 ### Added

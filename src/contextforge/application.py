@@ -46,10 +46,13 @@ from contextforge.intelligence import (
     GENERIC_SEMANTIC_ANALYZER_VERSION,
     GLOBAL_MAP_PROMPT_VERSION,
     INDEX_SCHEMA_VERSION,
+    POLYGLOT_ANALYZER,
     PYTHON_ANALYZER,
     SEMANTIC_ANALYZER_ID,
     SEMANTIC_ANALYZER_VERSION,
     SEMANTIC_PROMPT_VERSION,
+    SEMANTIC_SCHEMA_VERSION,
+    SUPPORTED_POLYGLOT_LANGUAGES,
     ArchitectureMap,
     GlobalMapAnalysisOptions,
     GlobalMapBuildResult,
@@ -69,11 +72,14 @@ from contextforge.intelligence import (
     initialize_index,
     load_architecture_map,
     load_feature_map,
+    load_file_code_map,
+    load_file_semantic_analysis,
     load_manifest,
     load_repository_overview,
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
+from contextforge.intelligence.store import index_publication_transaction
 from contextforge.logging import recent_records
 from contextforge.models import (
     ModelProvider,
@@ -193,7 +199,7 @@ async def build_repository_index(
     fail_on_error: bool = False,
     force_reanalyze: bool = False,
     max_files: int | None = None,
-    semantic_max_output_tokens: int = 512,
+    semantic_max_output_tokens: int = 1024,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
     progress: ProgressObserver | None = None,
@@ -340,12 +346,15 @@ async def _build_repository_index(
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
-    with acquire_index_lock(
-        root,
-        run_id,
-        recover_stale=recover_stale_lock,
-        confirm_unknown=confirm_unknown_lock,
-    ) as lock:
+    with (
+        acquire_index_lock(
+            root,
+            run_id,
+            recover_stale=recover_stale_lock,
+            confirm_unknown=confirm_unknown_lock,
+        ) as lock,
+        index_publication_transaction(lock),
+    ):
         try:
             progress.report(
                 "structural_index",
@@ -730,21 +739,37 @@ def _inspect_repository_index(
         )
     )
     stale = set(added) | set(changed)
+    if manifest.schema_version != INDEX_SCHEMA_VERSION:
+        stale.update(current)
     for path in sorted(set(current) & set(indexed)):
         state = indexed[path]
         structural_expected = (
-            PYTHON_ANALYZER if current[path].language == "Python" else FALLBACK_ANALYZER
+            PYTHON_ANALYZER
+            if current[path].language == "Python"
+            else POLYGLOT_ANALYZER
+            if current[path].language in SUPPORTED_POLYGLOT_LANGUAGES
+            else FALLBACK_ANALYZER
         )
         if state.analyzer != structural_expected:
             stale.add(path)
-        semantic_expected = _semantic_identity(
-            provider_configuration, generic=current[path].language != "Python"
-        )
-        if semantic_expected is not None and (
-            state.semantic_status != "complete"
-            or semantic_expected not in manifest.semantic_analyzers
-        ):
-            stale.add(path)
+        if provider_configuration is not None:
+            try:
+                code_map = load_file_code_map(root, path, manifest=manifest)
+                analysis = load_file_semantic_analysis(root, path, manifest=manifest)
+                expected = _semantic_identity(
+                    provider_configuration, generic=not code_map.symbols
+                )
+                if (
+                    not analysis.coverage_complete
+                    or analysis.schema_version != SEMANTIC_SCHEMA_VERSION
+                    or (
+                        analysis.record_kind != "deterministic_metadata_interpretation"
+                        and analysis.semantic_analyzer != expected
+                    )
+                ):
+                    stale.add(path)
+            except (IndexManifestReadError, ValueError):
+                stale.add(path)
     failed = tuple(
         state.path
         for state in manifest.files
@@ -1155,7 +1180,7 @@ def _semantic_identity(
             configuration,
         ),
         analysis_prompt_version=SEMANTIC_PROMPT_VERSION,
-        response_schema_version=1,
+        response_schema_version=SEMANTIC_SCHEMA_VERSION,
         model_identity=ModelIdentity(
             provider_id=configuration.provider_id,
             model_id=configuration.model_id,

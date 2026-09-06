@@ -253,7 +253,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["protocol_version", "contextforge_version", "supported_protocol_versions", "capabilities", "workspace", "policy"],
       "properties": {
-        "protocol_version": { "const": "1.0" },
+        "protocol_version": { "enum": ["1.0", "1.1"] },
         "contextforge_version": { "type": "string" },
         "supported_protocol_versions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
         "capabilities": { "type": "object" },
@@ -332,7 +332,22 @@
         "data": { "type": "object" },
         "truncated": { "type": "boolean" },
         "made_progress": { "type": "boolean" },
-        "budget_usage": { "$ref": "#/$defs/budgetUsage" }
+        "budget_usage": { "$ref": "#/$defs/budgetUsage" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/expandedCandidate" } }
+      }
+    },
+    "expandedCandidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "path", "language", "kind", "ranges", "source_sha256", "evidence_kind", "confidence"],
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "path": { "$ref": "#/$defs/portablePath" },
+        "language": { "type": "string" },
+        "kind": { "enum": ["line_ranges", "codemap"] },
+        "ranges": { "type": "array", "items": { "$ref": "#/$defs/lineRange" } },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "evidence_kind": { "enum": ["verified_symbol", "exact_text", "inferred_region"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
     "verifiedBlock": {

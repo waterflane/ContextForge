@@ -18,13 +18,13 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-CODEMAP_SCHEMA_VERSION: Literal[1] = 1
+CODEMAP_SCHEMA_VERSION: Literal[2] = 2
 RESOLVER_VERSION = "2"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 Resolution = Literal["internal", "external", "unresolved"]
-ParseStatus = Literal["parsed", "unsupported", "parse_error"]
+ParseStatus = Literal["parsed", "partial", "unsupported", "parse_error"]
 Visibility = Literal["public", "private", "explicit_export", "unknown"]
 
 
@@ -36,11 +36,18 @@ class SymbolKind(StrEnum):
     """Source declaration kinds approved for verified CodeMaps."""
 
     MODULE = "module"
+    NAMESPACE = "namespace"
     CLASS = "class"
+    INTERFACE = "interface"
+    STRUCT = "struct"
+    ENUM = "enum"
+    TRAIT = "trait"
     FUNCTION = "function"
     ASYNC_FUNCTION = "async_function"
     METHOD = "method"
+    CONSTRUCTOR = "constructor"
     VARIABLE = "variable"
+    CONSTANT = "constant"
     TYPE_ALIAS = "type_alias"
 
 
@@ -230,7 +237,7 @@ class RelationshipRecord(IndexModel):
 class SymbolRecord(IndexModel):
     """Verified declaration and directly contained syntax facts."""
 
-    schema_version: Literal[1] = RECORD_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = RECORD_SCHEMA_VERSION
     record_kind: Literal["verified_symbol"] = "verified_symbol"
     symbol_id: str
     name: str
@@ -265,11 +272,27 @@ class SymbolRecord(IndexModel):
             SymbolKind.FUNCTION,
             SymbolKind.ASYNC_FUNCTION,
             SymbolKind.METHOD,
+            SymbolKind.CONSTRUCTOR,
         } and (self.parameters or self.return_annotation is not None):
             raise ValueError("only callable symbols can declare parameters")
-        if self.kind != SymbolKind.CLASS and self.contained_methods:
-            raise ValueError("only classes can contain method IDs")
-        if tuple(self.contained_methods) != tuple(sorted(self.contained_methods)):
+        if (
+            self.kind
+            not in {
+                SymbolKind.CLASS,
+                SymbolKind.INTERFACE,
+                SymbolKind.STRUCT,
+                SymbolKind.TRAIT,
+                SymbolKind.ENUM,
+                SymbolKind.MODULE,
+                SymbolKind.NAMESPACE,
+                SymbolKind.TYPE_ALIAS,
+                SymbolKind.CONSTANT,
+                SymbolKind.VARIABLE,
+            }
+            and self.contained_methods
+        ):
+            raise ValueError("only declaration owners can contain method IDs")
+        if tuple(self.contained_methods) != tuple(sorted(set(self.contained_methods))):
             raise ValueError("contained method IDs must be canonical")
         if tuple(self.configuration_keys) != tuple(
             sorted(set(self.configuration_keys))
@@ -295,7 +318,7 @@ class SymbolRecord(IndexModel):
 class FileCodeMap(IndexModel):
     """Complete model-free structural projection for one snapshot file."""
 
-    schema_version: Literal[1] = CODEMAP_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = CODEMAP_SCHEMA_VERSION
     record_kind: Literal["verified_file_codemap"] = "verified_file_codemap"
     path: str
     source_sha256: Sha256
@@ -304,6 +327,8 @@ class FileCodeMap(IndexModel):
     analyzer: AnalyzerIdentity
     parse_status: ParseStatus
     line_count: NonNegativeInt
+    source_regions: tuple[SourceRange, ...] = ()
+    source_regions_truncated: bool = False
     module_docstring: str | None = None
     imports: tuple[ImportRecord, ...] = ()
     exports: tuple[ExportRecord, ...] = ()
@@ -326,6 +351,7 @@ class FileCodeMap(IndexModel):
         if len(symbol_ids) != len(set(symbol_ids)):
             raise ValueError("symbol IDs must be unique")
         known = set(symbol_ids)
+        by_id = {symbol.symbol_id: symbol for symbol in self.symbols}
         for symbol in self.symbols:
             if (
                 symbol.parent_symbol_id is not None
@@ -336,6 +362,13 @@ class FileCodeMap(IndexModel):
                 raise ValueError("a symbol cannot contain itself")
             if any(method not in known for method in symbol.contained_methods):
                 raise ValueError("contained method ID is absent from the CodeMap")
+            for method in symbol.contained_methods:
+                child = by_id[method]
+                if child.parent_symbol_id != symbol.symbol_id or child.kind not in {
+                    SymbolKind.METHOD,
+                    SymbolKind.CONSTRUCTOR,
+                }:
+                    raise ValueError("contained method does not belong to its owner")
             for call in symbol.direct_calls:
                 if (
                     call.target_file_path == self.path
@@ -396,7 +429,7 @@ class FileCodeMap(IndexModel):
                 source_range.end_line > max(self.line_count, 1)
             ):
                 raise ValueError("source range exceeds the canonical source line count")
-        if self.parse_status != "parsed" and (
+        if self.parse_status in {"unsupported", "parse_error"} and (
             self.module_docstring is not None
             or self.imports
             or self.exports

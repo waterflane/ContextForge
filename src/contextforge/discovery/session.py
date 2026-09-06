@@ -10,13 +10,19 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from contextforge.context import LineRange
+from contextforge.context import (
+    ContextReaderError,
+    LineRange,
+    ReaderLimits,
+    read_selected_text_file,
+)
 from contextforge.intelligence import (
+    CODEMAP_SCHEMA_VERSION,
     FileCodeMap,
     IndexManifest,
     IndexManifestNotFoundError,
@@ -31,8 +37,10 @@ from contextforge.intelligence import (
     load_repository_overview,
     resolve_relationships,
 )
+from contextforge.intelligence.codemap import SymbolRecord
 from contextforge.logging import LogLevel, emit
 from contextforge.models import (
+    ContextWindowExceededError,
     DuplicateCandidateIdIssue,
     InvalidFieldValueIssue,
     InvalidRepositoryPathIssue,
@@ -46,6 +54,7 @@ from contextforge.models import (
     UnknownCandidateIdIssue,
     UntrustedModelContext,
     ValidationIssue,
+    estimate_request_context,
     provider_error_details,
     structured_validation_fingerprint,
 )
@@ -54,12 +63,14 @@ from contextforge.repositories import ProjectSnapshot
 
 from .completeness import review_completeness
 from .constraints import extract_task_file_constraints
+from .dependencies import symbol_dependencies
 from .models import (
     CompletenessWarning,
     DiscoveryAction,
     DiscoveryActionBatch,
     DiscoveryCandidate,
     DiscoveryCandidateRecord,
+    DiscoveryLineRange,
     DiscoveryMode,
     DiscoveryObservation,
     DiscoveryRequest,
@@ -76,6 +87,7 @@ from .tools import (
     DiscoveryToolExecutor,
     FinalizeContextInput,
     GitDiffProvider,
+    GitDiffResult,
     ToolBudgetExceededError,
     ToolBudgetTracker,
 )
@@ -115,26 +127,36 @@ candidates are hints, never an authorization boundary. Preserve uncertainty and 
 not claim complete dynamic call, reflection, generated-code, or configuration
 coverage."""
 
-INDEXED_SELECTION_INSTRUCTIONS = """Return exactly one JSON object with three
+INDEXED_SELECTION_INSTRUCTIONS = """Return exactly one JSON object with required
 fields: schema_version must be 1; candidate_ids must be a non-empty array of one
 to ten IDs copied exactly from the supplied candidates; summary must briefly explain
-why those candidates fit the task. candidate_ids is required. Do not return actions,
+why those candidates fit the task. Optionally include symbol_ids copied from supplied
+symbols to select particular functions/constants rather than whole files. Include
+the supplied dependencies needed to answer the question. An absent exact name is
+not evidence that a similarly named function is identical: explain approximate matches.
+candidate_ids is required. Do not return actions,
 tool names, nested arguments, paths in place of IDs, Markdown, or extra fields."""
 
 FRESH_ACTION_INSTRUCTIONS = """Return one JSON object matching the supplied schema
 with the required non-empty actions array of one to ten actions; its shape begins
-{"schema_version":1,"actions":[{...}]}. When ranked
+{"schema_version":1,"actions":[{"schema_version":1,"action_id":"select",
+"kind":"call_tool","tool_name":"select_candidates","arguments":
+{"candidate_ids":["<supplied-candidate-id>"]}},{"schema_version":1,
+"action_id":"finish","kind":"finalize","arguments":{"summary":
+"Selected the smallest sufficient context."}}]}. When ranked
 candidates cover the task, select the smallest sufficient set in the first response
 and finalize in that same action batch; do not inspect merely to reconfirm a strong
 candidate. Investigate only when an essential role is missing. After a completeness
 review, add a genuinely missing candidate or finalize unchanged. Normally select one
 to five files, then stop."""
 
-HYBRID_MAX_MODEL_GENERATIONS = 1
 FRESH_EQUIVALENT_STRUCTURED_FAILURE_LIMIT = 3
 FACET_CANDIDATE_MIN_SCORE = 8.0
 MAX_FACET_COVERAGE_ADDITIONS = 2
 FRESH_STAGNANT_GENERATION_LIMIT = 3
+MAX_FALLBACK_RESERVE_SECONDS = 5.0
+
+_FallbackReason = Literal["stagnation", "structured_response", "timeout"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +244,8 @@ class DiscoverySession:
         self._intent_facets: tuple[_IntentFacet, ...] = ()
         self._facet_rankings: dict[str, tuple[str, ...]] = {}
         self._coverage_diagnostics_emitted = False
+        self._supplied_symbol_ids: set[str] = set()
+        self._needs_dependency_review = False
         self._enrichment_added_paths: set[str] = set()
         self._validated_selection: tuple[DiscoveryAction, ...] | None = None
         self._validated_selection_step_fingerprint: str | None = None
@@ -288,6 +312,12 @@ class DiscoverySession:
             pinned_paths=self.request.pinned_paths,
             excluded_paths=self._effective_excluded_paths,
         )
+        self.warnings.extend(
+            _identifier_warnings(
+                loaded.knowledge,
+                self._task_file_constraints.positive_task,
+            )
+        )
         self._intent_facets = _detect_intent_facets(
             self._task_file_constraints.positive_task
         )
@@ -297,12 +327,32 @@ class DiscoverySession:
             self._intent_facets,
         )
         limit = self.request.budget.max_preselected_candidates
+        if any(w.code.startswith("exact-identifier-") for w in self.warnings):
+            limit = min(limit, 3 + len(self.request.pinned_paths))
         self._preselected_candidates = _facet_aware_preselection(
             self._ranked_candidates,
             self._intent_facets,
             self._facet_rankings,
             limit=limit,
         )
+        if self._preselected_candidates and not any(
+            _record_has_relevance(record)
+            or any(
+                signal.startswith(("task_", "exact_source_"))
+                for signal in record.ranking_signals
+            )
+            for record in self._preselected_candidates
+        ):
+            self.warnings.append(
+                CompletenessWarning(
+                    code="low-relevance-candidates",
+                    message=(
+                        "No candidate has direct task, symbol, source, or role "
+                        "evidence; inspect or expand before selecting context."
+                    ),
+                    confidence=1.0,
+                )
+            )
         if self._ranked_candidates and limit > 0 and not self._preselected_candidates:
             emit(
                 "retrieval",
@@ -327,6 +377,15 @@ class DiscoverySession:
             candidate_records={
                 item.candidate_id: item for item in self._preselected_candidates
             },
+            candidate_ranges=_verified_identifier_ranges(
+                loaded.knowledge,
+                tuple(
+                    item
+                    for item in self._preselected_candidates
+                    if item.path not in self.request.pinned_paths
+                ),
+                self._task_file_constraints.positive_task,
+            ),
         )
         if len(self.request.pinned_paths) > self.request.budget.max_context_files:
             self.warnings.append(
@@ -428,26 +487,6 @@ class DiscoverySession:
                     if item.path is not None
                 }
                 actions = await self._request_actions()
-                if any(
-                    action.kind == "call_tool"
-                    and action.tool_name == "select_candidates"
-                    for action in actions
-                ):
-                    actions = (
-                        *actions,
-                        DiscoveryAction(
-                            action_id="engine-deterministic-finalize",
-                            kind="finalize",
-                            arguments={
-                                "summary": (
-                                    "Selected model-validated ranked context and "
-                                    "completed deterministic relationship review."
-                                ),
-                                "unknowns": [],
-                                "confidence": 0.8,
-                            },
-                        ),
-                    )
                 self._stage = "context_assembly"
                 for action in actions:
                     self._raise_if_cancelled()
@@ -550,7 +589,7 @@ class DiscoverySession:
                         >= FRESH_STAGNANT_GENERATION_LIMIT
                         and not self.request.strict
                     ):
-                        fallback = self._deterministic_fallback()
+                        fallback = self._deterministic_fallback(reason="stagnation")
                         if fallback is None:
                             raise self._failure(
                                 DiscoveryLimitError,
@@ -612,6 +651,67 @@ class DiscoverySession:
                         )
                         return fallback
         except DiscoveryError as exc:
+            if (
+                isinstance(exc, DiscoveryLimitError)
+                and exc.run_record.failure_code == "total_timeout"
+                and not self.request.strict
+            ):
+                self._stage = "fallback_selection"
+                self.warnings.append(
+                    CompletenessWarning(
+                        code="model-timeout-fallback",
+                        message=(
+                            "Model-guided discovery timed out; the returned context "
+                            "uses deterministic ranking and requires dependency review."
+                        ),
+                        confidence=0.2,
+                    )
+                )
+                try:
+                    fallback = self._deterministic_fallback(reason="timeout")
+                except DiscoveryError:
+                    fallback = None
+                if fallback is not None and self._remaining_seconds() >= 0:
+                    self._progress.report(
+                        "fallback_selection",
+                        "Selected deterministic ranked context after model timeout.",
+                        percentage=99,
+                        planned_units=1,
+                        processed_units=1,
+                        succeeded_units=1,
+                        fallback_units=1,
+                        failed_units=0,
+                        lifecycle_state="degraded_success",
+                        metadata={
+                            "fallback_kind": "deterministic_context_selection",
+                            "fallback_reason": "model_timeout",
+                        },
+                    )
+                    self._progress.complete(
+                        message="Repository context discovery completed with fallback."
+                    )
+                    emit(
+                        "fallback",
+                        "context_suggestion.fallback_selected",
+                        "Selected deterministic context after model timeout.",
+                        level=LogLevel.WARNING,
+                        operation_id=self._operation_id,
+                        top_level_operation_id=self._top_level_operation_id,
+                        parent_operation_id=self._operation_id,
+                        phase_id="fallback_selection",
+                        status="completed",
+                        fallback_selected=True,
+                        data={
+                            "fallback_selected": True,
+                            "fallback_kind": "deterministic_context_selection",
+                            "fallback_reason": "model_timeout",
+                            "fallback_units": 1,
+                            "succeeded_units": 1,
+                            "failed_units": 0,
+                            "final_outcome": "degraded_success",
+                        },
+                    )
+                    return fallback
             if isinstance(exc, DiscoveryCancelledError):
                 self._progress.cancel()
                 self._stage = "cancelled"
@@ -658,7 +758,7 @@ class DiscoverySession:
                 and (repeated_fresh_failure or repairs_exhausted)
             ):
                 self._stage = "fallback_selection"
-                fallback = self._deterministic_fallback()
+                fallback = self._deterministic_fallback(reason="structured_response")
                 if fallback is not None:
                     bounded_repetition = repeated_fresh_failure
                     self._progress.report(
@@ -781,7 +881,9 @@ class DiscoverySession:
                 "repository source or pinned index changed during discovery",
             ) from exc
 
-    def _deterministic_fallback(self) -> DiscoveryRunRecord | None:
+    def _deterministic_fallback(
+        self, *, reason: _FallbackReason
+    ) -> DiscoveryRunRecord | None:
         """Build the normal public DTO from highest-ranked valid request candidates."""
 
         files = {item.path: item for item in self.snapshot.files}
@@ -841,12 +943,27 @@ class DiscoverySession:
             if item.path in pinned and item.path not in candidate_paths
         )
         candidates.sort(key=lambda item: (item.path not in pinned, item.rank))
+        if any(item.code.startswith("exact-identifier-") for item in self.warnings):
+            candidates = [item for item in candidates if item.path in pinned] + [
+                item for item in candidates if item.path not in pinned
+            ][:3]
+        candidate_ranges = _verified_identifier_ranges(
+            self._require_knowledge(), tuple(candidates), constraints.positive_task
+        )
         maximum_files = max(
             self.request.budget.max_context_files,
             len(self.request.pinned_paths),
         )
         for record in candidates:
             project_file = files.get(record.path)
+            ranges = (
+                ()
+                if record.path in pinned
+                else candidate_ranges.get(record.candidate_id, ())
+            )
+            candidate_size = (
+                0 if ranges else (project_file.size_bytes if project_file else 0)
+            )
             if (
                 project_file is None
                 or project_file.is_text is not True
@@ -861,21 +978,26 @@ class DiscoverySession:
                     & set(record.ranking_signals)
                 )
                 or len(selected) >= maximum_files
-                or selected_bytes + project_file.size_bytes
+                or selected_bytes + candidate_size
                 > self.request.budget.max_context_bytes
             ):
                 continue
-            selected_bytes += project_file.size_bytes
+            selected_bytes += candidate_size
             signals = ", ".join(record.ranking_signals)
             selected.append(
                 DiscoveryCandidate(
                     candidate_id=record.candidate_id,
                     kind=(
-                        "related_test"
-                        if _looks_like_test_path(record.path)
-                        else "full_file"
+                        "line_ranges"
+                        if ranges
+                        else (
+                            "related_test"
+                            if _looks_like_test_path(record.path)
+                            else "full_file"
+                        )
                     ),
                     path=record.path,
+                    ranges=ranges,
                     reason=SelectionReason(
                         summary=(
                             f"Deterministic rank #{record.rank}; signals: {signals}."
@@ -893,14 +1015,29 @@ class DiscoverySession:
         verified, exact_context_bytes = self._verify_final_selection(tuple(selected))
         self.budget.context_bytes = exact_context_bytes
         self.budget.context_files = len(verified)
-        warnings = review_completeness(
-            self._require_knowledge(),
-            verified,
-            git_diff=self._require_executor().last_git_diff,
-            source_was_read=True,
+        warnings = self._audit_verified_selection(
+            verified, git_diff=self._require_executor().last_git_diff
         )
-        self.warnings.extend(warnings)
         final_warnings = _unique_warnings(self.warnings)
+        summaries = {
+            "stagnation": (
+                "Model-guided discovery made no selection progress; ContextForge "
+                "selected the highest-ranked valid candidates."
+            ),
+            "structured_response": (
+                "Model selection was unavailable after structured-response repair; "
+                "ContextForge selected the highest-ranked valid candidates."
+            ),
+            "timeout": (
+                "Model-guided discovery reached its bounded time allowance; "
+                "ContextForge selected the highest-ranked valid candidates."
+            ),
+        }
+        reason_unknowns = {
+            "stagnation": "Model-guided discovery stagnated before finalization.",
+            "structured_response": "Model-guided selection could not be validated.",
+            "timeout": "Model-guided selection timed out before validation.",
+        }
         knowledge = self._require_knowledge()
         final = FinalContextSelection(
             task=self.request.task,
@@ -912,11 +1049,19 @@ class DiscoverySession:
                 else None
             ),
             selected=tuple(sorted(verified, key=lambda item: item.candidate_id)),
-            summary=(
-                "Model selection was unavailable after structured-response repair; "
-                "ContextForge selected the highest-ranked valid candidates."
-            ),
-            unknowns=("Model-guided selection could not be validated.",),
+            summary=summaries[reason],
+            unknowns=tuple(
+                dict.fromkeys(
+                    (
+                        reason_unknowns[reason],
+                        *(
+                            warning.message
+                            for warning in warnings
+                            if warning.code == "symbol-dependencies-omitted"
+                        ),
+                    )
+                )
+            )[:100],
             completeness_warnings=final_warnings,
             confidence=_result_confidence(
                 verified,
@@ -980,13 +1125,17 @@ class DiscoverySession:
                     stale.add(state.path)
                     continue
                 try:
-                    code_maps[state.path] = load_file_code_map(
+                    code_map = load_file_code_map(
                         self.snapshot.root, state.path, manifest=manifest
                     )
+                    if code_map.schema_version != CODEMAP_SCHEMA_VERSION:
+                        stale.add(state.path)
+                        continue
+                    code_maps[state.path] = code_map
                 except IndexManifestReadError:
                     stale.add(state.path)
                     continue
-                if state.semantic_status == "complete":
+                if state.semantic_status in {"complete", "partial"}:
                     try:
                         semantics[state.path] = load_file_semantic_analysis(
                             self.snapshot.root, state.path, manifest=manifest
@@ -1141,7 +1290,79 @@ class DiscoverySession:
         )
         return _KnowledgeResult(knowledge, _unique_warnings(warnings))
 
-    async def _request_actions(self) -> tuple[DiscoveryAction, ...]:
+    def _prepare_symbol_evidence(self) -> tuple[list[dict[str, Any]], str, bool]:
+        knowledge = self._require_knowledge()
+        terms = _exact_identifier_terms(self._task_file_constraints.positive_task)
+        tokens = _ranking_tokens(self.request.task)
+        queue: list[tuple[str, SymbolRecord]] = []
+        exact_roots: list[tuple[str, SymbolRecord]] = []
+        for record in self._preselected_candidates:
+            code_map = knowledge.code_maps.get(record.path)
+            if code_map is None:
+                continue
+            exact = [
+                s
+                for s in code_map.symbols
+                if s.name in terms or s.qualified_name in terms
+            ]
+            relevant = [s for s in code_map.symbols if tokens & _ranking_tokens(s.name)]
+            exact_roots.extend((record.path, symbol) for symbol in exact)
+            queue.extend((record.path, s) for s in (exact or relevant[:3]))
+        if exact_roots:
+            queue = exact_roots
+        closed = bool(queue) and bool(terms)
+        rows: list[dict[str, Any]] = []
+        excerpts: list[str] = []
+        seen: set[str] = set()
+        total = 0
+        while queue and len(rows) < 12:
+            path, symbol = queue.pop(0)
+            if symbol.symbol_id in seen:
+                continue
+            seen.add(symbol.symbol_id)
+            dependencies, excerpt = (
+                self._require_executor().inspect_symbol_dependencies(path, symbol)
+            )
+            closed &= dependencies.supported and not dependencies.unresolved_names
+            row = {
+                "symbol_id": symbol.symbol_id,
+                "path": path,
+                "name": symbol.qualified_name,
+                "kind": symbol.kind.value,
+                "range": symbol.declaration_range.model_dump(mode="json"),
+                "dependency_symbol_ids": list(dependencies.symbol_ids),
+                "unresolved_names": list(dependencies.unresolved_names[:20]),
+                "dependency_coverage": "supported"
+                if dependencies.supported
+                else "unknown",
+                "excerpt_truncated": len(excerpt.encode("utf-8")) > 1600,
+            }
+            text = excerpt.encode("utf-8")[:1600].decode("utf-8", errors="ignore")
+            cost = len(_json_bytes(row)) + len(text.encode("utf-8"))
+            if total + cost > 10_000:
+                closed = False
+                continue
+            total += cost
+            rows.append(row)
+            excerpts.append(
+                f"{path}:{symbol.declaration_range.start_line} "
+                f"({symbol.symbol_id})\n{text}"
+            )
+            by_id = {s.symbol_id: s for s in knowledge.code_maps[path].symbols}
+            queue.extend(
+                (path, by_id[key]) for key in dependencies.symbol_ids if key not in seen
+            )
+        closed &= not queue
+        self._supplied_symbol_ids = {str(row["symbol_id"]) for row in rows}
+        closed &= all(
+            set(row["dependency_symbol_ids"]) <= self._supplied_symbol_ids
+            for row in rows
+        )
+        return rows, "\n\n".join(excerpts), closed
+
+    async def _request_actions(
+        self, *, context_retry: bool = True
+    ) -> tuple[DiscoveryAction, ...]:
         self._stage = "budget_calculation"
         observations = [
             item.model_dump(mode="json") for item in self.observations[-20:]
@@ -1155,10 +1376,28 @@ class DiscoverySession:
                 separators=(",", ":"),
                 allow_nan=False,
             )
-            contexts = (
-                UntrustedModelContext.from_text("discovery-observations", context_text),
+            byte_limit = min(
+                1_000_000, self._require_provider().configuration.context_window * 3
             )
+            while observations and len(context_text.encode("utf-8")) > byte_limit:
+                observations.pop(0)
+                context_text = json.dumps(
+                    observations, ensure_ascii=False, sort_keys=True
+                )
+            if observations:
+                contexts = (
+                    UntrustedModelContext.from_text(
+                        "discovery-observations", context_text
+                    ),
+                )
         knowledge = self._require_knowledge()
+        symbol_rows, symbol_text, dependencies_closed = self._prepare_symbol_evidence()
+        symbol_contexts = (
+            (UntrustedModelContext.from_text("symbol-excerpts", symbol_text),)
+            if symbol_text
+            else ()
+        )
+        contexts = (*contexts, *symbol_contexts)
         allowed_paths = [item.path for item in self.snapshot.files]
         serialized_candidates = [
             item.model_dump(mode="json") for item in self._preselected_candidates
@@ -1167,6 +1406,12 @@ class DiscoverySession:
             item.candidate_id for item in self._preselected_candidates
         ]
         trusted = {
+            "symbols": symbol_rows,
+            "retrieval_warnings": [
+                item.model_dump(mode="json")
+                for item in self.warnings
+                if item.code.startswith(("exact-identifier-", "low-relevance"))
+            ],
             "mode": self.request.mode,
             "all_allowed_paths": allowed_paths[:256],
             "allowed_path_count": len(allowed_paths),
@@ -1191,10 +1436,23 @@ class DiscoverySession:
             "budget": self.request.budget.model_dump(mode="json"),
             "budget_usage": self.budget.usage().model_dump(mode="json"),
         }
-        compact_selection = self.request.mode in {
-            DiscoveryMode.INDEXED,
-            DiscoveryMode.HYBRID,
-        }
+        compact_selection = (
+            self.request.mode == DiscoveryMode.INDEXED
+            or (
+                self.request.mode == DiscoveryMode.HYBRID
+                and not _exact_identifier_terms(self.request.task)
+                and not self._needs_dependency_review
+            )
+            or (
+                dependencies_closed
+                and not self._needs_dependency_review
+                and _evidence_complete_question(
+                    knowledge,
+                    self._preselected_candidates,
+                    self._task_file_constraints.positive_task,
+                )
+            )
+        )
         if not compact_selection:
             trusted["tool_schemas"] = _compact_tool_schemas()
         serialized_candidate_count = len(serialized_candidates)
@@ -1267,8 +1525,14 @@ class DiscoverySession:
                     f"Task: {self.request.task}\nInvestigate the repository in "
                     f"{self.request.mode.value} mode. Return schema_version=1 and "
                     "the required non-empty actions array with one to ten actions. "
-                    "Minimal valid response: a select_candidates action using only "
-                    "supplied IDs followed by a finalize action. "
+                    "Minimal valid response: "
+                    '{"schema_version":1,"actions":['
+                    '{"schema_version":1,"action_id":"select","kind":"call_tool",'
+                    '"tool_name":"select_candidates","arguments":'
+                    '{"candidate_ids":["<supplied-candidate-id>"]}},'
+                    '{"schema_version":1,"action_id":"finish","kind":"finalize",'
+                    '"arguments":{"summary":"Selected the smallest sufficient '
+                    'context."}}]}. '
                     "Use select_candidates with only supplied candidate IDs and a "
                     "finalize action in the same response when those candidates "
                     "cover the task. Use investigative call_tool actions only when "
@@ -1283,6 +1547,7 @@ class DiscoverySession:
                 IndexedContextSelection if compact_selection else DiscoveryActionBatch
             ),
             max_output_tokens=512,
+            max_output_tokens_ceiling=1_024,
             temperature=0.0,
             max_response_bytes=512 * 1024,
             metadata={"mode": self.request.mode.value, "run_id": self.run_id[:32]},
@@ -1298,7 +1563,73 @@ class DiscoverySession:
                 None if compact_selection else self._handle_structured_failure
             ),
         )
+        # Drop whole oldest observations, never slice JSON or source excerpts.
+        # Candidate evidence and current selection remain in trusted facts.
+        configuration = self._require_provider().configuration
+        while (
+            observations and not estimate_request_context(request, configuration).fits
+        ):
+            observations.pop(0)
+            request = replace(
+                request,
+                untrusted_contexts=(
+                    (
+                        UntrustedModelContext.from_text(
+                            "discovery-observations",
+                            json.dumps(
+                                observations, ensure_ascii=False, sort_keys=True
+                            ),
+                        ),
+                    )
+                    if observations
+                    else ()
+                )
+                + symbol_contexts,
+            )
+        # Directory inventories are optional: list_tree remains available. Keep
+        # candidates, supplied IDs, warnings and the current selection intact.
+        for key in (
+            "all_allowed_paths",
+            "current_codemap_paths",
+            "semantic_paths",
+            "stale_index_paths",
+        ):
+            values = trusted[key]
+            assert isinstance(values, list)
+            while values and not estimate_request_context(request, configuration).fits:
+                values = values[: len(values) // 2]
+                trusted[key] = values
+                trusted["inventories_truncated"] = True
+                if key == "all_allowed_paths":
+                    trusted["allowed_paths_truncated"] = True
+                request = replace(request, trusted_code_map_facts=dict(trusted))
+        if (
+            not compact_selection
+            and symbol_contexts
+            and not estimate_request_context(request, configuration).fits
+        ):
+            # Investigation can read the omitted source within the user budget.
+            trusted["symbols"] = [
+                {**row, "excerpt_truncated": True} for row in symbol_rows
+            ]
+            request = replace(
+                request,
+                trusted_code_map_facts=dict(trusted),
+                untrusted_contexts=tuple(
+                    item
+                    for item in request.untrusted_contexts
+                    if item.label != "symbol-excerpts"
+                ),
+            )
         remaining = self._remaining_seconds()
+        if not self.request.strict:
+            remaining -= self._fallback_reserve_seconds()
+        if remaining <= 0:
+            raise self._failure(
+                DiscoveryLimitError,
+                "total_timeout",
+                "discovery reached its model-assisted time allowance",
+            )
         emit(
             "synthesis",
             "context_suggestion.request_assembled",
@@ -1359,6 +1690,12 @@ class DiscoverySession:
             diagnostic = exc.diagnostic
             if diagnostic is not None:
                 self.budget.charge_provider(diagnostic)
+            if (
+                context_retry
+                and isinstance(exc, ContextWindowExceededError)
+                and exc.server_context_window is not None
+            ):
+                return await self._request_actions(context_retry=False)
             self._provider_request_dispatched = bool(
                 diagnostic is not None and diagnostic.total_provider_http_calls > 0
             )
@@ -1390,7 +1727,10 @@ class DiscoverySession:
                     action_id="model-candidate-selection",
                     kind="call_tool",
                     tool_name="select_candidates",
-                    arguments={"candidate_ids": list(response.value.candidate_ids)},
+                    arguments={
+                        "candidate_ids": list(response.value.candidate_ids),
+                        "symbol_ids": list(response.value.symbol_ids),
+                    },
                 ),
                 DiscoveryAction(
                     action_id="model-selection-finalize",
@@ -1421,6 +1761,23 @@ class DiscoverySession:
 
         if not isinstance(value, IndexedContextSelection):
             raise TypeError("expected IndexedContextSelection")
+        selected_paths = {
+            item.path
+            for item in self._preselected_candidates
+            if item.candidate_id in value.candidate_ids
+        }
+        allowed_symbols = {
+            symbol.symbol_id
+            for path, code_map in self._require_knowledge().code_maps.items()
+            if path in selected_paths
+            for symbol in code_map.symbols
+        }
+        if len(value.symbol_ids) != len(set(value.symbol_ids)) or not set(
+            value.symbol_ids
+        ) <= (allowed_symbols & self._supplied_symbol_ids):
+            raise StructuredResponseError(
+                "symbol IDs must be unique and supplied for the selected candidates"
+            )
         allowed_candidate_ids = {
             item.candidate_id for item in self._preselected_candidates
         }
@@ -1682,6 +2039,100 @@ class DiscoverySession:
         self._structured_fallback_fingerprint = fingerprint
         return True
 
+    def _review_symbol_dependencies(
+        self, selected: tuple[DiscoveryCandidate, ...]
+    ) -> tuple[CompletenessWarning, ...]:
+        result: list[CompletenessWarning] = []
+        for candidate in selected:
+            if candidate.path is None or not candidate.ranges:
+                continue
+            code_map = self._require_knowledge().code_maps.get(candidate.path)
+            if code_map is None:
+                continue
+
+            def covered(
+                symbol: Any, spans: tuple[DiscoveryLineRange, ...] = candidate.ranges
+            ) -> bool:
+                return any(
+                    span.start_line <= symbol.declaration_range.start_line
+                    and span.end_line >= symbol.declaration_range.end_line
+                    for span in spans
+                )
+
+            included = [
+                symbol
+                for symbol in code_map.symbols
+                if any(
+                    span.start_line <= symbol.declaration_range.end_line
+                    and span.end_line >= symbol.declaration_range.start_line
+                    for span in candidate.ranges
+                )
+            ]
+            by_id = {symbol.symbol_id: symbol for symbol in code_map.symbols}
+            missing: set[str] = set()
+            unresolved: set[str] = set()
+            for symbol in included:
+                dependencies, _ = self._require_executor().inspect_symbol_dependencies(
+                    candidate.path, symbol
+                )
+                missing.update(
+                    key for key in dependencies.symbol_ids if not covered(by_id[key])
+                )
+                unresolved.update(dependencies.unresolved_names)
+                if not dependencies.supported:
+                    unresolved.add("dependency extraction unavailable")
+            if missing or unresolved:
+                detail = [
+                    {
+                        "symbol_id": key,
+                        "name": by_id[key].name,
+                        "range": by_id[key].declaration_range.model_dump(mode="json"),
+                    }
+                    for key in sorted(missing)[:20]
+                ]
+                result.append(
+                    CompletenessWarning(
+                        code="symbol-dependencies-omitted",
+                        path=candidate.path,
+                        message=(
+                            "Selected declarations need dependency review. Missing: "
+                            + json.dumps(detail, ensure_ascii=False)
+                            + "; unresolved: "
+                            + ", ".join(sorted(unresolved)[:20])
+                        )[:2000],
+                        confidence=0.8,
+                    )
+                )
+        return tuple(result)
+
+    def _audit_verified_selection(
+        self,
+        verified: tuple[DiscoveryCandidate, ...],
+        *,
+        git_diff: GitDiffResult | None,
+    ) -> tuple[CompletenessWarning, ...]:
+        warnings = review_completeness(
+            self._require_knowledge(),
+            verified,
+            git_diff=git_diff,
+            source_was_read=True,
+        )
+        dependency_warnings = self._review_symbol_dependencies(verified)
+        warnings = (*warnings, *dependency_warnings)
+        self._needs_dependency_review = bool(dependency_warnings)
+        previous_warning_keys = {
+            (item.code, item.path, item.related_paths)
+            for item in self._completeness_warnings
+        }
+        self.warnings = [
+            item
+            for item in self.warnings
+            if (item.code, item.path, item.related_paths) not in previous_warning_keys
+        ]
+        self.warnings.extend(warnings)
+        self._completeness_warnings = warnings
+        return warnings
+
     def _attempt_finalize(
         self, value: FinalizeContextInput
     ) -> DiscoveryRunRecord | None:
@@ -1703,24 +2154,13 @@ class DiscoverySession:
             )
             return None
         verified, exact_context_bytes = self._verify_final_selection(selected)
-        warnings = review_completeness(
-            self._require_knowledge(),
-            verified,
-            git_diff=executor.last_git_diff,
-            source_was_read=True,
+        warnings = self._audit_verified_selection(
+            verified, git_diff=executor.last_git_diff
         )
-        previous_warning_keys = {
-            (item.code, item.path, item.related_paths)
-            for item in self._completeness_warnings
-        }
-        self.warnings = [
-            item
-            for item in self.warnings
-            if (item.code, item.path, item.related_paths) not in previous_warning_keys
+        actionable = [
+            item for item in warnings if item.code != "relationship-coverage-incomplete"
         ]
-        self.warnings.extend(warnings)
-        self._completeness_warnings = warnings
-        if warnings and not self._completeness_pass_requested:
+        if actionable and not self._completeness_pass_requested:
             self._completeness_pass_requested = True
             data = {
                 "message": "perform one final missing-context review",
@@ -1778,7 +2218,19 @@ class DiscoverySession:
             ),
             selected=tuple(sorted(verified, key=lambda item: item.candidate_id)),
             summary=value.summary,
-            unknowns=value.unknowns,
+            unknowns=tuple(
+                dict.fromkeys(
+                    (
+                        *value.unknowns,
+                        *(
+                            warning.message
+                            for warning in final_warnings
+                            if warning.code == "symbol-dependencies-omitted"
+                            or warning.code.startswith("exact-identifier-")
+                        ),
+                    )
+                )
+            )[:100],
             completeness_warnings=final_warnings,
             confidence=confidence,
             budget_usage=self.budget.usage(),
@@ -2003,6 +2455,7 @@ class DiscoverySession:
                     project_file,
                     line_ranges=ranges,
                     max_content_bytes=self.request.budget.max_context_bytes,
+                    revalidate=True,
                 )
             except Exception as exc:
                 self._emit_source_verification_counts(
@@ -2080,11 +2533,6 @@ class DiscoverySession:
 
     @property
     def _max_model_calls(self) -> int:
-        if self.request.mode is DiscoveryMode.HYBRID:
-            return min(
-                self.request.budget.max_model_calls,
-                HYBRID_MAX_MODEL_GENERATIONS,
-            )
         return self.request.budget.max_model_calls
 
     def _check_step_limit(self) -> None:
@@ -2097,6 +2545,12 @@ class DiscoverySession:
 
     def _remaining_seconds(self) -> float:
         return self.request.budget.timeout_seconds - (self.clock() - self._started)
+
+    def _fallback_reserve_seconds(self) -> float:
+        return min(
+            MAX_FALLBACK_RESERVE_SECONDS,
+            self.request.budget.timeout_seconds * 0.1,
+        )
 
     def _raise_if_cancelled(self) -> None:
         if self.cancellation is not None and self.cancellation.is_set():
@@ -2189,6 +2643,7 @@ def _rank_candidate_records(
     """Rank every current text file and assign stable short request IDs."""
 
     task_tokens = _ranking_tokens(task)
+    exact_identifier_matches = _exact_identifier_matches(knowledge.snapshot, task)
     tests_requested = bool(task_tokens & {"test", "regression"})
     pinned = set(pinned_paths)
     excluded = set(excluded_paths)
@@ -2220,7 +2675,7 @@ def _rank_candidate_records(
     candidate_paths = (
         set(current_files) | set(knowledge.code_maps) | set(knowledge.semantic_analyses)
     )
-    match_counts: dict[str, tuple[int, int, int]] = {}
+    match_counts: dict[str, tuple[int, int, int, int, int, int, int]] = {}
     for path in candidate_paths:
         code_map = knowledge.code_maps.get(path)
         path_matches = len(task_tokens & _ranking_tokens(path))
@@ -2233,10 +2688,27 @@ def _rank_candidate_records(
         }
         summary = knowledge.semantic_analyses.get(path)
         summary_tokens = set() if summary is None else _semantic_ranking_tokens(summary)
+        inferred_tokens = {
+            token
+            for region in (() if summary is None else summary.inferred_regions)
+            for token in _ranking_tokens(f"{region.label} {region.summary}")
+        }
+        exact_matches, exact_declaration_hints = exact_identifier_matches.get(
+            path, (0, 0)
+        )
+        exact_declarations = sum(
+            symbol.name in _exact_identifier_terms(task)
+            or symbol.qualified_name in _exact_identifier_terms(task)
+            for symbol in (() if code_map is None else code_map.symbols)
+        )
         match_counts[path] = (
             path_matches,
             len(task_tokens & symbol_tokens),
             len(task_tokens & summary_tokens),
+            len(task_tokens & inferred_tokens),
+            exact_matches,
+            exact_declaration_hints,
+            exact_declarations,
         )
     relevant_implementations = {
         path
@@ -2254,8 +2726,25 @@ def _rank_candidate_records(
         project_file = current_files.get(path)
         if path in excluded or project_file is None:
             continue
-        path_matches, symbol_matches, summary_matches = match_counts[path]
-        score = 1.0 + path_matches * 12.0 + symbol_matches * 8.0 + summary_matches * 6.0
+        (
+            path_matches,
+            symbol_matches,
+            summary_matches,
+            inferred_matches,
+            exact_matches,
+            exact_declaration_hints,
+            exact_declarations,
+        ) = match_counts[path]
+        score = (
+            1.0
+            + path_matches * 12.0
+            + symbol_matches * 8.0
+            + summary_matches * 6.0
+            + inferred_matches * 7.0
+            + exact_matches * 20.0
+            + exact_declaration_hints * 160.0
+            + exact_declarations * 240.0
+        )
         signals: list[str] = []
         if path in pinned:
             score += 10_000.0
@@ -2266,6 +2755,14 @@ def _rank_candidate_records(
             signals.append(f"task_symbol_token_matches={symbol_matches}")
         if summary_matches:
             signals.append(f"task_summary_token_matches={summary_matches}")
+        if inferred_matches:
+            signals.append(f"task_inferred_region_matches={inferred_matches}")
+        if exact_matches:
+            signals.append(f"exact_source_identifier_matches={exact_matches}")
+        if exact_declaration_hints:
+            signals.append(f"exact_source_declaration_hints={exact_declaration_hints}")
+        if exact_declarations:
+            signals.append(f"exact_source_declarations={exact_declarations}")
         if path in knowledge.semantic_analyses:
             score += 0.5
             signals.append("current_semantic_record")
@@ -2308,7 +2805,8 @@ def _rank_candidate_records(
         score = max(score, 0.0)
         language = project_file.language or "text"
         scored.append((score, path, language, tuple(dict.fromkeys(signals))[:10]))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    scored.sort(key=lambda item: (_evidence_group(item[3]), -item[0], item[1]))
     used_ids: set[str] = set()
     records: list[DiscoveryCandidateRecord] = []
     for rank, (score, path, language, record_signals) in enumerate(scored, start=1):
@@ -2330,6 +2828,18 @@ def _rank_candidate_records(
             )
         )
     return tuple(records)
+
+
+def _evidence_group(signals: tuple[str, ...]) -> int:
+    if "manual_pin" in signals:
+        return 0
+    if any(s.startswith("exact_source_declarations=") for s in signals):
+        return 1
+    if any(s.startswith("exact_source_declaration_hints=") for s in signals):
+        return 2
+    if any(s.startswith("exact_source_identifier_matches=") for s in signals):
+        return 3
+    return 4
 
 
 def _detect_intent_facets(task: str) -> tuple[_IntentFacet, ...]:
@@ -2425,7 +2935,7 @@ def _rank_candidates_by_facet(
     by_path = {item.path: item for item in records}
     result: dict[str, tuple[str, ...]] = {}
     for facet in facets:
-        scored: list[tuple[bool, float, int, str]] = []
+        scored: list[tuple[int, bool, float, int, str]] = []
         for path, record in by_path.items():
             if "incidental_metadata_penalty" in record.ranking_signals:
                 continue
@@ -2454,9 +2964,17 @@ def _rank_candidates_by_facet(
             role_mismatch = (
                 not is_test if facet.label == "relevant tests/files" else is_test
             )
-            scored.append((role_mismatch, -score, record.rank, path))
+            scored.append(
+                (
+                    _evidence_group(record.ranking_signals),
+                    role_mismatch,
+                    -score,
+                    record.rank,
+                    path,
+                )
+            )
         scored.sort()
-        result[facet.label] = tuple(item[3] for item in scored)
+        result[facet.label] = tuple(item[4] for item in scored)
     return result
 
 
@@ -2472,6 +2990,17 @@ def _facet_aware_preselection(
 
     if limit <= 0:
         return ()
+    exact_records = tuple(
+        record
+        for record in records
+        if _evidence_group(record.ranking_signals) in {1, 2, 3}
+    )
+    if exact_records:
+        selected = [
+            record for record in records if "manual_pin" in record.ranking_signals
+        ]
+        selected.extend(record for record in exact_records if record not in selected)
+        return tuple(selected[:limit])
     selected_paths: set[str] = set()
     for facet in facets:
         if not facet.substantial or len(selected_paths) >= limit:
@@ -2613,12 +3142,387 @@ def _ranking_tokens(value: str) -> set[str]:
         "verify",
         "verifying",
     }
-    raw = re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
+    expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    expanded = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", expanded)
+    expanded = re.sub(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])", " ", expanded)
+    raw = re.findall(r"[^\W_]+", expanded.casefold().replace("_", " "))
     return {
         aliases.get(item, item)
         for item in raw
         if len(item) >= 2 and item not in ignored
     }
+
+
+_IDENTIFIER_ATOM = r"(?:[^\W\d]|\$)[\w$]*"
+_IDENTIFIER_NAME = _IDENTIFIER_ATOM + r"(?:[.:]" + _IDENTIFIER_ATOM + r")*"
+_IDENTIFIER_TERM = re.compile(r"(?<![\w$])(" + _IDENTIFIER_NAME + r")(?![\w$])")
+_MAX_EXACT_SCAN_BYTES = 16 * 1024 * 1024
+
+
+def _exact_identifier_matches(
+    snapshot: ProjectSnapshot,
+    task: str,
+    *,
+    states: dict[str, str] | None = None,
+) -> dict[str, tuple[int, int]]:
+    """Find bounded, case-sensitive identifier evidence in current source.
+
+    Code-like terms are intentionally conservative: mixed-case, underscored,
+    dollar-prefixed, or explicitly quoted/backticked identifiers qualify. This
+    avoids turning ordinary prose into a repository-wide substring search.
+    """
+
+    terms = _exact_identifier_terms(task)
+    if not terms:
+        return {}
+    patterns = {
+        term: re.compile(rf"(?<![\w$]){re.escape(term)}(?![\w$])") for term in terms
+    }
+    matches: dict[str, tuple[int, int]] = {}
+    scanned = 0
+    found: set[str] = set()
+    limited = False
+    for project_file in snapshot.files:
+        if not project_file.is_text or scanned >= _MAX_EXACT_SCAN_BYTES:
+            limited |= bool(project_file.is_text)
+            continue
+        if project_file.size_bytes > _MAX_EXACT_SCAN_BYTES - scanned:
+            limited = True
+            continue
+        scanned += project_file.size_bytes
+        try:
+            selected = read_selected_text_file(
+                snapshot,
+                project_file,
+                limits=ReaderLimits(
+                    max_files=1,
+                    max_source_bytes=max(project_file.size_bytes, 1),
+                    max_content_bytes=max(project_file.size_bytes * 2, 1),
+                ),
+            )
+        except (ContextReaderError, OSError):
+            limited = True
+            continue
+        source = selected.blocks[0].text
+        found.update(
+            term for term, pattern in patterns.items() if pattern.search(source)
+        )
+        count = sum(len(pattern.findall(source)) for pattern in patterns.values())
+        declaration_hints = (
+            _kotlin_declaration_matches(source, terms)
+            if project_file.language == "Kotlin"
+            else 0
+        )
+        if count or declaration_hints:
+            matches[project_file.path] = (count, declaration_hints)
+    if states is not None:
+        states.update(
+            {
+                term: "found"
+                if term in found
+                else "limited"
+                if limited
+                else "not_found"
+                for term in terms
+            }
+        )
+    return matches
+
+
+def _kotlin_declaration_matches(source: str, terms: set[str]) -> int:
+    """Count conservative lexical declaration hints without claiming AST facts."""
+
+    modifiers = (
+        r"(?:(?:actual|abstract|annotation|companion|const|data|enum|expect|"
+        r"external|final|infix|inline|internal|lateinit|open|operator|override|"
+        r"private|protected|public|sealed|suspend|tailrec|value)\s+)*"
+    )
+    declaration_terms = {
+        atom for term in terms for atom in re.split(r"[.:]", term) if atom
+    }
+    declarations = 0
+    for term in declaration_terms:
+        pattern = re.compile(
+            r"(?m)^[ \t]*(?:@[\w.]+(?:\([^\n]*\))?[ \t]*)*"
+            + modifiers
+            + r"(?:class|interface|object|fun|val|var|typealias)\s+"
+            + re.escape(term)
+            + r"(?![\w$])"
+        )
+        declarations += len(pattern.findall(source))
+    return declarations
+
+
+def _identifier_warnings(
+    knowledge: DiscoveryKnowledge, task: str
+) -> tuple[CompletenessWarning, ...]:
+    states: dict[str, str] = {}
+    _exact_identifier_matches(knowledge.snapshot, task, states=states)
+    verified = {
+        name
+        for code_map in knowledge.code_maps.values()
+        for symbol in code_map.symbols
+        for name in (symbol.name, symbol.qualified_name)
+    }
+    warnings: list[CompletenessWarning] = []
+    for term, state in sorted(states.items()):
+        if term in verified or state == "found":
+            continue
+        warnings.append(
+            CompletenessWarning(
+                code="exact-identifier-not-found"
+                if state == "not_found"
+                else "exact-identifier-search-limited",
+                message=f"Exact identifier {term!r}: {state}. "
+                "Any selected alternatives are approximate.",
+                confidence=0.2,
+            )
+        )
+    if warnings:
+        warnings.append(
+            CompletenessWarning(
+                code="low-relevance-candidates",
+                message="Partial name tokens are not evidence of "
+                "the requested exact identifier.",
+                confidence=0.2,
+            )
+        )
+    return tuple(warnings)
+
+
+def _exact_identifier_terms(task: str) -> set[str]:
+    explicit = {
+        match.group(1)
+        for match in re.finditer(r"[`'\"](" + _IDENTIFIER_NAME + r")[`'\"]", task)
+    }
+    terms = {
+        match.group(1)
+        for match in _IDENTIFIER_TERM.finditer(task)
+        if (
+            match.group(1) in explicit
+            or "_" in match.group(1)
+            or "$" in match.group(1)
+            or "." in match.group(1)
+            or ":" in match.group(1)
+            or any(character.isupper() for character in match.group(1)[1:])
+        )
+        and len(match.group(1)) >= 3
+    }
+    simple = re.fullmatch(
+        r"\s*(?:(?:explain|what does|что делает|объясни)\s+)?"
+        r"(" + _IDENTIFIER_ATOM + r"(?:[.:]" + _IDENTIFIER_ATOM + r")*)"
+        r"\s*[?!.]?\s*",
+        task,
+        re.IGNORECASE,
+    )
+    if simple is not None and len(simple.group(1)) >= 3:
+        terms.add(simple.group(1))
+    return terms
+
+
+def _evidence_complete_question(
+    knowledge: DiscoveryKnowledge,
+    records: tuple[DiscoveryCandidateRecord, ...],
+    task: str,
+) -> bool:
+    """Only simple definition questions may bypass investigative tools."""
+    terms = _exact_identifier_terms(task)
+    if not terms:
+        return False
+    remainder = task
+    for term in sorted(terms, key=len, reverse=True):
+        remainder = re.sub(
+            r"(?<![\w$])" + re.escape(term) + r"(?![\w$])", " ", remainder
+        )
+    words = set(re.findall(r"\w+", remainder.casefold()))
+    if not words <= {
+        "explain",
+        "what",
+        "does",
+        "do",
+        "how",
+        "works",
+        "work",
+        "the",
+        "function",
+        "method",
+        "class",
+        "please",
+        "which",
+        "phase",
+        "phases",
+        "classify",
+        "classifies",
+        "as",
+        "index",
+        "is",
+        "что",
+        "делает",
+        "как",
+        "работает",
+        "объясни",
+        "функция",
+        "функцию",
+        "метод",
+        "класс",
+        "пожалуйста",
+        "какие",
+        "фазы",
+        "фаз",
+        "относит",
+        "к",
+    }:
+        return False
+    available = {record.path for record in records}
+    return all(
+        sum(
+            symbol.name == term or symbol.qualified_name == term
+            for path, code_map in knowledge.code_maps.items()
+            if path in available
+            for symbol in code_map.symbols
+        )
+        == 1
+        for term in terms
+    )
+
+
+def _verified_identifier_ranges(
+    knowledge: DiscoveryKnowledge,
+    records: tuple[DiscoveryCandidateRecord, ...],
+    task: str,
+) -> dict[str, tuple[DiscoveryLineRange, ...]]:
+    terms = _exact_identifier_terms(task)
+    if not terms:
+        return {}
+    result: dict[str, tuple[DiscoveryLineRange, ...]] = {}
+    files = {item.path: item for item in knowledge.snapshot.files}
+    pattern = re.compile(
+        r"(?<![\w$])(?:"
+        + "|".join(re.escape(term) for term in sorted(terms))
+        + r")(?![\w$])"
+    )
+    for record in records:
+        if record.language == "Kotlin" and any(
+            signal.startswith("exact_source_declaration_hints=")
+            for signal in record.ranking_signals
+        ):
+            # Unsupported-language lexical hints rank likely definitions but do
+            # not justify slicing an unparsed declaration body.
+            continue
+        code_map = knowledge.code_maps.get(record.path)
+        project_file = files.get(record.path)
+        dependency_ids: set[str] = set()
+        if (
+            code_map is not None
+            and project_file is not None
+            and project_file.size_bytes <= 256 * 1024
+        ):
+            roots = [
+                symbol
+                for symbol in code_map.symbols
+                if symbol.name in terms or symbol.qualified_name in terms
+            ]
+            if roots:
+                try:
+                    source = (
+                        read_selected_text_file(knowledge.snapshot, project_file)
+                        .blocks[0]
+                        .text
+                    )
+                    by_id = {symbol.symbol_id: symbol for symbol in code_map.symbols}
+                    pending = list(roots)
+                    visited: set[str] = set()
+                    while pending and len(visited) < 32:
+                        symbol = pending.pop()
+                        if symbol.symbol_id in visited:
+                            continue
+                        visited.add(symbol.symbol_id)
+                        dependencies = symbol_dependencies(source, code_map, symbol)
+                        dependency_ids.update(dependencies.symbol_ids)
+                        pending.extend(
+                            by_id[key]
+                            for key in dependencies.symbol_ids
+                            if key not in visited
+                        )
+                except (ContextReaderError, OSError):
+                    pass
+        ranges = sorted(
+            {
+                (
+                    symbol.declaration_range.start_line,
+                    symbol.declaration_range.end_line,
+                )
+                for symbol in (() if code_map is None else code_map.symbols)
+                if symbol.name in terms
+                or symbol.qualified_name in terms
+                or symbol.symbol_id in dependency_ids
+            }
+        )
+        if not ranges and any(
+            signal.startswith("exact_source_identifier_matches=")
+            for signal in record.ranking_signals
+        ):
+            project_file = files.get(record.path)
+            if project_file is None or project_file.size_bytes > _MAX_EXACT_SCAN_BYTES:
+                continue
+            try:
+                selected = read_selected_text_file(
+                    knowledge.snapshot,
+                    project_file,
+                    limits=ReaderLimits(
+                        max_files=1,
+                        max_source_bytes=max(project_file.size_bytes, 1),
+                        max_content_bytes=max(project_file.size_bytes * 2, 1),
+                    ),
+                )
+            except (ContextReaderError, OSError):
+                continue
+            lines = selected.blocks[0].text.splitlines()
+            ranges = [
+                (max(1, index - 3), min(len(lines), index + 3))
+                for index, line in enumerate(lines, start=1)
+                if pattern.search(line)
+            ]
+        if not ranges and code_map is not None:
+            task_tokens = _ranking_tokens(task)
+            approximate = sorted(
+                (
+                    symbol
+                    for symbol in code_map.symbols
+                    if symbol.kind.value
+                    in {
+                        "function",
+                        "async_function",
+                        "method",
+                        "constructor",
+                    }
+                    and task_tokens & _ranking_tokens(symbol.name)
+                ),
+                key=lambda symbol: (
+                    -len(task_tokens & _ranking_tokens(symbol.name)),
+                    symbol.declaration_range.start_line,
+                ),
+            )[:3]
+            ranges = sorted(
+                (symbol.declaration_range.start_line, symbol.declaration_range.end_line)
+                for symbol in approximate
+            )
+        if not ranges:
+            continue
+        merged: list[DiscoveryLineRange] = []
+        for start_line, end_line in ranges[:10]:
+            if merged and start_line <= merged[-1].end_line + 1:
+                previous = merged[-1]
+                merged[-1] = DiscoveryLineRange(
+                    start_line=previous.start_line,
+                    end_line=max(previous.end_line, end_line),
+                )
+            else:
+                merged.append(
+                    DiscoveryLineRange(start_line=start_line, end_line=end_line)
+                )
+        result[record.candidate_id] = tuple(merged)
+    return result
 
 
 def _semantic_ranking_tokens(summary: Any) -> set[str]:
@@ -2634,7 +3538,13 @@ def _semantic_ranking_tokens(summary: Any) -> set[str]:
         elif isinstance(value, (list, tuple)):
             for child in value:
                 visit(child, key=key)
-        elif isinstance(value, str) and key in {"claim", "name", "qualified_name"}:
+        elif isinstance(value, str) and key in {
+            "claim",
+            "label",
+            "name",
+            "qualified_name",
+            "summary",
+        }:
             texts.append(value)
 
     visit(payload)
@@ -2963,6 +3873,10 @@ def _result_confidence(
         )
     for penalty in penalties_by_code.values():
         confidence *= 1.0 - min(0.9, max(0.0, penalty))
+    if any(item.code.startswith("exact-identifier-") for item in warnings):
+        confidence = min(confidence, 0.35)
+    if any(item.code == "symbol-dependencies-omitted" for item in warnings):
+        confidence = min(confidence, 0.5)
     return min(1.0, max(0.0, confidence))
 
 

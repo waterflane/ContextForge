@@ -224,6 +224,7 @@ def test_twenty_six_candidates_are_bounded_serialized_and_stable(
         "schema_version",
         "candidate_ids",
         "summary",
+        "symbol_ids",
     }
     assert set(requests[0].response_schema["required"]) == {
         "schema_version",
@@ -397,7 +398,7 @@ def test_indexed_and_hybrid_share_compact_selection_contract(
         suggest_repository_context(
             snapshot,
             provider,
-            DiscoveryRequest(task="candidate", mode=mode),
+            DiscoveryRequest(task="Find candidate implementations", mode=mode),
         )
     )
 
@@ -407,6 +408,7 @@ def test_indexed_and_hybrid_share_compact_selection_contract(
         "schema_version",
         "candidate_ids",
         "summary",
+        "symbol_ids",
     }
     assert "actions" not in requests[0].response_schema["properties"]
     assert "tool_schemas" not in requests[0].trusted_code_map_facts
@@ -538,8 +540,11 @@ def test_final_verification_resolves_source_read_warning_and_confidence(
     selected_confidences = [
         item.confidence for item in selection.selected if item.confidence is not None
     ]
-    assert selection.confidence == min(selected_confidences)
-    assert selection.confidence > 0.9
+    assert selection.confidence <= min(selected_confidences)
+    assert selection.confidence == 0.35
+    assert any(
+        w.code == "exact-identifier-not-found" for w in selection.completeness_warnings
+    )
     verification = [
         item
         for item in recent_records()

@@ -13,7 +13,7 @@ package construction to the existing builder.
 
 Every session is pinned to a caller-supplied `ProjectSnapshot`. Initial index,
 symbol, text, or semantic matches are hints only. The trusted model request
-contains the complete allowed portable path inventory, and tree, text, and
+contains a bounded allowed portable path inventory; tree, text, and
 verified-read tools remain capable of reaching every permitted snapshot file
 until a caller-selected hard budget is exhausted.
 
@@ -32,6 +32,50 @@ until a caller-selected hard budget is exhausted.
 
 The index is never source truth. A source identity mismatch during investigation
 or final verification aborts without returning a partial successful selection.
+
+Simple exact-symbol questions in `fresh` use the compact candidate-ID contract
+when each requested identifier has one verified declaration among available
+candidates and its known dependencies are available. Broader, ambiguous or
+dependency-incomplete questions retain the investigative tool loop. Hybrid
+investigation uses the caller's model-call budget rather than an internal
+one-generation ceiling.
+The server supplies ranges and source identity; the model cannot introduce new
+IDs or paths through this compact contract. If request history exceeds the
+context budget, oldest complete observations are dropped, never sliced JSON or
+source. Optional directory inventories can also shrink; investigative requests
+may omit source excerpts and use read tools instead. Selected candidates, IDs,
+warnings and evidence origins remain available.
+
+Compact selection and `select_candidates` accept optional `symbol_ids` from the
+supplied verified candidates; legacy file-ID selections remain valid. The model
+chooses functions and constants, and the server resolves/merges their ranges.
+Bounded source excerpts are untrusted contexts, separate from symbol identities.
+AST references in Python and JS/TS identify unique same-file dependencies,
+including later constants such as `INDEX_PHASES`; unresolved references remain
+explicit. Selection alone no longer forces finalization. A final dependency
+review allows another investigation and preserves warnings if gaps remain.
+Source hashes are refreshed before success even when an earlier read is cached.
+
+Ranking groups are mandatory pins, exact verified declarations, conservative
+Kotlin declaration hints, exact text occurrences, then approximate matches,
+with numeric scores only within a group. Kotlin hints improve retrieval for an
+unsupported structural language but never become verified symbols; matching
+definition files are selected whole instead of slicing an unparsed body.
+Identifier extraction and ranking support Unicode while exact matching remains
+case-sensitive.
+Missing exact identifiers permit model-selected alternatives with
+`exact-identifier-not-found` and `low-relevance-candidates` warnings and confidence
+at most 0.35. A limited search is labelled separately. Approximate preselection
+and fallback are capped at three unpinned files and prefer callable ranges.
+
+`find_callers`, `find_references`, `find_imports`, and `find_importers` include a
+`coverage` object with status, scope, file counts and limitations. Status is
+`supported`, `partial`, `unsupported`, or `unknown`; zero matches/unresolved calls
+describes only observed static facts. The scope includes every recognized
+programming-language source file, so Kotlin and other languages without static
+relationship extraction contribute to `unsupported` instead of disappearing
+from the denominator. Repository relationship limitations appear in final
+warnings without requesting futile repeated model reviews.
 
 The three modes intentionally do not promise identical selections. Their
 available evidence differs, and more than one entry point, test, configuration
@@ -122,7 +166,8 @@ untrusted model context. Only ContextForge orchestration supplies system
 instructions. Every action is schema-validated before dispatch.
 
 Fresh action requests state the required non-empty `actions` array and include a
-minimal valid one-action example. The schema remains closed and strict. A
+complete minimal selection-plus-finalization JSON example, including the required
+final summary. The schema remains closed and strict. A
 session-level structured-action circuit breaker fingerprints each validation
 failure as `structured-validation-v1:` plus the SHA-256 of canonical JSON
 containing only schema path, issue type, and relevant constraint. Three
@@ -137,13 +182,19 @@ accepted normally.
 
 Hard limits cover steps, model calls, files read, source bytes, tool-result
 bytes, final context files and bytes, repeated non-progress actions, cancellation,
-and total elapsed time. Result and source byte accounting is authoritative.
+and total elapsed time. Non-strict discovery reserves the smaller of five seconds
+or ten percent of the total timeout for deterministic source verification. If the
+model consumes its allowance, a verified fallback can complete within that reserve
+with `model-timeout-fallback`; strict discovery remains fail-closed. Result and
+source byte accounting is authoritative.
 
-The first finalization attempt runs an advisory missing-context review over
+Every model and deterministic fallback finalization runs an advisory
+missing-context review over
 direct imports/importers, statically resolved callers, related tests,
 configuration consumers, mapped public entry points, relevant diff paths, and
 documentation signals. Warnings request one final model pass and remain in the
 result. Parse gaps, unresolved calls, dynamic dispatch, semantic uncertainty,
-and stale coverage lower confidence and explicitly recommend broader review;
+and stale coverage lower confidence and explicitly recommend broader review.
+Fallback selections also copy omitted symbol dependency details into `unknowns`;
 they never become a false completeness guarantee or trigger automatic inclusion
 of an entire dependency graph.

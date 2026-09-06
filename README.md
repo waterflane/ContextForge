@@ -28,8 +28,9 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.5.0` adds the stable generic
-> local bridge v1. Discovery benchmarking is experimental and
+> ContextForge is pre-alpha software. Version `0.5.1` adds verified polyglot
+> declarations, resumable semantic coverage, bridge protocol 1.1, and hardened
+> exact-symbol discovery. Discovery benchmarking is experimental and
 > its results should be reviewed alongside the recorded provider, model,
 > configuration, and source snapshot.
 
@@ -41,7 +42,8 @@ commands.
 - **Reviewable selection.** Choose exact files, directories, GitWildMatch
   patterns, or line ranges—or ask a configured model for a bounded suggestion.
 - **Local repository intelligence.** Store immutable structural and optional
-  semantic index generations under `.contextforge/index`.
+  semantic index generations under `.contextforge/index`, with verified symbols
+  for Python, JavaScript/TypeScript, Java, C#, Go, Rust, C/C++, PHP, and Ruby.
 - **Portable artifacts.** Export Markdown or JSON context packages, JSON task
   handoffs, and compiled Markdown prompts.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,

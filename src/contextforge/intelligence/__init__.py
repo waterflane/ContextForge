@@ -95,6 +95,11 @@ from contextforge.intelligence.models import (
     calculate_index_statistics,
     validate_portable_relative_path,
 )
+from contextforge.intelligence.polyglot import (
+    POLYGLOT_ANALYZER,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+    extract_polyglot_code_map,
+)
 from contextforge.intelligence.python import (
     DEFAULT_CODEMAP_SOURCE_LIMIT,
     PYTHON_ANALYZER,
@@ -108,6 +113,7 @@ from contextforge.intelligence.semantic_models import (
     DataFlowDescription,
     EvidenceReference,
     FileSemanticAnalysis,
+    InferredRegionRecord,
     SemanticConfidence,
     SideEffectDescription,
     SymbolSemanticAnalysis,
@@ -197,6 +203,7 @@ __all__ = [
     "FALLBACK_ANALYZER",
     "FileCodeMap",
     "FileSemanticAnalysis",
+    "InferredRegionRecord",
     "FeatureArea",
     "FeatureMap",
     "GlobalMapAnalysisError",
@@ -225,6 +232,9 @@ __all__ = [
     "ModelIdentity",
     "ModuleRole",
     "PYTHON_ANALYZER",
+    "POLYGLOT_ANALYZER",
+    "SUPPORTED_POLYGLOT_LANGUAGES",
+    "extract_polyglot_code_map",
     "ParameterRecord",
     "ParserDiagnostic",
     "RelationshipRecord",

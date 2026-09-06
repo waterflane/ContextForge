@@ -1,5 +1,28 @@
 # Repository intelligence storage
 
+## Declaration extraction and coverage
+
+Polyglot analyzer version 4 supports named object methods, enum/module methods,
+JS/TS callable class fields and parenthesized initializers, ambient TS functions,
+C/C++ prototypes, generic Rust impl owners, and C# file-scoped namespaces.
+Contained method IDs must refer to actual callable children of their owner.
+Anonymous returned objects retain lexical ancestry without turning their
+enclosing function into a type or object owner.
+
+Parser/validation failures are isolated per file as a `parse_error` CodeMap
+with an `extractor_error` diagnostic and no claimed declarations. The manifest
+record is complete as a stored diagnostic, not as successful extraction; such
+records are always retried. Source-read/freshness and publication failures still
+abort. Old analyzer records are not reused on rebuild; old generations remain
+readable and publication remains atomic.
+
+`parsed` means syntactically parsed, not exhaustive coverage of a language.
+Recognized declarations without a supported name produce a partial diagnostic.
+Call/import capability is separate: current Python static extraction is
+supported, current polyglot extraction is unsupported for those relationships,
+and unknown/old analyzers have unknown coverage. Mixed repositories report
+partial coverage; zero observed calls never proves absence of dynamic calls.
+
 ## Implemented boundary
 
 ContextForge has deterministic local storage for structural facts and separate
@@ -78,7 +101,15 @@ Mutation APIs require an active `IndexWriteLock`. Readers do not take the lock.
 `load_index_record()` accepts a caller-pinned manifest so a multi-record reader
 does not need to reopen the active pointer between reads.
 
-## Manifest schema version 1
+## Manifest schema version 2
+
+New index pointers, manifests, records, CodeMaps and semantic records use v2.
+The separate legacy loader permits read-only v1 inspection and preserves its
+original digest. Legacy records are stale and are never reused in a v2 build.
+Build/update publishes only a consistent generation. The application workflow
+keeps intermediate structural, semantic and map generations private until the
+final atomic pointer switch; a failure leaves the previous pointer untouched.
+Old generations are not deleted by migration.
 
 Persisted models are frozen Pydantic models with unknown fields forbidden.
 Canonical manifest JSON is UTF-8, sorted-key compact JSON with LF termination.
@@ -105,7 +136,12 @@ except the self-referential `generation_id` field. File-record content is bound
 through each record's SHA-256. API keys, bearer tokens, headers, and credential
 objects are not fields in any persisted schema and unknown fields are rejected.
 
-## CodeMap schema version 1
+## CodeMap schema version 2
+
+CodeMaps also retain bounded deterministic `source_regions` and
+`source_regions_truncated`, including when no model is configured. These are
+source partitions, not inferred symbols. Structural reads are bounded to
+16 MiB by default; semantic coverage has its separate 64-chunk limit.
 
 `FileCodeMap` is a closed, frozen, model-free record containing the portable
 path, raw-source SHA-256 and byte size, language, analyzer identity, parse
@@ -196,9 +232,12 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 - The CLI orchestrates build, update, status, and policy-bounded cleanup for a
   single repository root. Full multi-root workspaces remain deferred.
-- Python is the only structural language extractor. Other selectable text files
-  deliberately receive file-level fallback records.
-- Python name and call resolution is conservative and incomplete for dynamic
+- Python provides declarations plus conservative call/import relationships.
+  JavaScript, TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby provide
+  verified Tree-sitter declarations; their relationship extraction remains
+  explicitly unsupported. Other selectable text files receive file-level
+  fallback records.
+- Name and call resolution remains conservative and incomplete for dynamic
   dispatch, rebinding, wildcard imports, and ambiguous module layouts.
 - File/symbol semantics, repository architecture/feature maps, and
   task-specific indexed/fresh/hybrid discovery are implemented.

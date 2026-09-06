@@ -12,8 +12,9 @@ import socket
 import stat
 import tempfile
 import time
-from collections.abc import Callable, Iterable
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from contextforge.filesystem import read_file_stably
+from contextforge.intelligence.legacy import load_legacy_envelope
 from contextforge.intelligence.manifest import (
     calculate_generation_id,
     canonical_json_bytes,
@@ -52,6 +54,38 @@ RUNS_DIRECTORY = "runs"
 TEMPORARY_SUFFIX = ".contextforge-tmp"
 MAX_MANIFEST_BYTES = 4_000_000
 MAX_RECORD_BYTES = 16_000_000
+
+
+@dataclass(slots=True)
+class _PublicationTransaction:
+    repository_root: Path
+    pending: IndexManifest | None = None
+
+
+_publication_transaction: ContextVar[_PublicationTransaction | None] = ContextVar(
+    "index_publication_transaction",
+    default=None,
+)
+
+
+@contextmanager
+def index_publication_transaction(lock: IndexWriteLock) -> Iterator[None]:
+    """Keep intermediate generations private to this build's async context."""
+    if _publication_transaction.get() is not None:
+        raise IndexPublicationError("nested publication transactions are not supported")
+    transaction = _PublicationTransaction(lock.layout.repository_root)
+    token = _publication_transaction.set(transaction)
+    try:
+        yield
+    except BaseException:
+        raise
+    else:
+        if transaction.pending is not None:
+            _activate_manifest(lock, transaction.pending)
+    finally:
+        _publication_transaction.reset(token)
+
+
 WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS = (0.01, 0.05)
 MAX_WINDOWS_DIRECTORY_REPLACE_RETRIES = len(WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS)
 _WINDOWS_RETRYABLE_DIRECTORY_REPLACE_ERRORS = frozenset({5, 32, 33})
@@ -74,7 +108,7 @@ context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 512
+semantic_max_output_tokens = 1024
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -330,6 +364,8 @@ def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
 
     _require_lock(lock)
     _require_supported_schema_versions(manifest.schema_versions)
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION:
+        raise UnsupportedIndexSchemaError(manifest.schema_version)
     expected_generation_id = calculate_generation_id(manifest)
     if manifest.generation_id != expected_generation_id:
         raise IndexPublicationError(
@@ -360,6 +396,18 @@ def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
         _fsync_directory(lock.layout.generations)
         _validate_generation(generation, manifest)
 
+    transaction = _publication_transaction.get()
+    if (
+        transaction is not None
+        and transaction.repository_root == lock.layout.repository_root
+    ):
+        transaction.pending = manifest
+    else:
+        _activate_manifest(lock, manifest)
+    return generation
+
+
+def _activate_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> None:
     pointer = ActiveIndexPointer(
         generation_id=manifest.generation_id,
         generation_manifest=(
@@ -374,13 +422,19 @@ def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
         error_type=IndexPublicationError,
     )
     _fsync_directory(lock.layout.index)
-    return generation
 
 
 def load_manifest(repository_root: str | Path) -> IndexManifest:
     """Load and validate the active pointer and its immutable generation once."""
 
     layout = _layout(repository_root)
+    transaction = _publication_transaction.get()
+    if (
+        transaction is not None
+        and transaction.repository_root == layout.repository_root
+        and transaction.pending is not None
+    ):
+        return transaction.pending
     if not os.path.lexists(layout.active_manifest):
         raise IndexManifestNotFoundError("no active repository index is published")
     _require_safe_existing_chain(layout.contextforge_root, layout.active_manifest)
@@ -396,7 +450,11 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions)
+    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
+    if pointer.schema_version != manifest.schema_version:
+        raise IndexManifestReadError("mixed pointer and manifest schema versions")
+    if manifest.schema_versions.index_schema_version != manifest.schema_version:
+        raise IndexManifestReadError("mixed generation schema versions")
     if manifest.generation_id != pointer.generation_id:
         raise IndexManifestReadError(
             "active pointer generation does not match manifest"
@@ -432,7 +490,7 @@ def load_generation_manifest(
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions)
+    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
     if (
         manifest.generation_id != generation_id
         or calculate_generation_id(manifest) != generation_id
@@ -482,7 +540,7 @@ def load_interpretation_record(
             "interpretation state is not present in the pinned manifest"
         )
     if (
-        state.semantic_status != "complete"
+        state.semantic_status not in {"complete", "partial"}
         or state.interpretation_record_location is None
         or state.interpretation_record_sha256 is None
     ):
@@ -797,7 +855,17 @@ def _validate_record_location(value: str) -> str:
     return location
 
 
-def _require_supported_schema_versions(versions: SchemaVersionMetadata) -> None:
+def _require_supported_schema_versions(
+    versions: SchemaVersionMetadata,
+    *,
+    legacy: bool = False,
+) -> None:
+    if legacy and versions == SchemaVersionMetadata(
+        index_schema_version=1,
+        manifest_schema_version=1,
+        record_schema_version=1,
+    ):
+        return
     expected = SchemaVersionMetadata()
     for actual, supported in (
         (versions.index_schema_version, expected.index_schema_version),
@@ -830,6 +898,7 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             record = root.joinpath(*state.record_location.split("/"))
             _require_safe_existing_chain(root, record)
             content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
+            _validate_record_schema(content, manifest.schema_version)
             if hashlib.sha256(content).hexdigest() != state.record_sha256:
                 raise IndexPublicationError(
                     f"record digest does not match manifest for {state.path}"
@@ -845,6 +914,7 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             interpretation_content = _read_bounded_bytes(
                 interpretation, MAX_RECORD_BYTES
             )
+            _validate_record_schema(interpretation_content, manifest.schema_version)
             if (
                 hashlib.sha256(interpretation_content).hexdigest()
                 != state.interpretation_record_sha256
@@ -852,6 +922,24 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 raise IndexPublicationError(
                     f"interpretation digest does not match manifest for {state.path}"
                 )
+
+
+def _validate_record_schema(content: bytes, expected: int) -> None:
+    try:
+        value = json.loads(content)
+    except (ValueError, UnicodeError):
+        return  # Opaque legacy/root records are validated by their own codecs.
+    if (
+        isinstance(value, dict)
+        and value.get("record_kind")
+        in {
+            "verified_file_codemap",
+            "model_file_interpretation",
+            "deterministic_metadata_interpretation",
+        }
+        and value.get("schema_version") != expected
+    ):
+        raise IndexPublicationError("mixed record schema versions in generation")
 
 
 def _prune_unreferenced_staged_records(stage: Path, manifest: IndexManifest) -> None:
@@ -909,11 +997,13 @@ def _read_persisted_model[ModelType: BaseModel](
     if not isinstance(value, dict):
         raise IndexManifestReadError("index JSON root must be an object")
     schema_version = value.get("schema_version")
-    if type(schema_version) is int and schema_version != expected_schema:
+    if type(schema_version) is int and schema_version not in {1, expected_schema}:
         raise UnsupportedIndexSchemaError(schema_version)
     try:
+        if schema_version == 1 and expected_schema == 2:
+            return load_legacy_envelope(value, model)
         return model.model_validate(value)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         raise IndexManifestReadError("index JSON does not match its schema") from exc
 
 

@@ -36,7 +36,7 @@ PYTHON_ANALYZER = AnalyzerIdentity(
     analysis_prompt_version="none",
     response_schema_version=1,
 )
-DEFAULT_CODEMAP_SOURCE_LIMIT = 1_000_000
+DEFAULT_CODEMAP_SOURCE_LIMIT = 16 * 1024 * 1024
 
 _Definition = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 _Callable = ast.FunctionDef | ast.AsyncFunctionDef

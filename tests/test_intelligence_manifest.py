@@ -267,7 +267,7 @@ def test_source_schema_and_build_option_changes_invalidate() -> None:
         (project_file,),
         expected_analyzer=_analyzer(),
         build_options_digest=_sha("options"),
-        schema_versions=SchemaVersionMetadata(record_schema_version=2),
+        schema_versions=SchemaVersionMetadata(record_schema_version=3),
     )
 
     assert source_stale == option_stale == schema_stale == manifest.files

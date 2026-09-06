@@ -15,6 +15,7 @@ from contextforge.cli.main import app
 from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    ContextWindowExceededError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -100,6 +101,49 @@ def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:
     )
 
 
+@pytest.mark.parametrize(
+    "message, limit",
+    [
+        ("maximum context length is 8264 tokens; requested 22427", 8264),
+        ("maximum prompt length is 8,264 tokens", 8264),
+        ("context window exceeded by 12345 tokens", None),
+    ],
+)
+def test_server_context_limit_is_typed_and_only_decreases(
+    message: str, limit: int | None
+) -> None:
+    posts = 0
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        maximum: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        nonlocal posts
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        posts += 1
+        return OpenAICompatibleHTTPResponse(
+            status=400,
+            body=json.dumps(
+                {
+                    "error": {"message": message},
+                }
+            ).encode(),
+        )
+
+    provider = OpenAICompatibleModelProvider(
+        _configuration(context_window=262144), transport=transport
+    )
+    with pytest.raises(ContextWindowExceededError) as error:
+        asyncio.run(provider.complete_structured(_request()))
+    assert posts == 1
+    assert error.value.server_context_window == limit
+    assert provider.configuration.context_window == (limit or 262144)
+
+
 def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
     calls: list[tuple[str, str, bytes | None, Mapping[str, str], int]] = []
 
@@ -129,6 +173,7 @@ def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
     assert payload["model"] == "publisher/exact-model-id"
     assert payload["stream"] is False
     assert payload["max_tokens"] == 123
+    assert payload["reasoning_effort"] == "off"
     assert payload["response_format"] == {
         "type": "json_schema",
         "json_schema": {
@@ -152,6 +197,41 @@ def test_exact_urls_model_schema_and_successful_response_parsing() -> None:
     assert response.diagnostic.transport_attempts == 1
     assert response.diagnostic.total_provider_http_calls == 2
     assert response.diagnostic.total_provider_calls == 2
+
+
+def test_reasoning_effort_rejection_retries_with_provider_default() -> None:
+    posted: list[dict[str, object]] = []
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        payload = json.loads(body or b"null")
+        posted.append(payload)
+        if len(posted) == 1:
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"unknown parameter reasoning_effort"}}',
+            )
+        return _completion()
+
+    async def exercise() -> ModelResponse:
+        provider = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        return await provider.complete_structured(_request())
+
+    response = asyncio.run(exercise())
+    assert posted[0]["reasoning_effort"] == "off"
+    assert "reasoning_effort" not in posted[1]
+    assert response.value == _Answer(answer="works")
+    assert response.diagnostic is not None
+    assert response.diagnostic.transport_attempts == 2
+    assert response.diagnostic.total_provider_http_calls == 3
 
 
 def test_list_models_parses_exact_ids_without_starting_a_completion() -> None:

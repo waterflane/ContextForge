@@ -29,6 +29,10 @@ from contextforge.intelligence.models import (
     SchemaVersionMetadata,
     analyzer_identity_key,
 )
+from contextforge.intelligence.polyglot import (
+    POLYGLOT_ANALYZER,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+)
 from contextforge.intelligence.python import (
     DEFAULT_CODEMAP_SOURCE_LIMIT,
     PYTHON_ANALYZER,
@@ -221,7 +225,9 @@ def load_file_code_map(
         raise IndexManifestReadError(
             "published CodeMap does not match its schema"
         ) from exc
-    if not _map_matches_state(code_map, state):
+    if code_map.schema_version != active.schema_version or not _map_matches_state(
+        code_map, state
+    ):
         raise IndexManifestReadError(
             "CodeMap identity does not match its manifest state"
         )
@@ -237,6 +243,7 @@ def _reuse_code_map(
     expected_analyzer = _analyzer_for(project_file)
     if (
         previous is None
+        or previous.schema_versions != SchemaVersionMetadata()
         or state is None
         or state.source_sha256 != project_file.sha256
         or state.source_size_bytes != project_file.size_bytes
@@ -251,12 +258,20 @@ def _reuse_code_map(
         )
     except (ValueError, IndexManifestReadError):
         return None
-    return code_map if _map_matches_state(code_map, state) else None
+    return (
+        code_map
+        if (
+            code_map.schema_version == CODEMAP_SCHEMA_VERSION
+            and _map_matches_state(code_map, state)
+            and not any(item.code == "extractor_error" for item in code_map.diagnostics)
+        )
+        else None
+    )
 
 
 def _map_matches_state(code_map: FileCodeMap, state: IndexedFileState) -> bool:
     return (
-        code_map.schema_version == CODEMAP_SCHEMA_VERSION
+        code_map.schema_version in {1, CODEMAP_SCHEMA_VERSION}
         and code_map.path == state.path
         and code_map.source_sha256 == state.source_sha256
         and code_map.source_size_bytes == state.source_size_bytes
@@ -303,7 +318,11 @@ def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
 
 
 def _analyzer_for(project_file: ProjectFile) -> AnalyzerIdentity:
-    return PYTHON_ANALYZER if project_file.language == "Python" else FALLBACK_ANALYZER
+    if project_file.language == "Python":
+        return PYTHON_ANALYZER
+    if project_file.language in SUPPORTED_POLYGLOT_LANGUAGES:
+        return POLYGLOT_ANALYZER
+    return FALLBACK_ANALYZER
 
 
 def _record_location(path: str) -> str:
@@ -318,6 +337,7 @@ def _build_options_digest(max_source_bytes: int) -> str:
                 "codemap_schema_version": CODEMAP_SCHEMA_VERSION,
                 "fallback_analyzer": FALLBACK_ANALYZER.model_dump(mode="json"),
                 "max_source_bytes": max_source_bytes,
+                "polyglot_analyzer": POLYGLOT_ANALYZER.model_dump(mode="json"),
                 "python_analyzer": PYTHON_ANALYZER.model_dump(mode="json"),
                 "resolver_version": RESOLVER_VERSION,
             }
