@@ -35,7 +35,22 @@ and Python distribution versions follow PEP 440.
   oversized work splits before dispatch, and validated chunks can resume after
   interruption.
 
-### Fixed
+### Added
+
+- Added immutable, model-free repository discovery application contracts for
+  deterministic candidate preparation, read-only expansion, verified source
+  reads, and canonical context packaging.
+- Added the generic ContextForge bridge protocol v1 ADR, normative JSON Schema,
+  persistent workspace-bound JSON-RPC 2.0 service over bounded UTF-8 NDJSON
+  stdio, and a runnable generic client example.
+- Added explicit protocol negotiation and compatibility failures for missing or
+  unsupported v1 handshakes, cooperative JSON-RPC request cancellation, typed
+  source-identity drift, deterministic preparation/selection identities, and
+  bounded concurrent requests with serialized responses.
+- Added bridge architecture, CLI, troubleshooting, security, stream,
+  cancellation, read-only, repository-truth, and source-verification guidance.
+
+### Changed
 
 - Preserved exact identifier ranges through discovery review and required
   sufficient multi-symbol context before accepting model finalization.
