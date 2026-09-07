@@ -884,6 +884,7 @@ async def build_semantic_index(
         write_index_record(lock, _interpretation_location(path), _serialize(analysis))
 
     semaphore = asyncio.Semaphore(active_options.max_concurrency)
+    failure_causes: dict[str, BaseException] = {}
 
     async def analyze_one(
         project_file: ProjectFile,
@@ -974,6 +975,7 @@ async def build_semantic_index(
                 path=project_file.path,
             )
             tracker.fail(project_file.path, diagnostic)
+            failure_causes[project_file.path] = exc
             emit(
                 "semantic",
                 "semantic.analysis.failed",
@@ -1040,8 +1042,13 @@ async def build_semantic_index(
                 pending, return_when=asyncio.FIRST_COMPLETED
             )
             limit_diagnostic: AnalysisDiagnostic | None = None
-            for task in done:
-                result = task.result()
+            completed = await asyncio.gather(*done, return_exceptions=True)
+            first_exception: BaseException | None = None
+            for result in completed:
+                if isinstance(result, BaseException):
+                    if first_exception is None:
+                        first_exception = result
+                    continue
                 task_results.append(result)
                 _, work, diagnostic, _ = result
                 if work is not None:
@@ -1054,6 +1061,8 @@ async def build_semantic_index(
                     and limit_diagnostic is None
                 ):
                     limit_diagnostic = diagnostic
+            if first_exception is not None:
+                raise first_exception
             if limit_diagnostic is not None:
                 cancelled_units = len(pending)
                 for unfinished in pending:
@@ -1105,9 +1114,20 @@ async def build_semantic_index(
             )
     if failures and active_options.fail_on_error:
         tracker.abort()
-        raise SemanticAnalysisError(
+        error = SemanticAnalysisError(
             f"semantic analysis failed for {len(failures)} file(s); index not published"
         )
+        cause = next(
+            (
+                failure_causes[diagnostic.path]
+                for diagnostic in failures
+                if diagnostic.path in failure_causes
+            ),
+            None,
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
     _raise_if_cancelled(cancellation)
 
     states: list[IndexedFileState] = []

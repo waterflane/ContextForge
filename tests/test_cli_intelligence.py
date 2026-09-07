@@ -26,9 +26,14 @@ from contextforge.discovery import (
     SelectionReason,
 )
 from contextforge.discovery.renderers import DiscoveryResultFormat
-from contextforge.intelligence import IndexManifestNotFoundError, load_manifest
+from contextforge.intelligence import (
+    IndexManifestNotFoundError,
+    calculate_source_snapshot_digest,
+    load_manifest,
+)
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 from contextforge.progress import ProgressEvent, ProgressStatus
+from contextforge.repositories import scan_repository
 
 runner = CliRunner()
 TERMINAL_WIDTH = 140
@@ -272,6 +277,79 @@ def test_index_rechecks_snapshot_before_atomic_publication(
             )
         )
 
+    assert load_manifest(tmp_path) == previous
+
+
+def test_index_rejects_a_snapshot_other_than_the_callers_precondition(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "app.py"
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    previous = load_manifest(tmp_path)
+    expected = calculate_source_snapshot_digest(scan_repository(tmp_path))
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+
+    with pytest.raises(IndexSourceChangedError, match="expected snapshot"):
+        asyncio.run(
+            build_repository_index(
+                tmp_path,
+                provider=None,
+                provider_configuration=None,
+                update_only=True,
+                expected_snapshot_digest=expected,
+            )
+        )
+
+    assert load_manifest(tmp_path) == previous
+
+
+def test_index_cancellation_during_final_scan_cannot_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "app.py"
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    previous = load_manifest(tmp_path)
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    cancellation = asyncio.Event()
+    original_scan = cast(Any, application_module).scan_repository
+    scan_count = 0
+
+    def cancel_during_final_scan(*args: Any, **kwargs: Any) -> Any:
+        nonlocal scan_count
+        snapshot = original_scan(*args, **kwargs)
+        scan_count += 1
+        if scan_count == 2:
+            cancellation.set()
+        return snapshot
+
+    monkeypatch.setattr(application_module, "scan_repository", cancel_during_final_scan)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            build_repository_index(
+                tmp_path,
+                provider=None,
+                provider_configuration=None,
+                update_only=True,
+                cancellation=cancellation,
+            )
+        )
+
+    assert scan_count == 2
     assert load_manifest(tmp_path) == previous
 
 

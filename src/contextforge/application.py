@@ -212,6 +212,7 @@ async def build_repository_index(
     operation_id: str | None = None,
     parent_operation_id: str | None = None,
     cancellation: asyncio.Event | None = None,
+    expected_snapshot_digest: str | None = None,
 ) -> IndexBuildReport:
     """Build/update all index phases while retaining a prior pointer on failure."""
 
@@ -266,6 +267,7 @@ async def build_repository_index(
             confirm_unknown_lock=confirm_unknown_lock,
             progress=reporter,
             cancellation=cancellation,
+            expected_snapshot_digest=expected_snapshot_digest,
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
@@ -314,6 +316,7 @@ async def _build_repository_index(
     confirm_unknown_lock: bool,
     progress: ProgressReporter,
     cancellation: asyncio.Event | None,
+    expected_snapshot_digest: str | None,
 ) -> IndexBuildReport:
     """Implement index construction under the public progress boundary."""
 
@@ -344,6 +347,14 @@ async def _build_repository_index(
     )
     snapshot = await asyncio.to_thread(scan_repository, root)
     _raise_if_index_cancelled(cancellation)
+    snapshot_digest = calculate_source_snapshot_digest(snapshot)
+    if (
+        expected_snapshot_digest is not None
+        and snapshot_digest != expected_snapshot_digest
+    ):
+        raise IndexSourceChangedError(
+            "repository source identity differs from expected snapshot"
+        )
     progress.report(
         "scan",
         "Repository scan completed.",
@@ -378,7 +389,10 @@ async def _build_repository_index(
             recover_stale=recover_stale_lock,
             confirm_unknown=confirm_unknown_lock,
         ) as lock,
-        index_publication_transaction(lock),
+        index_publication_transaction(
+            lock,
+            before_publish=lambda: _raise_if_index_cancelled(cancellation),
+        ),
     ):
         try:
             progress.report(
@@ -607,9 +621,8 @@ async def _build_repository_index(
             )
             _raise_if_index_cancelled(cancellation)
             current_snapshot = await asyncio.to_thread(scan_repository, root)
-            if calculate_source_snapshot_digest(
-                current_snapshot
-            ) != calculate_source_snapshot_digest(snapshot):
+            _raise_if_index_cancelled(cancellation)
+            if calculate_source_snapshot_digest(current_snapshot) != snapshot_digest:
                 raise IndexSourceChangedError(
                     "repository source identity changed before index publication"
                 )
@@ -643,6 +656,7 @@ async def _build_repository_index(
                 phase_weight=3 if model_enabled else 10,
                 metadata={"generation_id": active.generation_id},
             )
+            _raise_if_index_cancelled(cancellation)
         except BaseException:
             if previous is not None:
                 with suppress(Exception):

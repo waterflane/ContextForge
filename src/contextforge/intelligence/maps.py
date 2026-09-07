@@ -477,6 +477,7 @@ async def build_repository_maps(
     architecture: ArchitectureMap | None = None
     features: FeatureMap | None = None
     outcomes: list[GlobalMapOutcome] = []
+    failure_causes: list[BaseException] = []
     final_requests = 0
 
     final_requests += 1
@@ -508,6 +509,7 @@ async def build_repository_maps(
             ) from exc
         diagnostic = _failure_diagnostic("architecture-map-failed", exc)
         outcomes.append(GlobalMapOutcome("architecture", "failed", 1, diagnostic))
+        failure_causes.append(exc)
 
     _raise_if_cancelled(cancellation)
     final_requests += 1
@@ -539,13 +541,17 @@ async def build_repository_maps(
             ) from exc
         diagnostic = _failure_diagnostic("feature-map-failed", exc)
         outcomes.append(GlobalMapOutcome("features", "failed", 1, diagnostic))
+        failure_causes.append(exc)
 
     failures = tuple(item for item in outcomes if item.status == "failed")
     if failures and active_options.fail_on_error:
-        raise GlobalMapAnalysisError(
+        error = GlobalMapAnalysisError(
             f"repository map analysis failed for {len(failures)} map(s); "
             "index not published"
         )
+        if failure_causes:
+            raise error from failure_causes[0]
+        raise error
     if failures and active_options.recover_previous and previous_records is not None:
         old_overview, old_architecture, old_features = previous_records
         if (

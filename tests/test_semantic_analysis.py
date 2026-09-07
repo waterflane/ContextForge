@@ -1163,6 +1163,25 @@ def test_fail_on_error_keeps_prior_valid_generation_active(tmp_path: Path) -> No
     assert load_manifest(tmp_path) == structural
 
 
+def test_fail_on_error_preserves_the_typed_provider_cause(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
+
+    with (
+        acquire_index_lock(tmp_path, "semantic-provider-cause") as lock,
+        pytest.raises(SemanticAnalysisError) as raised,
+    ):
+        asyncio.run(
+            build_semantic_index(
+                snapshot,
+                lock,
+                _provider(scripts=[ProviderTimeoutError("unsafe provider detail")]),
+                options=SemanticAnalysisOptions(fail_on_error=True),
+            )
+        )
+
+    assert isinstance(raised.value.__cause__, ProviderTimeoutError)
+
+
 @pytest.mark.parametrize(
     ("concurrency", "failure_limit", "expected_calls"),
     [(1, 1, 1), (1, 2, 2), (2, 1, 2)],

@@ -105,6 +105,7 @@ MAX_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_PREPARATIONS = 128
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 FORCED_CANCELLATION_TIMEOUT_SECONDS = 0.1
+MAX_PENDING_PROGRESS_EVENTS = 256
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -194,6 +195,94 @@ class _SerializedWriter:
     def _write(self, payload: bytes) -> None:
         self._stream.write(payload)
         self._stream.flush()
+
+
+class _ProgressPublisher:
+    """Serialize one bounded progress stream without spawning per-event tasks."""
+
+    def __init__(
+        self,
+        writer: _SerializedWriter,
+        request_id: str | int,
+        cancellation: asyncio.Event,
+        operation_id: str,
+        *,
+        capacity: int = MAX_PENDING_PROGRESS_EVENTS,
+    ) -> None:
+        self.last_event: ProgressEvent | None = None
+        self._writer = writer
+        self._request_id = request_id
+        self._cancellation = cancellation
+        self._operation_id = operation_id
+        self._queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue(
+            maxsize=capacity
+        )
+        self._overflowed = False
+        self._closed = False
+        self._task = asyncio.create_task(self._run())
+
+    def observe(self, event: ProgressEvent) -> None:
+        self.last_event = event
+        if self._closed or self._overflowed:
+            return
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._overflowed = True
+            self._cancellation.set()
+
+    async def close(self, *, check_overflow: bool = True) -> None:
+        if not self._closed:
+            self._closed = True
+            if not self._task.done():
+                stopper = asyncio.create_task(self._queue.put(None))
+                try:
+                    done, _ = await asyncio.wait(
+                        {self._task, stopper}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if self._task in done:
+                        stopper.cancel()
+                finally:
+                    if not stopper.done():
+                        stopper.cancel()
+                    await asyncio.gather(stopper, return_exceptions=True)
+        await self._task
+        if check_overflow and self._overflowed:
+            raise BridgeFault(
+                INDEX_BUILD_FAILED,
+                "INDEX_BUILD_FAILED",
+                "The client did not consume index progress quickly enough.",
+                data={
+                    "error_code": "progress_backpressure",
+                    "phase": (
+                        "initialize"
+                        if self.last_event is None
+                        else self.last_event.phase_id
+                    ),
+                    "reason": "The Bridge progress delivery queue reached its limit.",
+                    "retryable": True,
+                    "operation_id": self._operation_id,
+                },
+            )
+
+    async def _run(self) -> None:
+        while True:
+            event = await self._queue.get()
+            try:
+                if event is None:
+                    return
+                await self._writer.write(
+                    {
+                        "jsonrpc": JSONRPC_VERSION,
+                        "method": "$/progress",
+                        "params": {
+                            "request_id": self._request_id,
+                            "event": event.model_dump(mode="json"),
+                        },
+                    }
+                )
+            finally:
+                self._queue.task_done()
 
 
 class _BoundedDiagnostics:
@@ -469,12 +558,20 @@ class BridgeServer:
             if timeout_ms is None:
                 result = await operation
             else:
-                try:
-                    result = await asyncio.wait_for(
-                        operation, timeout=timeout_ms / 1000
-                    )
-                except TimeoutError:
+                operation_task = asyncio.create_task(operation)
+                done, _ = await asyncio.wait(
+                    {operation_task}, timeout=timeout_ms / 1000
+                )
+                if operation_task in done:
+                    result = operation_task.result()
+                else:
                     cancellation.set()
+                    if method == "index":
+                        with suppress(asyncio.CancelledError, Exception):
+                            await operation_task
+                    else:
+                        operation_task.cancel()
+                        await asyncio.gather(operation_task, return_exceptions=True)
                     raise BridgeFault(
                         REQUEST_TIMEOUT,
                         "REQUEST_TIMEOUT",
@@ -737,33 +834,9 @@ class BridgeServer:
             ).hexdigest()[:24]
         )
         provider: ModelProvider | None = None
-        last_event: ProgressEvent | None = None
-        progress_tail: asyncio.Task[None] | None = None
-
-        def observe(event: ProgressEvent) -> None:
-            nonlocal last_event, progress_tail
-            last_event = event
-            previous = progress_tail
-
-            async def publish() -> None:
-                if previous is not None:
-                    await previous
-                await self._require_writer().write(
-                    {
-                        "jsonrpc": JSONRPC_VERSION,
-                        "method": "$/progress",
-                        "params": {
-                            "request_id": request_id,
-                            "event": event.model_dump(mode="json"),
-                        },
-                    }
-                )
-
-            progress_tail = asyncio.create_task(publish())
-
-        async def flush_progress() -> None:
-            if progress_tail is not None:
-                await progress_tail
+        publisher = _ProgressPublisher(
+            self._require_writer(), request_id, cancellation, operation_id
+        )
 
         try:
             snapshot = await asyncio.to_thread(scan_repository, self.workspace)
@@ -773,7 +846,7 @@ class BridgeServer:
                     IndexSourceChangedError(
                         "repository source identity differs from expected snapshot"
                     ),
-                    last_event,
+                    publisher.last_event,
                     operation_id,
                 )
             try:
@@ -797,7 +870,7 @@ class BridgeServer:
                     ProviderConfigurationError(
                         "provider configuration could not be resolved"
                     ),
-                    last_event,
+                    publisher.last_event,
                     operation_id,
                 ) from None
             concurrency = (
@@ -827,11 +900,12 @@ class BridgeServer:
                 ),
                 recover_stale_lock=params.recover_stale_lock,
                 confirm_unknown_lock=params.confirm_unknown_lock,
-                progress=observe,
+                progress=publisher.observe,
                 operation_id=operation_id,
                 cancellation=cancellation,
+                expected_snapshot_digest=params.expected_snapshot_digest,
             )
-            await flush_progress()
+            await publisher.close()
             self._snapshot_digest = report.manifest.build.source_snapshot_digest
             self._preparations.clear()
             return {
@@ -843,10 +917,10 @@ class BridgeServer:
                 "statistics": report.manifest.statistics.model_dump(mode="json"),
             }
         except asyncio.CancelledError:
-            await flush_progress()
+            await publisher.close()
             raise
         except BridgeFault:
-            await flush_progress()
+            await publisher.close(check_overflow=False)
             raise
         except (
             ApplicationError,
@@ -857,9 +931,11 @@ class BridgeServer:
             SemanticAnalysisError,
             ValueError,
         ) as exc:
-            await flush_progress()
-            raise _index_bridge_fault(exc, last_event, operation_id) from None
+            await publisher.close(check_overflow=False)
+            raise _index_bridge_fault(exc, publisher.last_event, operation_id) from None
         finally:
+            with suppress(Exception, asyncio.CancelledError):
+                await publisher.close(check_overflow=False)
             if provider is not None:
                 with suppress(ModelProviderError):
                     await provider.close()
@@ -1468,11 +1544,13 @@ def _index_bridge_fault(
     error_code = "index_build_failed"
     reason = "ContextForge could not complete the index operation."
     retryable = False
+    provider_failure: ModelProviderError | None = None
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, ModelProviderError):
+            provider_failure = current
             error_code, reason = provider_error_details(current)
             retryable = (
                 classify_retry(current) is RetryClassification.RETRYABLE
@@ -1510,9 +1588,14 @@ def _index_bridge_fault(
         error_code = "provider_circuit_open"
         reason = "The provider circuit breaker opened during indexing."
         retryable = False
-    elif isinstance(error, ModelProviderError):
-        rpc_code = PROVIDER_FAILURE
-        typed_rpc_code = "PROVIDER_FAILURE"
+    elif provider_failure is not None:
+        if provider_failure.circuit_opened:
+            rpc_code = PROVIDER_CIRCUIT_OPEN
+            typed_rpc_code = "PROVIDER_CIRCUIT_OPEN"
+            retryable = False
+        else:
+            rpc_code = PROVIDER_FAILURE
+            typed_rpc_code = "PROVIDER_FAILURE"
     elif isinstance(error, IndexLockError):
         rpc_code = INDEX_LOCKED
         typed_rpc_code = "INDEX_LOCKED"

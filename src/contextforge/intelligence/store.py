@@ -69,7 +69,11 @@ _publication_transaction: ContextVar[_PublicationTransaction | None] = ContextVa
 
 
 @contextmanager
-def index_publication_transaction(lock: IndexWriteLock) -> Iterator[None]:
+def index_publication_transaction(
+    lock: IndexWriteLock,
+    *,
+    before_publish: Callable[[], None] | None = None,
+) -> Iterator[None]:
     """Keep intermediate generations private to this build's async context."""
     if _publication_transaction.get() is not None:
         raise IndexPublicationError("nested publication transactions are not supported")
@@ -81,6 +85,8 @@ def index_publication_transaction(lock: IndexWriteLock) -> Iterator[None]:
         raise
     else:
         if transaction.pending is not None:
+            if before_publish is not None:
+                before_publish()
             _activate_manifest(lock, transaction.pending)
     finally:
         _publication_transaction.reset(token)

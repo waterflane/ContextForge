@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+import contextforge.application as application_module
 import contextforge.bridge.server as bridge_module
 from contextforge.bridge import MAX_JSONRPC_MESSAGE_BYTES, BridgeServer
 from contextforge.bridge.models import (
@@ -22,9 +23,16 @@ from contextforge.bridge.models import (
     IndexParams,
     ReadParams,
 )
-from contextforge.intelligence import acquire_index_lock, build_structural_index
-from contextforge.models import ProviderAuthenticationError
-from contextforge.progress import ProgressEvent, ProgressStatus
+from contextforge.intelligence import (
+    GlobalMapAnalysisError,
+    IndexManifestNotFoundError,
+    acquire_index_lock,
+    build_structural_index,
+    calculate_source_snapshot_digest,
+    load_manifest,
+)
+from contextforge.models import ProviderAuthenticationError, ProviderTimeoutError
+from contextforge.progress import ProgressEvent, ProgressReporter, ProgressStatus
 from contextforge.repositories import scan_repository
 
 
@@ -190,6 +198,68 @@ class _Harness:
         self.input.close()
         assert self.task is not None
         await self.task
+
+
+def test_bridge_progress_publisher_is_bounded_and_uses_one_writer_task() -> None:
+    class SlowWriter:
+        def __init__(self) -> None:
+            self.frames: list[dict[str, Any]] = []
+
+        async def write(self, frame: dict[str, Any]) -> None:
+            self.frames.append(frame)
+
+    async def exercise() -> None:
+        writer = SlowWriter()
+        cancellation = asyncio.Event()
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, writer),
+            "index-1",
+            cancellation,
+            "operation-1",
+            capacity=1,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        reporter.report("scan", "first", percentage=1)
+        reporter.report("scan", "second", percentage=2)
+
+        assert cancellation.is_set()
+        with pytest.raises(bridge_module.BridgeFault) as raised:
+            await publisher.close()
+
+        assert raised.value.typed_code == "INDEX_BUILD_FAILED"
+        assert raised.value.data["error_code"] == "progress_backpressure"
+        assert len(writer.frames) == 1
+        assert writer.frames[0]["params"]["event"]["sequence"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_bridge_progress_publisher_close_does_not_hang_after_writer_failure() -> None:
+    class BrokenWriter:
+        async def write(self, frame: dict[str, Any]) -> None:
+            del frame
+            raise OSError("closed pipe")
+
+    async def exercise() -> None:
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, BrokenWriter()),
+            "index-1",
+            asyncio.Event(),
+            "operation-1",
+            capacity=1,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        reporter.report("scan", "first", percentage=1)
+        reporter.report("scan", "second", percentage=2)
+
+        with pytest.raises(OSError, match="closed pipe"):
+            await asyncio.wait_for(publisher.close(), timeout=1)
+
+    asyncio.run(exercise())
 
 
 def _request(
@@ -426,6 +496,107 @@ def test_bridge_v2_index_cancellation_is_cooperative(
     asyncio.run(exercise())
 
 
+def test_bridge_v2_rechecks_expected_snapshot_inside_index_workflow(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    expected = calculate_source_snapshot_digest(scan_repository(tmp_path))
+    original_load = cast(Any, bridge_module).load_project_configuration
+    mutated = False
+
+    def mutate_after_bridge_precheck(path: Path) -> Any:
+        nonlocal mutated
+        if not mutated:
+            source.write_text("VALUE = 2\n", encoding="utf-8")
+            mutated = True
+        return original_load(path)
+
+    monkeypatch.setattr(
+        bridge_module, "load_project_configuration", mutate_after_bridge_precheck
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        harness.input.send(
+            _request(
+                "snapshot-race",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": expected,
+                    "provider": "none",
+                },
+            )
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "snapshot-race")
+        assert response["error"]["data"]["code"] == "SOURCE_IDENTITY_CHANGED"
+        with pytest.raises(IndexManifestNotFoundError):
+            load_manifest(tmp_path)
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    cancellation_seen = threading.Event()
+    lock_was_active = False
+
+    def wait_for_cancellation(
+        snapshot: object,
+        lock: Any,
+        **kwargs: object,
+    ) -> None:
+        del snapshot
+        nonlocal lock_was_active
+        cancellation = cast(asyncio.Event, kwargs["cancellation"])
+        deadline = time.monotonic() + 5
+        while not cancellation.is_set():
+            if time.monotonic() >= deadline:
+                raise AssertionError("index timeout did not signal cancellation")
+            time.sleep(0.001)
+        lock_was_active = lock.active and lock.layout.lock.is_file()
+        cancellation_seen.set()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        application_module, "build_structural_index", wait_for_cancellation
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        digest = calculate_source_snapshot_digest(scan_repository(tmp_path))
+        harness.input.send(
+            _request(
+                "index-timeout",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": digest,
+                    "provider": "none",
+                    "timeout_ms": 500,
+                },
+            )
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "index-timeout")
+        assert response["error"]["data"]["code"] == "REQUEST_TIMEOUT"
+        assert cancellation_seen.is_set()
+        assert lock_was_active is True
+        assert not (tmp_path / ".contextforge" / "index" / "lock.json").exists()
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
 def test_bridge_v2_index_errors_are_typed_and_safe(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -507,6 +678,26 @@ def test_bridge_v2_index_errors_are_typed_and_safe(
         await harness.close()
 
     asyncio.run(exercise())
+
+
+def test_bridge_v2_classifies_a_provider_failure_wrapped_by_index_phases() -> None:
+    try:
+        try:
+            raise ProviderTimeoutError("unsafe timeout detail")
+        except ProviderTimeoutError as cause:
+            raise GlobalMapAnalysisError("aggregate map failure") from cause
+    except GlobalMapAnalysisError as error:
+        fault = bridge_module._index_bridge_fault(error, None, "operation-1")
+
+    assert fault.rpc_code == bridge_module.PROVIDER_FAILURE
+    assert fault.typed_code == "PROVIDER_FAILURE"
+    assert fault.data == {
+        "error_code": "provider_timeout",
+        "phase": "initialize",
+        "reason": "provider request timed out",
+        "retryable": True,
+        "operation_id": "operation-1",
+    }
 
 
 def test_bridge_rejects_malformed_oversized_unknown_and_invalid_requests(
