@@ -40,6 +40,7 @@ DEFAULT_OPERATION_TIMEOUT_SECONDS = 360.0
 MAX_PROVIDER_TIMEOUT_SECONDS = 600.0
 MAX_PROVIDER_CONCURRENCY = 8
 MAX_PROVIDER_RETRIES = 2
+DEFAULT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD = 3
 RETRY_DELAYS_SECONDS = (0.25, 1.0)
 MAX_UNTRUSTED_SOURCE_BYTES = 1_000_000
 MAX_REQUEST_SOURCE_BYTES = 4_000_000
@@ -225,7 +226,7 @@ class ProviderConfiguration(ProviderModel):
         source = os.environ if environment is None else environment
         value = source.get(self.credential_env)
         if value is None or not value:
-            raise ProviderConfigurationError(
+            raise ProviderMissingCredentialError(
                 f"credential environment variable {self.credential_env!r} is not set"
             )
         return SecretStr(value)
@@ -809,6 +810,7 @@ class ModelProviderError(RuntimeError):
     """Base provider failure with stable retry classification."""
 
     retry_classification = RetryClassification.NON_RETRYABLE
+    provider_wide = False
 
     def __init__(
         self, message: str, *, diagnostic: ProviderDiagnostic | None = None
@@ -818,6 +820,7 @@ class ModelProviderError(RuntimeError):
         self.provider_capability_calls = 0
         self.transport_attempts = 1
         self.total_provider_http_calls = 1
+        self.circuit_opened = False
         super().__init__(message)
 
     def add_http_accounting(
@@ -944,6 +947,52 @@ class ProviderUnavailableError(ModelProviderError):
     retry_classification = RetryClassification.RETRYABLE
 
 
+class ProviderRequestError(ModelProviderError):
+    """Raised for a non-retryable provider request failure."""
+
+
+class ProviderRateLimitError(ProviderUnavailableError):
+    """Raised for a transient provider rate limit."""
+
+
+class ProviderAuthenticationError(ProviderRequestError):
+    """Raised when provider credentials are absent, expired, or rejected."""
+
+    provider_wide = True
+
+
+class ProviderMissingCredentialError(ProviderAuthenticationError):
+    """Raised when a configured credential reference has no usable value."""
+
+
+class ProviderAuthorizationError(ProviderRequestError):
+    """Raised when valid credentials cannot perform the configured operation."""
+
+    provider_wide = True
+
+
+class ProviderQuotaError(ProviderRequestError):
+    """Raised when provider quota or billing capacity is exhausted."""
+
+    provider_wide = True
+
+
+class ProviderModelNotFoundError(ProviderRequestError):
+    """Raised when the configured model identity is unavailable."""
+
+    provider_wide = True
+
+
+class ProviderCircuitOpenError(ModelProviderError):
+    """Raised before dispatch after the shared provider circuit opens."""
+
+    provider_wide = True
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.circuit_opened = True
+
+
 class ProviderCancelledError(ModelProviderError):
     """Raised when explicit or task cancellation stops provider work."""
 
@@ -951,9 +1000,7 @@ class ProviderCancelledError(ModelProviderError):
 class ProviderConfigurationError(ModelProviderError):
     """Raised for a non-retryable local provider configuration failure."""
 
-
-class ProviderRequestError(ModelProviderError):
-    """Raised for a non-retryable provider request failure."""
+    provider_wide = True
 
 
 class ModelProvider(Protocol):
@@ -1066,6 +1113,7 @@ class ProviderRuntime:
         environment: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         retry_delays: Sequence[float] = RETRY_DELAYS_SECONDS,
+        circuit_failure_threshold: int = DEFAULT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
     ) -> None:
         self.configuration = configuration
         self._environment = environment
@@ -1081,8 +1129,61 @@ class ProviderRuntime:
             raise ValueError("retry_delays must contain finite non-negative numbers")
         if configuration.retry_limit and not self._retry_delays:
             raise ValueError("retry_delays must not be empty when retries are enabled")
+        if (
+            type(circuit_failure_threshold) is not int
+            or circuit_failure_threshold < 1
+            or circuit_failure_threshold > 100
+        ):
+            raise ValueError("circuit_failure_threshold must be between 1 and 100")
         self._semaphore = asyncio.Semaphore(configuration.concurrency_limit)
+        self._circuit_lock = asyncio.Lock()
+        self._circuit_failure_threshold = circuit_failure_threshold
+        self._consecutive_failure_key: str | None = None
+        self._consecutive_failure_count = 0
+        self._circuit_error: tuple[str, str] | None = None
         self._closed = False
+
+    async def _raise_if_circuit_open(self) -> None:
+        async with self._circuit_lock:
+            if self._circuit_error is None:
+                return
+            code, message = self._circuit_error
+        raise ProviderCircuitOpenError(
+            f"provider circuit is open after {code}: {message}"
+        )
+
+    async def _record_success(self) -> None:
+        async with self._circuit_lock:
+            if self._circuit_error is None:
+                self._consecutive_failure_key = None
+                self._consecutive_failure_count = 0
+
+    async def _record_final_failure(self, error: ModelProviderError) -> None:
+        if isinstance(error, (ProviderCancelledError, ProviderCircuitOpenError)):
+            return
+        code, message = provider_error_details(error)
+        async with self._circuit_lock:
+            if self._circuit_error is not None:
+                return
+            if error.provider_wide:
+                self._circuit_error = (code, message)
+                error.circuit_opened = True
+                return
+            if classify_retry(error) is not RetryClassification.RETRYABLE:
+                self._consecutive_failure_key = None
+                self._consecutive_failure_count = 0
+                return
+            key = (
+                f"{self.configuration.provider_id}:{self.configuration.model_id}:{code}"
+            )
+            if key == self._consecutive_failure_key:
+                self._consecutive_failure_count += 1
+            else:
+                self._consecutive_failure_key = key
+                self._consecutive_failure_count = 1
+            if self._consecutive_failure_count >= self._circuit_failure_threshold:
+                self._circuit_error = (code, message)
+                error.circuit_opened = True
 
     async def execute(
         self,
@@ -1095,7 +1196,12 @@ class ProviderRuntime:
 
         if self._closed:
             raise ProviderRequestError("provider is closed")
-        credential = self.configuration.load_credential(self._environment)
+        await self._raise_if_circuit_open()
+        try:
+            credential = self.configuration.load_credential(self._environment)
+        except ModelProviderError as exc:
+            await self._record_final_failure(exc)
+            raise
         secrets = () if credential is None else (credential.get_secret_value(),)
         started = self._clock()
         timeout = min(
@@ -1344,6 +1450,7 @@ class ProviderRuntime:
                     timeout=timeout,
                 )
                 try:
+                    await self._raise_if_circuit_open()
                     transport_attempts += 1
                     total_http_calls += 1
                     raw = await _await_bounded(
@@ -1528,6 +1635,7 @@ class ProviderRuntime:
                     usage=raw.usage,
                 )
                 progress.complete(message="Provider request completed.")
+                await self._record_success()
                 return ModelResponse(
                     normalized_json=accepted.normalized_json,
                     value=accepted.value,
@@ -1912,6 +2020,7 @@ class ProviderRuntime:
                 )
             else:
                 progress.fail(message=message)
+            await self._record_final_failure(error)
             raise error
 
     async def close(self) -> None:
@@ -1937,6 +2046,20 @@ def provider_error_details(error: BaseException) -> tuple[str, str]:
         return "provider_timeout", "provider request timed out"
     if isinstance(error, ProviderCancelledError):
         return "cancelled", "provider request was cancelled"
+    if isinstance(error, ProviderCircuitOpenError):
+        return "provider_circuit_open", "provider circuit breaker is open"
+    if isinstance(error, ProviderMissingCredentialError):
+        return "missing_credential", "provider credential is not configured"
+    if isinstance(error, ProviderAuthenticationError):
+        return "authentication_failed", "provider authentication failed"
+    if isinstance(error, ProviderAuthorizationError):
+        return "authorization_failed", "provider authorization failed"
+    if isinstance(error, ProviderQuotaError):
+        return "quota_exhausted", "provider quota is exhausted"
+    if isinstance(error, ProviderModelNotFoundError):
+        return "model_not_found", "configured model was not found"
+    if isinstance(error, ProviderRateLimitError):
+        return "rate_limited", "provider rate limit was reached"
     if isinstance(error, ContextWindowExceededError):
         return (
             "context_window_exceeded",
@@ -3544,9 +3667,16 @@ __all__ = [
     "ModelUsage",
     "MissingRequiredFieldIssue",
     "ProviderCancelledError",
+    "ProviderAuthenticationError",
+    "ProviderAuthorizationError",
+    "ProviderCircuitOpenError",
     "ProviderCapabilities",
     "ProviderConfiguration",
     "ProviderConfigurationError",
+    "ProviderModelNotFoundError",
+    "ProviderMissingCredentialError",
+    "ProviderQuotaError",
+    "ProviderRateLimitError",
     "ProviderDiagnostic",
     "ProviderRequestError",
     "ProviderRuntime",

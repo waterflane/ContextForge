@@ -19,6 +19,8 @@ from contextforge.models.providers import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    ProviderAuthenticationError,
+    ProviderAuthorizationError,
     ProviderCapabilities,
     ProviderConfiguration,
     ProviderConfigurationError,
@@ -378,7 +380,11 @@ def _raise_for_ollama_http_error(status: int, data: bytes) -> None:
         raise StructuredOutputSchemaUnsupportedError(
             "Ollama rejected the structured output schema"
         )
-    if status in {400, 401, 403, 404, 422}:
+    if status == 401:
+        raise ProviderAuthenticationError("Ollama rejected authentication (HTTP 401)")
+    if status == 403:
+        raise ProviderAuthorizationError("Ollama rejected authorization (HTTP 403)")
+    if status in {400, 404, 422}:
         raise ProviderRequestError(f"Ollama rejected the request (HTTP {status})")
     raise ProviderUnavailableError(f"Ollama returned HTTP status {status}")
 
