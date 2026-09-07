@@ -45,6 +45,13 @@ EOF, and shutdown feed the same cooperative cancellation event. Bridge 1.0 and
 current and readable index, manifest, record, progress, and context-package
 schema versions.
 
+The application validates the expected digest against its own build snapshot
+and checks cancellation inside the publication transaction immediately before
+manifest activation. Bridge timeout sets cooperative cancellation before it
+unwinds index work, so a background structural worker retains its writer lock
+until it has stopped. Progress notifications use one writer task and a bounded
+queue; backpressure cancels rather than accumulating unbounded tasks.
+
 Analyzer identity includes analyzer, prompt, response-schema, provider, and
 model identity, but excludes transport endpoint. Legacy analyzer versions with
 a terminal `+base.<sha256>` suffix compare as the neutral identity. The next

@@ -124,10 +124,12 @@ failure, force, file-limit, and stale-lock recovery policies. `fail_fast` and
 meaning: finish all eligible work but do not publish if any semantic file fails.
 
 The bridge owns scanning, lock acquisition, staging, generation validation, and
-atomic publication. It verifies the expected snapshot before starting and
-rescans immediately before publication. Cancellation, timeout, clean EOF, and
-shutdown signal the application cancellation token; partial generations never
-become active.
+atomic publication. The application workflow verifies the expected snapshot
+against the exact scan used for the build and rescans immediately before
+publication. Cancellation is checked again at manifest activation. Timeout,
+clean EOF, and shutdown signal the application cancellation token; partial
+generations never become active. A timed-out index request finishes cooperative
+worker cleanup before its writer lock is released.
 
 While the request runs, Bridge 2 emits notifications before its final response:
 
@@ -139,6 +141,12 @@ The real `event` is the full closed `ProgressEvent` schema 3 object. Correlate
 notifications with `params.request_id`; sequence is monotonic within the
 operation. A successful result contains `generation_id`, `snapshot_digest`,
 `index_schema`, statistics, and `partial`.
+
+Clients must continuously consume Bridge stdout while an index request is
+active. Progress delivery uses one writer task and a bounded 256-event queue.
+If that queue fills, the index job is cancelled without publication and returns
+`INDEX_BUILD_FAILED` with `error.data.error_code` set to
+`progress_backpressure` and `retryable` set to `true`.
 
 JSON-RPC standard errors retain their numeric meaning. ContextForge also puts a
 stable uppercase typed code in `error.data.code`. Integration-relevant v1 codes

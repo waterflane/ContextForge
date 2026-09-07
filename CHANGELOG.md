@@ -29,9 +29,16 @@ and Python distribution versions follow PEP 440.
 
 ### Fixed
 
-- Revalidate the repository snapshot immediately before atomic index
-  publication and preserve the prior active generation on cancellation,
-  failure limits, provider circuit opening, or source drift.
+- Enforce the caller's expected snapshot inside the index workflow, revalidate
+  it immediately before atomic publication, and check cancellation at the
+  manifest activation boundary.
+- Signal cooperative index cancellation before unwinding a timed-out Bridge
+  request so background structural workers cannot outlive their writer lock.
+- Bound Bridge progress delivery with one writer task, drain every completed
+  semantic task, and preserve typed provider causes through semantic and map
+  aggregation.
+- Preserve the prior active generation on cancellation, failure limits,
+  provider circuit opening, source drift, or progress backpressure.
 - Return safe typed Bridge index errors without provider bodies, credentialed
   URLs, absolute paths, tracebacks, or exception representations.
 
