@@ -8,6 +8,33 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+### Added
+
+- Added independent `--fail-fast` and `--max-failures N` index policies, a
+  bounded semantic scheduler, and a job-scoped provider circuit breaker.
+- Added `--progress jsonl` for clean, flushed `ProgressEvent` schema 3 streams
+  from `index build` and `index update`.
+- Added opt-in Bridge 2.0 tracked `build`/`update` jobs, correlated
+  `$/progress` notifications, cooperative cancellation, schema capabilities,
+  and a normative Bridge 2 JSON Schema. Bridge 1.0/1.1 remain supported.
+
+### Changed
+
+- Classified authentication, authorization, missing credential, quota, rate
+  limit, model, configuration, timeout, and service failures so terminal
+  provider-wide failures are not retried per file.
+- Made semantic and repository-map analyzer identity depend on provider/model
+  and analysis contracts rather than an OpenAI-compatible endpoint. Legacy
+  `+base.<sha256>` records migrate on update without model calls.
+
+### Fixed
+
+- Revalidate the repository snapshot immediately before atomic index
+  publication and preserve the prior active generation on cancellation,
+  failure limits, provider circuit opening, or source drift.
+- Return safe typed Bridge index errors without provider bodies, credentialed
+  URLs, absolute paths, tracebacks, or exception representations.
+
 ## [0.5.1] - 2026-09-05
 
 ### Added
