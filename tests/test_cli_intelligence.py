@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -6,9 +7,14 @@ import click
 import pytest
 from typer.testing import CliRunner, Result
 
+import contextforge.application as application_module
 import contextforge.cli.context_commands as context_cli
 import contextforge.cli.intelligence_commands as index_cli
-from contextforge.application import render_context_suggestion
+from contextforge.application import (
+    IndexSourceChangedError,
+    build_repository_index,
+    render_context_suggestion,
+)
 from contextforge.cli.main import app
 from contextforge.discovery import (
     CompletenessWarning,
@@ -22,6 +28,7 @@ from contextforge.discovery import (
 from contextforge.discovery.renderers import DiscoveryResultFormat
 from contextforge.intelligence import IndexManifestNotFoundError, load_manifest
 from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.progress import ProgressEvent, ProgressStatus
 
 runner = CliRunner()
 TERMINAL_WIDTH = 140
@@ -230,6 +237,44 @@ def test_index_provider_failure_preserves_previous_active_generation(
     assert load_manifest(tmp_path) == previous
 
 
+def test_index_rechecks_snapshot_before_atomic_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "app.py"
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    previous = load_manifest(tmp_path)
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    original = cast(Any, application_module).build_structural_index
+
+    def mutate_after_structural(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        source.write_text("VALUE = 3\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        application_module, "build_structural_index", mutate_after_structural
+    )
+
+    with pytest.raises(IndexSourceChangedError):
+        asyncio.run(
+            build_repository_index(
+                tmp_path,
+                provider=None,
+                provider_configuration=None,
+                update_only=True,
+            )
+        )
+
+    assert load_manifest(tmp_path) == previous
+
+
 def test_index_cancellation_maps_to_130(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,6 +324,54 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
     assert built.stderr == ""
     assert suggested.stderr == ""
     assert json.loads(suggested.stdout)["mode"] == "hybrid"
+
+
+def test_index_jsonl_progress_is_a_clean_schema_three_stream(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+
+    result = _invoke(
+        "--log-level",
+        "quiet",
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--progress",
+        "jsonl",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    events = [
+        ProgressEvent.model_validate_json(line) for line in result.stdout.splitlines()
+    ]
+    assert events
+    assert all(event.schema_version == 3 for event in events)
+    assert [event.sequence for event in events] == list(range(len(events)))
+    assert events[-1].status is ProgressStatus.COMPLETED
+    assert events[-1].metadata["generation_id"] == load_manifest(tmp_path).generation_id
+    assert events[-1].metadata["snapshot_digest"]
+    assert events[-1].metadata["index_schema"] == 2
+    assert events[-1].metadata["partial"] is False
+    assert "\x1b[" not in result.stdout
+    assert "Status:" not in result.stdout
+
+
+def test_index_rejects_ambiguous_failure_policy(tmp_path: Path) -> None:
+    result = _invoke(
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--fail-fast",
+        "--max-failures",
+        "2",
+    )
+
+    assert result.exit_code == 2
+    assert "cannot be used together" in _plain(result.stderr)
 
 
 def _invoke_focused_suggestion(tmp_path: Path, *arguments: str) -> Result:

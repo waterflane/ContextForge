@@ -39,6 +39,7 @@ class ProgressMode(StrEnum):
     AUTO = "auto"
     ALWAYS = "always"
     NEVER = "never"
+    JSONL = "jsonl"
 
 
 class CLIProgressRenderer:
@@ -84,7 +85,7 @@ class CLIProgressRenderer:
         self._unicode = self._supports_unicode(self._console.encoding)
         self._spinner = Spinner("dots" if self._unicode else "line", style="cyan")
         self._dynamic = (
-            self.mode is not ProgressMode.NEVER
+            self.mode not in {ProgressMode.NEVER, ProgressMode.JSONL}
             and self._console.is_terminal
             and self._is_interactive(self._stdout)
             and self._is_interactive(self._stream)
@@ -124,6 +125,8 @@ class CLIProgressRenderer:
 
         if self.mode is ProgressMode.NEVER:
             return "disabled"
+        if self.mode is ProgressMode.JSONL:
+            return "jsonl"
         return "dynamic" if self._dynamic else "discrete"
 
     def __call__(self, event: ProgressEvent) -> None:
@@ -131,6 +134,11 @@ class CLIProgressRenderer:
 
         with self._state_lock:
             if self.mode is ProgressMode.NEVER or self._closed:
+                return
+            if self.mode is ProgressMode.JSONL:
+                self._stream.write(event.model_dump_json() + "\n")
+                self._stream.flush()
+                self._event = event
                 return
             if self._started is None:
                 self._started = self._clock()

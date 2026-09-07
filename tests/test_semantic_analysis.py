@@ -19,6 +19,7 @@ from contextforge.intelligence import (
     SemanticAnalysisError,
     SemanticAnalysisOptions,
     SemanticConfidence,
+    SemanticFailureLimitError,
     SemanticIndexBuildResult,
     SourceRange,
     StaleStructuralIndexError,
@@ -954,6 +955,72 @@ def test_unchanged_analysis_is_reused_without_provider_calls(tmp_path: Path) -> 
     assert second.generation_path == first.generation_path
 
 
+def test_loopback_endpoint_change_does_not_invalidate_semantics(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.txt": "service notes\n"})
+    first_provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://127.0.0.1:1234",
+            model_id="exact/model",
+            retry_limit=0,
+        ),
+        responder=_valid_response,
+    )
+    first = _build_semantics(snapshot, first_provider, run_id="endpoint-first")
+    second_provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://127.0.0.1:9999",
+            model_id="exact/model",
+            retry_limit=0,
+        ),
+        responder=_valid_response,
+    )
+
+    second = _build_semantics(snapshot, second_provider, run_id="endpoint-second")
+
+    assert first_provider.call_count == 1
+    assert second_provider.call_count == 0
+    assert second.manifest == first.manifest
+    assert "+base." not in second.analyses[0].semantic_analyzer.analyzer_version
+
+
+def test_legacy_endpoint_identity_is_republished_without_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.txt": "service notes\n"})
+    original = semantics_module._semantic_analyzer
+
+    def legacy_analyzer(*args: Any, **kwargs: Any) -> Any:
+        identity = original(*args, **kwargs)
+        return identity.model_copy(
+            update={"analyzer_version": identity.analyzer_version + "+base." + "a" * 64}
+        )
+
+    monkeypatch.setattr(semantics_module, "_semantic_analyzer", legacy_analyzer)
+    legacy = _build_semantics(snapshot, _provider(), run_id="legacy-identity")
+    monkeypatch.setattr(semantics_module, "_semantic_analyzer", original)
+    migration_provider = _provider()
+
+    migrated = _build_semantics(snapshot, migration_provider, run_id="migrate-identity")
+    stable_provider = _provider()
+    stable = _build_semantics(snapshot, stable_provider, run_id="stable-identity")
+
+    assert migration_provider.call_count == stable_provider.call_count == 0
+    assert migrated.manifest.generation_id != legacy.manifest.generation_id
+    assert stable.manifest == migrated.manifest
+    assert all(
+        "+base." not in item.analyzer_version
+        for item in migrated.manifest.semantic_analyzers
+    )
+    assert (
+        "+base."
+        not in load_file_semantic_analysis(
+            tmp_path, "app.txt"
+        ).semantic_analyzer.analyzer_version
+    )
+
+
 def test_semantic_persistence_is_deterministic_across_repository_roots(
     tmp_path: Path,
 ) -> None:
@@ -1094,6 +1161,53 @@ def test_fail_on_error_keeps_prior_valid_generation_active(tmp_path: Path) -> No
         )
 
     assert load_manifest(tmp_path) == structural
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "failure_limit", "expected_calls"),
+    [(1, 1, 1), (1, 2, 2), (2, 1, 2)],
+)
+def test_failure_limit_stops_scheduling_and_keeps_active_generation(
+    tmp_path: Path,
+    concurrency: int,
+    failure_limit: int,
+    expected_calls: int,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path, {f"{name}.txt": f"{name}\n" for name in "abcde"}
+    )
+    active = load_manifest(tmp_path)
+    events: list[ProgressEvent] = []
+    scripts: list[Any] = [
+        ProviderRequestError("rejected") for _ in range(failure_limit)
+    ]
+    if concurrency > 1:
+        scripts.insert(1, FakeScript(ProviderRequestError("late"), delay_seconds=1))
+    provider = _provider(concurrency=concurrency, scripts=scripts)
+
+    with (
+        acquire_index_lock(tmp_path, "semantic-failure-limit") as lock,
+        pytest.raises(SemanticFailureLimitError),
+    ):
+        asyncio.run(
+            build_semantic_index(
+                snapshot,
+                lock,
+                provider,
+                options=SemanticAnalysisOptions(
+                    max_concurrency=concurrency,
+                    max_failures=failure_limit,
+                    progress=events.append,
+                ),
+            )
+        )
+
+    assert provider.call_count == expected_calls
+    assert load_manifest(tmp_path) == active
+    assert events[-1].status.value == "failed"
+    assert events[-1].failed_units == failure_limit
+    assert cast(int, events[-1].metadata["unstarted_units"]) > 0
+    assert cast(int, events[-1].metadata["cancelled_units"]) == concurrency - 1
 
 
 def test_interrupted_build_resumes_only_validated_checkpoints(tmp_path: Path) -> None:

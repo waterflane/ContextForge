@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,7 @@ def build_structural_index(
     *,
     max_source_bytes: int = DEFAULT_CODEMAP_SOURCE_LIMIT,
     previous_manifest: IndexManifest | None = None,
+    cancellation: asyncio.Event | None = None,
 ) -> StructuralIndexBuildResult:
     """Extract, resolve, and atomically persist facts without semantic analysis."""
 
@@ -85,6 +87,7 @@ def build_structural_index(
     reused: list[str] = []
     all_records_valid = previous is not None
     for project_file in sorted(snapshot.files, key=lambda item: item.path):
+        _raise_if_cancelled(cancellation)
         state = previous_states.get(project_file.path)
         code_map = _reuse_code_map(lock, previous, state, project_file)
         if code_map is None:
@@ -122,10 +125,12 @@ def build_structural_index(
             generation_path=generation,
         )
 
+    _raise_if_cancelled(cancellation)
     code_maps = resolve_relationships(tuple(base_maps))
     states: list[IndexedFileState] = []
     record_digests: list[tuple[str, str]] = []
     for code_map in code_maps:
+        _raise_if_cancelled(cancellation)
         content = serialize_code_map(code_map)
         location = _record_location(code_map.path)
         digest = write_index_record(lock, location, content)
@@ -190,6 +195,7 @@ def build_structural_index(
             previous.generation_id if previous is not None else None
         ),
     )
+    _raise_if_cancelled(cancellation)
     manifest = build_index_manifest(
         build=build,
         files=states,
@@ -308,6 +314,11 @@ def _validate_build_inputs(
         raise ValueError("max_source_bytes must be a positive integer")
     if snapshot.root != lock.layout.repository_root:
         raise ValueError("snapshot root does not match the locked repository")
+
+
+def _raise_if_cancelled(cancellation: asyncio.Event | None) -> None:
+    if cancellation is not None and cancellation.is_set():
+        raise asyncio.CancelledError
 
 
 def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
