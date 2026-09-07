@@ -38,6 +38,37 @@ class SnapshotParams(BridgeParams):
     pass
 
 
+class IndexParams(BridgeParams):
+    """Bridge 2 parameters for one atomic tracked index job."""
+
+    action: Literal["build", "update"]
+    expected_snapshot_digest: Sha256
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    base_url: str | None = Field(default=None, min_length=1, max_length=2_000)
+    concurrency: int | None = Field(default=None, ge=1, le=8, strict=True)
+    request_timeout: float | None = Field(default=None, ge=1, le=600)
+    context_window: int | None = Field(
+        default=None, ge=1_024, le=2_000_000, strict=True
+    )
+    json_repair_attempts: int | None = Field(default=None, ge=0, le=10, strict=True)
+    max_output_tokens: int | None = Field(default=None, ge=96, le=32_768, strict=True)
+    fail_on_error: bool = False
+    fail_fast: bool = False
+    max_failures: int | None = Field(default=None, ge=1, strict=True)
+    force_reanalyze: bool = False
+    max_files: int | None = Field(default=None, ge=1, strict=True)
+    local_only: bool = False
+    recover_stale_lock: bool = False
+    confirm_unknown_lock: bool = False
+
+    @model_validator(mode="after")
+    def validate_failure_policy(self) -> IndexParams:
+        if self.fail_fast and self.max_failures is not None:
+            raise ValueError("fail_fast and max_failures cannot be used together")
+        return self
+
+
 class DiscoverParams(BridgeParams):
     expected_snapshot_digest: Sha256
     task: str = Field(min_length=1, max_length=20_000)
@@ -152,6 +183,7 @@ __all__ = [
     "ExpandParams",
     "ExpansionOperation",
     "HelloParams",
+    "IndexParams",
     "PackageParams",
     "ReadParams",
     "ShutdownParams",
