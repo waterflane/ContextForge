@@ -128,8 +128,10 @@ atomic publication. The application workflow verifies the expected snapshot
 against the exact scan used for the build and rescans immediately before
 publication. Cancellation is checked again at manifest activation. Timeout,
 clean EOF, and shutdown signal the application cancellation token; partial
-generations never become active. A timed-out index request finishes cooperative
-worker cleanup before its writer lock is released.
+generations never become active. A timed-out index request returns
+`REQUEST_TIMEOUT` at the caller's deadline while cooperative worker cleanup
+continues as tracked bridge work. Its writer lock remains held until that cleanup
+finishes, preventing a second writer from observing half-finished staging.
 
 While the request runs, Bridge 2 emits notifications before its final response:
 
@@ -139,12 +141,15 @@ While the request runs, Bridge 2 emits notifications before its final response:
 
 The real `event` is the full closed `ProgressEvent` schema 3 object. Correlate
 notifications with `params.request_id`; sequence is monotonic within the
-operation. A successful result contains `generation_id`, `snapshot_digest`,
-`index_schema`, statistics, and `partial`.
+operation but may contain gaps when cumulative snapshots from a synchronous
+producer burst are coalesced. A successful result contains `generation_id`,
+`snapshot_digest`, `index_schema`, statistics, and `partial`.
 
 Clients must continuously consume Bridge stdout while an index request is
 active. Progress delivery uses one writer task and a bounded 256-event queue.
-If that queue fills, the index job is cancelled without publication and returns
+An instantaneous local producer burst retains the newest cumulative snapshot
+instead of being mistaken for a slow client. If no queue slot becomes available
+for 5 seconds, the index job is cancelled without publication and returns
 `INDEX_BUILD_FAILED` with `error.data.error_code` set to
 `progress_backpressure` and `retryable` set to `true`.
 
@@ -219,8 +224,10 @@ and waits at most 5 seconds. Any request task still pending then receives direct
 asyncio cancellation and gets at most another 0.1 seconds for cleanup. After
 that 5.1-second maximum drain budget, the bridge detaches any remaining task and
 does not wait for it again. These internal bridge limits are fixed rather than CLI
-configurable. A timed-out request cannot return a partial success, and the
-shutdown response remains a normal serialized JSON-RPC frame.
+configurable. Caller timeout returns its JSON-RPC error immediately; the timed-out
+index cleanup remains part of this shutdown drain and cannot emit later progress
+or return a partial success. The shutdown response remains a normal serialized
+JSON-RPC frame.
 
 ## Security and mutation boundary
 

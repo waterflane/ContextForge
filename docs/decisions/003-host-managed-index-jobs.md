@@ -48,9 +48,11 @@ schema versions.
 The application validates the expected digest against its own build snapshot
 and checks cancellation inside the publication transaction immediately before
 manifest activation. Bridge timeout sets cooperative cancellation before it
-unwinds index work, so a background structural worker retains its writer lock
-until it has stopped. Progress notifications use one writer task and a bounded
-queue; backpressure cancels rather than accumulating unbounded tasks.
+returns the deadline error, and the bridge tracks background cleanup so a
+structural worker retains its writer lock until it has stopped. Progress
+notifications use one writer task and a bounded queue. Cumulative snapshots from
+synchronous producer bursts are coalesced; sustained backpressure cancels rather
+than accumulating unbounded tasks.
 
 Analyzer identity includes analyzer, prompt, response-schema, provider, and
 model identity, but excludes transport endpoint. Legacy analyzer versions with
