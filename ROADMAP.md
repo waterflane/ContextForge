@@ -81,6 +81,22 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Adapt structured model requests to truncation and reported runtime context
   limits without weakening strict validation.
 
+### Unreleased host-integration hardening (complete)
+
+- [x] Add independent fail-fast and bounded-failure index policies while
+  preserving the existing `--fail-on-error` contract.
+- [x] Classify provider failures, stop retrying terminal authentication, quota,
+  model, and configuration errors, and add a job-scoped circuit breaker.
+- [x] Expose clean JSONL index progress and bounded Bridge progress
+  notifications that coalesce synchronous bursts while detecting sustained
+  client backpressure.
+- [x] Add opt-in Bridge 2 tracked build/update jobs with cooperative
+  cancellation, caller-deadline responses, background lock-safe cleanup,
+  snapshot preconditions, and atomic publication guards.
+- [x] Publish readable/current index-family schema capabilities, stabilize
+  analyzer identity across endpoint changes, and return safe typed Bridge
+  integration errors.
+
 ## Later
 
 - Full multi-root workspaces.
