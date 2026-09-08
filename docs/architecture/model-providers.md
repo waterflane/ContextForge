@@ -57,7 +57,8 @@ context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
-semantic_max_output_tokens = 512
+semantic_max_output_tokens = 1024
+reasoning_effort = "off"
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -66,6 +67,12 @@ store_raw_responses = false
 [models.structured_response]
 max_repair_attempts = 5
 ```
+
+Structured repository operations default to `reasoning_effort = "off"` so
+reasoning-capable OpenAI-compatible models reserve their bounded output for the
+required JSON. Values `low`, `medium`, `high`, and `provider_default` are also
+accepted. A server that explicitly rejects the parameter is retried once with
+its provider default and emits a safe diagnostic warning.
 
 Generic OpenAI-compatible APIs do not standardize context-window discovery.
 ContextForge therefore uses a conservative 4,096-token default unless
@@ -80,6 +87,15 @@ built-in default. The event also names the effective value and source. A
 provider/model value such as 98,304 is not silently substituted for a
 ContextForge `config.toml` value of 16,384; diagnostics show both and identify
 `config.toml` as the effective source.
+
+An architectural maximum advertised by `/models` is not the server's loaded
+context allocation. An explicit server context refusal is a typed
+`context_window_exceeded`, not a JSON-repair opportunity. If the refusal names
+an unambiguous smaller limit, the OpenAI-compatible provider lowers its in-memory
+window for this instance. Discovery and semantic callers rebuild the request
+once against that limit; they never modify configuration files. Ambiguous
+errors retain the configured window and fail safely. Semantic preflight may
+split remaining source chunks further; successful checkpoints remain reusable.
 
 Connection, response-read, and complete-operation defaults are 10, 300, and
 360 seconds. The retained `timeout_seconds` value is a compatibility operation
@@ -255,15 +271,28 @@ identity. Arbitrary parsed JSON is never accepted. No model name is supplied by
 default.
 
 The base URL is configurable with `[models].base_url` or CLI `--base-url`.
-Changing it changes the credential-free SHA-256 suffix on semantic and
-repository-map analyzer identity versions, invalidating model-dependent records
-without changing the persisted provider/model schema.
+It is transport configuration, not analyzer identity: changing a temporary
+loopback port does not invalidate model-dependent records. Analyzer identity is
+derived from analyzer, prompt and response-schema versions plus provider/model.
+Legacy versions ending in `+base.<sha256>` compare as their neutral identity
+and are republished without that suffix during the next update, without a model
+call.
 An optional bearer token is loaded only through the configured
 `credential_env` name. Authentication failures, safe structured error bodies,
 missing model IDs, malformed envelopes, structured-output rejection,
 unavailability, timeout, and cancellation are translated to the shared typed
 provider errors. The adapter uses the same bounded retry runtime as Ollama and
 accepts an injectable async HTTP transport for offline tests.
+
+The shared runtime distinguishes terminal provider-wide failures from transient
+ones. Authentication, authorization, missing credentials, quota/billing
+exhaustion, missing models, and invalid configuration open the job-scoped
+circuit after the first final result and are not retried for each file. Rate
+limits, timeouts, and service unavailability retain bounded request retries;
+three consecutive exhausted failures with the same safe code and
+provider/model identity open the circuit. A success resets that sequence.
+OpenAI-compatible HTTP 429 responses use bounded structured `error.code` and
+message fields to distinguish quota exhaustion from transient rate limiting.
 
 ## Troubleshooting local structured providers
 

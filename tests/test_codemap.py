@@ -186,7 +186,7 @@ def test_syntax_error_is_diagnostic_without_fabricated_symbols(tmp_path: Path) -
     assert str(tmp_path) not in code_map.diagnostics[0].message
 
 
-def test_unsupported_language_is_file_level_only_and_deterministic(
+def test_polyglot_language_is_symbol_level_and_deterministic(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "app.js", "function invented() { return 1; }\n")
@@ -195,10 +195,9 @@ def test_unsupported_language_is_file_level_only_and_deterministic(
     second = _map(tmp_path, "app.js")
 
     assert first == second
-    assert first.parse_status == "unsupported"
-    assert first.symbols == ()
-    assert first.relationships == ()
-    assert first.diagnostics[0].code == "no_structural_extractor"
+    assert first.parse_status == "parsed"
+    assert {item.name for item in first.symbols} == {"invented"}
+    assert first.analyzer.analyzer_id == "tree-sitter-polyglot"
 
 
 def test_serialization_is_canonical_strict_and_round_trips(tmp_path: Path) -> None:
@@ -496,8 +495,14 @@ def test_codemap_models_reject_false_resolution_and_noncanonical_shapes() -> Non
             }
         )
     assert variable.source_range == source_range
-    with pytest.raises(ValidationError, match="only classes"):
-        SymbolRecord(**{**variable.model_dump(), "contained_methods": ("method",)})
+    with pytest.raises(ValidationError, match="only declaration owners"):
+        SymbolRecord(
+            **{
+                **variable.model_dump(),
+                "kind": SymbolKind.FUNCTION,
+                "contained_methods": ("method",),
+            }
+        )
     with pytest.raises(ValidationError, match="canonical"):
         SymbolRecord(
             **{

@@ -25,6 +25,7 @@ from contextforge.discovery import (
     DiscoveryLimitError,
     DiscoveryLineRange,
     DiscoveryMode,
+    DiscoveryObservation,
     DiscoveryProtocolError,
     DiscoveryRequest,
     DiscoverySession,
@@ -39,7 +40,10 @@ from contextforge.discovery import (
     discover_repository,
     review_completeness,
 )
-from contextforge.discovery.session import _result_confidence
+from contextforge.discovery.session import (
+    _evidence_complete_question,
+    _result_confidence,
+)
 from contextforge.intelligence import (
     AnalyzerIdentity,
     FileSemanticAnalysis,
@@ -307,7 +311,8 @@ def test_indexed_partial_staleness_is_disclosed_and_current_records_work(
     assert any(item.code == "stale-index-coverage" for item in result.warnings)
     assert any(item.code == "stale-global-maps" for item in result.warnings)
     assert result.final_selection is not None
-    assert result.final_selection.confidence == pytest.approx(0.57456)
+    assert 0 < result.final_selection.confidence < 0.52
+    assert any(w.code == "relationship-coverage-incomplete" for w in result.warnings)
     verification = next(
         item
         for item in recent_records()
@@ -350,6 +355,132 @@ def test_hybrid_uses_compact_selection_over_current_index_candidates(
     assert result.final_selection is not None
     assert result.final_selection.selected[0].path == "x.py"
     assert result.budget_usage.model_calls == 1
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Explain preparationProgressStage",
+        "Что делает preparationProgressStage?",
+    ],
+)
+def test_fresh_exact_question_uses_compact_selection(tmp_path: Path, task: str) -> None:
+    snapshot = _snapshot(
+        tmp_path,
+        {
+            "progress.ts": (
+                "export function preparationProgressStage() { return 'index'; }\n"
+            ),
+        },
+    )
+
+    def responder(request: ModelRequest, _: int) -> str:
+        assert request.response_model.__name__ == "IndexedContextSelection"
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "Verified definition.",
+            }
+        )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            FakeModelProvider(_configuration(), responder=responder),
+            DiscoveryRequest(task=task, mode="fresh"),
+        )
+    )
+    assert result.final_selection is not None
+    assert result.final_selection.selected[0].kind == "line_ranges"
+    assert result.budget_usage.model_calls == 1
+
+
+@pytest.mark.parametrize(
+    "task,compact",
+    [
+        ("Explain run", True),
+        ("run", True),
+        ("Explain Reader", True),
+        ("Explain run and its callers", False),
+        ("Explain missing", False),
+    ],
+)
+def test_fresh_compact_gate_is_conservative(
+    tmp_path: Path, task: str, compact: bool
+) -> None:
+    snapshot = _snapshot(
+        tmp_path, {"a.py": "def run():\n    pass\nclass Reader:\n    pass\n"}
+    )
+    session = DiscoverySession(
+        snapshot, None, DiscoveryRequest(task=task, mode="fresh")
+    )
+    session.prepare_read_only_tools()
+    assert (
+        _evidence_complete_question(
+            session._require_knowledge(), session._preselected_candidates, task
+        )
+        == compact
+    )
+
+
+def test_large_observation_history_is_dropped_at_record_boundaries(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path, {"a.py": "def run():\n    return 1\n"})
+
+    def responder(request: ModelRequest, _: int) -> str:
+        for context in request.untrusted_contexts:
+            if context.label != "discovery-observations":
+                continue
+            history = json.loads(context.text)
+            assert isinstance(history, list)
+            assert history[-1]["data"]["marker"] == "latest"
+            assert len(context.text.encode("utf-8")) < 12000
+        records = cast(
+            list[dict[str, Any]], request.trusted_code_map_facts["candidates"]
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_ids": [records[0]["candidate_id"]],
+                "summary": "definition",
+            }
+        )
+
+    session = DiscoverySession(
+        snapshot,
+        FakeModelProvider(_configuration(), responder=responder),
+        DiscoveryRequest(task="Explain run", mode="fresh"),
+    )
+    session.prepare_read_only_tools()
+    for index in range(20):
+        session.observations.append(
+            DiscoveryObservation(
+                step=index + 1,
+                action_id=f"old-{index}",
+                tool_name="read_file",
+                ok=True,
+                code="ok",
+                data={"source": "x" * 100_000},
+            )
+        )
+    session.observations.append(
+        DiscoveryObservation(
+            step=21,
+            action_id="latest",
+            tool_name="get_context_budget",
+            ok=True,
+            code="ok",
+            data={"marker": "latest"},
+        )
+    )
+    session._started = session.clock()
+    actions = asyncio.run(session._request_actions())
+    assert actions[-1].kind == "finalize"
 
 
 def test_hybrid_without_index_degrades_explicitly_to_fresh(tmp_path: Path) -> None:
@@ -650,7 +781,7 @@ def test_finalize_in_received_batch_can_use_the_last_action_step(
     assert result.budget_usage.model_calls == 1
 
 
-def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None:
+def test_candidate_selection_requires_explicit_finalize(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
 
     def responder(request: ModelRequest, index: int) -> str:
@@ -662,29 +793,31 @@ def test_engine_deterministic_finalize_remains_uncounted(tmp_path: Path) -> None
             _call(
                 "select",
                 "select_candidates",
-                {"candidate_ids": [candidates[0]["candidate_id"]]},
+                {
+                    "candidate_ids": [candidates[0]["candidate_id"]],
+                    "summary": "Selected the highest-ranked candidate.",
+                },
             )
         )
 
     provider = FakeModelProvider(_configuration(), responder=responder)
-    result = asyncio.run(
-        discover_repository(
-            snapshot,
-            provider,
-            DiscoveryRequest(
-                task="x",
-                mode="fresh",
-                budget=DiscoveryBudget(max_steps=1),
-            ),
+    with pytest.raises(DiscoveryLimitError) as error:
+        asyncio.run(
+            discover_repository(
+                snapshot,
+                provider,
+                DiscoveryRequest(
+                    task="x",
+                    mode="fresh",
+                    budget=DiscoveryBudget(max_steps=1),
+                ),
+            )
         )
+    assert error.value.run_record.final_selection is None
+    assert not any(
+        item.action_id == "engine-deterministic-finalize"
+        for item in error.value.run_record.observations
     )
-
-    assert result.final_selection is not None
-    assert result.budget_usage.steps == 1
-    assert [item.action_id for item in result.observations] == [
-        "select",
-        "engine-deterministic-finalize",
-    ]
 
 
 def test_source_and_context_byte_budgets_fail_closed(tmp_path: Path) -> None:
@@ -721,7 +854,7 @@ def test_cancellation_before_provider_call_returns_no_partial_success(
     assert error.value.run_record.final_selection is None
 
 
-def test_total_deadline_converted_provider_cancellation_is_timeout(
+def test_strict_total_deadline_converted_provider_cancellation_is_timeout(
     tmp_path: Path,
 ) -> None:
     snapshot = _snapshot(tmp_path, {"a.py": "A = 1\n"})
@@ -738,6 +871,7 @@ def test_total_deadline_converted_provider_cancellation_is_timeout(
                 DiscoveryRequest(
                     task="x",
                     mode="fresh",
+                    strict=True,
                     budget=DiscoveryBudget(timeout_seconds=0.1),
                 ),
             )
@@ -753,6 +887,35 @@ def test_total_deadline_converted_provider_cancellation_is_timeout(
     assert isinstance(provider_error, ProviderCancelledError)
     assert provider_error.diagnostic is not None
     assert provider_error.diagnostic.response_validation == "not_received"
+
+
+def test_non_strict_model_timeout_returns_reviewed_fallback(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, {"focused.py": "VALUE = 1\n"})
+    provider = FakeModelProvider(
+        _configuration(),
+        scripts=(FakeScript(_batch(_finalize()), delay_seconds=2.0),),
+    )
+
+    result = asyncio.run(
+        discover_repository(
+            snapshot,
+            provider,
+            DiscoveryRequest(
+                task="Find focused behavior",
+                mode="fresh",
+                budget=DiscoveryBudget(timeout_seconds=1.0),
+            ),
+        )
+    )
+
+    assert result.status == "complete"
+    assert result.final_selection is not None
+    assert result.final_selection.provenance == "deterministic_fallback"
+    assert any(
+        item.code == "model-timeout-fallback"
+        for item in result.final_selection.completeness_warnings
+    )
+    assert "timed out" in result.final_selection.unknowns[0]
 
 
 def test_external_cancellation_during_provider_wait_remains_cancelled(
@@ -861,6 +1024,8 @@ def test_prompt_injection_is_untrusted_and_cannot_expand_path_authority(
     )
     assert result.status == "complete"
     assert requests[0].system_instructions.startswith(DISCOVERY_SYSTEM_INSTRUCTIONS)
+    assert requests[0].max_output_tokens == 512
+    assert requests[0].max_output_tokens_ceiling == 1_024
     assert "required non-empty actions array" in requests[0].system_instructions
     assert not any(item.code == "invalid_input" for item in result.observations)
     assert "STRUCTURED_RESPONSE_REPAIR" in requests[2].analysis_task

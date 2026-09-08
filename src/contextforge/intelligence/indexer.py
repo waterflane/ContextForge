@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,10 @@ from contextforge.intelligence.models import (
     IndexManifest,
     SchemaVersionMetadata,
     analyzer_identity_key,
+)
+from contextforge.intelligence.polyglot import (
+    POLYGLOT_ANALYZER,
+    SUPPORTED_POLYGLOT_LANGUAGES,
 )
 from contextforge.intelligence.python import (
     DEFAULT_CODEMAP_SOURCE_LIMIT,
@@ -63,6 +68,7 @@ def build_structural_index(
     *,
     max_source_bytes: int = DEFAULT_CODEMAP_SOURCE_LIMIT,
     previous_manifest: IndexManifest | None = None,
+    cancellation: asyncio.Event | None = None,
 ) -> StructuralIndexBuildResult:
     """Extract, resolve, and atomically persist facts without semantic analysis."""
 
@@ -81,6 +87,7 @@ def build_structural_index(
     reused: list[str] = []
     all_records_valid = previous is not None
     for project_file in sorted(snapshot.files, key=lambda item: item.path):
+        _raise_if_cancelled(cancellation)
         state = previous_states.get(project_file.path)
         code_map = _reuse_code_map(lock, previous, state, project_file)
         if code_map is None:
@@ -118,10 +125,12 @@ def build_structural_index(
             generation_path=generation,
         )
 
+    _raise_if_cancelled(cancellation)
     code_maps = resolve_relationships(tuple(base_maps))
     states: list[IndexedFileState] = []
     record_digests: list[tuple[str, str]] = []
     for code_map in code_maps:
+        _raise_if_cancelled(cancellation)
         content = serialize_code_map(code_map)
         location = _record_location(code_map.path)
         digest = write_index_record(lock, location, content)
@@ -186,6 +195,7 @@ def build_structural_index(
             previous.generation_id if previous is not None else None
         ),
     )
+    _raise_if_cancelled(cancellation)
     manifest = build_index_manifest(
         build=build,
         files=states,
@@ -221,7 +231,9 @@ def load_file_code_map(
         raise IndexManifestReadError(
             "published CodeMap does not match its schema"
         ) from exc
-    if not _map_matches_state(code_map, state):
+    if code_map.schema_version != active.schema_version or not _map_matches_state(
+        code_map, state
+    ):
         raise IndexManifestReadError(
             "CodeMap identity does not match its manifest state"
         )
@@ -237,6 +249,7 @@ def _reuse_code_map(
     expected_analyzer = _analyzer_for(project_file)
     if (
         previous is None
+        or previous.schema_versions != SchemaVersionMetadata()
         or state is None
         or state.source_sha256 != project_file.sha256
         or state.source_size_bytes != project_file.size_bytes
@@ -251,12 +264,20 @@ def _reuse_code_map(
         )
     except (ValueError, IndexManifestReadError):
         return None
-    return code_map if _map_matches_state(code_map, state) else None
+    return (
+        code_map
+        if (
+            code_map.schema_version == CODEMAP_SCHEMA_VERSION
+            and _map_matches_state(code_map, state)
+            and not any(item.code == "extractor_error" for item in code_map.diagnostics)
+        )
+        else None
+    )
 
 
 def _map_matches_state(code_map: FileCodeMap, state: IndexedFileState) -> bool:
     return (
-        code_map.schema_version == CODEMAP_SCHEMA_VERSION
+        code_map.schema_version in {1, CODEMAP_SCHEMA_VERSION}
         and code_map.path == state.path
         and code_map.source_sha256 == state.source_sha256
         and code_map.source_size_bytes == state.source_size_bytes
@@ -295,6 +316,11 @@ def _validate_build_inputs(
         raise ValueError("snapshot root does not match the locked repository")
 
 
+def _raise_if_cancelled(cancellation: asyncio.Event | None) -> None:
+    if cancellation is not None and cancellation.is_set():
+        raise asyncio.CancelledError
+
+
 def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
     try:
         return load_manifest(lock.layout.repository_root)
@@ -303,7 +329,11 @@ def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
 
 
 def _analyzer_for(project_file: ProjectFile) -> AnalyzerIdentity:
-    return PYTHON_ANALYZER if project_file.language == "Python" else FALLBACK_ANALYZER
+    if project_file.language == "Python":
+        return PYTHON_ANALYZER
+    if project_file.language in SUPPORTED_POLYGLOT_LANGUAGES:
+        return POLYGLOT_ANALYZER
+    return FALLBACK_ANALYZER
 
 
 def _record_location(path: str) -> str:
@@ -318,6 +348,7 @@ def _build_options_digest(max_source_bytes: int) -> str:
                 "codemap_schema_version": CODEMAP_SCHEMA_VERSION,
                 "fallback_analyzer": FALLBACK_ANALYZER.model_dump(mode="json"),
                 "max_source_bytes": max_source_bytes,
+                "polyglot_analyzer": POLYGLOT_ANALYZER.model_dump(mode="json"),
                 "python_analyzer": PYTHON_ANALYZER.model_dump(mode="json"),
                 "resolver_version": RESOLVER_VERSION,
             }

@@ -13,14 +13,27 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+import contextforge.application as application_module
 import contextforge.bridge.server as bridge_module
 from contextforge.bridge import MAX_JSONRPC_MESSAGE_BYTES, BridgeServer
 from contextforge.bridge.models import (
     BridgeSelectionItem,
     CancelParams,
     DiscoverParams,
+    IndexParams,
     ReadParams,
 )
+from contextforge.intelligence import (
+    GlobalMapAnalysisError,
+    IndexManifestNotFoundError,
+    acquire_index_lock,
+    build_structural_index,
+    calculate_source_snapshot_digest,
+    load_manifest,
+)
+from contextforge.models import ProviderAuthenticationError, ProviderTimeoutError
+from contextforge.progress import ProgressEvent, ProgressReporter, ProgressStatus
+from contextforge.repositories import scan_repository
 
 
 def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
@@ -39,6 +52,47 @@ def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
     assert "action_id" not in expand["properties"]
     assert "tool_name" not in expand["properties"]
     assert schema["$defs"]["discoverResult"]["additionalProperties"] is False
+
+    v2 = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v2.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        v2["$defs"]["indexRequest"]["properties"]["params"]["additionalProperties"]
+        is False
+    )
+    progress_event = v2["$defs"]["progressNotification"]["properties"]["params"][
+        "properties"
+    ]["event"]
+    assert progress_event["properties"]["schema_version"] == {"const": 3}
+    assert v2["$defs"]["progressNotification"]["properties"]["method"] == {
+        "const": "$/progress"
+    }
+
+
+def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None:
+    (tmp_path / "parsed.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "fallback.txt").write_text("plain text\n", encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "bridge-coverage") as lock:
+        build_structural_index(snapshot, lock)
+
+    coverage = BridgeServer(tmp_path)._index_coverage()
+
+    assert coverage == {
+        "total_files": 2,
+        "parsed_files": 1,
+        "fallback_files": 1,
+        "semantic_complete_files": 0,
+        "semantic_disabled_files": 2,
+        "semantic_failed_files": 0,
+        "semantic_partial_files": 0,
+        "semantic_chunks_planned": 0,
+        "semantic_chunks_completed": 0,
+        "verified_symbols": 1,
+        "inferred_regions": 0,
+    }
 
 
 class _QueueInput:
@@ -95,6 +149,19 @@ class _RecordingOutput:
             chunks = list(self.chunks[:count])
         return [cast(dict[str, Any], json.loads(chunk)) for chunk in chunks]
 
+    def wait_for_id(self, request_id: str | int) -> dict[str, Any]:
+        deadline = time.monotonic() + 10
+        with self._condition:
+            while True:
+                for chunk in self.chunks:
+                    frame = cast(dict[str, Any], json.loads(chunk))
+                    if frame.get("id") == request_id:
+                        return frame
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError("timed out waiting for bridge response")
+                self._condition.wait(remaining)
+
 
 class _Harness:
     def __init__(
@@ -131,6 +198,108 @@ class _Harness:
         self.input.close()
         assert self.task is not None
         await self.task
+
+
+def test_bridge_progress_publisher_coalesces_synchronous_bursts() -> None:
+    class ImmediateWriter:
+        def __init__(self) -> None:
+            self.frames: list[dict[str, Any]] = []
+
+        async def write(self, frame: dict[str, Any]) -> None:
+            self.frames.append(frame)
+
+    async def exercise() -> None:
+        writer = ImmediateWriter()
+        cancellation = asyncio.Event()
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, writer),
+            "index-1",
+            cancellation,
+            "operation-1",
+            capacity=1,
+            backpressure_timeout_seconds=0.1,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        for sequence in range(300):
+            reporter.report("scan", f"event {sequence}", percentage=sequence / 3)
+
+        await publisher.close()
+
+        assert not cancellation.is_set()
+        assert len(writer.frames) == 2
+        assert writer.frames[0]["params"]["event"]["sequence"] == 0
+        assert writer.frames[-1]["params"]["event"]["sequence"] == 299
+
+    asyncio.run(exercise())
+
+
+def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
+    class BlockedWriter:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def write(self, frame: dict[str, Any]) -> None:
+            del frame
+            self.started.set()
+            await self.release.wait()
+
+    async def exercise() -> None:
+        writer = BlockedWriter()
+        cancellation = asyncio.Event()
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, writer),
+            "index-1",
+            cancellation,
+            "operation-1",
+            capacity=1,
+            backpressure_timeout_seconds=0.01,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        reporter.report("scan", "first", percentage=1)
+        await asyncio.wait_for(writer.started.wait(), timeout=1)
+        reporter.report("scan", "second", percentage=2)
+        reporter.report("scan", "third", percentage=3)
+
+        await asyncio.wait_for(cancellation.wait(), timeout=1)
+        writer.release.set()
+        with pytest.raises(bridge_module.BridgeFault) as raised:
+            await publisher.close()
+
+        assert raised.value.typed_code == "INDEX_BUILD_FAILED"
+        assert raised.value.data["error_code"] == "progress_backpressure"
+
+    asyncio.run(exercise())
+
+
+def test_bridge_progress_publisher_close_does_not_hang_after_writer_failure() -> None:
+    class BrokenWriter:
+        async def write(self, frame: dict[str, Any]) -> None:
+            del frame
+            raise OSError("closed pipe")
+
+    async def exercise() -> None:
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, BrokenWriter()),
+            "index-1",
+            asyncio.Event(),
+            "operation-1",
+            capacity=1,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        reporter.report("scan", "first", percentage=1)
+        reporter.report("scan", "second", percentage=2)
+
+        with pytest.raises(OSError, match="closed pipe"):
+            await asyncio.wait_for(publisher.close(), timeout=1)
+
+    asyncio.run(exercise())
 
 
 def _request(
@@ -175,7 +344,11 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
         hello = (await harness.response(1))[0]
         assert hello["jsonrpc"] == "2.0"
         assert hello["result"]["protocol_version"] == "1.0"
-        assert hello["result"]["supported_protocol_versions"] == ["1.0"]
+        assert hello["result"]["supported_protocol_versions"] == [
+            "1.0",
+            "1.1",
+            "2.0",
+        ]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
         assert "shell" in hello["result"]["policy"]
@@ -208,13 +381,13 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         assert missing["error"]["data"]["code"] == "INVALID_PARAMS"
 
         harness.input.send(
-            _request("incompatible", "hello", {"protocol_version": "2.0"})
+            _request("incompatible", "hello", {"protocol_version": "3.0"})
         )
         incompatible = (await harness.response(3))[-1]
         assert incompatible["error"]["data"] == {
             "code": "INCOMPATIBLE_PROTOCOL_VERSION",
-            "requested_protocol_version": "2.0",
-            "supported_protocol_versions": ["1.0"],
+            "requested_protocol_version": "3.0",
+            "supported_protocol_versions": ["1.0", "1.1", "2.0"],
         }
 
         harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))
@@ -227,6 +400,369 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         await harness.close()
 
     asyncio.run(exercise())
+
+
+def test_bridge_v1_does_not_expose_index_mutation(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "1.1"}))
+        hello = (await harness.response(1))[-1]
+        assert "index" not in hello["result"]["capabilities"]["methods"]
+        assert hello["result"]["policy"]["index_mutation"] is False
+
+        harness.input.send(
+            _request(
+                "index-v1",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": "0" * 64,
+                    "provider": "none",
+                },
+            )
+        )
+        rejected = await asyncio.to_thread(harness.output.wait_for_id, "index-v1")
+        assert rejected["error"]["data"]["code"] == "METHOD_NOT_FOUND"
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        hello = (await harness.response(1))[-1]["result"]
+        capabilities = hello["capabilities"]
+        assert capabilities["tracked_index_jobs"] is True
+        assert capabilities["progress_notifications"] is True
+        assert capabilities["schemas"] == {
+            "index": {"current": 2, "readable": [1, 2]},
+            "manifest": {"current": 2, "readable": [1, 2]},
+            "record": {"current": 2, "readable": [1, 2]},
+            "progress": {"current": 3, "readable": [1, 2, 3]},
+            "context_package": {"current": 1, "readable": [1]},
+        }
+        assert "index" in capabilities["methods"]
+        digest = await _snapshot(harness, 2)
+
+        for action in ("build", "update"):
+            request_id = f"index-{action}"
+            harness.input.send(
+                _request(
+                    request_id,
+                    "index",
+                    {
+                        "action": action,
+                        "expected_snapshot_digest": digest,
+                        "provider": "none",
+                    },
+                )
+            )
+            response = await asyncio.to_thread(harness.output.wait_for_id, request_id)
+            assert response["result"]["action"] == action
+            assert response["result"]["snapshot_digest"] == digest
+            assert response["result"]["index_schema"] == 2
+            assert response["result"]["partial"] is False
+            progress = [
+                frame
+                for frame in await harness.response(len(harness.output.chunks))
+                if frame.get("method") == "$/progress"
+                and frame["params"]["request_id"] == request_id
+            ]
+            assert progress
+            events = [
+                ProgressEvent.model_validate(frame["params"]["event"])
+                for frame in progress
+            ]
+            assert events[-1].status is ProgressStatus.COMPLETED
+            assert (
+                events[-1].metadata["generation_id"]
+                == response["result"]["generation_id"]
+            )
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_index_cancellation_is_cooperative(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    started = asyncio.Event()
+
+    async def blocked_build(*args: object, **kwargs: object) -> None:
+        del args
+        cancellation = cast(asyncio.Event, kwargs["cancellation"])
+        started.set()
+        while not cancellation.is_set():
+            await asyncio.sleep(0)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(bridge_module, "build_repository_index", blocked_build)
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        digest = await _snapshot(harness, 2)
+        harness.input.send(
+            _request(
+                "slow-index",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": digest,
+                    "provider": "none",
+                },
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        harness.input.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": "slow-index"},
+            }
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "slow-index")
+        assert response["error"]["data"]["code"] == "REQUEST_CANCELLED"
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_rechecks_expected_snapshot_inside_index_workflow(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    expected = calculate_source_snapshot_digest(scan_repository(tmp_path))
+    original_load = cast(Any, bridge_module).load_project_configuration
+    mutated = False
+
+    def mutate_after_bridge_precheck(path: Path) -> Any:
+        nonlocal mutated
+        if not mutated:
+            source.write_text("VALUE = 2\n", encoding="utf-8")
+            mutated = True
+        return original_load(path)
+
+    monkeypatch.setattr(
+        bridge_module, "load_project_configuration", mutate_after_bridge_precheck
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        harness.input.send(
+            _request(
+                "snapshot-race",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": expected,
+                    "provider": "none",
+                },
+            )
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "snapshot-race")
+        assert response["error"]["data"]["code"] == "SOURCE_IDENTITY_CHANGED"
+        with pytest.raises(IndexManifestNotFoundError):
+            load_manifest(tmp_path)
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    cancellation_seen = threading.Event()
+    release_worker = threading.Event()
+    lock_was_active = False
+
+    def wait_for_cancellation(
+        snapshot: object,
+        lock: Any,
+        **kwargs: object,
+    ) -> None:
+        del snapshot
+        nonlocal lock_was_active
+        cancellation = cast(asyncio.Event, kwargs["cancellation"])
+        deadline = time.monotonic() + 5
+        while not cancellation.is_set():
+            if time.monotonic() >= deadline:
+                raise AssertionError("index timeout did not signal cancellation")
+            time.sleep(0.001)
+        lock_was_active = lock.active and lock.layout.lock.is_file()
+        cancellation_seen.set()
+        if not release_worker.wait(timeout=5):
+            raise AssertionError("test did not release the timed-out index worker")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        application_module, "build_structural_index", wait_for_cancellation
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        digest = calculate_source_snapshot_digest(scan_repository(tmp_path))
+        started_at = time.monotonic()
+        harness.input.send(
+            _request(
+                "index-timeout",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": digest,
+                    "provider": "none",
+                    "timeout_ms": 50,
+                },
+            )
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "index-timeout")
+        elapsed = time.monotonic() - started_at
+        assert response["error"]["data"]["code"] == "REQUEST_TIMEOUT"
+        assert await asyncio.to_thread(cancellation_seen.wait, 1)
+        assert lock_was_active is True
+        assert elapsed < 0.5
+        assert (tmp_path / ".contextforge" / "index" / "lock.json").is_file()
+        assert len(harness.server._background_tasks) == 1
+        release_worker.set()
+        deadline = time.monotonic() + 5
+        while harness.server._background_tasks:
+            if time.monotonic() >= deadline:
+                raise AssertionError("timed-out index cleanup did not finish")
+            await asyncio.sleep(0.01)
+        assert not (tmp_path / ".contextforge" / "index" / "lock.json").exists()
+        frames = [json.loads(chunk) for chunk in harness.output.chunks]
+        timeout_position = next(
+            index
+            for index, frame in enumerate(frames)
+            if frame.get("id") == "index-timeout"
+        )
+        assert all(
+            frame.get("method") != "$/progress"
+            for frame in frames[timeout_position + 1 :]
+        )
+        assert harness.stderr.getvalue() == ""
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_index_errors_are_typed_and_safe(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    async def authentication_failure(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise ProviderAuthenticationError(
+            "Bearer top-secret at http://user:pass@example.invalid"
+        )
+
+    monkeypatch.setattr(bridge_module, "build_repository_index", authentication_failure)
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
+        await harness.response(1)
+        digest = await _snapshot(harness, 2)
+        harness.input.send(
+            _request(
+                "provider-error",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": digest,
+                    "provider": "none",
+                },
+            )
+        )
+        response = await asyncio.to_thread(harness.output.wait_for_id, "provider-error")
+        data = response["error"]["data"]
+        assert response["error"]["code"] == bridge_module.PROVIDER_FAILURE
+        assert data["code"] == "PROVIDER_FAILURE"
+        assert data["error_code"] == "authentication_failed"
+        assert data["phase"] == "initialize"
+        assert data["reason"] == "provider authentication failed"
+        assert data["retryable"] is False
+        assert data["operation_id"].startswith("bridge-index-")
+        assert "secret" not in json.dumps(response)
+
+        harness.input.send(
+            _request(
+                "snapshot-drift",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": "0" * 64,
+                    "provider": "none",
+                },
+            )
+        )
+        drift = await asyncio.to_thread(harness.output.wait_for_id, "snapshot-drift")
+        drift_data = drift["error"]["data"]
+        assert drift["error"]["code"] == bridge_module.SOURCE_IDENTITY_CHANGED
+        assert drift_data["code"] == "SOURCE_IDENTITY_CHANGED"
+        assert drift_data["error_code"] == "source_identity_changed"
+        assert drift_data["retryable"] is True
+
+        harness.input.send(
+            _request(
+                "configuration-error",
+                "index",
+                {
+                    "action": "build",
+                    "expected_snapshot_digest": digest,
+                    "provider": "openai-compatible",
+                    "model": "exact/model",
+                    "base_url": "http://user:top-secret@example.invalid/v1",
+                },
+            )
+        )
+        configuration = await asyncio.to_thread(
+            harness.output.wait_for_id, "configuration-error"
+        )
+        configuration_data = configuration["error"]["data"]
+        assert configuration["error"]["code"] == bridge_module.PROVIDER_FAILURE
+        assert configuration_data["code"] == "PROVIDER_CONFIGURATION_ERROR"
+        assert configuration_data["error_code"] == "provider_configuration_error"
+        assert "top-secret" not in json.dumps(configuration)
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v2_classifies_a_provider_failure_wrapped_by_index_phases() -> None:
+    try:
+        try:
+            raise ProviderTimeoutError("unsafe timeout detail")
+        except ProviderTimeoutError as cause:
+            raise GlobalMapAnalysisError("aggregate map failure") from cause
+    except GlobalMapAnalysisError as error:
+        fault = bridge_module._index_bridge_fault(error, None, "operation-1")
+
+    assert fault.rpc_code == bridge_module.PROVIDER_FAILURE
+    assert fault.typed_code == "PROVIDER_FAILURE"
+    assert fault.data == {
+        "error_code": "provider_timeout",
+        "phase": "initialize",
+        "reason": "provider request timed out",
+        "retryable": True,
+        "operation_id": "operation-1",
+    }
 
 
 def test_bridge_rejects_malformed_oversized_unknown_and_invalid_requests(
@@ -646,6 +1182,82 @@ def test_bridge_discover_expand_read_and_package_are_verified_and_in_memory(
     asyncio.run(exercise())
 
 
+def test_bridge_v11_expansion_candidate_can_be_read(tmp_path: Path) -> None:
+    (tmp_path / "alpha.py").write_text("alpha = 1\n", encoding="utf-8")
+    (tmp_path / "beta.ts").write_text(
+        "export function uniqueBeta() { return 2; }\n", encoding="utf-8"
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "1.1"}))
+        hello = (await harness.response(1))[-1]
+        assert hello["result"]["capabilities"]["expansion_candidates"] is True
+        digest = await _snapshot(harness, 2)
+        harness.input.send(
+            _request(
+                "discover",
+                "discover",
+                {
+                    "expected_snapshot_digest": digest,
+                    "task": "Find alpha",
+                    "mode": "fresh",
+                    "budget": {"max_preselected_candidates": 1},
+                },
+            )
+        )
+        discovered = (await harness.response(3))[-1]
+        assert "beta.ts" not in {
+            item["path"] for item in discovered["result"]["candidates"]
+        }
+        preparation_id = discovered["result"]["preparation_id"]
+
+        harness.input.send(
+            _request(
+                "expand",
+                "expand",
+                {
+                    "expected_snapshot_digest": digest,
+                    "preparation_id": preparation_id,
+                    "operation": "text",
+                    "arguments": {"query": "uniqueBeta", "case_sensitive": True},
+                },
+            )
+        )
+        expanded = (await harness.response(4))[-1]["result"]
+        candidate = next(
+            item for item in expanded["candidates"] if item["path"] == "beta.ts"
+        )
+        assert candidate["evidence_kind"] == "exact_text"
+        assert candidate["ranges"] == [{"start_line": 1, "end_line": 1}]
+
+        harness.input.send(
+            _request(
+                "read",
+                "read",
+                {
+                    "expected_snapshot_digest": digest,
+                    "preparation_id": preparation_id,
+                    "items": [
+                        {
+                            "candidate_id": candidate["candidate_id"],
+                            "path": candidate["path"],
+                            "source_sha256": candidate["source_sha256"],
+                            "ranges": candidate["ranges"],
+                        }
+                    ],
+                },
+            )
+        )
+        read = (await harness.response(5))[-1]
+        assert read["result"]["files"][0]["path"] == "beta.ts"
+        assert "uniqueBeta" in read["result"]["files"][0]["blocks"][0]["text"]
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
 def test_bridge_rejects_path_traversal_source_mismatch_and_snapshot_drift(
     tmp_path: Path,
 ) -> None:
@@ -1024,6 +1636,15 @@ def test_bridge_timeout_and_internal_failure_are_safe(
 
 
 def test_bridge_parameter_models_reject_noncanonical_values() -> None:
+    with pytest.raises(ValidationError):
+        IndexParams.model_validate(
+            {
+                "action": "build",
+                "expected_snapshot_digest": "0" * 64,
+                "fail_fast": True,
+                "max_failures": 2,
+            }
+        )
     with pytest.raises(ValidationError):
         DiscoverParams.model_validate_json(
             json.dumps(

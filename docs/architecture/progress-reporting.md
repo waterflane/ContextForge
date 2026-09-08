@@ -159,6 +159,14 @@ stderr receives coalesced, non-ANSI records only for meaningful phase,
 percentage, item, counter, or terminal changes. `never` suppresses rendering;
 `always` never forces terminal controls onto an unsafe redirected stream.
 
+For `contextforge index build|update`, `--progress jsonl` changes stdout into a
+pure UTF-8 JSONL stream. Every line is the complete `ProgressEvent` schema 3
+object and is flushed immediately; Rich rendering and the human build summary
+are suppressed. Diagnostics remain on stderr. The final event carries the
+generation ID, source snapshot digest, index schema, and partial flag. When a
+failure limit or cancellation stops semantic scheduling, terminal event
+metadata also reports cancelled and not-yet-started units.
+
 Direct stderr and existing stderr logging handlers are routed through the same
 live console while it is active, then restored on the single stop path. This
 prints diagnostics above the panel instead of leaving a duplicate frame. All

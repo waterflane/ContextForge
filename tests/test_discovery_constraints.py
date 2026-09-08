@@ -22,6 +22,7 @@ from contextforge.discovery import (
 )
 from contextforge.discovery.constraints import extract_task_file_constraints
 from contextforge.discovery.session import (
+    DiscoverySession,
     _detect_intent_facets,
     _facet_aware_preselection,
     _rank_candidate_records,
@@ -347,6 +348,128 @@ def test_ranking_tokens_normalize_conservative_aliases_and_stopwords() -> None:
         "provider",
         "video",
     }
+
+
+def test_text_matches_without_codemap_do_not_claim_verified_declarations(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "progress.ts").write_text(
+        "export function preparationProgressStage(value: string) { return value; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "client.ts").write_text(
+        "preparationProgressStage(a); preparationProgressStage(b);\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+    task = "Что делает preparationProgressStage?"
+    records = _rank_candidate_records(
+        knowledge,
+        task=task,
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+    selected = _facet_aware_preselection(
+        records,
+        _detect_intent_facets(task),
+        _rank_candidates_by_facet(knowledge, records, _detect_intent_facets(task)),
+        limit=8,
+    )
+
+    assert records[0].path == "src/client.ts"
+    assert not any(
+        signal.startswith("exact_source_declarations=")
+        for record in records
+        for signal in record.ranking_signals
+    )
+    assert [item.path for item in selected] == [
+        "src/client.ts",
+        "src/progress.ts",
+    ]
+    session = DiscoverySession(
+        snapshot,
+        None,
+        DiscoveryRequest(task=task, mode=DiscoveryMode.FRESH),
+    )
+    executor, _ = session.prepare_read_only_tools()
+    observation = executor.execute(
+        step=1,
+        action_id="select-definition",
+        tool_name="select_candidates",
+        arguments={
+            "candidate_ids": [
+                item.candidate_id for item in session._preselected_candidates
+            ]
+        },
+    )
+    candidate = observation.data["candidates"][0]
+    assert candidate["kind"] == "line_ranges"
+    assert candidate["ranges"] == [{"start_line": 1, "end_line": 1}]
+    usage = observation.data["candidates"][1]
+    assert usage["path"] == "src/client.ts"
+    assert usage["kind"] == "line_ranges"
+    assert usage["ranges"] == [{"start_line": 1, "end_line": 1}]
+
+
+def test_exact_identifier_selection_preserves_full_file_manual_pin(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "progress.ts").write_text(
+        "export function preparationProgressStage() {}\n", encoding="utf-8"
+    )
+    session = DiscoverySession(
+        scan_repository(tmp_path),
+        None,
+        DiscoveryRequest(
+            task="Explain preparationProgressStage",
+            mode=DiscoveryMode.FRESH,
+            pinned_paths=("progress.ts",),
+        ),
+    )
+    executor, _ = session.prepare_read_only_tools()
+    executor.execute(
+        step=1,
+        action_id="select-pinned",
+        tool_name="select_candidates",
+        arguments={"candidate_ids": [session._preselected_candidates[0].candidate_id]},
+    )
+
+    assert executor.selected[0].kind == "full_file"
+    assert executor.selected[0].ranges == ()
+    assert executor.selected[0].manually_pinned is True
+
+
+def test_exact_identifier_scan_rejects_content_changed_after_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "progress.ts"
+    source.write_text("export function originalName() {}\n", encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    source.write_text(
+        "export function preparationProgressStage() {}\n", encoding="utf-8"
+    )
+    knowledge = DiscoveryKnowledge(
+        snapshot=snapshot,
+        mode=DiscoveryMode.INDEXED,
+        code_maps={},
+    )
+
+    records = _rank_candidate_records(
+        knowledge,
+        task="Что делает preparationProgressStage?",
+        pinned_paths=(),
+        excluded_paths=(),
+    )
+
+    assert not any(
+        signal.startswith("exact_source_") for signal in records[0].ranking_signals
+    )
 
 
 def test_role_scoring_does_not_turn_index_coverage_into_test_request(

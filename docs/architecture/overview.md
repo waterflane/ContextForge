@@ -106,4 +106,6 @@ implemented in v0.4. Version 0.4.1 adds maintenance-level progress,
 diagnostics, nested-ignore, and CLI usability improvements; it does not claim
 future GUI, remote transport, orchestration, or source-mutation functionality.
 Version 0.5.0 adds the trusted-local, model-free, read-only bridge v1 without
-changing the existing model-assisted discovery or MCP semantics.
+changing the existing model-assisted discovery or MCP semantics. Version 0.5.1
+adds verified polyglot declarations, resumable semantic coverage, bridge
+protocol 1.1, and stricter exact-symbol and dependency-aware discovery.

@@ -1,15 +1,19 @@
-# Generic bridge v1
+# Generic bridge protocols
 
-ContextForge bridge v1 is a persistent, workspace-bound, model-free service for
-trusted local integrations. Start it as a child process:
+ContextForge Bridge is a persistent, workspace-bound service for trusted local
+integrations. Protocols 1.0 and 1.1 are model-free and read-only. Protocol 2.0
+adds opt-in, tracked index mutation through the same application workflow used
+by the CLI. Start it as a child process:
 
 ```bash
 contextforge bridge --stdio --workspace /path/to/repository
 ```
 
-It is not a remote API, sandbox, session manager, model gateway, or agent
-orchestrator. The consumer owns model selection, prompts, retries, working-set
-state, and candidate choice. ContextForge retains repository truth: scanning,
+It is not a remote API, sandbox, session manager, or agent orchestrator. For
+discovery the consumer owns model selection, prompts, working-set state, and
+candidate choice. A Bridge 2 index request may select a configured provider and
+bounded execution policy, but cannot supply prompts. ContextForge retains
+repository truth: scanning,
 ignore/protection policy, current index provenance, path authorization, source
 identity, verified reads, budgets, and canonical package construction.
 
@@ -25,11 +29,11 @@ Protocol versioning is independent of the ContextForge package version and the
 context-package schema. The first application request must be:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol_version":"1.0","client_name":"example"}}
+{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol_version":"1.1","client_name":"example"}}
 ```
 
 The response reports `protocol_version`, `supported_protocol_versions`, exact
-method/operation capabilities, limits, and read-only policy. A client must
+method/operation capabilities, limits, schemas, and policy. A client must
 compare the selected version with the version it implements before continuing.
 Missing negotiation returns `PROTOCOL_NEGOTIATION_REQUIRED`; an unsupported
 version returns `INCOMPATIBLE_PROTOCOL_VERSION` and the supported list.
@@ -38,8 +42,16 @@ V1 requests and parameter objects are closed. Unknown methods, fields, and
 operations fail rather than being ignored. Compatible optional evolution
 requires explicit minor-version negotiation. Required fields, changed source or
 budget semantics, weaker verification, or changed success/failure meaning
-require a new major version. The normative frame schema is
-[`contextforge-bridge-v1.schema.json`](../schemas/contextforge-bridge-v1.schema.json).
+require a new major version. The normative frame schemas are
+[`contextforge-bridge-v1.schema.json`](../schemas/contextforge-bridge-v1.schema.json)
+and
+[`contextforge-bridge-v2.schema.json`](../schemas/contextforge-bridge-v2.schema.json).
+
+`hello.capabilities.schemas` reports independent persisted/wire formats rather
+than inferring them from the bridge version: index, manifest, and record are
+current 2/readable 1–2; progress is current 3/readable 1–3; context package is
+current/readable 1. Bridge 1 response compatibility does not depend on these
+versions.
 
 ## Repository flow
 
@@ -68,6 +80,13 @@ The public `expand` operations in v1 are `symbol`, `text`, `callers`,
 No internal discovery action IDs, tool names, mutable executors, or model-side
 session state are part of the bridge contract.
 
+Version 1.1 adds verified expansion candidates. `text` and `symbol` expansion
+results include a `candidates` array whose IDs are registered under the same
+`preparation_id`; callers may pass those IDs and ranges directly to `read` or
+`package`. Version 1.0 retains its original response shape. Version 1.1 status
+also includes index coverage counts so a structural-only or semantic-disabled
+index cannot be mistaken for a fully enriched one.
+
 ## Method contract
 
 | Method | Required parameters | Result purpose |
@@ -75,6 +94,7 @@ session state are part of the bridge contract.
 | `hello` | `protocol_version` | Negotiated version, package version, capabilities, workspace identity, and policy |
 | `status` | none | Current readiness, source drift, and read-only index status |
 | `snapshot` | none | New authoritative digest and bounded inventory summary |
+| `index` (v2) | action and expected snapshot digest | Atomic tracked build/update job using the application workflow |
 | `discover` | `expected_snapshot_digest`, `task` | Deterministic candidates and preparation identity; never a model call |
 | `expand` | digest, preparation ID, operation | One bounded read-only evidence result and cumulative usage |
 | `read` | digest, preparation ID, non-empty items | All-or-nothing verified source excerpts and selection identity |
@@ -89,6 +109,50 @@ portable relative paths. Read/package items must be unique and sorted by
 candidate ID; line ranges are one-based, inclusive, sorted, and disjoint. See
 the normative schema for every budget and response field.
 
+## Bridge 2 tracked index jobs
+
+Negotiate `2.0`, call `snapshot`, then pass the exact digest to `index`:
+
+```json
+{"jsonrpc":"2.0","id":"build-7","method":"index","params":{"action":"update","expected_snapshot_digest":"<64 hex characters>","provider":"openai-compatible","model":"exact/model-id","base_url":"http://127.0.0.1:1234/v1","concurrency":2,"max_failures":3}}
+```
+
+`action` is `build` or `update`. Optional fields mirror the bounded CLI provider,
+model, endpoint, concurrency, timeout, context-window, JSON repair, output-token,
+failure, force, file-limit, and stale-lock recovery policies. `fail_fast` and
+`max_failures` are mutually exclusive. `fail_on_error` alone keeps its existing
+meaning: finish all eligible work but do not publish if any semantic file fails.
+
+The bridge owns scanning, lock acquisition, staging, generation validation, and
+atomic publication. The application workflow verifies the expected snapshot
+against the exact scan used for the build and rescans immediately before
+publication. Cancellation is checked again at manifest activation. Timeout,
+clean EOF, and shutdown signal the application cancellation token; partial
+generations never become active. A timed-out index request returns
+`REQUEST_TIMEOUT` at the caller's deadline while cooperative worker cleanup
+continues as tracked bridge work. Its writer lock remains held until that cleanup
+finishes, preventing a second writer from observing half-finished staging.
+
+While the request runs, Bridge 2 emits notifications before its final response:
+
+```json
+{"jsonrpc":"2.0","method":"$/progress","params":{"request_id":"build-7","event":{"schema_version":3,"operation_id":"bridge-index-...","sequence":4,"status":"running"}}}
+```
+
+The real `event` is the full closed `ProgressEvent` schema 3 object. Correlate
+notifications with `params.request_id`; sequence is monotonic within the
+operation but may contain gaps when cumulative snapshots from a synchronous
+producer burst are coalesced. A successful result contains `generation_id`,
+`snapshot_digest`, `index_schema`, statistics, and `partial`.
+
+Clients must continuously consume Bridge stdout while an index request is
+active. Progress delivery uses one writer task and a bounded 256-event queue.
+An instantaneous local producer burst retains the newest cumulative snapshot
+instead of being mistaken for a slow client. If no queue slot becomes available
+for 5 seconds, the index job is cancelled without publication and returns
+`INDEX_BUILD_FAILED` with `error.data.error_code` set to
+`progress_backpressure` and `retryable` set to `true`.
+
 JSON-RPC standard errors retain their numeric meaning. ContextForge also puts a
 stable uppercase typed code in `error.data.code`. Integration-relevant v1 codes
 include `PROTOCOL_NEGOTIATION_REQUIRED`, `INCOMPATIBLE_PROTOCOL_VERSION`,
@@ -98,6 +162,22 @@ include `PROTOCOL_NEGOTIATION_REQUIRED`, `INCOMPATIBLE_PROTOCOL_VERSION`,
 `RESOURCE_LIMIT_EXCEEDED`, `INVALID_SOURCE_RANGE`,
 `APPLICATION_REQUEST_REJECTED`, and `INTERNAL_ERROR`. Errors never share a
 `result` payload, and internal exceptions or local paths are not returned.
+
+Bridge 2 index failures additionally use dedicated numeric/typed categories:
+
+| JSON-RPC | Typed code | Meaning |
+| --- | --- | --- |
+| `-32001` | `SOURCE_IDENTITY_CHANGED` | Snapshot drift before or during the job |
+| `-32009` | `PROVIDER_FAILURE` / `PROVIDER_CONFIGURATION_ERROR` | Safe provider or configuration failure |
+| `-32010` | `FAILURE_LIMIT_REACHED` | `fail_fast`/`max_failures` threshold reached |
+| `-32011` | `PROVIDER_CIRCUIT_OPEN` | Provider-wide circuit opened |
+| `-32012` | `INDEX_STORAGE_ERROR` | Safe index storage failure |
+| `-32013` | `INDEX_LOCKED` | Active or unrecoverable writer lock |
+
+Their `error.data` includes `code`, `error_code`, `phase`, safe `reason`,
+`retryable`, and `operation_id`. Provider bodies, credentialed URLs, secrets,
+absolute paths, tracebacks, and exception representations are never returned.
+`-32603 INTERNAL_ERROR` is reserved for unexpected defects.
 
 ## Verified source and identity changes
 
@@ -128,25 +208,34 @@ Cancellation is cooperative and uses the target request ID:
 
 The target completes normally if it won the race, or fails with typed
 `REQUEST_CANCELLED`. Cancellation does not return partial read/package output
-and grants no mutation capability. A cancellation notification has no response;
+or publish a partial index generation. A cancellation notification has no response;
 include its own JSON-RPC `id` only when a `{"cancelled": true|false}` response is
 needed.
 
 Send `shutdown` after outstanding work is resolved, wait for its response, then
 close stdin and wait for the child process. Clean stdin EOF also stops the
-bridge. Abrupt process termination is safe with respect to repository and index
-state because bridge operations are read-only.
+bridge. For Bridge 1 this remains read-only. Bridge 2 cancellation does not
+activate a partial generation; abrupt termination may leave recoverable staging
+or lock metadata, while the prior active generation remains authoritative.
 
 Shutdown and clean EOF use the same bounded drain. The bridge first stops
 accepting work, signals every active request's cooperative cancellation event,
 and waits at most 5 seconds. Any request task still pending then receives direct
 asyncio cancellation and gets at most another 0.1 seconds for cleanup. After
 that 5.1-second maximum drain budget, the bridge detaches any remaining task and
-does not wait for it again. These internal v1 limits are fixed rather than CLI
-configurable. A timed-out request cannot return a partial success, and the
-shutdown response remains a normal serialized JSON-RPC frame.
+does not wait for it again. These internal bridge limits are fixed rather than CLI
+configurable. Caller timeout returns its JSON-RPC error immediately; the timed-out
+index cleanup remains part of this shutdown drain and cannot emit later progress
+or return a partial success. The shutdown response remains a normal serialized
+JSON-RPC frame.
 
-## Security and read-only boundary
+## Security and mutation boundary
+
+Bridge 1.1 coverage includes `semantic_partial_files`,
+`semantic_chunks_planned`, and `semantic_chunks_completed`. Partial files do
+not count toward `semantic_complete_files`. Bridge 1.0 keeps its existing
+response shape. Chunk cache payloads are internal and are not returned in
+semantic tool summaries or packaged source.
 
 Run the bridge only as a child process of a trusted local consumer. It inherits
 the user's filesystem read authority and intentionally returns repository data.
@@ -156,8 +245,11 @@ stdio through a network or untrusted broker without an external security layer.
 
 Bridge v1 cannot write repository source, mutate Git, invoke a shell or arbitrary
 subprocess, call a model/provider, access external data, mutate the index, or
-publish artifacts to disk. `package` returns the canonical package in memory.
-The workspace is fixed at process start and requests cannot replace it.
+publish artifacts to disk. Bridge 2 relaxes only model/provider access under the
+configured policy and verified atomic writes beneath `.contextforge/index`.
+Neither version writes source or Git state. `package` returns the canonical
+package in memory. The workspace is fixed at process start and requests cannot
+replace it.
 
 See the runnable [generic bridge client](../../examples/generic_bridge_client.py)
 and [troubleshooting guide](troubleshooting.md).

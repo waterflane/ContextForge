@@ -92,7 +92,10 @@ class ProjectModelSettings(_ConfigModel):
     max_response_bytes: int = 1_000_000
     concurrency_limit: int = 2
     retry_limit: int = 2
-    semantic_max_output_tokens: int = Field(default=512, ge=96, le=32_768, strict=True)
+    semantic_max_output_tokens: int = Field(default=1024, ge=96, le=32_768, strict=True)
+    reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
+        "off"
+    )
     local_only: bool = True
     external_data_policy: Literal["deny", "allow_selected", "allow_repository"] = "deny"
     store_raw_prompts: bool = False
@@ -260,6 +263,7 @@ def resolve_provider_configuration(
             if json_repair_attempts is None
             else max(0, min(10, json_repair_attempts))
         ),
+        "reasoning_effort": settings.reasoning_effort,
         "local_only": settings.local_only if local_only is None else local_only,
         "external_data_policy": settings.external_data_policy,
         "credential_env": settings.credential_env,

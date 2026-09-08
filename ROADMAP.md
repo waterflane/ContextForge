@@ -58,7 +58,7 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Correct ANSI-sensitive CLI help validation for consistent Linux and
   Windows release CI.
 
-## v0.5: Generic local integration bridge (release prepared)
+## v0.5: Generic local integration bridge (milestone complete)
 
 - [x] Expose immutable model-free candidate, expansion, verified-read, and
   package application contracts without changing model-assisted discovery.
@@ -67,6 +67,35 @@ This roadmap describes broad milestones only. It does not promise dates.
 - [x] Keep repository truth, source identity verification, path policy, and
   read-only guarantees inside ContextForge while consumers own model selection.
 - [x] Keep MCP independent and preserve its existing read-only protocol.
+
+### v0.5.1 repository intelligence maintenance release (release prepared)
+
+- [x] Add verified Tree-sitter declaration extraction for ten common polyglot
+  languages and publish explicit relationship-coverage limitations.
+- [x] Persist index schema v2 source regions, resumable semantic chunks, and
+  complete required-symbol budgeting.
+- [x] Add bridge protocol 1.1 expansion candidates and index coverage while
+  retaining protocol 1.0 compatibility.
+- [x] Harden exact-symbol discovery, lexical dependency resolution, Kotlin
+  definition ranking, and reviewed deterministic fallback finalization.
+- [x] Adapt structured model requests to truncation and reported runtime context
+  limits without weakening strict validation.
+
+### Unreleased host-integration hardening (complete)
+
+- [x] Add independent fail-fast and bounded-failure index policies while
+  preserving the existing `--fail-on-error` contract.
+- [x] Classify provider failures, stop retrying terminal authentication, quota,
+  model, and configuration errors, and add a job-scoped circuit breaker.
+- [x] Expose clean JSONL index progress and bounded Bridge progress
+  notifications that coalesce synchronous bursts while detecting sustained
+  client backpressure.
+- [x] Add opt-in Bridge 2 tracked build/update jobs with cooperative
+  cancellation, caller-deadline responses, background lock-safe cleanup,
+  snapshot preconditions, and atomic publication guards.
+- [x] Publish readable/current index-family schema capabilities, stabilize
+  analyzer identity across endpoint changes, and return safe typed Bridge
+  integration errors.
 
 ## Later
 

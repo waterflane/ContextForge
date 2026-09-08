@@ -11,17 +11,19 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, Field, JsonValue
 
 from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.intelligence.chunks import SourceChunk, plan_source_chunks
 from contextforge.intelligence.codemap import (
     FileCodeMap,
     SourceRange,
     SymbolKind,
     SymbolRecord,
 )
+from contextforge.intelligence.extractors import SUPPORTED_CODEMAP_LANGUAGES
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.manifest import (
     build_index_manifest,
@@ -37,6 +39,7 @@ from contextforge.intelligence.models import (
     ModelIdentity,
     SemanticStatus,
     analyzer_identity_key,
+    normalize_analyzer_identity,
 )
 from contextforge.intelligence.semantic_models import (
     SEMANTIC_SCHEMA_VERSION,
@@ -45,6 +48,8 @@ from contextforge.intelligence.semantic_models import (
     DataFlowDescription,
     EvidenceReference,
     FileSemanticAnalysis,
+    InferredRegionRecord,
+    SemanticChunkCheckpoint,
     SemanticConfidence,
     SideEffectDescription,
     SymbolSemanticAnalysis,
@@ -64,6 +69,7 @@ from contextforge.intelligence.store import (
 )
 from contextforge.logging import LogLevel, emit
 from contextforge.models import (
+    ContextWindowExceededError,
     ModelProvider,
     ModelProviderError,
     ModelRequest,
@@ -84,10 +90,10 @@ from contextforge.progress import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_ANALYZER_ID = "contextforge-file-semantics"
-SEMANTIC_ANALYZER_VERSION = "3"
+SEMANTIC_ANALYZER_VERSION = "5"
 GENERIC_SEMANTIC_ANALYZER_ID = "generic-text-semantic"
-GENERIC_SEMANTIC_ANALYZER_VERSION = "1"
-SEMANTIC_PROMPT_VERSION = "3"
+GENERIC_SEMANTIC_ANALYZER_VERSION = "2"
+SEMANTIC_PROMPT_VERSION = "5"
 DETERMINISTIC_SEMANTIC_ANALYZER_ID = "contextforge-metadata-semantics"
 DETERMINISTIC_SEMANTIC_ANALYZER_VERSION = "1"
 SEMANTIC_WORK_UNIT_BYTES = 32_768
@@ -102,9 +108,14 @@ or text outside the object."""
 _ANALYZED_SYMBOL_KINDS = frozenset(
     {
         SymbolKind.CLASS,
+        SymbolKind.CONSTRUCTOR,
+        SymbolKind.ENUM,
         SymbolKind.FUNCTION,
         SymbolKind.ASYNC_FUNCTION,
+        SymbolKind.INTERFACE,
         SymbolKind.METHOD,
+        SymbolKind.STRUCT,
+        SymbolKind.TRAIT,
     }
 )
 
@@ -128,7 +139,16 @@ class _RawClaim(IndexModel):
     evidence: tuple[_RawEvidence, ...] = Field(default=(), max_length=50)
 
 
-class _RawFileAnalysis(IndexModel):
+class _RawInferredRegion(IndexModel):
+    label: Annotated[str, Field(min_length=1, max_length=200)]
+    kind: Literal["callable", "type", "section", "block", "unknown"]
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+    summary: Annotated[str, Field(min_length=1, max_length=320)]
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+
+class _RawFileClaims(IndexModel):
     primary_purpose: _RawClaim | None = None
     architectural_roles: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     major_responsibilities: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
@@ -138,6 +158,10 @@ class _RawFileAnalysis(IndexModel):
     public_entry_points: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     test_relationships: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
     uncertainty: tuple[_RawClaim, ...] = Field(default=(), max_length=20)
+
+
+class _RawFileAnalysis(_RawFileClaims):
+    inferred_regions: tuple[_RawInferredRegion, ...] = Field(default=(), max_length=64)
 
 
 class _RawSymbolAnalysis(IndexModel):
@@ -160,18 +184,18 @@ class _RawSymbolAnalysis(IndexModel):
 
 
 class _CombinedResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
-    file: _RawFileAnalysis
+    schema_version: Literal[1] = 1
+    file: _RawFileClaims
     symbols: tuple[_RawSymbolAnalysis, ...] = Field(default=(), max_length=500)
 
 
 class _FileResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
-    file: _RawFileAnalysis
+    schema_version: Literal[1] = 1
+    file: _RawFileClaims
 
 
 class _SymbolResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1] = 1
     symbol: _RawSymbolAnalysis
 
 
@@ -180,16 +204,17 @@ _CompactItem = Annotated[str, Field(min_length=1, max_length=160)]
 
 
 class _GenericTextResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1] = 1
     summary: _CompactText
     key_points: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
     entry_points: tuple[_CompactItem, ...] = Field(default=(), max_length=3)
     configuration: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
     uncertainty: tuple[_CompactItem, ...] = Field(default=(), max_length=2)
+    regions: tuple[_RawInferredRegion, ...] = Field(default=(), max_length=64)
 
 
 class _ReadmeResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1] = 1
     project_purpose: _CompactText
     entry_points: tuple[_CompactItem, ...] = Field(default=(), max_length=3)
     setup: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
@@ -197,21 +222,47 @@ class _ReadmeResponse(IndexModel):
 
 
 class _LicenseResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1] = 1
     license_type: Annotated[str, Field(min_length=1, max_length=96)]
     obligations: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
     restrictions: tuple[_CompactItem, ...] = Field(default=(), max_length=4)
 
 
 class _ConfigResponse(IndexModel):
-    schema_version: Literal[1] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1] = 1
     summary: _CompactText
     sections: tuple[_CompactItem, ...] = Field(default=(), max_length=5)
     important_keys: tuple[_CompactItem, ...] = Field(default=(), max_length=8)
 
 
+class _ChunkOutputLimit(ContextWindowExceededError):
+    """The required symbol response cannot fit the caller's output ceiling."""
+
+
 class SemanticAnalysisError(RuntimeError):
     """Raised when semantic analysis cannot safely publish the requested result."""
+
+
+class SemanticFailureLimitError(SemanticAnalysisError):
+    """Raised after the configured number of semantic units fail."""
+
+    def __init__(self, failure_count: int, diagnostic: AnalysisDiagnostic) -> None:
+        self.failure_count = failure_count
+        self.error_code = diagnostic.code
+        self.safe_reason = diagnostic.message
+        super().__init__(
+            f"semantic failure limit reached after {failure_count} file(s): "
+            f"{diagnostic.message}"
+        )
+
+
+class SemanticProviderCircuitError(SemanticAnalysisError):
+    """Raised when a provider-wide or repeated transient failure opens the circuit."""
+
+    def __init__(self, error_code: str, safe_reason: str) -> None:
+        self.error_code = error_code
+        self.safe_reason = safe_reason
+        super().__init__(f"provider circuit opened: {safe_reason}")
 
 
 class StaleStructuralIndexError(SemanticAnalysisError):
@@ -242,10 +293,11 @@ class SemanticAnalysisOptions:
     max_request_bytes: int = 2_000_000
     max_source_bytes_per_request: int = 65_536
     max_response_bytes: int = 1_000_000
-    max_output_tokens: int = 512
+    max_output_tokens: int = 1024
     max_chunks_per_file: int = 64
-    max_requests_per_file: int = 1
+    max_requests_per_file: int = 64
     max_files: int | None = None
+    max_failures: int | None = None
     fail_on_error: bool = False
     resume: bool = True
     force_reanalyze: bool = False
@@ -279,6 +331,10 @@ class SemanticAnalysisOptions:
             type(self.max_files) is not int or self.max_files <= 0
         ):
             raise ValueError("max_files must be a positive integer or None")
+        if self.max_failures is not None and (
+            type(self.max_failures) is not int or self.max_failures <= 0
+        ):
+            raise ValueError("max_failures must be a positive integer or None")
         if self.max_source_bytes_per_request > self.max_request_bytes:
             raise ValueError("source byte limit cannot exceed request byte limit")
         if (
@@ -426,11 +482,27 @@ class _SemanticProgressTracker:
         self._lifecycle = "published"
         self.reporter.complete(message="Semantic generation published atomically.")
 
-    def abort(self, *, cancelled: bool = False) -> None:
+    def abort(
+        self,
+        *,
+        cancelled: bool = False,
+        cancelled_units: int = 0,
+        unstarted_units: int = 0,
+    ) -> None:
+        metadata: dict[str, JsonValue] = {
+            "route_totals": cast(dict[str, JsonValue], self.plan.route_totals),
+            "cancelled_units": cancelled_units,
+            "unstarted_units": unstarted_units,
+        }
         if cancelled:
-            self.reporter.cancel(message="Semantic analysis cancelled.")
+            self.reporter.cancel(
+                message="Semantic analysis cancelled.", metadata=metadata
+            )
         else:
-            self.reporter.fail(message="Semantic analysis failed before publication.")
+            self.reporter.fail(
+                message="Semantic analysis failed before publication.",
+                metadata=metadata,
+            )
 
     def _emit(self, message: str, *, current_item: str | None = None) -> None:
         total_weight = sum(self._weights.values())
@@ -515,7 +587,9 @@ class SemanticIndexBuildResult:
         return tuple(
             item.path
             for item in self.outcomes
-            if item.final_status == "complete" and not item.reused and not item.resumed
+            if item.final_status in {"complete", "partial"}
+            and not item.reused
+            and not item.resumed
         )
 
     @property
@@ -565,19 +639,17 @@ async def build_semantic_index(
         load_file_code_map(snapshot.root, item.path, manifest=structural)
         for item in structural.files
     )
-    provider_id, model_id, base_url_sha256 = _provider_identity(provider)
+    provider_id, model_id = _provider_identity(provider)
     rich_analyzer = _semantic_analyzer(
         active_options,
         provider_id,
         model_id,
-        base_url_sha256,
         analysis_route="rich_model_analysis",
     )
     generic_analyzer = _semantic_analyzer(
         active_options,
         provider_id,
         model_id,
-        base_url_sha256,
         analysis_route="generic_model_analysis",
     )
     options_digest = _analysis_options_digest(active_options)
@@ -585,6 +657,10 @@ async def build_semantic_index(
     deterministic_options_digest = _deterministic_options_digest(active_options)
     reusable_manifests = _reuse_manifests(
         snapshot.root, structural, previous_manifest=previous_manifest
+    )
+    identity_migration_needed = any(
+        normalize_analyzer_identity(item) != item
+        for item in structural.semantic_analyzers
     )
 
     analyses: dict[str, FileSemanticAnalysis] = {}
@@ -620,7 +696,7 @@ async def build_semantic_index(
             _emit_status(active_options, code_map.path, "skipped")
             continue
         project_file = project_files[code_map.path]
-        route = _semantic_route(project_file)
+        route = _semantic_route(project_file, code_map)
         if route == "skipped":
             outcomes[code_map.path] = SemanticFileOutcome(
                 path=code_map.path,
@@ -663,7 +739,7 @@ async def build_semantic_index(
                 expected_digest,
             )
         )
-        if reused is not None:
+        if reused is not None and reused.coverage_complete:
             analyses[code_map.path] = reused
             outcomes[code_map.path] = SemanticFileOutcome(
                 path=code_map.path,
@@ -788,7 +864,11 @@ async def build_semantic_index(
                 plan_item.path, code=diagnostic.code, message=diagnostic.message
             )
 
-    if not selected_stale and _manifest_matches_planned_semantics(structural, analyses):
+    if (
+        not selected_stale
+        and not identity_migration_needed
+        and _manifest_matches_planned_semantics(structural, analyses)
+    ):
         tracker.publish()
         return SemanticIndexBuildResult(
             manifest=structural,
@@ -804,6 +884,7 @@ async def build_semantic_index(
         write_index_record(lock, _interpretation_location(path), _serialize(analysis))
 
     semaphore = asyncio.Semaphore(active_options.max_concurrency)
+    failure_causes: dict[str, BaseException] = {}
 
     async def analyze_one(
         project_file: ProjectFile,
@@ -819,7 +900,7 @@ async def build_semantic_index(
             checkpoint = load_staged_index_record(lock, location)
             if checkpoint is not None:
                 resumed = _deserialize_analysis(checkpoint)
-                if _analysis_matches(
+                if resumed.coverage_complete and _analysis_matches(
                     resumed, state, code_map, expected_analyzer, expected_digest
                 ):
                     tracker.reuse(project_file.path)
@@ -859,6 +940,15 @@ async def build_semantic_index(
                         options_digest=expected_digest,
                         cancellation=cancellation,
                         analysis_route=model_route,
+                        checkpoint_lock=lock,
+                        previous_analysis=_find_reusable_analysis(
+                            snapshot.root,
+                            reusable_manifests,
+                            state,
+                            code_map,
+                            expected_analyzer,
+                            expected_digest,
+                        ),
                     )
             _raise_if_cancelled(cancellation)
             tracker.accepted(project_file.path)
@@ -885,6 +975,7 @@ async def build_semantic_index(
                 path=project_file.path,
             )
             tracker.fail(project_file.path, diagnostic)
+            failure_causes[project_file.path] = exc
             emit(
                 "semantic",
                 "semantic.analysis.failed",
@@ -904,41 +995,99 @@ async def build_semantic_index(
                 },
             )
             _emit_status(active_options, project_file.path, "failed")
+            if isinstance(exc, ModelProviderError) and exc.circuit_opened:
+                raise SemanticProviderCircuitError(code, message) from exc
             return project_file.path, None, diagnostic, False
 
     task_results: list[
         tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]
     ] = []
-    for offset in range(0, len(selected_stale), active_options.max_concurrency):
-        batch = selected_stale[offset : offset + active_options.max_concurrency]
-        tasks = [
-            asyncio.create_task(
-                analyze_one(
-                    project_file,
-                    code_map,
-                    state,
-                    route,
-                    expected_analyzer,
-                    expected_digest,
-                )
-            )
-            for (
+    failure_count = 0
+    pending: set[
+        asyncio.Task[tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]]
+    ] = set()
+    next_work = 0
+
+    def schedule_available() -> None:
+        nonlocal next_work
+        while len(pending) < active_options.max_concurrency and next_work < len(
+            selected_stale
+        ):
+            (
                 project_file,
                 code_map,
                 state,
                 route,
                 expected_analyzer,
                 expected_digest,
-            ) in batch
-        ]
-        try:
-            task_results.extend(await asyncio.gather(*tasks))
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            tracker.abort(cancelled=True)
-            raise
+            ) = selected_stale[next_work]
+            next_work += 1
+            pending.add(
+                asyncio.create_task(
+                    analyze_one(
+                        project_file,
+                        code_map,
+                        state,
+                        route,
+                        expected_analyzer,
+                        expected_digest,
+                    )
+                )
+            )
+
+    schedule_available()
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            limit_diagnostic: AnalysisDiagnostic | None = None
+            completed = await asyncio.gather(*done, return_exceptions=True)
+            first_exception: BaseException | None = None
+            for result in completed:
+                if isinstance(result, BaseException):
+                    if first_exception is None:
+                        first_exception = result
+                    continue
+                task_results.append(result)
+                _, work, diagnostic, _ = result
+                if work is not None:
+                    continue
+                assert diagnostic is not None
+                failure_count += 1
+                if (
+                    active_options.max_failures is not None
+                    and failure_count >= active_options.max_failures
+                    and limit_diagnostic is None
+                ):
+                    limit_diagnostic = diagnostic
+            if first_exception is not None:
+                raise first_exception
+            if limit_diagnostic is not None:
+                cancelled_units = len(pending)
+                for unfinished in pending:
+                    unfinished.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                tracker.abort(
+                    cancelled_units=cancelled_units,
+                    unstarted_units=len(selected_stale) - next_work,
+                )
+                raise SemanticFailureLimitError(failure_count, limit_diagnostic)
+            schedule_available()
+    except BaseException as exc:
+        cancelled_units = len(pending)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if not isinstance(exc, SemanticFailureLimitError):
+            tracker.abort(
+                cancelled=isinstance(
+                    exc, (asyncio.CancelledError, ProviderCancelledError)
+                ),
+                cancelled_units=cancelled_units,
+                unstarted_units=len(selected_stale) - next_work,
+            )
+        raise
 
     failures: list[AnalysisDiagnostic] = []
     for path, work, diagnostic, resumed in task_results:
@@ -957,15 +1106,28 @@ async def build_semantic_index(
             outcomes[path] = SemanticFileOutcome(
                 path=path,
                 initial_status="stale",
-                final_status="complete",
+                final_status="complete"
+                if work.analysis.coverage_complete
+                else "partial",
                 request_count=work.request_count,
                 resumed=resumed,
             )
     if failures and active_options.fail_on_error:
         tracker.abort()
-        raise SemanticAnalysisError(
+        error = SemanticAnalysisError(
             f"semantic analysis failed for {len(failures)} file(s); index not published"
         )
+        cause = next(
+            (
+                failure_causes[diagnostic.path]
+                for diagnostic in failures
+                if diagnostic.path in failure_causes
+            ),
+            None,
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
     _raise_if_cancelled(cancellation)
 
     states: list[IndexedFileState] = []
@@ -973,7 +1135,10 @@ async def build_semantic_index(
     for state in structural.files:
         file_analysis = analyses.get(state.path)
         outcome = outcomes[state.path]
-        if file_analysis is not None and outcome.final_status == "complete":
+        if file_analysis is not None and outcome.final_status in {
+            "complete",
+            "partial",
+        }:
             content = _serialize(file_analysis)
             digest = hashlib.sha256(content).hexdigest()
             location = _interpretation_location(state.path)
@@ -983,7 +1148,7 @@ async def build_semantic_index(
                     update={
                         "interpretation_record_location": location,
                         "interpretation_record_sha256": digest,
-                        "semantic_status": "complete",
+                        "semantic_status": outcome.final_status,
                     }
                 )
             )
@@ -1049,9 +1214,10 @@ async def analyze_file_semantics(
     analysis_route: Literal[
         "rich_model_analysis", "generic_model_analysis"
     ] = "rich_model_analysis",
+    checkpoint_lock: IndexWriteLock | None = None,
+    previous_analysis: FileSemanticAnalysis | None = None,
 ) -> _AnalysisWork:
-    """Analyze one verified file in one compact, bounded provider request."""
-
+    """Analyze ordered bounded regions, checkpointing successful requests."""
     selected = read_selected_text_file(
         snapshot,
         project_file,
@@ -1062,16 +1228,310 @@ async def analyze_file_semantics(
         ),
     )
     source = selected.blocks[0].text
+    limit = min(options.max_source_bytes_per_request, 65_536)
+    # The authoritative preflight below also includes schema and fact overhead.
+    available = provider.configuration.context_window - options.max_output_tokens - 2048
+    limit = min(limit, max(64, available * 2))
+    cap = min(64, options.max_chunks_per_file, options.max_requests_per_file)
+    max_symbols = max(
+        1, (options.max_output_tokens - min(256, options.max_output_tokens // 4)) // 384
+    )
+    required_ids = frozenset(
+        symbol.symbol_id
+        for symbol in code_map.symbols
+        if symbol.kind in _ANALYZED_SYMBOL_KINDS
+    )
+    chunks, truncated = plan_source_chunks(
+        source,
+        code_map,
+        max_bytes=limit,
+        max_chunks=cap,
+        max_symbols=max_symbols,
+        required_symbol_ids=required_ids,
+    )
+    completed: list[tuple[SourceChunk, FileSemanticAnalysis]] = []
+    warnings: list[str] = []
+    request_count = 0
+    server_context_retries = 0
+    last_error: Exception | None = None
+    checkpoints: list[SemanticChunkCheckpoint] = []
+    old_checkpoints = {
+        item.cache_key: item.analysis_json.encode("utf-8")
+        for item in (
+            () if previous_analysis is None else previous_analysis.chunk_checkpoints
+        )
+    }
+    index = 0
+    while index < len(chunks):
+        _raise_if_cancelled(cancellation)
+        chunk = chunks[index]
+        cache_key = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "source_sha256": code_map.source_sha256,
+                    "facts": state.record_sha256,
+                    "range": chunk.source_range.model_dump(mode="json"),
+                    "analyzer": analyzer.model_dump(mode="json"),
+                    "options": options_digest,
+                    "required_symbol_ids": [
+                        item.symbol_id
+                        for item in _chunk_symbols(code_map, chunk)
+                        if item.kind in _ANALYZED_SYMBOL_KINDS
+                    ],
+                    "chunk_planner_version": 2,
+                }
+            )
+        ).hexdigest()
+        cache_location = f"files/chunks/{cache_key}.json"
+        cached = (
+            load_staged_index_record(checkpoint_lock, cache_location)
+            if checkpoint_lock is not None
+            and options.resume
+            and not options.force_reanalyze
+            else None
+        )
+        if cached is None and options.resume and not options.force_reanalyze:
+            cached = old_checkpoints.get(cache_key)
+        if cached is not None:
+            with suppress(ValueError, IndexManifestReadError):
+                analysis = _deserialize_analysis(cached)
+                if _analysis_matches(
+                    analysis, state, code_map, analyzer, options_digest
+                ):
+                    completed.append((chunk, analysis))
+                    checkpoints.append(
+                        SemanticChunkCheckpoint(
+                            cache_key=cache_key,
+                            analysis_json=_serialize(analysis).decode("utf-8"),
+                        )
+                    )
+                    index += 1
+                    continue
+        try:
+            work = await _analyze_semantic_chunk(
+                project_file,
+                code_map,
+                state,
+                provider,
+                source=source,
+                chunk=chunk,
+                analyzer=analyzer,
+                options=options,
+                options_digest=options_digest,
+                cancellation=cancellation,
+            )
+        except ProviderCancelledError:
+            raise
+        except ContextWindowExceededError as exc:
+            last_error = exc
+            dispatched = (
+                exc.diagnostic is not None
+                and exc.diagnostic.total_provider_http_calls > 0
+            )
+            can_retry = not dispatched or (
+                exc.server_context_window is not None and server_context_retries == 0
+            )
+            if can_retry and limit > 4:
+                if dispatched:
+                    server_context_retries += 1
+                limit = max(4, limit // 2)
+                tail, truncated = plan_source_chunks(
+                    source,
+                    code_map,
+                    max_bytes=limit,
+                    max_chunks=cap - index,
+                    start_byte=chunk.start_byte,
+                    max_symbols=max_symbols,
+                    required_symbol_ids=required_ids,
+                )
+                chunks = chunks[:index] + tail
+                continue
+            if dispatched:
+                request_count += 1
+            warnings.append(
+                f"chunk-output-limit:{index + 1}"
+                if isinstance(exc, _ChunkOutputLimit)
+                else f"chunk-context-limit:{index + 1}"
+            )
+        except (ModelProviderError, SemanticAnalysisError, ValueError) as exc:
+            last_error = exc
+            request_count += 1
+            if options.fail_on_error:
+                raise
+            code, _ = _semantic_error_details(exc)
+            warnings.append(f"chunk-failed:{index + 1}:{code}")
+        else:
+            request_count += work.request_count
+            completed.append((chunk, work.analysis))
+            checkpoints.append(
+                SemanticChunkCheckpoint(
+                    cache_key=cache_key,
+                    analysis_json=_serialize(work.analysis).decode("utf-8"),
+                )
+            )
+            if checkpoint_lock is not None:
+                write_index_record(
+                    checkpoint_lock, cache_location, _serialize(work.analysis)
+                )
+        index += 1
+    if not completed:
+        if last_error is not None:
+            raise last_error
+        raise SemanticAnalysisError("no semantic source chunks completed")
+    if truncated:
+        warnings.append("semantic-chunk-limit:source-coverage-incomplete")
+    # A concurrent edit during model work must not publish stale source claims.
+    read_selected_text_file(
+        snapshot,
+        project_file,
+        limits=ReaderLimits(
+            max_files=1,
+            max_source_bytes=max(project_file.size_bytes, 1),
+            max_content_bytes=max(project_file.size_bytes * 2, 1),
+        ),
+    )
+    analysis = _merge_chunk_analyses([item[1] for item in completed], warnings)
+    analysis = analysis.model_copy(
+        update={
+            "chunks_planned": len(chunks),
+            "chunks_completed": len(completed),
+            "covered_ranges": tuple(item[0].source_range for item in completed),
+            "coverage_complete": not truncated and len(completed) == len(chunks),
+            "coverage_warnings": tuple(warnings),
+            "chunk_checkpoints": tuple(checkpoints),
+        }
+    )
+    return _AnalysisWork(analysis, request_count)
+
+
+def _merge_chunk_analyses(
+    analyses: list[FileSemanticAnalysis],
+    warnings: list[str],
+) -> FileSemanticAnalysis:
+    """Preserve attributed claims from all chunks, without another generation."""
+    merged = analyses[0].model_dump(mode="json")
+    symbols: dict[str, dict[str, Any]] = {}
+    regions: list[dict[str, Any]] = []
+    for analysis in analyses:
+        data = analysis.model_dump(mode="json")
+        for key, value in data.items():
+            if isinstance(value, list) and key not in {
+                "symbols",
+                "inferred_regions",
+                "covered_ranges",
+                "coverage_warnings",
+                "chunk_checkpoints",
+            }:
+                target = merged[key]
+                for claim in value:
+                    if claim not in target:
+                        target.append(claim)
+        purpose = data["primary_purpose"]
+        if (
+            purpose is not None
+            and purpose != merged["primary_purpose"]
+            and purpose not in merged["major_responsibilities"]
+        ):
+            merged["major_responsibilities"].append(purpose)
+        for symbol in data["symbols"]:
+            existing = symbols.get(symbol["symbol_id"])
+            if existing is None:
+                symbols[symbol["symbol_id"]] = symbol
+            else:
+                for key, claims in symbol.items():
+                    if isinstance(claims, list):
+                        target = cast(list[object], existing[key])
+                        target.extend(claim for claim in claims if claim not in target)
+                purpose = symbol["behavioral_purpose"]
+                if purpose is not None and purpose != existing["behavioral_purpose"]:
+                    target = cast(list[object], existing["uncertainty"])
+                    if purpose not in target:
+                        target.append(purpose)
+        for region in data["inferred_regions"]:
+            if region in regions:
+                continue
+            bounds = region["source_range"]
+            if any(
+                previous["source_range"]["end_line"] >= bounds["start_line"]
+                and previous["source_range"]["start_line"] <= bounds["end_line"]
+                for previous in regions
+            ):
+                if "inferred-region-overlap:first-valid-retained" not in warnings:
+                    warnings.append("inferred-region-overlap:first-valid-retained")
+                continue
+            regions.append(region)
+    merged["symbols"] = sorted(
+        symbols.values(),
+        key=lambda item: (
+            cast(dict[str, int], item["declaration_range"])["start_line"],
+            cast(dict[str, int], item["declaration_range"])["start_column"],
+            item["symbol_id"],
+        ),
+    )
+    merged["inferred_regions"] = sorted(
+        regions,
+        key=lambda item: (
+            cast(dict[str, int], item["source_range"])["start_line"],
+            cast(dict[str, int], item["source_range"])["start_column"],
+            item["region_id"],
+        ),
+    )
+    return FileSemanticAnalysis.model_validate(merged)
+
+
+def _chunk_symbols(
+    code_map: FileCodeMap, chunk: SourceChunk
+) -> tuple[SymbolRecord, ...]:
+    region = chunk.source_range
+    return tuple(
+        symbol
+        for symbol in code_map.symbols
+        if (symbol.declaration_range.start_line, symbol.declaration_range.start_column)
+        < (region.end_line, region.end_column)
+        and (symbol.declaration_range.end_line, symbol.declaration_range.end_column)
+        > (region.start_line, region.start_column)
+    )
+
+
+async def _analyze_semantic_chunk(
+    project_file: ProjectFile,
+    code_map: FileCodeMap,
+    state: IndexedFileState,
+    provider: ModelProvider,
+    *,
+    source: str,
+    chunk: SourceChunk,
+    analyzer: AnalyzerIdentity,
+    options: SemanticAnalysisOptions,
+    options_digest: str,
+    cancellation: asyncio.Event | None,
+) -> _AnalysisWork:
+    region = chunk.source_range
+    chunk_symbols = _chunk_symbols(code_map, chunk)
+    required_count = sum(item.kind in _ANALYZED_SYMBOL_KINDS for item in chunk_symbols)
+    # Reserve room for IDs, a short purpose per symbol, and file-level claims.
+    required_output = (
+        min(256, options.max_output_tokens // 4) + 384 * required_count
+        if required_count
+        else 0
+    )
+    if required_output > options.max_output_tokens:
+        raise _ChunkOutputLimit()
+    analysis_route: Literal["rich_model_analysis", "generic_model_analysis"] = (
+        "rich_model_analysis" if chunk_symbols else "generic_model_analysis"
+    )
+    # Keep identity and global source coordinates; only supplied symbols are valid IDs.
+    chunk_map = code_map.model_copy(update={"symbols": chunk_symbols})
     category = _semantic_category(project_file)
     response_model = _response_model(category, analysis_route)
     output_budget = _output_token_budget(
         project_file,
-        code_map,
+        chunk_map,
         category=category,
         analysis_route=analysis_route,
         ceiling=options.max_output_tokens,
     )
-    excerpt_limit = options.max_source_bytes_per_request
+    output_budget = max(output_budget, required_output)
     max_fact_items = 100
     source_line_bytes = tuple(
         len(line.encode("utf-8")) for line in source.splitlines(keepends=True)
@@ -1080,13 +1540,22 @@ async def analyze_file_semantics(
     def validate_and_convert_response(value: BaseModel) -> None:
         raw_value, symbol_values = _compact_response_to_raw(
             value,
-            code_map,
+            chunk_map,
             analyzer,
             analysis_route=analysis_route,
         )
         _validate_raw_file_claims(
-            raw_value, code_map, None, source_line_bytes=source_line_bytes
+            raw_value, code_map, region, source_line_bytes=source_line_bytes
         )
+        _validate_inferred_region_ranges(
+            raw_value.inferred_regions,
+            code_map,
+            excerpt_ranges,
+            source_line_bytes=source_line_bytes,
+        )
+        if isinstance(value, _CombinedResponse):
+            for symbol in value.symbols:
+                _validate_raw_symbol_claims(symbol, code_map, region)
         _build_file_analysis(
             raw_value,
             symbol_values,
@@ -1098,11 +1567,12 @@ async def analyze_file_semantics(
         )
 
     while True:
-        excerpt, excerpt_ranges, input_truncated = _bounded_source_excerpt(
-            source, code_map, excerpt_limit
+        excerpt, excerpt_ranges = chunk.text, (region,)
+        input_truncated = chunk.start_byte != 0 or chunk.end_byte != len(
+            source.encode("utf-8")
         )
         trusted_facts = _compact_codemap_facts(
-            code_map,
+            chunk_map,
             excerpt_ranges=excerpt_ranges,
             category=category,
             known_license=(
@@ -1110,15 +1580,34 @@ async def analyze_file_semantics(
             ),
             max_fact_items=max_fact_items,
         )
+        trusted_facts["chunk_range"] = region.model_dump(mode="json")
+        trusted_facts["required_symbol_ids"] = [
+            symbol.symbol_id
+            for symbol in chunk_symbols
+            if symbol.kind in _ANALYZED_SYMBOL_KINDS
+        ]
         request = _request(
             code_map,
             purpose="file-semantics",
-            analysis_task=_compact_file_task(code_map.path, category, analysis_route),
+            analysis_task=_compact_file_task(code_map.path, category, analysis_route)
+            + (
+                " Return exactly one symbols entry for each required_symbol_ids value, "
+                "and no other symbols. Copy those IDs verbatim. Prioritize a short "
+                "behavioral_purpose for every required symbol and "
+                "file.primary_purpose. Omit empty/default arrays and optional fields "
+                "to fit the output budget."
+                if analysis_route == "rich_model_analysis"
+                else ""
+            ),
             trusted_facts=trusted_facts,
             source=excerpt,
             response_model=response_model,
             options=options,
-            analyzer_kind=analyzer.analyzer_id,
+            analyzer_kind=(
+                GENERIC_SEMANTIC_ANALYZER_ID
+                if analysis_route == "generic_model_analysis"
+                else SEMANTIC_ANALYZER_ID
+            ),
             output_token_budget=output_budget,
             input_truncated=input_truncated or max_fact_items < 100,
         )
@@ -1136,20 +1625,26 @@ async def analyze_file_semantics(
                 },
             )
             break
-        if excerpt_limit <= 64 and max_fact_items == 0:
-            # The shared runtime emits the final deterministic typed diagnostic.
-            break
-        excerpt_limit = max(64, excerpt_limit // 2)
+        if max_fact_items == 0:
+            raise ContextWindowExceededError(budget)
         max_fact_items = max(0, max_fact_items // 2)
     response = await provider.complete_structured(request, cancellation=cancellation)
     _validate_response_identity(response.provider_id, response.model_id, analyzer)
     raw, symbols = _compact_response_to_raw(
         response.value,
-        code_map,
+        chunk_map,
         analyzer,
         analysis_route=analysis_route,
     )
-    _validate_raw_file_claims(raw, code_map, None, source_line_bytes=source_line_bytes)
+    _validate_inferred_region_ranges(
+        raw.inferred_regions,
+        code_map,
+        excerpt_ranges,
+        source_line_bytes=source_line_bytes,
+    )
+    _validate_raw_file_claims(
+        raw, code_map, region, source_line_bytes=source_line_bytes
+    )
     analysis = _build_file_analysis(
         raw,
         symbols,
@@ -1249,94 +1744,6 @@ def _output_token_budget(
     return max(1, min(selected, ceiling))
 
 
-def _bounded_source_excerpt(
-    source: str, code_map: FileCodeMap, max_bytes: int
-) -> tuple[str, tuple[SourceRange, ...], bool]:
-    encoded = source.encode("utf-8")
-    lines = source.splitlines(keepends=True)
-    if len(encoded) <= max_bytes:
-        end_line = max(1, len(lines))
-        end_column = len(lines[-1].rstrip("\r\n")) if lines else 0
-        return (
-            source,
-            (
-                SourceRange(
-                    start_line=1,
-                    start_column=0,
-                    end_line=end_line,
-                    end_column=end_column,
-                ),
-            ),
-            False,
-        )
-    if not lines:
-        return "", (), True
-    line_bytes = [len(line.encode("utf-8")) for line in lines]
-    beginning = list(range(len(lines)))
-    symbol_lines = [
-        index
-        for symbol in code_map.symbols
-        for index in range(
-            max(0, symbol.declaration_range.start_line - 2),
-            min(len(lines), symbol.declaration_range.start_line + 1),
-        )
-    ]
-    ending = list(range(len(lines) - 1, -1, -1))
-    priorities = (
-        (beginning, max_bytes // 2),
-        (symbol_lines, max_bytes // 4),
-        (ending, max_bytes - (max_bytes // 2 + max_bytes // 4)),
-    )
-    selected: set[int] = set()
-    used = 0
-    for candidates, section_budget in priorities:
-        section_used = 0
-        for index in candidates:
-            if index in selected:
-                continue
-            size = line_bytes[index]
-            if section_used + size > section_budget or used + size > max_bytes:
-                continue
-            selected.add(index)
-            section_used += size
-            used += size
-    if not selected:
-        prefix = _utf8_prefix(source, max_bytes)
-        return (
-            prefix,
-            (
-                SourceRange(
-                    start_line=1, start_column=0, end_line=1, end_column=len(prefix)
-                ),
-            ),
-            True,
-        )
-    ordered = sorted(selected)
-    excerpt = "".join(lines[index] for index in ordered)
-    ranges: list[SourceRange] = []
-    start = previous = ordered[0]
-    for index in (*ordered[1:], -1):
-        if index == previous + 1:
-            previous = index
-            continue
-        end_text = lines[previous].rstrip("\r\n")
-        ranges.append(
-            SourceRange(
-                start_line=start + 1,
-                start_column=0,
-                end_line=previous + 1,
-                end_column=len(end_text),
-            )
-        )
-        start = previous = index
-    return excerpt, tuple(ranges), True
-
-
-def _utf8_prefix(text: str, max_bytes: int) -> str:
-    encoded = text.encode("utf-8")[:max_bytes]
-    return encoded.decode("utf-8", errors="ignore")
-
-
 def _compact_codemap_facts(
     code_map: FileCodeMap,
     *,
@@ -1345,7 +1752,11 @@ def _compact_codemap_facts(
     known_license: str | None,
     max_fact_items: int = 100,
 ) -> dict[str, object]:
-    symbols = code_map.symbols[:max_fact_items]
+    symbols = tuple(
+        item
+        for index, item in enumerate(code_map.symbols)
+        if item.kind in _ANALYZED_SYMBOL_KINDS or index < max_fact_items
+    )
     imports = code_map.imports[: min(max_fact_items, 50)]
     exports = code_map.exports[: min(max_fact_items, 50)]
     return {
@@ -1361,7 +1772,7 @@ def _compact_codemap_facts(
                 "name": item.name,
                 "qualified_name": item.qualified_name,
                 "kind": item.kind,
-                "signature": item.signature,
+                "signature": item.signature if max_fact_items else None,
                 "declaration_range": item.declaration_range.model_dump(mode="json"),
             }
             for item in symbols
@@ -1421,7 +1832,10 @@ def _compact_response_to_raw(
     if analysis_route == "rich_model_analysis":
         if not isinstance(value, _CombinedResponse):
             raise StructuredResponseError("model returned the wrong source schema")
-        return value.file, _convert_symbols(value.symbols, code_map, analyzer)
+        return (
+            _RawFileAnalysis.model_validate(value.file.model_dump(mode="python")),
+            _convert_symbols(value.symbols, code_map, analyzer),
+        )
     if isinstance(value, _ReadmeResponse):
         raw = _RawFileAnalysis(
             primary_purpose=_compact_claim(value.project_purpose),
@@ -1448,6 +1862,7 @@ def _compact_response_to_raw(
             public_entry_points=tuple(map(_compact_claim, value.entry_points)),
             configuration_dependencies=tuple(map(_compact_claim, value.configuration)),
             uncertainty=tuple(map(_compact_claim, value.uncertainty)),
+            inferred_regions=value.regions,
         )
     else:
         raise StructuredResponseError("model returned the wrong generic text schema")
@@ -1508,6 +1923,7 @@ def _request(
         response_model=response_model,
         untrusted_contexts=contexts,
         max_output_tokens=selected_output_budget,
+        max_output_tokens_ceiling=options.max_output_tokens,
         max_response_bytes=options.max_response_bytes,
         metadata={
             "analyzer_version": SEMANTIC_ANALYZER_VERSION,
@@ -1593,7 +2009,104 @@ def _build_file_analysis(
                 ),
             )
         ),
+        inferred_regions=_inferred_regions(raw.inferred_regions, code_map, analyzer),
     )
+
+
+def _inferred_regions(
+    values: tuple[_RawInferredRegion, ...],
+    code_map: FileCodeMap,
+    analyzer: AnalyzerIdentity,
+) -> tuple[InferredRegionRecord, ...]:
+    result: list[InferredRegionRecord] = []
+    for value in values:
+        source_range = SourceRange(
+            start_line=value.start_line,
+            start_column=0,
+            end_line=value.end_line,
+            end_column=0,
+        )
+        result.append(
+            InferredRegionRecord(
+                region_id=hashlib.sha256(
+                    canonical_json_bytes(
+                        [
+                            code_map.path,
+                            value.label,
+                            value.kind,
+                            value.start_line,
+                            value.end_line,
+                            code_map.source_sha256,
+                        ]
+                    )
+                ).hexdigest(),
+                label=value.label,
+                kind=value.kind,
+                source_range=source_range,
+                summary=value.summary,
+                confidence=SemanticConfidence(
+                    value=value.confidence,
+                    rationale="Model-inferred region within supplied verified source.",
+                ),
+                analyzer_prompt_version=analyzer.analysis_prompt_version,
+                provider_id=(
+                    analyzer.model_identity.provider_id
+                    if analyzer.model_identity is not None
+                    else "unknown"
+                ),
+                model_id=(
+                    analyzer.model_identity.model_id
+                    if analyzer.model_identity is not None
+                    else "unknown"
+                ),
+                source_sha256=code_map.source_sha256,
+            )
+        )
+    return tuple(
+        sorted(
+            result,
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.region_id,
+            ),
+        )
+    )
+
+
+def _validate_inferred_region_ranges(
+    values: tuple[_RawInferredRegion, ...],
+    code_map: FileCodeMap,
+    excerpt_ranges: tuple[SourceRange, ...],
+    *,
+    source_line_bytes: tuple[int, ...] | None = None,
+) -> None:
+    previous_end = 0
+    for value in sorted(values, key=lambda item: (item.start_line, item.end_line)):
+        if value.end_line < value.start_line or value.end_line > code_map.line_count:
+            raise StructuredResponseError(
+                "model returned an inferred region outside verified source"
+            )
+        if value.start_line <= previous_end:
+            raise StructuredResponseError("model returned overlapping inferred regions")
+        if not any(
+            source_range.start_line <= value.start_line
+            and value.end_line <= source_range.end_line
+            and (
+                source_range.start_line != value.start_line
+                or source_range.start_column == 0
+            )
+            and (
+                value.end_line < source_range.end_line
+                or source_line_bytes is None
+                or source_range.end_column >= source_line_bytes[value.end_line - 1]
+            )
+            for source_range in excerpt_ranges
+        ):
+            raise StructuredResponseError(
+                "model returned an inferred region outside the supplied excerpt"
+            )
+        previous_end = value.end_line
 
 
 def _convert_symbols(
@@ -1985,13 +2498,17 @@ def _is_contextforge_path(path: str) -> bool:
     return path == ".contextforge" or path.startswith(".contextforge/")
 
 
-def _semantic_route(project_file: ProjectFile) -> SemanticRoute:
+def _semantic_route(
+    project_file: ProjectFile, code_map: FileCodeMap | None = None
+) -> SemanticRoute:
     filename = project_file.path.rsplit("/", maxsplit=1)[-1].casefold()
     if filename == ".env":
         return "skipped"
     if project_file.size_bytes == 0 or filename in _METADATA_FILENAMES:
         return "deterministic_metadata_summary"
-    if project_file.language == "Python":
+    if project_file.language in SUPPORTED_CODEMAP_LANGUAGES and (
+        code_map is None or code_map.symbols
+    ):
         return "rich_model_analysis"
     return "generic_model_analysis"
 
@@ -2106,6 +2623,11 @@ def _analyze_metadata_file(
 
 
 def _semantic_error_details(error: BaseException) -> tuple[str, str]:
+    if isinstance(error, _ChunkOutputLimit):
+        return (
+            "symbol_output_budget_exceeded",
+            "required symbol response exceeds the output token ceiling",
+        )
     if isinstance(error, ModelProviderError):
         code, safe_message = provider_error_details(error)
         if isinstance(error, StructuredResponseError):
@@ -2126,7 +2648,6 @@ def _semantic_analyzer(
     options: SemanticAnalysisOptions,
     provider_id: str,
     model_id: str,
-    base_url_sha256: str | None,
     *,
     analysis_route: Literal["rich_model_analysis", "generic_model_analysis"],
 ) -> AnalyzerIdentity:
@@ -2142,7 +2663,7 @@ def _semantic_analyzer(
     )
     return AnalyzerIdentity(
         analyzer_id=analyzer_id,
-        analyzer_version=_connection_bound_version(analyzer_version, base_url_sha256),
+        analyzer_version=analyzer_version,
         analysis_prompt_version=options.prompt_version,
         response_schema_version=SEMANTIC_SCHEMA_VERSION,
         model_identity=ModelIdentity(
@@ -2152,7 +2673,7 @@ def _semantic_analyzer(
     )
 
 
-def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
+def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
     provider_id = provider.provider_id
     configuration = getattr(provider, "configuration", None)
     model_id = getattr(configuration, "model_id", None)
@@ -2160,23 +2681,7 @@ def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
         raise SemanticAnalysisError(
             "semantic provider must expose stable provider and model identity"
         )
-    endpoint = getattr(configuration, "endpoint", None)
-    base_url_sha256 = None
-    if provider_id == "openai-compatible":
-        if not isinstance(endpoint, str):
-            raise SemanticAnalysisError(
-                "OpenAI-compatible provider must expose a stable base URL identity"
-            )
-        base_url_sha256 = hashlib.sha256(
-            endpoint.rstrip("/").encode("utf-8")
-        ).hexdigest()
-    return provider_id, model_id, base_url_sha256
-
-
-def _connection_bound_version(version: str, base_url_sha256: str | None) -> str:
-    if base_url_sha256 is None:
-        return version
-    return f"{version}+base.{base_url_sha256}"
+    return provider_id, model_id
 
 
 def _validate_response_identity(
@@ -2198,7 +2703,9 @@ def _analysis_options_digest(options: SemanticAnalysisOptions) -> str:
             {
                 "analyzer_version": SEMANTIC_ANALYZER_VERSION,
                 "generic_analyzer_version": GENERIC_SEMANTIC_ANALYZER_VERSION,
-                "large_file_strategy": "deterministic-excerpt-single-request-v1",
+                "large_file_strategy": "symbol-aligned-chunks-v2",
+                "max_chunks_per_file": options.max_chunks_per_file,
+                "max_requests_per_file": options.max_requests_per_file,
                 "adaptive_output_budgets": "semantic-category-v1",
                 "max_output_tokens": options.max_output_tokens,
                 "max_request_bytes": options.max_request_bytes,
@@ -2227,7 +2734,7 @@ def _analysis_matches(
         and analysis.language == state.language == code_map.language
         and analysis.fact_record_sha256 == _required_fact_digest(state)
         and analysis.codemap_analyzer == code_map.analyzer
-        and analysis.semantic_analyzer == analyzer
+        and normalize_analyzer_identity(analysis.semantic_analyzer) == analyzer
         and analysis.analysis_options_digest == options_digest
     )
 
@@ -2244,7 +2751,10 @@ def _find_reusable_analysis(
         old_state = next(
             (item for item in manifest.files if item.path == state.path), None
         )
-        if old_state is None or old_state.semantic_status != "complete":
+        if old_state is None or old_state.semantic_status not in {
+            "complete",
+            "partial",
+        }:
             continue
         try:
             analysis = _deserialize_analysis(
@@ -2254,8 +2764,10 @@ def _find_reusable_analysis(
             )
         except (IndexManifestReadError, ValueError):
             continue
-        if _analysis_matches(analysis, state, code_map, analyzer, options_digest):
-            return analysis
+        if analysis.schema_version == SEMANTIC_SCHEMA_VERSION and _analysis_matches(
+            analysis, state, code_map, analyzer, options_digest
+        ):
+            return analysis.model_copy(update={"semantic_analyzer": analyzer})
     return None
 
 
@@ -2388,9 +2900,11 @@ __all__ = [
     "SEMANTIC_PROMPT_VERSION",
     "SEMANTIC_SYSTEM_INSTRUCTIONS",
     "SemanticAnalysisError",
+    "SemanticFailureLimitError",
     "SemanticAnalysisOptions",
     "SemanticFileOutcome",
     "SemanticIndexBuildResult",
+    "SemanticProviderCircuitError",
     "SemanticRoute",
     "SemanticWorkPlan",
     "SemanticWorkPlanItem",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import suppress
 from enum import StrEnum
 from pathlib import Path
@@ -60,6 +61,8 @@ def _index_operation(
     json_repair_attempts: int | None,
     max_output_tokens: int | None,
     fail_on_error: bool,
+    fail_fast: bool,
+    max_failures: int | None,
     force_reanalyze: bool,
     max_files: int | None,
     local_only: bool,
@@ -67,8 +70,15 @@ def _index_operation(
     confirm_unknown_lock: bool,
     progress_mode: ProgressMode,
 ) -> None:
+    if fail_fast and max_failures is not None:
+        _exit_with_error(
+            "--fail-fast and --max-failures cannot be used together", code=2
+        )
     provider: ModelProvider | None = None
-    progress = CLIProgressRenderer(progress_mode)
+    progress = CLIProgressRenderer(
+        progress_mode,
+        stream=sys.stdout if progress_mode is ProgressMode.JSONL else None,
+    )
     try:
         project = load_project_configuration(path, config_path=config)
         provider_configuration = resolve_provider_configuration(
@@ -100,6 +110,8 @@ def _index_operation(
                 update_only=update_only,
                 concurrency=effective_concurrency,
                 fail_on_error=fail_on_error,
+                fail_fast=fail_fast,
+                max_failures=max_failures,
                 force_reanalyze=force_reanalyze,
                 max_files=max_files,
                 semantic_max_output_tokens=(
@@ -132,7 +144,8 @@ def _index_operation(
             with suppress(ModelProviderError):
                 asyncio.run(provider.close())
 
-    typer.echo(_render_build_summary(report), nl=False)
+    if progress_mode is not ProgressMode.JSONL:
+        typer.echo(_render_build_summary(report), nl=False)
 
 
 @index_app.command("build")
@@ -205,6 +218,21 @@ def build_index(
             help="Keep the prior active generation on any model-analysis failure.",
         ),
     ] = False,
+    fail_fast: Annotated[
+        bool,
+        typer.Option(
+            "--fail-fast",
+            help="Stop after the first model-analysis failure.",
+        ),
+    ] = False,
+    max_failures: Annotated[
+        int | None,
+        typer.Option(
+            "--max-failures",
+            min=1,
+            help="Stop after this many model-analysis failures.",
+        ),
+    ] = None,
     force_reanalyze: Annotated[
         bool,
         typer.Option(
@@ -242,7 +270,7 @@ def build_index(
         ProgressMode,
         typer.Option(
             "--progress",
-            help="Progress rendering: auto, always when safe, or never.",
+            help="Progress rendering: auto, always, never, or JSONL on stdout.",
             case_sensitive=False,
         ),
     ] = ProgressMode.AUTO,
@@ -262,6 +290,8 @@ def build_index(
         json_repair_attempts=json_repair_attempts,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
+        fail_fast=fail_fast,
+        max_failures=max_failures,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,
@@ -310,6 +340,8 @@ def update_index(
         typer.Option("--max-output-tokens", min=96, max=32_768),
     ] = None,
     fail_on_error: Annotated[bool, typer.Option("--fail-on-error")] = False,
+    fail_fast: Annotated[bool, typer.Option("--fail-fast")] = False,
+    max_failures: Annotated[int | None, typer.Option("--max-failures", min=1)] = None,
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,
     max_files: Annotated[int | None, typer.Option("--max-files", min=1)] = None,
     local_only: Annotated[bool, typer.Option("--local-only")] = False,
@@ -321,7 +353,7 @@ def update_index(
         ProgressMode,
         typer.Option(
             "--progress",
-            help="Progress rendering: auto, always when safe, or never.",
+            help="Progress rendering: auto, always, never, or JSONL on stdout.",
             case_sensitive=False,
         ),
     ] = ProgressMode.AUTO,
@@ -341,6 +373,8 @@ def update_index(
         json_repair_attempts=json_repair_attempts,
         max_output_tokens=max_output_tokens,
         fail_on_error=fail_on_error,
+        fail_fast=fail_fast,
+        max_failures=max_failures,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
         local_only=local_only,

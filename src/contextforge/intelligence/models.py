@@ -15,14 +15,15 @@ from contextforge.core.validation import (
     validate_portable_relative_path as validate_portable_relative_path,
 )
 
-INDEX_SCHEMA_VERSION: Literal[1] = 1
-MANIFEST_SCHEMA_VERSION: Literal[1] = 1
-RECORD_SCHEMA_VERSION: Literal[1] = 1
+INDEX_SCHEMA_VERSION: Literal[2] = 2
+MANIFEST_SCHEMA_VERSION: Literal[2] = 2
+RECORD_SCHEMA_VERSION: Literal[2] = 2
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 RecordStatus = Literal["complete", "failed", "skipped", "unsupported"]
 SemanticStatus = Literal[
+    "partial",
     "pending",
     "analyzing",
     "complete",
@@ -33,6 +34,7 @@ SemanticStatus = Literal[
 ]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$")
+_LEGACY_ENDPOINT_SUFFIX = re.compile(r"\+base\.[0-9a-f]{64}$")
 
 
 class IndexModel(BaseModel):
@@ -165,14 +167,23 @@ class IndexedFileState(IndexModel):
             raise ValueError(
                 "interpretation record location and digest must be set together"
             )
-        if self.semantic_status == "complete" and not has_interpretation_location:
+        if (
+            self.semantic_status in {"complete", "partial"}
+            and not has_interpretation_location
+        ):
             raise ValueError("complete semantic records require a location and digest")
-        if self.semantic_status == "complete" and self.record_status not in {
+        if self.semantic_status in {
+            "complete",
+            "partial",
+        } and self.record_status not in {
             "complete",
             "unsupported",
         }:
             raise ValueError("complete semantic records require published facts")
-        if self.semantic_status != "complete" and has_interpretation_location:
+        if (
+            self.semantic_status not in {"complete", "partial"}
+            and has_interpretation_location
+        ):
             raise ValueError(
                 "non-complete semantic records cannot reference an interpretation"
             )
@@ -217,7 +228,7 @@ class IndexStatistics(IndexModel):
 class IndexManifest(IndexModel):
     """Complete immutable generation manifest."""
 
-    schema_version: Literal[1] = MANIFEST_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = MANIFEST_SCHEMA_VERSION
     schema_versions: SchemaVersionMetadata = Field(
         default_factory=SchemaVersionMetadata
     )
@@ -247,7 +258,7 @@ class IndexManifest(IndexModel):
 class ActiveIndexPointer(IndexModel):
     """Small atomic root document that selects one immutable generation."""
 
-    schema_version: Literal[1] = INDEX_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = INDEX_SCHEMA_VERSION
     generation_id: Sha256
     generation_manifest: str
     source_snapshot_digest: Sha256
@@ -329,3 +340,12 @@ def analyzer_identity_key(identity: AnalyzerIdentity) -> tuple[str, ...]:
         model.provider_id if model is not None else "",
         model.model_id if model is not None else "",
     )
+
+
+def normalize_analyzer_identity(identity: AnalyzerIdentity) -> AnalyzerIdentity:
+    """Remove the legacy transport-endpoint suffix from analyzer provenance."""
+
+    version = _LEGACY_ENDPOINT_SUFFIX.sub("", identity.analyzer_version)
+    if version == identity.analyzer_version:
+        return identity
+    return identity.model_copy(update={"analyzer_version": version})

@@ -48,6 +48,7 @@ from contextforge.intelligence.models import (
     IndexModel,
     ModelIdentity,
     analyzer_identity_key,
+    normalize_analyzer_identity,
 )
 from contextforge.intelligence.semantic_models import (
     EvidenceReference,
@@ -336,8 +337,8 @@ async def build_repository_maps(
     )
     overview = build_repository_overview(current, code_maps)
     semantic_analyses = _load_available_semantics(snapshot.root, current)
-    provider_id, model_id, base_url_sha256 = _provider_identity(provider)
-    analyzer = _global_analyzer(active_options, provider_id, model_id, base_url_sha256)
+    provider_id, model_id = _provider_identity(provider)
+    analyzer = _global_analyzer(active_options, provider_id, model_id)
     options_digest = _options_digest(active_options)
     source_interpretations_digest = _file_interpretations_digest(current)
     previous_records = _try_load_global_records(snapshot.root, current)
@@ -362,20 +363,40 @@ async def build_repository_maps(
                 source_interpretations_digest,
             )
         ):
+            normalized_architecture = old_architecture.model_copy(
+                update={"analyzer": analyzer}
+            )
+            normalized_features = old_features.model_copy(update={"analyzer": analyzer})
+            migrated = (
+                normalized_architecture != old_architecture
+                or normalized_features != old_features
+            )
+            generation_path = lock.layout.generations / current.generation_id
+            manifest = current
+            if migrated:
+                generation_path = _publish_global_records(
+                    lock,
+                    current,
+                    overview,
+                    normalized_architecture,
+                    normalized_features,
+                    analyzer,
+                )
+                manifest = load_manifest(snapshot.root)
             return GlobalMapBuildResult(
-                manifest=current,
+                manifest=manifest,
                 overview=overview,
-                architecture=old_architecture,
-                features=old_features,
+                architecture=normalized_architecture,
+                features=normalized_features,
                 outcomes=(
                     GlobalMapOutcome("architecture", "reused", 0),
                     GlobalMapOutcome("features", "reused", 0),
                 ),
-                generation_path=lock.layout.generations / current.generation_id,
+                generation_path=generation_path,
                 request_count=0,
                 package_summary_count=0,
                 group_summary_count=0,
-                published=False,
+                published=migrated,
             )
 
     required_model_calls = _required_model_calls(code_maps, active_options)
@@ -397,6 +418,10 @@ async def build_repository_maps(
     except ProviderCancelledError:
         raise
     except (ModelProviderError, GlobalMapAnalysisError, ValueError) as exc:
+        if isinstance(exc, ModelProviderError) and exc.circuit_opened:
+            raise GlobalMapAnalysisError(
+                "provider circuit opened during repository map hierarchy"
+            ) from exc
         if active_options.fail_on_error:
             raise GlobalMapAnalysisError(
                 "repository map hierarchy failed; index not published"
@@ -452,6 +477,7 @@ async def build_repository_maps(
     architecture: ArchitectureMap | None = None
     features: FeatureMap | None = None
     outcomes: list[GlobalMapOutcome] = []
+    failure_causes: list[BaseException] = []
     final_requests = 0
 
     final_requests += 1
@@ -477,8 +503,13 @@ async def build_repository_maps(
     except ProviderCancelledError:
         raise
     except (ModelProviderError, GlobalMapAnalysisError, ValueError) as exc:
+        if isinstance(exc, ModelProviderError) and exc.circuit_opened:
+            raise GlobalMapAnalysisError(
+                "provider circuit opened during architecture map analysis"
+            ) from exc
         diagnostic = _failure_diagnostic("architecture-map-failed", exc)
         outcomes.append(GlobalMapOutcome("architecture", "failed", 1, diagnostic))
+        failure_causes.append(exc)
 
     _raise_if_cancelled(cancellation)
     final_requests += 1
@@ -504,15 +535,23 @@ async def build_repository_maps(
     except ProviderCancelledError:
         raise
     except (ModelProviderError, GlobalMapAnalysisError, ValueError) as exc:
+        if isinstance(exc, ModelProviderError) and exc.circuit_opened:
+            raise GlobalMapAnalysisError(
+                "provider circuit opened during feature map analysis"
+            ) from exc
         diagnostic = _failure_diagnostic("feature-map-failed", exc)
         outcomes.append(GlobalMapOutcome("features", "failed", 1, diagnostic))
+        failure_causes.append(exc)
 
     failures = tuple(item for item in outcomes if item.status == "failed")
     if failures and active_options.fail_on_error:
-        raise GlobalMapAnalysisError(
+        error = GlobalMapAnalysisError(
             f"repository map analysis failed for {len(failures)} map(s); "
             "index not published"
         )
+        if failure_causes:
+            raise error from failure_causes[0]
+        raise error
     if failures and active_options.recover_previous and previous_records is not None:
         old_overview, old_architecture, old_features = previous_records
         if (
@@ -1955,11 +1994,13 @@ def _publish_global_records(
         interpretations_digest=interpretations_digest,
         previous_generation_id=current.generation_id,
     )
-    semantic_analyzers = current.semantic_analyzers
+    semantic_analyzers = tuple(
+        normalize_analyzer_identity(item) for item in current.semantic_analyzers
+    )
     if analyzer is not None:
         semantic_analyzers = tuple(
             sorted(
-                set((*current.semantic_analyzers, analyzer)),
+                set((*semantic_analyzers, analyzer)),
                 key=analyzer_identity_key,
             )
         )
@@ -2116,13 +2157,10 @@ def _global_analyzer(
     options: GlobalMapAnalysisOptions,
     provider_id: str,
     model_id: str,
-    base_url_sha256: str | None,
 ) -> AnalyzerIdentity:
     return AnalyzerIdentity(
         analyzer_id=GLOBAL_MAP_ANALYZER_ID,
-        analyzer_version=_connection_bound_version(
-            GLOBAL_MAP_ANALYZER_VERSION, base_url_sha256
-        ),
+        analyzer_version=GLOBAL_MAP_ANALYZER_VERSION,
         analysis_prompt_version=options.prompt_version,
         response_schema_version=GLOBAL_MAP_SCHEMA_VERSION,
         model_identity=ModelIdentity(
@@ -2183,12 +2221,12 @@ def _map_inputs_match(
         value.source_snapshot_digest == manifest.build.source_snapshot_digest
         and value.facts_digest == manifest.build.facts_digest
         and value.source_interpretations_digest == source_interpretations_digest
-        and value.analyzer == analyzer
+        and normalize_analyzer_identity(value.analyzer) == analyzer
         and value.analysis_options_digest == options_digest
     )
 
 
-def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
+def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
     provider_id = provider.provider_id
     configuration = getattr(provider, "configuration", None)
     model_id = getattr(configuration, "model_id", None)
@@ -2196,23 +2234,7 @@ def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
         raise GlobalMapAnalysisError(
             "global map provider must expose stable provider and model identity"
         )
-    endpoint = getattr(configuration, "endpoint", None)
-    base_url_sha256 = None
-    if provider_id == "openai-compatible":
-        if not isinstance(endpoint, str):
-            raise GlobalMapAnalysisError(
-                "OpenAI-compatible provider must expose a stable base URL identity"
-            )
-        base_url_sha256 = hashlib.sha256(
-            endpoint.rstrip("/").encode("utf-8")
-        ).hexdigest()
-    return provider_id, model_id, base_url_sha256
-
-
-def _connection_bound_version(version: str, base_url_sha256: str | None) -> str:
-    if base_url_sha256 is None:
-        return version
-    return f"{version}+base.{base_url_sha256}"
+    return provider_id, model_id
 
 
 def _validate_build_inputs(snapshot: ProjectSnapshot, lock: IndexWriteLock) -> None:

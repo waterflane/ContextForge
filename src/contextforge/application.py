@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import uuid
 from contextlib import suppress
@@ -46,10 +45,13 @@ from contextforge.intelligence import (
     GENERIC_SEMANTIC_ANALYZER_VERSION,
     GLOBAL_MAP_PROMPT_VERSION,
     INDEX_SCHEMA_VERSION,
+    POLYGLOT_ANALYZER,
     PYTHON_ANALYZER,
     SEMANTIC_ANALYZER_ID,
     SEMANTIC_ANALYZER_VERSION,
     SEMANTIC_PROMPT_VERSION,
+    SEMANTIC_SCHEMA_VERSION,
+    SUPPORTED_POLYGLOT_LANGUAGES,
     ArchitectureMap,
     GlobalMapAnalysisOptions,
     GlobalMapBuildResult,
@@ -69,11 +71,15 @@ from contextforge.intelligence import (
     initialize_index,
     load_architecture_map,
     load_feature_map,
+    load_file_code_map,
+    load_file_semantic_analysis,
     load_manifest,
     load_repository_overview,
+    normalize_analyzer_identity,
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
+from contextforge.intelligence.store import index_publication_transaction
 from contextforge.logging import recent_records
 from contextforge.models import (
     ModelProvider,
@@ -99,6 +105,10 @@ class ApplicationError(RuntimeError):
 
 class MissingIndexError(ApplicationError):
     """Raised when an operation explicitly requires an active index."""
+
+
+class IndexSourceChangedError(ApplicationError):
+    """Raised when repository identity changes before atomic publication."""
 
 
 class ArtifactReadError(ApplicationError):
@@ -191,17 +201,28 @@ async def build_repository_index(
     update_only: bool = False,
     concurrency: int = 2,
     fail_on_error: bool = False,
+    fail_fast: bool = False,
+    max_failures: int | None = None,
     force_reanalyze: bool = False,
     max_files: int | None = None,
-    semantic_max_output_tokens: int = 512,
+    semantic_max_output_tokens: int = 1024,
     recover_stale_lock: bool = False,
     confirm_unknown_lock: bool = False,
     progress: ProgressObserver | None = None,
     operation_id: str | None = None,
     parent_operation_id: str | None = None,
+    cancellation: asyncio.Event | None = None,
+    expected_snapshot_digest: str | None = None,
 ) -> IndexBuildReport:
     """Build/update all index phases while retaining a prior pointer on failure."""
 
+    if fail_fast and max_failures is not None:
+        raise ValueError("fail_fast and max_failures cannot be used together")
+    if max_failures is not None and (
+        type(max_failures) is not int or max_failures <= 0
+    ):
+        raise ValueError("max_failures must be a positive integer or None")
+    effective_max_failures = 1 if fail_fast else max_failures
     reporter = _progress_reporter(
         "repository.index.update" if update_only else "repository.index.build",
         progress,
@@ -238,12 +259,15 @@ async def build_repository_index(
             update_only=update_only,
             concurrency=concurrency,
             fail_on_error=fail_on_error,
+            max_failures=effective_max_failures,
             force_reanalyze=force_reanalyze,
             max_files=max_files,
             semantic_max_output_tokens=semantic_max_output_tokens,
             recover_stale_lock=recover_stale_lock,
             confirm_unknown_lock=confirm_unknown_lock,
             progress=reporter,
+            cancellation=cancellation,
+            expected_snapshot_digest=expected_snapshot_digest,
         )
     except BaseException as exc:
         _report_terminal_exception(reporter, exc)
@@ -258,7 +282,12 @@ async def build_repository_index(
         raise
     reporter.complete(
         message="Repository index build completed.",
-        metadata={"partial": report.partial},
+        metadata={
+            "generation_id": report.manifest.generation_id,
+            "snapshot_digest": report.manifest.build.source_snapshot_digest,
+            "index_schema": report.manifest.schema_versions.index_schema_version,
+            "partial": report.partial,
+        },
     )
     _persist_application_diagnostic(
         repository_root,
@@ -279,16 +308,20 @@ async def _build_repository_index(
     update_only: bool,
     concurrency: int,
     fail_on_error: bool,
+    max_failures: int | None,
     force_reanalyze: bool,
     max_files: int | None,
     semantic_max_output_tokens: int,
     recover_stale_lock: bool,
     confirm_unknown_lock: bool,
     progress: ProgressReporter,
+    cancellation: asyncio.Event | None,
+    expected_snapshot_digest: str | None,
 ) -> IndexBuildReport:
     """Implement index construction under the public progress boundary."""
 
     root = Path(repository_root).expanduser().resolve(strict=True)
+    _raise_if_index_cancelled(cancellation)
     initialize_index(root)
     previous: IndexManifest | None
     try:
@@ -312,7 +345,16 @@ async def _build_repository_index(
         phase_weight=scan_end,
         activity=ProgressActivity.ACTIVE,
     )
-    snapshot = scan_repository(root)
+    snapshot = await asyncio.to_thread(scan_repository, root)
+    _raise_if_index_cancelled(cancellation)
+    snapshot_digest = calculate_source_snapshot_digest(snapshot)
+    if (
+        expected_snapshot_digest is not None
+        and snapshot_digest != expected_snapshot_digest
+    ):
+        raise IndexSourceChangedError(
+            "repository source identity differs from expected snapshot"
+        )
     progress.report(
         "scan",
         "Repository scan completed.",
@@ -340,12 +382,18 @@ async def _build_repository_index(
     run_id = "cli-index-update" if update_only else "cli-index-build"
     semantic: SemanticIndexBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
-    with acquire_index_lock(
-        root,
-        run_id,
-        recover_stale=recover_stale_lock,
-        confirm_unknown=confirm_unknown_lock,
-    ) as lock:
+    with (
+        acquire_index_lock(
+            root,
+            run_id,
+            recover_stale=recover_stale_lock,
+            confirm_unknown=confirm_unknown_lock,
+        ) as lock,
+        index_publication_transaction(
+            lock,
+            before_publish=lambda: _raise_if_index_cancelled(cancellation),
+        ),
+    ):
         try:
             progress.report(
                 "structural_index",
@@ -361,10 +409,12 @@ async def _build_repository_index(
                 unit_type="files",
                 activity=ProgressActivity.ACTIVE,
             )
-            structural = build_structural_index(
+            structural = await asyncio.to_thread(
+                build_structural_index,
                 snapshot,
                 lock,
                 previous_manifest=previous,
+                cancellation=cancellation,
             )
             progress.report(
                 "structural_index",
@@ -445,11 +495,13 @@ async def _build_repository_index(
                         max_files=max_files,
                         max_output_tokens=semantic_max_output_tokens,
                         fail_on_error=fail_on_error,
+                        max_failures=max_failures,
                         force_reanalyze=force_reanalyze,
                         resume=not force_reanalyze,
                         progress=observe_semantic,
                     ),
                     previous_manifest=previous,
+                    cancellation=cancellation,
                 )
                 semantic_event = progress.last_event
                 if semantic_event is not None:
@@ -520,6 +572,7 @@ async def _build_repository_index(
                             maps_start, 93.0, phase_prefix="repository_maps"
                         ),
                     ),
+                    cancellation=cancellation,
                 )
                 map_fallback = any(item.status == "fallback" for item in maps.outcomes)
                 progress.report(
@@ -566,6 +619,13 @@ async def _build_repository_index(
                 phase_percent=100,
                 phase_weight=3 if model_enabled else 15,
             )
+            _raise_if_index_cancelled(cancellation)
+            current_snapshot = await asyncio.to_thread(scan_repository, root)
+            _raise_if_index_cancelled(cancellation)
+            if calculate_source_snapshot_digest(current_snapshot) != snapshot_digest:
+                raise IndexSourceChangedError(
+                    "repository source identity changed before index publication"
+                )
             progress.report(
                 "validation",
                 "Validating the active index generation.",
@@ -596,6 +656,7 @@ async def _build_repository_index(
                 phase_weight=3 if model_enabled else 10,
                 metadata={"generation_id": active.generation_id},
             )
+            _raise_if_index_cancelled(cancellation)
         except BaseException:
             if previous is not None:
                 with suppress(Exception):
@@ -730,21 +791,38 @@ def _inspect_repository_index(
         )
     )
     stale = set(added) | set(changed)
+    if manifest.schema_version != INDEX_SCHEMA_VERSION:
+        stale.update(current)
     for path in sorted(set(current) & set(indexed)):
         state = indexed[path]
         structural_expected = (
-            PYTHON_ANALYZER if current[path].language == "Python" else FALLBACK_ANALYZER
+            PYTHON_ANALYZER
+            if current[path].language == "Python"
+            else POLYGLOT_ANALYZER
+            if current[path].language in SUPPORTED_POLYGLOT_LANGUAGES
+            else FALLBACK_ANALYZER
         )
         if state.analyzer != structural_expected:
             stale.add(path)
-        semantic_expected = _semantic_identity(
-            provider_configuration, generic=current[path].language != "Python"
-        )
-        if semantic_expected is not None and (
-            state.semantic_status != "complete"
-            or semantic_expected not in manifest.semantic_analyzers
-        ):
-            stale.add(path)
+        if provider_configuration is not None:
+            try:
+                code_map = load_file_code_map(root, path, manifest=manifest)
+                analysis = load_file_semantic_analysis(root, path, manifest=manifest)
+                expected = _semantic_identity(
+                    provider_configuration, generic=not code_map.symbols
+                )
+                if (
+                    not analysis.coverage_complete
+                    or analysis.schema_version != SEMANTIC_SCHEMA_VERSION
+                    or (
+                        analysis.record_kind != "deterministic_metadata_interpretation"
+                        and normalize_analyzer_identity(analysis.semantic_analyzer)
+                        != expected
+                    )
+                ):
+                    stale.add(path)
+            except (IndexManifestReadError, ValueError):
+                stale.add(path)
     failed = tuple(
         state.path
         for state in manifest.files
@@ -1146,31 +1224,16 @@ def _semantic_identity(
         return None
     return AnalyzerIdentity(
         analyzer_id=(GENERIC_SEMANTIC_ANALYZER_ID if generic else SEMANTIC_ANALYZER_ID),
-        analyzer_version=_model_dependent_analyzer_version(
-            (
-                GENERIC_SEMANTIC_ANALYZER_VERSION
-                if generic
-                else SEMANTIC_ANALYZER_VERSION
-            ),
-            configuration,
+        analyzer_version=(
+            GENERIC_SEMANTIC_ANALYZER_VERSION if generic else SEMANTIC_ANALYZER_VERSION
         ),
         analysis_prompt_version=SEMANTIC_PROMPT_VERSION,
-        response_schema_version=1,
+        response_schema_version=SEMANTIC_SCHEMA_VERSION,
         model_identity=ModelIdentity(
             provider_id=configuration.provider_id,
             model_id=configuration.model_id,
         ),
     )
-
-
-def _model_dependent_analyzer_version(
-    analyzer_version: str, configuration: ProviderConfiguration
-) -> str:
-    if configuration.provider_id != "openai-compatible":
-        return analyzer_version
-    canonical = configuration.endpoint.rstrip("/")
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{analyzer_version}+base.{digest}"
 
 
 def _manifest_model_identity(
@@ -1269,6 +1332,11 @@ def _workflow_snapshot(
     return cast(ProjectSnapshot, source)
 
 
+def _raise_if_index_cancelled(cancellation: asyncio.Event | None) -> None:
+    if cancellation is not None and cancellation.is_set():
+        raise asyncio.CancelledError
+
+
 def _report_terminal_exception(
     reporter: ProgressReporter, error: BaseException
 ) -> None:
@@ -1333,6 +1401,11 @@ def _diagnostic_error_code(error: BaseException | None) -> str | None:
         return None
     if isinstance(error, ModelProviderError):
         return provider_error_details(error)[0]
+    typed_code = getattr(error, "error_code", None)
+    if isinstance(typed_code, str):
+        return typed_code
+    if isinstance(error, IndexSourceChangedError):
+        return "source_identity_changed"
     run_record = getattr(error, "run_record", None)
     value = getattr(run_record, "failure_code", None)
     if isinstance(value, str):
@@ -1398,6 +1471,7 @@ __all__ = [
     "ApplicationError",
     "ArtifactReadError",
     "IndexBuildReport",
+    "IndexSourceChangedError",
     "IndexStatusReport",
     "MAX_HANDOFF_BYTES",
     "MissingIndexError",

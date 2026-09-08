@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+import contextforge.intelligence.maps as maps_module
 from contextforge.intelligence import (
     ArchitectureMap,
     GlobalMapAnalysisError,
@@ -278,6 +279,36 @@ def test_one_module_hierarchical_maps_persist_and_reuse_without_source_prompt(
     assert all(request.max_output_tokens == 512 for request in responder.requests)
     assert all(
         injection not in request.messages()[0].content for request in responder.requests
+    )
+
+
+def test_legacy_endpoint_identity_is_republished_for_maps_without_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = _facts(tmp_path, {"main.py": "def main():\n    return 1\n"})
+    original = maps_module._global_analyzer
+
+    def legacy_analyzer(*args: Any, **kwargs: Any) -> Any:
+        identity = original(*args, **kwargs)
+        return identity.model_copy(
+            update={"analyzer_version": identity.analyzer_version + "+base." + "b" * 64}
+        )
+
+    monkeypatch.setattr(maps_module, "_global_analyzer", legacy_analyzer)
+    legacy = _maps(snapshot, _Responder(), run_id="legacy-map-identity")
+    monkeypatch.setattr(maps_module, "_global_analyzer", original)
+    responder = _Responder()
+
+    migrated = _maps(snapshot, responder, run_id="migrate-map-identity")
+
+    assert responder.requests == []
+    assert migrated.published is True
+    assert migrated.manifest.generation_id != legacy.manifest.generation_id
+    assert migrated.architecture is not None
+    assert "+base." not in migrated.architecture.analyzer.analyzer_version
+    assert all(
+        "+base." not in item.analyzer_version
+        for item in migrated.manifest.semantic_analyzers
     )
 
 

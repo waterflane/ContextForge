@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 import contextforge.intelligence.semantics as semantics_module
 import contextforge.intelligence.store as store_module
+from contextforge.bridge import BridgeServer
 from contextforge.intelligence import (
     AnalysisDiagnostic,
     BehaviorDescription,
@@ -17,24 +19,29 @@ from contextforge.intelligence import (
     SemanticAnalysisError,
     SemanticAnalysisOptions,
     SemanticConfidence,
+    SemanticFailureLimitError,
     SemanticIndexBuildResult,
     SourceRange,
     StaleStructuralIndexError,
     acquire_index_lock,
     build_semantic_index,
     build_structural_index,
+    load_file_code_map,
     load_file_semantic_analysis,
     load_generation_manifest,
     load_manifest,
 )
 from contextforge.models import (
+    ContextWindowExceededError,
     FakeModelProvider,
     FakeScript,
     ModelRequest,
     ProviderCancelledError,
     ProviderConfiguration,
+    ProviderRequestError,
     ProviderTimeoutError,
 )
+from contextforge.models.providers import RequestContextBudget, estimate_request_context
 from contextforge.progress import ProgressEvent
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
@@ -146,7 +153,7 @@ def _symbol_payload(
 
 def _valid_response(request: ModelRequest, _: int) -> str:
     category = request.trusted_code_map_facts.get("file_category")
-    if request.metadata.get("analyzer_kind") == "generic-text-semantic":
+    if request.response_model.__name__ != "_CombinedResponse":
         if category == "readme":
             payload = {
                 "schema_version": 1,
@@ -195,7 +202,9 @@ def _valid_response(request: ModelRequest, _: int) -> str:
         raw_symbols = request.trusted_code_map_facts.get("symbols", [])
         assert isinstance(raw_symbols, list)
         symbols = [
-            _symbol_payload(item, item["declaration_range"])
+            _symbol_payload(
+                item, _intersection(item["declaration_range"], _first_range(request))
+            )
             for item in raw_symbols
             if item["kind"] in {"class", "function", "async_function", "method"}
         ]
@@ -205,6 +214,22 @@ def _valid_response(request: ModelRequest, _: int) -> str:
             "symbols": symbols,
         }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _intersection(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    start = max(
+        (left["start_line"], left["start_column"]),
+        (right["start_line"], right["start_column"]),
+    )
+    end = min(
+        (left["end_line"], left["end_column"]), (right["end_line"], right["end_column"])
+    )
+    return {
+        "start_line": start[0],
+        "start_column": start[1],
+        "end_line": end[0],
+        "end_column": end[1],
+    }
 
 
 def _provider(
@@ -270,7 +295,7 @@ def q(a):
     assert analysis.primary_purpose.provider_id == "fake"
     assert analysis.primary_purpose.model_id == "semantic-v1"
     assert analysis.primary_purpose.source_sha256 == analysis.source_sha256
-    assert analysis.primary_purpose.analyzer_prompt_version == "3"
+    assert analysis.primary_purpose.analyzer_prompt_version == "5"
     assert analysis.primary_purpose.evidence[0].path == "src/модуль.py"
     assert analysis.primary_purpose.confidence.value == 0.9
     assert {item.kind for item in analysis.symbols} == {"class", "method", "function"}
@@ -603,14 +628,12 @@ def test_invalid_utf8_is_planned_without_a_provider_call(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("path", "language"),
     [
-        ("app.js", "JavaScript"),
         ("README.md", "Markdown"),
         ("page.html", "HTML"),
         ("style.css", "CSS"),
         ("script.ps1", "PowerShell"),
         ("build.cmd", "Batch"),
         ("schema.json", "JSON"),
-        ("module.ts", "TypeScript"),
         ("script.sh", "Shell"),
         ("settings.toml", "TOML"),
         ("workflow.yaml", "YAML"),
@@ -636,6 +659,116 @@ def test_meaningful_non_ast_files_use_generic_model_semantics(
     assert provider.call_count == 1
 
 
+def test_generic_semantics_persist_separate_inferred_regions(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {"workflow.dsl": "stage prepare\n  do work\nstage publish\n"},
+    )
+
+    def with_regions(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        payload["regions"] = [
+            {
+                "label": "prepare stage",
+                "kind": "block",
+                "start_line": 1,
+                "end_line": 2,
+                "summary": "Prepares work before publication.",
+                "confidence": 0.8,
+            },
+            {
+                "label": "publish stage",
+                "kind": "section",
+                "start_line": 3,
+                "end_line": 3,
+                "summary": "Publishes the prepared result.",
+                "confidence": 0.7,
+            },
+        ]
+        return json.dumps(payload)
+
+    result = _build_semantics(snapshot, _provider(responder=with_regions))
+
+    analysis = result.analyses[0]
+    assert analysis.symbols == ()
+    assert [item.label for item in analysis.inferred_regions] == [
+        "prepare stage",
+        "publish stage",
+    ]
+    assert all(
+        item.record_kind == "model_inferred_region"
+        and item.source_sha256 == analysis.source_sha256
+        for item in analysis.inferred_regions
+    )
+
+
+@pytest.mark.parametrize(
+    "regions",
+    [
+        [
+            {
+                "label": "outside",
+                "kind": "block",
+                "start_line": 1,
+                "end_line": 99,
+                "summary": "Escapes the verified source.",
+                "confidence": 0.5,
+            }
+        ],
+        [
+            {
+                "label": "first",
+                "kind": "section",
+                "start_line": 1,
+                "end_line": 2,
+                "summary": "First region.",
+                "confidence": 0.5,
+            },
+            {
+                "label": "overlap",
+                "kind": "section",
+                "start_line": 2,
+                "end_line": 2,
+                "summary": "Overlapping region.",
+                "confidence": 0.5,
+            },
+        ],
+    ],
+)
+def test_invalid_inferred_regions_never_publish(
+    tmp_path: Path, regions: list[dict[str, object]]
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"workflow.dsl": "one\ntwo\n"})
+
+    def invalid(request: ModelRequest, index: int) -> str:
+        payload = json.loads(_valid_response(request, index))
+        payload["regions"] = regions
+        return json.dumps(payload)
+
+    result = _build_semantics(snapshot, _provider(responder=invalid))
+
+    assert result.failed_paths == ("workflow.dsl",)
+    assert result.manifest.files[0].semantic_status == "failed"
+
+
+def test_polyglot_semantics_are_bound_to_verified_symbols(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path,
+        {
+            "progress.ts": (
+                "export function preparationProgressStage() { return 'index'; }\n"
+            )
+        },
+    )
+
+    result = _build_semantics(snapshot, _provider())
+
+    analysis = result.analyses[0]
+    assert analysis.analysis_route == "rich_model_analysis"
+    assert [item.name for item in analysis.symbols] == ["preparationProgressStage"]
+    assert analysis.inferred_regions == ()
+
+
 @pytest.mark.parametrize(
     ("path", "expected_budget"),
     [
@@ -644,7 +777,7 @@ def test_meaningful_non_ast_files_use_generic_model_semantics(
         ("notes.txt", 160),
         ("config.json", 160),
         ("app.js", 192),
-        ("app.py", 256),
+        ("app.py", 640),
     ],
 )
 def test_small_file_output_budgets_are_adaptive(
@@ -782,7 +915,14 @@ def test_combined_response_rejects_symbol_evidence_outside_symbol(
             invalid_response = json.dumps(payload)
         return invalid_response
 
-    result = _build_semantics(snapshot, _provider(responder=misplaced))
+    result = _build_semantics(
+        snapshot,
+        FakeModelProvider(
+            _configuration().model_copy(update={"context_window": 32768}),
+            responder=misplaced,
+        ),
+        options=SemanticAnalysisOptions(max_output_tokens=2048),
+    )
 
     assert result.failed_paths == ("app.py",)
     diagnostic = result.outcomes[0].diagnostic
@@ -795,10 +935,8 @@ def _valid_response_for_script(path: str) -> str:
     return json.dumps(
         {
             "schema_version": 1,
-            "file": {
-                "primary_purpose": _claim("recovered purpose"),
-            },
-            "symbols": [],
+            "summary": "recovered purpose",
+            "key_points": [],
         }
     )
 
@@ -815,6 +953,72 @@ def test_unchanged_analysis_is_reused_without_provider_calls(tmp_path: Path) -> 
     assert second.reused_paths == ("app.py",)
     assert second_provider.call_count == 0
     assert second.generation_path == first.generation_path
+
+
+def test_loopback_endpoint_change_does_not_invalidate_semantics(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.txt": "service notes\n"})
+    first_provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://127.0.0.1:1234",
+            model_id="exact/model",
+            retry_limit=0,
+        ),
+        responder=_valid_response,
+    )
+    first = _build_semantics(snapshot, first_provider, run_id="endpoint-first")
+    second_provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="fake://127.0.0.1:9999",
+            model_id="exact/model",
+            retry_limit=0,
+        ),
+        responder=_valid_response,
+    )
+
+    second = _build_semantics(snapshot, second_provider, run_id="endpoint-second")
+
+    assert first_provider.call_count == 1
+    assert second_provider.call_count == 0
+    assert second.manifest == first.manifest
+    assert "+base." not in second.analyses[0].semantic_analyzer.analyzer_version
+
+
+def test_legacy_endpoint_identity_is_republished_without_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.txt": "service notes\n"})
+    original = semantics_module._semantic_analyzer
+
+    def legacy_analyzer(*args: Any, **kwargs: Any) -> Any:
+        identity = original(*args, **kwargs)
+        return identity.model_copy(
+            update={"analyzer_version": identity.analyzer_version + "+base." + "a" * 64}
+        )
+
+    monkeypatch.setattr(semantics_module, "_semantic_analyzer", legacy_analyzer)
+    legacy = _build_semantics(snapshot, _provider(), run_id="legacy-identity")
+    monkeypatch.setattr(semantics_module, "_semantic_analyzer", original)
+    migration_provider = _provider()
+
+    migrated = _build_semantics(snapshot, migration_provider, run_id="migrate-identity")
+    stable_provider = _provider()
+    stable = _build_semantics(snapshot, stable_provider, run_id="stable-identity")
+
+    assert migration_provider.call_count == stable_provider.call_count == 0
+    assert migrated.manifest.generation_id != legacy.manifest.generation_id
+    assert stable.manifest == migrated.manifest
+    assert all(
+        "+base." not in item.analyzer_version
+        for item in migrated.manifest.semantic_analyzers
+    )
+    assert (
+        "+base."
+        not in load_file_semantic_analysis(
+            tmp_path, "app.txt"
+        ).semantic_analyzer.analyzer_version
+    )
 
 
 def test_semantic_persistence_is_deterministic_across_repository_roots(
@@ -855,7 +1059,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
         snapshot,
         prompt_provider,
         run_id="semantic-prompt",
-        options=SemanticAnalysisOptions(prompt_version="4"),
+        options=SemanticAnalysisOptions(prompt_version="6"),
     )
     model_provider = _provider(model="semantic-v2")
     model = _build_semantics(snapshot, model_provider, run_id="semantic-model")
@@ -868,7 +1072,7 @@ def test_prompt_and_model_changes_invalidate_complete_records(tmp_path: Path) ->
     )
 
     assert prompt_provider.call_count == 1
-    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "4"
+    assert prompt.analyses[0].semantic_analyzer.analysis_prompt_version == "6"
     assert model_provider.call_count == 1
     identity = model.analyses[0].semantic_analyzer.model_identity
     assert identity is not None
@@ -957,6 +1161,72 @@ def test_fail_on_error_keeps_prior_valid_generation_active(tmp_path: Path) -> No
         )
 
     assert load_manifest(tmp_path) == structural
+
+
+def test_fail_on_error_preserves_the_typed_provider_cause(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "pass\n"})
+
+    with (
+        acquire_index_lock(tmp_path, "semantic-provider-cause") as lock,
+        pytest.raises(SemanticAnalysisError) as raised,
+    ):
+        asyncio.run(
+            build_semantic_index(
+                snapshot,
+                lock,
+                _provider(scripts=[ProviderTimeoutError("unsafe provider detail")]),
+                options=SemanticAnalysisOptions(fail_on_error=True),
+            )
+        )
+
+    assert isinstance(raised.value.__cause__, ProviderTimeoutError)
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "failure_limit", "expected_calls"),
+    [(1, 1, 1), (1, 2, 2), (2, 1, 2)],
+)
+def test_failure_limit_stops_scheduling_and_keeps_active_generation(
+    tmp_path: Path,
+    concurrency: int,
+    failure_limit: int,
+    expected_calls: int,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path, {f"{name}.txt": f"{name}\n" for name in "abcde"}
+    )
+    active = load_manifest(tmp_path)
+    events: list[ProgressEvent] = []
+    scripts: list[Any] = [
+        ProviderRequestError("rejected") for _ in range(failure_limit)
+    ]
+    if concurrency > 1:
+        scripts.insert(1, FakeScript(ProviderRequestError("late"), delay_seconds=1))
+    provider = _provider(concurrency=concurrency, scripts=scripts)
+
+    with (
+        acquire_index_lock(tmp_path, "semantic-failure-limit") as lock,
+        pytest.raises(SemanticFailureLimitError),
+    ):
+        asyncio.run(
+            build_semantic_index(
+                snapshot,
+                lock,
+                provider,
+                options=SemanticAnalysisOptions(
+                    max_concurrency=concurrency,
+                    max_failures=failure_limit,
+                    progress=events.append,
+                ),
+            )
+        )
+
+    assert provider.call_count == expected_calls
+    assert load_manifest(tmp_path) == active
+    assert events[-1].status.value == "failed"
+    assert events[-1].failed_units == failure_limit
+    assert cast(int, events[-1].metadata["unstarted_units"]) > 0
+    assert cast(int, events[-1].metadata["cancelled_units"]) == concurrency - 1
 
 
 def test_interrupted_build_resumes_only_validated_checkpoints(tmp_path: Path) -> None:
@@ -1053,7 +1323,7 @@ def test_bounded_concurrency_and_file_limit_statuses(tmp_path: Path) -> None:
     assert ("a.py", "complete") in statuses
 
 
-def test_large_file_uses_one_deterministic_excerpt_request(tmp_path: Path) -> None:
+def test_large_file_uses_bounded_chunks_with_complete_coverage(tmp_path: Path) -> None:
     body = "".join(f"    value += {index}\n" for index in range(80))
     source = f"def calculate(value):\n{body}    return value\n"
     snapshot = _snapshot_with_facts(tmp_path, {"large.py": source})
@@ -1073,16 +1343,20 @@ def test_large_file_uses_one_deterministic_excerpt_request(tmp_path: Path) -> No
     )
 
     assert result.failed_paths == ()
-    assert result.request_count == len(requests) == 1
+    assert result.request_count == len(requests) > 1
+    assert result.analyses[0].coverage_complete
+    assert all(
+        len(item.untrusted_sources[0].text.encode("utf-8")) <= 300 for item in requests
+    )
     request = requests[0]
     excerpt = request.untrusted_sources[0].text
     assert len(excerpt.encode("utf-8")) <= 300
     assert excerpt.startswith("def calculate")
-    assert "return value" in excerpt
+    assert "return value" in requests[-1].untrusted_sources[0].text
     assert request.metadata["input_truncated"] == "true"
     assert int(request.metadata["estimated_input_tokens"]) > 0
     assert request.max_output_tokens is not None
-    assert 192 <= request.max_output_tokens <= 512
+    assert 192 <= request.max_output_tokens <= 1024
 
 
 def test_large_file_excerpt_is_deterministic_and_utf8_safe(tmp_path: Path) -> None:
@@ -1106,13 +1380,15 @@ def test_large_file_excerpt_is_deterministic_and_utf8_safe(tmp_path: Path) -> No
         options=options,
     )
 
-    assert len(excerpts) == 2
-    assert excerpts[0] == excerpts[1]
-    assert len(excerpts[0].encode("utf-8")) <= 101
-    excerpts[0].encode("utf-8").decode("utf-8")
+    assert len(excerpts) > 2
+    midpoint = len(excerpts) // 2
+    assert excerpts[:midpoint] == excerpts[midpoint:]
+    assert all(len(item.encode("utf-8")) <= 101 for item in excerpts)
+    for excerpt in excerpts:
+        excerpt.encode("utf-8").decode("utf-8")
 
 
-def test_many_symbols_still_use_one_bounded_file_request(tmp_path: Path) -> None:
+def test_many_symbols_use_bounded_file_chunks(tmp_path: Path) -> None:
     source = (
         "\n".join(f"def q{index}():\n    return {index}" for index in range(8)) + "\n"
     )
@@ -1125,7 +1401,225 @@ def test_many_symbols_still_use_one_bounded_file_request(tmp_path: Path) -> None
     )
 
     assert result.failed_paths == ()
-    assert result.request_count == provider.call_count == 1
+    assert result.request_count == provider.call_count > 1
+    assert result.analyses[0].coverage_complete
+
+
+def test_required_ids_survive_small_context_and_more_than_100_symbols(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(f"def f{i}(): return {i}" for i in range(101)) + "\n"
+    snapshot = _snapshot_with_facts(tmp_path, {"many.py": source})
+    code_map = load_file_code_map(tmp_path, "many.py")
+    requests: list[ModelRequest] = []
+
+    def capture(request: ModelRequest, index: int) -> str:
+        requests.append(request)
+        region = _first_range(request)
+        expected = {
+            s.symbol_id
+            for s in code_map.symbols
+            if (s.declaration_range.start_line, s.declaration_range.start_column)
+            < (region["end_line"], region["end_column"])
+            and (s.declaration_range.end_line, s.declaration_range.end_column)
+            > (region["start_line"], region["start_column"])
+        }
+        supplied = {s["symbol_id"] for s in request.trusted_code_map_facts["symbols"]}
+        assert expected == supplied
+        assert estimate_request_context(request, provider.configuration).fits
+        return _valid_response(request, index)
+
+    provider = FakeModelProvider(
+        _configuration().model_copy(update={"context_window": 8192}),
+        responder=capture,
+    )
+    result = _build_semantics(snapshot, provider)
+    assert result.failed_paths == (), result.outcomes
+    assert result.analyses[0].coverage_complete
+    assert len(result.analyses[0].symbols) == 101
+    assert len(requests) > 1
+
+
+def test_impossible_symbol_output_budget_does_not_dispatch(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"one.py": "def f(): return 1\n"})
+    provider = _provider()
+    result = _build_semantics(
+        snapshot, provider, options=SemanticAnalysisOptions(max_output_tokens=32)
+    )
+    assert provider.call_count == 0
+    assert result.failed_paths == ("one.py",)
+    assert result.outcomes[0].diagnostic is not None
+    assert result.outcomes[0].diagnostic.code == "symbol_output_budget_exceeded"
+
+
+def test_partial_chunks_resume_across_published_generations(tmp_path: Path) -> None:
+    source = "ordinary line\n" * 20 + "FAIL_MARKER\n" + "ordinary line\n" * 20
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": source})
+
+    def failing(request: ModelRequest, index: int) -> str:
+        if "FAIL_MARKER" in request.untrusted_sources[0].text:
+            raise ProviderRequestError("deliberate test failure")
+        return _valid_response(request, index)
+
+    options = SemanticAnalysisOptions(max_source_bytes_per_request=128)
+    partial = _build_semantics(snapshot, _provider(responder=failing), options=options)
+    analysis = partial.analyses[0]
+    assert not analysis.coverage_complete
+    assert 0 < analysis.chunks_completed < analysis.chunks_planned
+    assert len(analysis.chunk_checkpoints) == analysis.chunks_completed
+    assert partial.manifest.files[0].semantic_status == "partial"
+    coverage = BridgeServer(tmp_path)._index_coverage()
+    assert coverage["semantic_partial_files"] == 1
+    assert coverage["semantic_complete_files"] == 0
+    assert coverage["semantic_chunks_completed"] == analysis.chunks_completed
+    provider = _provider()
+    complete = _build_semantics(
+        snapshot, provider, options=options, run_id="resume-chunks"
+    )
+    assert complete.analyses[0].coverage_complete
+    assert provider.call_count == analysis.chunks_planned - analysis.chunks_completed
+
+
+def test_source_changed_during_model_work_is_not_published_as_claims(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "original text\n"})
+
+    def changing(request: ModelRequest, index: int) -> str:
+        (tmp_path / "notes.txt").write_text("changed text\n", encoding="utf-8")
+        return _valid_response(request, index)
+
+    result = _build_semantics(snapshot, _provider(responder=changing))
+    assert result.failed_paths == ("notes.txt",)
+    assert not result.analyses
+
+
+def test_chunk_merge_preserves_conflicting_claims(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"app.py": "def run():\n    return 1\n"})
+    first = _build_semantics(snapshot, _provider()).analyses[0]
+    assert first.primary_purpose is not None
+    first_symbol = first.symbols[0]
+    assert first_symbol.behavioral_purpose is not None
+    alternative_purpose = first.primary_purpose.model_copy(
+        update={"claim": "alternative purpose"}
+    )
+    alternative_symbol = first_symbol.model_copy(
+        update={
+            "behavioral_purpose": first_symbol.behavioral_purpose.model_copy(
+                update={"claim": "alternative behavior"}
+            ),
+        }
+    )
+    second = first.model_copy(
+        update={
+            "primary_purpose": alternative_purpose,
+            "symbols": (alternative_symbol,),
+        }
+    )
+    merged = semantics_module._merge_chunk_analyses([first, second], [])
+    assert alternative_purpose in merged.major_responsibilities
+    assert any(
+        claim.claim == "alternative behavior" for claim in merged.symbols[0].uncertainty
+    )
+
+
+def test_chunk_merge_deduplicates_and_warns_about_overlapping_regions(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(
+        tmp_path, {"notes.txt": "a section\nanother line\n"}
+    )
+    base = _build_semantics(snapshot, _provider()).analyses[0]
+    code_map = load_file_code_map(tmp_path, "notes.txt")
+    raw = semantics_module._RawInferredRegion(
+        label="first",
+        kind="section",
+        start_line=1,
+        end_line=1,
+        summary="first region",
+        confidence=0.8,
+    )
+    region = semantics_module._inferred_regions(
+        (raw,), code_map, base.semantic_analyzer
+    )[0]
+    first = base.model_copy(update={"inferred_regions": (region,)})
+    other = region.model_copy(
+        update={"region_id": "b" * 64, "summary": "other interpretation"}
+    )
+    second = base.model_copy(update={"inferred_regions": (other,)})
+    warnings: list[str] = []
+    merged = semantics_module._merge_chunk_analyses([first, first, second], warnings)
+    assert merged.inferred_regions == (region,)
+    assert warnings == ["inferred-region-overlap:first-valid-retained"]
+
+
+def test_context_preflight_replans_chunks_without_sending_oversized_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "text\n" * 60})
+    estimate = estimate_request_context
+
+    def bounded(
+        request: ModelRequest, configuration: ProviderConfiguration
+    ) -> RequestContextBudget:
+        budget = estimate(request, configuration)
+        if len(request.untrusted_sources[0].text.encode("utf-8")) > 128:
+            return replace(budget, configured_context_window=1)
+        return budget
+
+    monkeypatch.setattr(semantics_module, "estimate_request_context", bounded)
+    sizes: list[int] = []
+
+    def capture(request: ModelRequest, index: int) -> str:
+        sizes.append(len(request.untrusted_sources[0].text.encode("utf-8")))
+        return _valid_response(request, index)
+
+    result = _build_semantics(
+        snapshot,
+        _provider(responder=capture),
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=512,
+        ),
+    )
+    assert result.analyses[0].coverage_complete
+    assert len(sizes) > 1 and max(sizes) <= 128
+
+
+def test_server_context_refusal_rebuilds_once_without_json_repair(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "some text\n"})
+    calls = 0
+
+    def refusal(request: ModelRequest, index: int) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ContextWindowExceededError(server_context_window=2048)
+        return _valid_response(request, index)
+
+    result = _build_semantics(snapshot, _provider(responder=refusal))
+    assert result.analyses[0].coverage_complete
+    assert calls == 2
+
+
+def test_chunk_cap_reports_partial_coverage(tmp_path: Path) -> None:
+    snapshot = _snapshot_with_facts(tmp_path, {"notes.txt": "a line of text\n" * 100})
+    result = _build_semantics(
+        snapshot,
+        _provider(),
+        options=SemanticAnalysisOptions(
+            max_source_bytes_per_request=128,
+            max_chunks_per_file=2,
+        ),
+    )
+    assert result.analyses[0].chunks_completed == 2
+    assert not result.analyses[0].coverage_complete
+    assert (
+        "semantic-chunk-limit:source-coverage-incomplete"
+        in result.analyses[0].coverage_warnings
+    )
 
 
 def test_request_byte_limit_fails_before_calling_provider(tmp_path: Path) -> None:

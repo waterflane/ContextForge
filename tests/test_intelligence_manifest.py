@@ -267,7 +267,7 @@ def test_source_schema_and_build_option_changes_invalidate() -> None:
         (project_file,),
         expected_analyzer=_analyzer(),
         build_options_digest=_sha("options"),
-        schema_versions=SchemaVersionMetadata(record_schema_version=2),
+        schema_versions=SchemaVersionMetadata(record_schema_version=3),
     )
 
     assert source_stale == option_stale == schema_stale == manifest.files
@@ -341,7 +341,7 @@ def test_invalid_build_options_digest_is_rejected() -> None:
         )
 
 
-def test_openai_compatible_base_url_identity_change_invalidates_model_records() -> None:
+def test_legacy_endpoint_suffixes_are_equivalent_model_identities() -> None:
     project_file = _file("app.py", "pass")
     first = _analyzer().model_copy(
         update={
@@ -359,12 +359,9 @@ def test_openai_compatible_base_url_identity_change_invalidates_model_records() 
     )
     manifest = _manifest((project_file,), analyzer=first)
 
-    assert (
-        identify_stale_analysis(
-            manifest,
-            (project_file,),
-            expected_analyzer=changed,
-            build_options_digest=_sha("options"),
-        )
-        == manifest.files
+    assert not identify_stale_analysis(
+        manifest,
+        (project_file,),
+        expected_analyzer=changed,
+        build_options_digest=_sha("options"),
     )
