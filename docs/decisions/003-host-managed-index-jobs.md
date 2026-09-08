@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for the unreleased ContextForge API following 0.5.1.
+Accepted for ContextForge 0.5.1.
 
 ## Context
 
@@ -77,4 +77,4 @@ reserved for unexpected defects.
 - Bridge 2 has narrowly scoped index and provider authority; it still cannot
   write source, mutate Git, or execute arbitrary commands.
 - Persisted index, manifest, and record schemas remain version 2; progress
-  remains version 3 and the package version remains 0.5.1 until release work.
+  remains version 3 in ContextForge 0.5.1.
