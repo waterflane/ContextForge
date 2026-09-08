@@ -999,6 +999,7 @@ def _validate_record_schema(content: bytes, expected: int) -> None:
             "verified_file_codemap",
             "model_file_interpretation",
             "deterministic_metadata_interpretation",
+            "semantic_card",
         }
         and value.get("schema_version") != expected
     ):

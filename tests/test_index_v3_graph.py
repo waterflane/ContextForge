@@ -43,7 +43,11 @@ def test_structural_generation_contains_deterministic_graph_and_orientation(
     orientation = load_orientation_map(tmp_path, manifest=report.manifest)
 
     assert report.manifest.schema_version == 3
-    assert report.manifest.generation_kind == "structural"
+    assert report.manifest.generation_kind == "enriched"
+    assert (
+        report.manifest.build.previous_generation_id
+        == report.structural.manifest.generation_id
+    )
     assert {item.path for item in graph.file_metrics} == {
         "main.py",
         "service.py",
@@ -75,7 +79,9 @@ def test_enrichment_failure_keeps_published_structural_generation(
         del args, kwargs
         raise RuntimeError("enrichment failed")
 
-    monkeypatch.setattr(application_module, "build_semantic_index", fail_enrichment)
+    monkeypatch.setattr(
+        application_module, "build_semantic_card_index", fail_enrichment
+    )
     with pytest.raises(RuntimeError, match="enrichment failed"):
         asyncio.run(
             build_repository_index(

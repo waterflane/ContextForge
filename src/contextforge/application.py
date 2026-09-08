@@ -53,19 +53,18 @@ from contextforge.intelligence import (
     SEMANTIC_SCHEMA_VERSION,
     SUPPORTED_POLYGLOT_LANGUAGES,
     ArchitectureMap,
-    GlobalMapAnalysisOptions,
     GlobalMapBuildResult,
     IndexManifest,
     IndexManifestNotFoundError,
     IndexManifestReadError,
     ModelIdentity,
-    SemanticAnalysisOptions,
+    SemanticCardBuildResult,
+    SemanticCardOptions,
     SemanticIndexBuildResult,
     StructuralIndexBuildResult,
     UnsupportedIndexSchemaError,
     acquire_index_lock,
-    build_repository_maps,
-    build_semantic_index,
+    build_semantic_card_index,
     build_structural_index,
     calculate_source_snapshot_digest,
     clean_generated_index,
@@ -76,6 +75,7 @@ from contextforge.intelligence import (
     load_file_semantic_analysis,
     load_manifest,
     load_repository_overview,
+    load_semantic_card,
     normalize_analyzer_identity,
     write_manifest,
 )
@@ -94,7 +94,6 @@ from contextforge.models import (
 )
 from contextforge.progress import (
     ProgressActivity,
-    ProgressEvent,
     ProgressObserver,
     ProgressReporter,
 )
@@ -129,7 +128,7 @@ class IndexBuildReport:
 
     snapshot: ProjectSnapshot
     structural: StructuralIndexBuildResult
-    semantic: SemanticIndexBuildResult | None
+    semantic: SemanticIndexBuildResult | SemanticCardBuildResult | None
     maps: GlobalMapBuildResult | None
     provider_id: str | None
     model_id: str | None
@@ -398,7 +397,7 @@ async def _build_repository_index(
         },
     )
     run_id = "cli-index-update" if update_only else "cli-index-build"
-    semantic: SemanticIndexBuildResult | None = None
+    semantic: SemanticIndexBuildResult | SemanticCardBuildResult | None = None
     maps: GlobalMapBuildResult | None = None
     with (
         acquire_index_lock(
@@ -482,182 +481,82 @@ async def _build_repository_index(
                         "generation_kind": "structural",
                     },
                 )
-            if provider is not None:
-                semantic_start = 18.0
-                semantic_end = 82.0
-                semantic_running_end = semantic_start
-                model_semantic_observer = progress.scaled_observer(semantic_start, 81.0)
-                metadata_semantic_observer = progress.scaled_observer(
-                    semantic_start, 22.0
+            progress.report(
+                "semantic_cards",
+                "Building sparse grounded semantic cards.",
+                percentage=structural_end,
+                completed=0,
+                total=len(snapshot.files),
+                phase_label="Grounded semantic cards",
+                phase_percent=0,
+                phase_weight=76 if model_enabled else 15,
+                completed_units=0,
+                total_units=len(snapshot.files),
+                unit_type="files",
+                activity=ProgressActivity.ACTIVE,
+            )
+            semantic = await build_semantic_card_index(
+                snapshot,
+                lock,
+                provider,
+                structural=structural.manifest,
+                code_maps=structural.code_maps,
+                options=SemanticCardOptions(
+                    scope="priority" if provider is not None else "none",
+                    max_model_files=64 if max_files is None else max_files,
+                    max_requests=96,
+                    max_estimated_input_tokens=256_000,
+                    max_chunks_per_file=4,
+                    max_output_tokens=semantic_max_output_tokens,
+                    force_reanalyze=force_reanalyze,
+                ),
+                cancellation=cancellation,
+            )
+            if fail_on_error and semantic.failed_paths:
+                raise ApplicationError(
+                    "semantic analysis failed; one or more semantic cards "
+                    "required deterministic fallback"
                 )
-                reused_semantic_observer = progress.scaled_observer(
-                    semantic_start, semantic_start
-                )
-
-                def observe_semantic(event: ProgressEvent) -> None:
-                    nonlocal semantic_running_end
-                    route_totals = event.metadata.get("route_totals")
-                    model_units = 0
-                    metadata_units = 0
-                    if isinstance(route_totals, dict):
-                        model_units = sum(
-                            value
-                            for key, value in route_totals.items()
-                            if key in {"rich_model_analysis", "generic_model_analysis"}
-                            and isinstance(value, int)
-                        )
-                        metadata_value = route_totals.get(
-                            "deterministic_metadata_summary", 0
-                        )
-                        if isinstance(metadata_value, int):
-                            metadata_units = metadata_value
-                    if model_units:
-                        semantic_running_end = 81.0
-                        model_semantic_observer(event)
-                    elif metadata_units:
-                        semantic_running_end = 22.0
-                        metadata_semantic_observer(event)
-                    else:
-                        reused_semantic_observer(event)
-
-                progress.report(
-                    "semantic_index",
-                    "Planning semantic repository analysis.",
-                    percentage=semantic_start,
-                    completed=0,
-                    total=0,
-                    phase_label="Semantic analysis",
-                    phase_percent=0,
-                    phase_weight=semantic_end - semantic_start,
-                    completed_units=0,
-                    total_units=0,
-                    unit_type="files",
-                    activity=ProgressActivity.ACTIVE,
-                )
-                semantic = await build_semantic_index(
-                    snapshot,
-                    lock,
-                    provider,
-                    options=SemanticAnalysisOptions(
-                        max_concurrency=concurrency,
-                        max_files=max_files,
-                        max_output_tokens=semantic_max_output_tokens,
-                        fail_on_error=fail_on_error,
-                        max_failures=max_failures,
-                        force_reanalyze=force_reanalyze,
-                        resume=not force_reanalyze,
-                        progress=observe_semantic,
-                    ),
-                    previous_manifest=previous,
-                    cancellation=cancellation,
-                )
-                semantic_event = progress.last_event
-                if semantic_event is not None:
-                    semantic_publish_end = (
-                        semantic_end
-                        if semantic_running_end == 81.0
-                        else 23.0
-                        if semantic_running_end == 22.0
-                        else semantic_start
-                    )
-                    progress.report(
-                        "semantic_index",
-                        "Semantic analysis was validated and published.",
-                        percentage=semantic_publish_end,
-                        completed=semantic_event.processed_units,
-                        total=semantic_event.planned_units,
-                        phase_label="Semantic analysis",
-                        phase_percent=100,
-                        phase_weight=semantic_publish_end - semantic_start,
-                        completed_units=semantic_event.processed_units,
-                        total_units=semantic_event.planned_units,
-                        unit_type="items",
-                        last_completed_item=semantic_event.last_completed_item,
-                        last_failed_item=semantic_event.last_failed_item,
-                        reused_units=semantic_event.reused_units,
-                        skipped_units=semantic_event.skipped_units,
-                        failed_units=semantic_event.failed_units,
-                        planned_units=semantic_event.planned_units,
-                        processed_units=semantic_event.processed_units,
-                        succeeded_units=semantic_event.succeeded_units,
-                        fallback_units=semantic_event.fallback_units,
-                        lifecycle_state="published",
-                        safe_error_code=semantic_event.safe_error_code,
-                        safe_error_message=semantic_event.safe_error_message,
-                        analyzer_kind=semantic_event.analyzer_kind,
-                        estimated_input_tokens=semantic_event.estimated_input_tokens,
-                        output_token_budget=semantic_event.output_token_budget,
-                        input_truncated=semantic_event.input_truncated,
-                        metadata={
-                            "analyzed": len(semantic.analyzed_paths),
-                            "reused": len(semantic.reused_paths),
-                            "failed": len(semantic.failed_paths),
-                        },
-                    )
-                maps_start = (
-                    semantic_end
-                    if semantic_running_end == 81.0
-                    else 23.0
-                    if semantic_running_end == 22.0
-                    else semantic_start
-                )
-                progress.report(
-                    "repository_maps",
-                    "Building repository maps.",
-                    percentage=maps_start,
-                    phase_label="Semantic repository maps",
-                    phase_percent=0,
-                    phase_weight=94 - maps_start,
-                    activity=ProgressActivity.WAITING,
-                )
-                maps = await build_repository_maps(
-                    snapshot,
-                    lock,
-                    provider,
-                    options=GlobalMapAnalysisOptions(
-                        fail_on_error=fail_on_error,
-                        progress=progress.scaled_observer(
-                            maps_start, 93.0, phase_prefix="repository_maps"
-                        ),
-                    ),
-                    cancellation=cancellation,
-                )
-                map_fallback = any(item.status == "fallback" for item in maps.outcomes)
-                progress.report(
-                    "repository_maps",
-                    (
-                        "Deterministic repository-map fallback was validated "
-                        "and published."
-                        if map_fallback
-                        else "Repository maps were validated and published."
-                    ),
-                    percentage=94,
-                    phase_label="Semantic repository maps",
-                    phase_percent=100,
-                    phase_weight=94 - maps_start,
-                    lifecycle_state="fallback" if map_fallback else "published",
-                    safe_error_code=(
-                        "repository_map_fallback" if map_fallback else None
-                    ),
-                    metadata={
-                        "outcomes": {
-                            item.map_kind: item.status for item in maps.outcomes
-                        }
-                    },
-                )
-            else:
-                progress.report(
-                    "model_analysis",
-                    "Model-backed analysis was not requested.",
-                    percentage=structural_end,
-                    phase_label="Model analysis",
-                    phase_percent=100,
-                    phase_weight=0,
-                    lifecycle_state="skipped",
-                    safe_error_code="provider_disabled",
-                    safe_error_message="model provider is disabled",
-                    metadata={"skipped": True},
-                )
+            semantic_reused_without_work = semantic.request_count == 0 and len(
+                semantic.reused_paths
+            ) == len(semantic.cards)
+            semantic_end = (
+                structural_end
+                if semantic_reused_without_work
+                else 94
+                if model_enabled
+                else 88
+            )
+            progress.report(
+                "semantic_cards",
+                "Grounded semantic cards validated for enriched publication.",
+                percentage=semantic_end,
+                completed=len(semantic.cards),
+                total=len(snapshot.files),
+                phase_label="Grounded semantic cards",
+                phase_percent=100,
+                phase_weight=(
+                    0 if semantic_reused_without_work else 76 if model_enabled else 13
+                ),
+                completed_units=len(semantic.cards),
+                total_units=len(snapshot.files),
+                unit_type="files",
+                failed_units=0,
+                planned_units=len(snapshot.files),
+                processed_units=len(semantic.cards),
+                succeeded_units=len(semantic.cards),
+                fallback_units=sum(
+                    card.quality == "deterministic" for card in semantic.cards
+                ),
+                lifecycle_state="published",
+                metadata={
+                    "cards": len(semantic.cards),
+                    "model_requests": semantic.request_count,
+                    "repairs": semantic.repair_count,
+                    "cache_hits": semantic.cache_hits,
+                    "reused": len(semantic.reused_paths),
+                },
+            )
 
             progress.report(
                 "finalization",
@@ -883,20 +782,33 @@ def _inspect_repository_index(
         if provider_configuration is not None:
             try:
                 code_map = load_file_code_map(root, path, manifest=manifest)
-                analysis = load_file_semantic_analysis(root, path, manifest=manifest)
-                expected = _semantic_identity(
-                    provider_configuration, generic=not code_map.symbols
-                )
-                if (
-                    not analysis.coverage_complete
-                    or analysis.schema_version != SEMANTIC_SCHEMA_VERSION
-                    or (
-                        analysis.record_kind != "deterministic_metadata_interpretation"
-                        and normalize_analyzer_identity(analysis.semantic_analyzer)
-                        != expected
+                if manifest.schema_version == 3:
+                    card = load_semantic_card(root, path, manifest=manifest)
+                    identity = card.provenance.analyzer.model_identity
+                    if card.provenance.method == "model" and (
+                        identity is None
+                        or identity.provider_id != provider_configuration.provider_id
+                        or identity.model_id != provider_configuration.model_id
+                    ):
+                        stale.add(path)
+                else:
+                    analysis = load_file_semantic_analysis(
+                        root, path, manifest=manifest
                     )
-                ):
-                    stale.add(path)
+                    expected = _semantic_identity(
+                        provider_configuration, generic=not code_map.symbols
+                    )
+                    if (
+                        not analysis.coverage_complete
+                        or analysis.schema_version != SEMANTIC_SCHEMA_VERSION
+                        or (
+                            analysis.record_kind
+                            != "deterministic_metadata_interpretation"
+                            and normalize_analyzer_identity(analysis.semantic_analyzer)
+                            != expected
+                        )
+                    ):
+                        stale.add(path)
             except (IndexManifestReadError, ValueError):
                 stale.add(path)
     failed = tuple(
@@ -1336,6 +1248,20 @@ def _global_statuses(
     Literal["current", "missing", "stale"],
     Literal["current", "missing", "stale"],
 ]:
+    if manifest.schema_version == 3:
+        current = manifest.build.source_snapshot_digest == repository_identity
+
+        def artifact_status(present: bool) -> Literal["current", "missing", "stale"]:
+            if not present:
+                return "missing"
+            return "current" if current else "stale"
+
+        return (
+            artifact_status(manifest.artifacts.orientation_map is not None),
+            artifact_status(manifest.artifacts.architecture_map is not None),
+            artifact_status(manifest.artifacts.features_map is not None),
+        )
+
     def status(loader: Any) -> Literal["current", "missing", "stale"]:
         try:
             value = loader(root, manifest=manifest)

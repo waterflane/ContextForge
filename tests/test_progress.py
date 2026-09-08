@@ -400,7 +400,7 @@ def test_incremental_index_progress_credits_reused_files(tmp_path: Path) -> None
     assert not any(event.phase_id == "semantic_analysis" for event in events)
 
 
-def test_semantic_file_events_track_current_completion_and_weight(
+def test_semantic_card_phase_tracks_completion_and_weight(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "a.py").write_text("A = 1\n", encoding="utf-8")
@@ -454,17 +454,12 @@ def test_semantic_file_events_track_current_completion_and_weight(
 
     asyncio.run(exercise())
 
-    semantic = [event for event in events if event.phase_id == "semantic_analysis"]
-    starts = [event for event in semantic if event.current_item is not None]
-    completions = [event for event in semantic if event.last_completed_item is not None]
-    assert starts
-    assert all(event.activity is ProgressActivity.WAITING for event in starts)
-    assert completions
-    assert completions[-1].completed_units == completions[-1].total_units
-    assert all(event.current_item != event.last_completed_item for event in completions)
-    assert all(event.phase_weight == 63 for event in semantic)
-    assert max(event.active_item_count for event in semantic) >= 2
-    assert max(event.percentage for event in semantic) <= 81
+    semantic = [event for event in events if event.phase_id == "semantic_cards"]
+    assert len(semantic) == 2
+    assert semantic[0].activity is ProgressActivity.ACTIVE
+    assert semantic[-1].completed_units == semantic[-1].total_units == 2
+    assert semantic[-1].phase_weight == 76
+    assert semantic[-1].metadata["model_requests"] == 2
     assert [event.percentage for event in events] == sorted(
         event.percentage for event in events
     )
@@ -510,13 +505,14 @@ def test_incremental_semantic_reuse_completes_empty_model_phase_without_jump(
     semantic = next(
         event
         for event in events
-        if event.phase_id == "semantic_index" and event.phase_percent == 100
+        if event.phase_id == "semantic_cards" and event.phase_percent == 100
     )
     assert semantic.percentage == 18
     assert semantic.phase_weight == 0
     assert semantic.total_units == 1
     assert semantic.processed_units == 1
-    assert semantic.reused_units > 0
+    assert semantic.metadata["reused"] == 1
+    assert semantic.metadata["model_requests"] == 0
     assert events[-1].percentage == 100
 
 

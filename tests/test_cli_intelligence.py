@@ -121,10 +121,7 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert status.stderr == ""
     payload = json.loads(status.stdout)
     assert payload["indexed_files"] == 2
-    assert payload["stale_files"] == [
-        "app.py",
-        "new.py",
-    ]
+    assert payload["stale_files"] == ["app.py", "new.py"]
     assert payload["provider_id"] == "fake"
     assert payload["global_maps"] == {
         "architecture": "current",

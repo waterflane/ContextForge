@@ -647,6 +647,36 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
         return json.dumps({"schema_version": 1, "actions": actions})
     if purpose == "task-refinement":
         return json.dumps({"schema_version": 1})
+    if purpose in {"semantic-card", "semantic-card-repair"}:
+        evidence = request.trusted_code_map_facts.get("evidence", [])
+        evidence_ids = [
+            item["evidence_id"]
+            for item in evidence
+            if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
+        ]
+        root_evidence = "file" if "file" in evidence_ids else evidence_ids[0]
+        symbol_evidence = [
+            evidence_id
+            for evidence_id in evidence_ids
+            if evidence_id.startswith("symbol:")
+        ][:12]
+        profile = request.trusted_code_map_facts.get("profile", "code")
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": f"Offline fixture {profile} semantic card.",
+                    "evidence_ids": [root_evidence],
+                },
+                "concepts": [{"text": str(profile), "evidence_ids": [root_evidence]}],
+                "responsibilities": [],
+                "key_symbols": [
+                    {"evidence_id": evidence_id} for evidence_id in symbol_evidence
+                ],
+                "side_effects": [],
+                "profile_facts": {},
+            }
+        )
     if purpose == "file-semantics":
         analyzer_kind = request.metadata.get("analyzer_kind")
         category = request.trusted_code_map_facts.get("file_category")
