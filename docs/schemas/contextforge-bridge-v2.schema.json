@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/contextforge-bridge-v2.schema.json",
+  "title": "ContextForge trusted-local bridge protocol v2",
+  "description": "Bridge v1 frames plus opt-in tracked index jobs and correlated progress notifications.",
+  "oneOf": [
+    { "$ref": "contextforge-bridge-v1.schema.json" },
+    { "$ref": "#/$defs/helloV2Request" },
+    { "$ref": "#/$defs/helloV2Success" },
+    { "$ref": "#/$defs/indexRequest" },
+    { "$ref": "#/$defs/indexSuccess" },
+    { "$ref": "#/$defs/indexFailure" },
+    { "$ref": "#/$defs/progressNotification" }
+  ],
+  "$defs": {
+    "id": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "integer" }
+      ]
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timeout": { "type": "integer", "minimum": 1, "maximum": 900000 },
+    "helloV2Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "hello" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol_version"],
+          "properties": {
+            "protocol_version": { "const": "2.0" },
+            "client_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "helloV2Success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol_version", "contextforge_version", "supported_protocol_versions", "capabilities", "workspace", "policy"],
+          "properties": {
+            "protocol_version": { "const": "2.0" },
+            "contextforge_version": { "type": "string" },
+            "supported_protocol_versions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "capabilities": { "type": "object" },
+            "workspace": { "type": "object" },
+            "policy": { "type": "object" }
+          }
+        }
+      }
+    },
+    "indexRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "index" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "expected_snapshot_digest"],
+          "properties": {
+            "action": { "enum": ["build", "update"] },
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "base_url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "concurrency": { "type": "integer", "minimum": 1, "maximum": 8 },
+            "request_timeout": { "type": "number", "minimum": 1, "maximum": 600 },
+            "context_window": { "type": "integer", "minimum": 1024, "maximum": 2000000 },
+            "json_repair_attempts": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "max_output_tokens": { "type": "integer", "minimum": 96, "maximum": 32768 },
+            "fail_on_error": { "type": "boolean" },
+            "fail_fast": { "type": "boolean" },
+            "max_failures": { "type": "integer", "minimum": 1 },
+            "force_reanalyze": { "type": "boolean" },
+            "max_files": { "type": "integer", "minimum": 1 },
+            "local_only": { "type": "boolean" },
+            "recover_stale_lock": { "type": "boolean" },
+            "confirm_unknown_lock": { "type": "boolean" },
+            "timeout_ms": { "$ref": "#/$defs/timeout" }
+          }
+        }
+      }
+    },
+    "indexSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "generation_id", "snapshot_digest", "index_schema", "partial", "statistics"],
+          "properties": {
+            "action": { "enum": ["build", "update"] },
+            "generation_id": { "$ref": "#/$defs/sha256" },
+            "snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "index_schema": { "type": "integer", "minimum": 1 },
+            "partial": { "type": "boolean" },
+            "statistics": { "type": "object" }
+          }
+        }
+      }
+    },
+    "indexFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "data"],
+          "properties": {
+            "code": { "enum": [-32001, -32008, -32009, -32010, -32011, -32012, -32013] },
+            "message": { "type": "string" },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "error_code", "phase", "reason", "retryable", "operation_id"],
+              "properties": {
+                "code": {
+                  "enum": [
+                    "SOURCE_IDENTITY_CHANGED",
+                    "INDEX_BUILD_FAILED",
+                    "PROVIDER_FAILURE",
+                    "PROVIDER_CONFIGURATION_ERROR",
+                    "FAILURE_LIMIT_REACHED",
+                    "PROVIDER_CIRCUIT_OPEN",
+                    "INDEX_STORAGE_ERROR",
+                    "INDEX_LOCKED"
+                  ]
+                },
+                "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                "retryable": { "type": "boolean" },
+                "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "progressNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/progress" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["request_id", "event"],
+          "properties": {
+            "request_id": { "$ref": "#/$defs/id" },
+            "event": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["schema_version", "operation_id", "operation_type", "phase_id", "message", "percentage", "status", "sequence", "overall_percent", "phase_label", "phase_percent", "processed_units", "failed_units", "elapsed_seconds"],
+              "properties": {
+                "schema_version": { "const": 3 },
+                "operation_id": { "type": "string" },
+                "operation_type": { "type": "string" },
+                "phase_id": { "type": "string" },
+                "message": { "type": "string" },
+                "completed": { "type": "number" },
+                "total": { "type": ["number", "null"] },
+                "percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+                "status": { "enum": ["running", "completed", "failed", "cancelled"] },
+                "top_level_operation_id": { "type": ["string", "null"] },
+                "parent_operation_id": { "type": ["string", "null"] },
+                "metadata": { "type": "object" },
+                "sequence": { "type": "integer", "minimum": 0 },
+                "indeterminate": { "type": "boolean" },
+                "overall_percent": { "type": "number" },
+                "phase_label": { "type": "string" },
+                "phase_percent": { "type": "number" },
+                "phase_weight": { "type": "number" },
+                "completed_units": { "type": "number" },
+                "total_units": { "type": ["number", "null"] },
+                "unit_type": { "type": "string" },
+                "current_item": { "type": ["string", "null"] },
+                "last_completed_item": { "type": ["string", "null"] },
+                "last_failed_item": { "type": ["string", "null"] },
+                "active_items": { "type": "array", "items": { "type": "string" } },
+                "active_item_count": { "type": "integer" },
+                "reused_units": { "type": "integer" },
+                "skipped_units": { "type": "integer" },
+                "failed_units": { "type": "integer" },
+                "elapsed_seconds": { "type": "number" },
+                "activity": { "enum": ["idle", "active", "waiting"] },
+                "planned_units": { "type": "integer" },
+                "processed_units": { "type": "integer" },
+                "succeeded_units": { "type": "integer" },
+                "fallback_units": { "type": "integer" },
+                "active_units": { "type": "integer" },
+                "current_attempt": { "type": ["integer", "null"] },
+                "max_attempts": { "type": ["integer", "null"] },
+                "lifecycle_state": { "type": "string" },
+                "safe_error_code": { "type": ["string", "null"] },
+                "safe_error_message": { "type": ["string", "null"] },
+                "request_elapsed_seconds": { "type": "number" },
+                "operation_elapsed_seconds": { "type": "number" },
+                "analyzer_kind": { "type": ["string", "null"] },
+                "estimated_input_tokens": { "type": ["integer", "null"] },
+                "output_token_budget": { "type": ["integer", "null"] },
+                "input_truncated": { "type": "boolean" },
+                "configured_context_window": { "type": ["integer", "null"] },
+                "schema_overhead_tokens": { "type": ["integer", "null"] },
+                "safety_margin_tokens": { "type": ["integer", "null"] },
+                "estimated_total_tokens": { "type": ["integer", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

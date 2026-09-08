@@ -277,7 +277,7 @@ def bridge(
         typer.Option(
             "--stdio",
             help=(
-                "Required in v1. Read UTF-8 NDJSON requests from stdin and write "
+                "Required. Read UTF-8 NDJSON requests from stdin and write "
                 "only JSON-RPC 2.0 responses to stdout."
             ),
         ),
@@ -288,7 +288,7 @@ def bridge(
             "--workspace",
             help=(
                 "Repository root to bind for the lifetime of this verified "
-                "read-only local integration session."
+                "local integration session."
             ),
             exists=True,
             file_okay=False,
@@ -297,15 +297,16 @@ def bridge(
         ),
     ] = Path("."),
 ) -> None:
-    """Run trusted-local, model-free ContextForge bridge protocol v1.
+    """Run the trusted-local ContextForge bridge protocols.
 
-    The client must negotiate protocol 1.0 or 1.1 with hello before repository calls.
-    Stdout is protocol-only; bounded diagnostics use stderr. The bridge never
-    writes source or index state and never selects or invokes a model.
+    The client must negotiate protocol 1.0, 1.1, or 2.0 with hello. Versions
+    1.0/1.1 are model-free and read-only. Version 2.0 additionally exposes
+    atomic tracked index jobs under the configured provider policy. Stdout is
+    protocol-only and bounded diagnostics use stderr.
     """
 
     if not stdio:
-        _exit_with_error("bridge v1 requires --stdio", code=2)
+        _exit_with_error("bridge requires --stdio", code=2)
     input_stream = cast(BinaryIO, getattr(sys.stdin, "buffer", sys.stdin))
     output_stream = cast(BinaryIO, getattr(sys.stdout, "buffer", sys.stdout))
     try:

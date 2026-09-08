@@ -15,6 +15,7 @@ from contextforge.intelligence.models import (
     SchemaVersionMetadata,
     analyzer_identity_key,
     calculate_index_statistics,
+    normalize_analyzer_identity,
     validate_portable_relative_path,
 )
 from contextforge.repositories import ProjectFile, ProjectSnapshot
@@ -183,7 +184,8 @@ def identify_stale_analysis(
         and (
             invalidate_all
             or not _source_matches(indexed, current_by_path[indexed.path])
-            or indexed.analyzer != expected_analyzer
+            or normalize_analyzer_identity(indexed.analyzer)
+            != normalize_analyzer_identity(expected_analyzer)
         )
     )
 

@@ -21,10 +21,15 @@ from contextforge.models.providers import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    ProviderAuthenticationError,
+    ProviderAuthorizationError,
     ProviderCancelledError,
     ProviderCapabilities,
     ProviderConfiguration,
     ProviderConfigurationError,
+    ProviderModelNotFoundError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
     ProviderRequestError,
     ProviderRuntime,
     ProviderTimeoutError,
@@ -712,15 +717,21 @@ def _raise_for_status(
     if 200 <= status < 300:
         return
     detail = _safe_error_detail(response.body)
+    error_code = _safe_error_code(response.body)
     lowered = "" if detail is None else detail.casefold()
+    classified = "" if error_code is None else error_code.casefold()
     suffix = "" if detail is None else f": {detail}"
-    if status in {401, 403}:
-        raise ProviderRequestError(
-            f"OpenAI-compatible authentication failed with HTTP {status}{suffix}"
+    if status == 401:
+        raise ProviderAuthenticationError(
+            "OpenAI-compatible provider rejected authentication (HTTP 401)"
+        )
+    if status == 403:
+        raise ProviderAuthorizationError(
+            "OpenAI-compatible provider rejected authorization (HTTP 403)"
         )
     if status == 404 and operation == "chat completion":
-        raise ProviderRequestError(
-            f"model ID {model_id!r} was not found (HTTP 404){suffix}"
+        raise ProviderModelNotFoundError(
+            f"model ID {model_id!r} was not found (HTTP 404)"
         )
     if (
         status in {400, 422}
@@ -773,7 +784,25 @@ def _raise_for_status(
         raise ProviderRequestError(
             f"OpenAI-compatible server rejected the request (HTTP {status}){suffix}"
         )
-    if status in {408, 429} or 500 <= status < 600:
+    if status == 408:
+        raise ProviderTimeoutError("OpenAI-compatible provider returned HTTP 408")
+    if status == 429 and any(
+        marker in f"{classified} {lowered}"
+        for marker in (
+            "insufficient_quota",
+            "quota exceeded",
+            "quota_exceeded",
+            "billing hard limit",
+            "billing_hard_limit",
+            "credits exhausted",
+        )
+    ):
+        raise ProviderQuotaError("OpenAI-compatible provider quota is exhausted")
+    if status == 429:
+        raise ProviderRateLimitError(
+            "OpenAI-compatible provider rate limit was reached"
+        )
+    if 500 <= status < 600:
         raise ProviderUnavailableError(
             f"OpenAI-compatible server failed {operation} with HTTP {status}{suffix}"
         )
@@ -800,6 +829,25 @@ def _safe_error_detail(data: bytes) -> str | None:
             cleaned = " ".join(candidate.split())
             return cleaned[:MAX_ERROR_TEXT_CHARACTERS]
     return None
+
+
+def _safe_error_code(data: bytes) -> str | None:
+    """Read only a bounded provider error classifier, never an arbitrary body."""
+
+    try:
+        payload = json.loads(data.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    candidate = error.get("code") if isinstance(error, dict) else payload.get("code")
+    if not isinstance(candidate, str):
+        return None
+    normalized = candidate.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", normalized):
+        return None
+    return normalized
 
 
 def _redact_error[ErrorType: (ProviderRequestError, ProviderUnavailableError)](

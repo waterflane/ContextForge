@@ -271,15 +271,28 @@ identity. Arbitrary parsed JSON is never accepted. No model name is supplied by
 default.
 
 The base URL is configurable with `[models].base_url` or CLI `--base-url`.
-Changing it changes the credential-free SHA-256 suffix on semantic and
-repository-map analyzer identity versions, invalidating model-dependent records
-without changing the persisted provider/model schema.
+It is transport configuration, not analyzer identity: changing a temporary
+loopback port does not invalidate model-dependent records. Analyzer identity is
+derived from analyzer, prompt and response-schema versions plus provider/model.
+Legacy versions ending in `+base.<sha256>` compare as their neutral identity
+and are republished without that suffix during the next update, without a model
+call.
 An optional bearer token is loaded only through the configured
 `credential_env` name. Authentication failures, safe structured error bodies,
 missing model IDs, malformed envelopes, structured-output rejection,
 unavailability, timeout, and cancellation are translated to the shared typed
 provider errors. The adapter uses the same bounded retry runtime as Ollama and
 accepts an injectable async HTTP transport for offline tests.
+
+The shared runtime distinguishes terminal provider-wide failures from transient
+ones. Authentication, authorization, missing credentials, quota/billing
+exhaustion, missing models, and invalid configuration open the job-scoped
+circuit after the first final result and are not retried for each file. Rate
+limits, timeouts, and service unavailability retain bounded request retries;
+three consecutive exhausted failures with the same safe code and
+provider/model identity open the circuit. A success resets that sequence.
+OpenAI-compatible HTTP 429 responses use bounded structured `error.code` and
+message fields to distinguish quota exhaustion from transient rate limiting.
 
 ## Troubleshooting local structured providers
 

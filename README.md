@@ -28,9 +28,9 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.5.1` adds verified polyglot
-> declarations, resumable semantic coverage, bridge protocol 1.1, and hardened
-> exact-symbol discovery. Discovery benchmarking is experimental and
+> ContextForge is pre-alpha software. The unreleased API adds bounded failure
+> policies, JSONL progress, and opt-in Bridge 2 tracked index jobs while the
+> package version remains `0.5.1`. Discovery benchmarking is experimental and
 > its results should be reviewed alongside the recorded provider, model,
 > configuration, and source snapshot.
 
@@ -49,7 +49,8 @@ commands.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,
   execute repository code, expose shell tools, or mutate Git state.
 - **Automation-friendly output.** Structured results stay on stdout while
-  progress and diagnostics stay on stderr.
+  normal progress and diagnostics stay on stderr; index jobs can opt into a
+  pure schema-3 JSONL progress stream on stdout.
 
 ## Representative workflow
 
@@ -185,7 +186,7 @@ mutating operations.
 | `contextforge diagnostics config [PATH]` | Explain effective configuration | Read-only |
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
-| `contextforge bridge --stdio --workspace PATH` | Run persistent JSON-RPC bridge v1 | Verified read-only workspace session |
+| `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1 or 2 | V1 read-only; V2 may atomically mutate only the index |
 | `contextforge benchmark discovery PATH` | Run manifest-driven discovery benchmarks | Repository/index read-only; experimental |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
@@ -193,8 +194,19 @@ repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.
 Detailed syntax, defaults, streams, side effects, mistakes, and examples are in
 the [Wiki CLI reference](https://github.com/waterflane/ContextForge/wiki/CLI-Overview).
 The local integration contract is documented in the
-[bridge v1 guide](docs/guides/bridge.md), with a runnable
+[bridge integration guide](docs/guides/bridge.md), with a runnable
 [generic client](examples/generic_bridge_client.py).
+
+Long model-backed index jobs can stop issuing new work with `--fail-fast` or
+`--max-failures N`. Existing `--fail-on-error` semantics are unchanged: without
+one of those limits ContextForge finishes the workload and declines publication
+if any semantic unit failed. Hosts that launch the CLI can consume full
+`ProgressEvent` schema 3 objects with `--progress jsonl`:
+
+```bash
+contextforge index update . --provider openai-compatible \
+  --model exact/model-id --progress jsonl --max-failures 3
+```
 
 ## Configuration
 

@@ -20,9 +20,12 @@ from contextforge.models import (
     ModelResponse,
     ModelUsage,
     OllamaModelProvider,
+    ProviderAuthenticationError,
     ProviderCancelledError,
+    ProviderCircuitOpenError,
     ProviderConfiguration,
     ProviderConfigurationError,
+    ProviderMissingCredentialError,
     ProviderRequestError,
     ProviderTimeoutError,
     ProviderTransportResponse,
@@ -576,6 +579,70 @@ def test_retry_limit_is_finite_and_exhaustion_preserves_typed_failure() -> None:
     assert provider.call_count == 3
 
 
+def test_provider_circuit_opens_after_three_matching_transient_failures() -> None:
+    async def exercise() -> FakeModelProvider:
+        provider = FakeModelProvider(
+            _configuration(),
+            scripts=[ProviderUnavailableError("offline")] * 3 + [_valid_json()],
+        )
+        for _ in range(3):
+            with pytest.raises(ProviderUnavailableError):
+                await provider.complete_structured(_request())
+        with pytest.raises(ProviderCircuitOpenError) as captured:
+            await provider.complete_structured(_request())
+        assert captured.value.circuit_opened is True
+        return provider
+
+    provider = asyncio.run(exercise())
+
+    assert provider.call_count == 3
+
+
+def test_provider_success_resets_transient_circuit_sequence() -> None:
+    async def exercise() -> FakeModelProvider:
+        provider = FakeModelProvider(
+            _configuration(),
+            scripts=[
+                ProviderUnavailableError("offline"),
+                ProviderUnavailableError("offline"),
+                _valid_json(),
+                ProviderUnavailableError("offline"),
+                ProviderUnavailableError("offline"),
+                _valid_json(),
+            ],
+        )
+        for _ in range(2):
+            with pytest.raises(ProviderUnavailableError):
+                await provider.complete_structured(_request())
+        await provider.complete_structured(_request())
+        for _ in range(2):
+            with pytest.raises(ProviderUnavailableError):
+                await provider.complete_structured(_request())
+        await provider.complete_structured(_request())
+        return provider
+
+    provider = asyncio.run(exercise())
+
+    assert provider.call_count == 6
+
+
+def test_terminal_provider_failure_opens_circuit_immediately() -> None:
+    async def exercise() -> FakeModelProvider:
+        provider = FakeModelProvider(
+            _configuration(),
+            scripts=[ProviderAuthenticationError("expired"), _valid_json()],
+        )
+        with pytest.raises(ProviderAuthenticationError):
+            await provider.complete_structured(_request())
+        with pytest.raises(ProviderCircuitOpenError):
+            await provider.complete_structured(_request())
+        return provider
+
+    provider = asyncio.run(exercise())
+
+    assert provider.call_count == 1
+
+
 def test_environment_credential_loading_and_secret_redaction() -> None:
     secret = "sensitive-provider-value"
     configuration = ProviderConfiguration(
@@ -623,11 +690,17 @@ def test_missing_environment_credential_reference_is_non_retryable() -> None:
     configuration = _configuration(credential_env="MISSING_TEST_TOKEN")
     provider = FakeModelProvider(configuration, scripts=[_valid_json()], environment={})
 
-    with pytest.raises(ProviderConfigurationError) as captured:
-        asyncio.run(provider.complete_structured(_request()))
+    async def exercise() -> ProviderMissingCredentialError:
+        with pytest.raises(ProviderMissingCredentialError) as captured:
+            await provider.complete_structured(_request())
+        with pytest.raises(ProviderCircuitOpenError):
+            await provider.complete_structured(_request())
+        return captured.value
+
+    error = asyncio.run(exercise())
 
     assert provider.call_count == 0
-    assert classify_retry(captured.value) is RetryClassification.NON_RETRYABLE
+    assert classify_retry(error) is RetryClassification.NON_RETRYABLE
 
 
 def test_secret_values_are_not_persisted_in_contextforge_index(tmp_path: Path) -> None:

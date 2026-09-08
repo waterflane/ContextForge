@@ -21,9 +21,14 @@ from contextforge.models import (
     ModelUsage,
     OpenAICompatibleHTTPResponse,
     OpenAICompatibleModelProvider,
+    ProviderAuthenticationError,
+    ProviderAuthorizationError,
     ProviderCancelledError,
     ProviderConfiguration,
     ProviderConfigurationError,
+    ProviderModelNotFoundError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
     ProviderRequestError,
     ProviderTimeoutError,
     ProviderUnavailableError,
@@ -301,7 +306,7 @@ def test_exact_model_id_must_appear_in_model_diagnostics() -> None:
     asyncio.run(exercise())
 
 
-def test_http_404_reports_model_error_body_when_safe() -> None:
+def test_http_404_is_a_terminal_typed_model_error() -> None:
     call_count = 0
 
     async def transport(
@@ -323,7 +328,7 @@ def test_http_404_reports_model_error_body_when_safe() -> None:
 
     async def exercise() -> None:
         provider = OpenAICompatibleModelProvider(_configuration(), transport=transport)
-        with pytest.raises(ProviderRequestError, match="model was unloaded"):
+        with pytest.raises(ProviderRequestError, match="model ID"):
             await provider.complete_structured(_request())
 
     asyncio.run(exercise())
@@ -446,7 +451,7 @@ def test_retry_classification_and_bounded_retry() -> None:
     )
 
 
-def test_auth_error_redacts_loaded_credential_and_keeps_safe_body() -> None:
+def test_auth_error_omits_loaded_credential_and_provider_body() -> None:
     secret = "credential-that-must-not-leak"
 
     async def transport(
@@ -471,7 +476,6 @@ def test_auth_error_redacts_loaded_credential_and_keeps_safe_body() -> None:
         with pytest.raises(ProviderRequestError) as captured:
             await provider.complete_structured(_request())
         assert secret not in str(captured.value)
-        assert "[REDACTED]" in str(captured.value)
         assert "HTTP 401" in str(captured.value)
 
     asyncio.run(exercise())
@@ -790,11 +794,13 @@ def test_provider_capabilities_close_and_configuration_policy() -> None:
 @pytest.mark.parametrize(
     ("status", "operation", "error_type", "message"),
     [
-        (403, "model diagnostics", ProviderRequestError, "authentication"),
+        (401, "model diagnostics", ProviderAuthenticationError, "authentication"),
+        (403, "model diagnostics", ProviderAuthorizationError, "authorization"),
         (404, "model diagnostics", ProviderRequestError, "model diagnostics"),
         (418, "chat completion", ProviderRequestError, "chat completion"),
-        (408, "chat completion", ProviderUnavailableError, "HTTP 408"),
-        (429, "chat completion", ProviderUnavailableError, "HTTP 429"),
+        (404, "chat completion", ProviderModelNotFoundError, "model ID"),
+        (408, "chat completion", ProviderTimeoutError, "HTTP 408"),
+        (429, "chat completion", ProviderRateLimitError, "rate limit"),
         (500, "chat completion", ProviderUnavailableError, "HTTP 500"),
         (422, "chat completion", ProviderRequestError, "request"),
     ],
@@ -811,6 +817,18 @@ def test_http_status_classification(
     with pytest.raises(error_type, match=message):
         openai_module._raise_for_status(
             response, operation=operation, model_id="exact/model"
+        )
+
+
+def test_http_quota_is_terminal_and_distinct_from_rate_limit() -> None:
+    response = OpenAICompatibleHTTPResponse(
+        status=429,
+        body=b'{"error":{"code":"insufficient_quota","message":"limit"}}',
+    )
+
+    with pytest.raises(ProviderQuotaError):
+        openai_module._raise_for_status(
+            response, operation="chat completion", model_id="exact/model"
         )
 
 
@@ -884,10 +902,10 @@ def test_transport_exception_and_list_diagnostic_redaction() -> None:
             transport=auth_transport,
             environment={"LM_STUDIO_API_KEY": secret},
         )
-        with pytest.raises(ProviderRequestError) as captured:
+        with pytest.raises(ProviderAuthorizationError) as captured:
             await authenticated.list_models()
         assert secret not in str(captured.value)
-        assert "[REDACTED]" in str(captured.value)
+        assert "HTTP 403" in str(captured.value)
 
     asyncio.run(exercise())
 

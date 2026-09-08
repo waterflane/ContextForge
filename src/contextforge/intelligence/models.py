@@ -34,6 +34,7 @@ SemanticStatus = Literal[
 ]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$")
+_LEGACY_ENDPOINT_SUFFIX = re.compile(r"\+base\.[0-9a-f]{64}$")
 
 
 class IndexModel(BaseModel):
@@ -339,3 +340,12 @@ def analyzer_identity_key(identity: AnalyzerIdentity) -> tuple[str, ...]:
         model.provider_id if model is not None else "",
         model.model_id if model is not None else "",
     )
+
+
+def normalize_analyzer_identity(identity: AnalyzerIdentity) -> AnalyzerIdentity:
+    """Remove the legacy transport-endpoint suffix from analyzer provenance."""
+
+    version = _LEGACY_ENDPOINT_SUFFIX.sub("", identity.analyzer_version)
+    if version == identity.analyzer_version:
+        return identity
+    return identity.model_copy(update={"analyzer_version": version})

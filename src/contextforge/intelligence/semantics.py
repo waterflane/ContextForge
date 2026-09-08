@@ -39,6 +39,7 @@ from contextforge.intelligence.models import (
     ModelIdentity,
     SemanticStatus,
     analyzer_identity_key,
+    normalize_analyzer_identity,
 )
 from contextforge.intelligence.semantic_models import (
     SEMANTIC_SCHEMA_VERSION,
@@ -242,6 +243,28 @@ class SemanticAnalysisError(RuntimeError):
     """Raised when semantic analysis cannot safely publish the requested result."""
 
 
+class SemanticFailureLimitError(SemanticAnalysisError):
+    """Raised after the configured number of semantic units fail."""
+
+    def __init__(self, failure_count: int, diagnostic: AnalysisDiagnostic) -> None:
+        self.failure_count = failure_count
+        self.error_code = diagnostic.code
+        self.safe_reason = diagnostic.message
+        super().__init__(
+            f"semantic failure limit reached after {failure_count} file(s): "
+            f"{diagnostic.message}"
+        )
+
+
+class SemanticProviderCircuitError(SemanticAnalysisError):
+    """Raised when a provider-wide or repeated transient failure opens the circuit."""
+
+    def __init__(self, error_code: str, safe_reason: str) -> None:
+        self.error_code = error_code
+        self.safe_reason = safe_reason
+        super().__init__(f"provider circuit opened: {safe_reason}")
+
+
 class StaleStructuralIndexError(SemanticAnalysisError):
     """Raised when semantics are requested without current deterministic facts."""
 
@@ -274,6 +297,7 @@ class SemanticAnalysisOptions:
     max_chunks_per_file: int = 64
     max_requests_per_file: int = 64
     max_files: int | None = None
+    max_failures: int | None = None
     fail_on_error: bool = False
     resume: bool = True
     force_reanalyze: bool = False
@@ -307,6 +331,10 @@ class SemanticAnalysisOptions:
             type(self.max_files) is not int or self.max_files <= 0
         ):
             raise ValueError("max_files must be a positive integer or None")
+        if self.max_failures is not None and (
+            type(self.max_failures) is not int or self.max_failures <= 0
+        ):
+            raise ValueError("max_failures must be a positive integer or None")
         if self.max_source_bytes_per_request > self.max_request_bytes:
             raise ValueError("source byte limit cannot exceed request byte limit")
         if (
@@ -454,11 +482,27 @@ class _SemanticProgressTracker:
         self._lifecycle = "published"
         self.reporter.complete(message="Semantic generation published atomically.")
 
-    def abort(self, *, cancelled: bool = False) -> None:
+    def abort(
+        self,
+        *,
+        cancelled: bool = False,
+        cancelled_units: int = 0,
+        unstarted_units: int = 0,
+    ) -> None:
+        metadata: dict[str, JsonValue] = {
+            "route_totals": cast(dict[str, JsonValue], self.plan.route_totals),
+            "cancelled_units": cancelled_units,
+            "unstarted_units": unstarted_units,
+        }
         if cancelled:
-            self.reporter.cancel(message="Semantic analysis cancelled.")
+            self.reporter.cancel(
+                message="Semantic analysis cancelled.", metadata=metadata
+            )
         else:
-            self.reporter.fail(message="Semantic analysis failed before publication.")
+            self.reporter.fail(
+                message="Semantic analysis failed before publication.",
+                metadata=metadata,
+            )
 
     def _emit(self, message: str, *, current_item: str | None = None) -> None:
         total_weight = sum(self._weights.values())
@@ -595,19 +639,17 @@ async def build_semantic_index(
         load_file_code_map(snapshot.root, item.path, manifest=structural)
         for item in structural.files
     )
-    provider_id, model_id, base_url_sha256 = _provider_identity(provider)
+    provider_id, model_id = _provider_identity(provider)
     rich_analyzer = _semantic_analyzer(
         active_options,
         provider_id,
         model_id,
-        base_url_sha256,
         analysis_route="rich_model_analysis",
     )
     generic_analyzer = _semantic_analyzer(
         active_options,
         provider_id,
         model_id,
-        base_url_sha256,
         analysis_route="generic_model_analysis",
     )
     options_digest = _analysis_options_digest(active_options)
@@ -615,6 +657,10 @@ async def build_semantic_index(
     deterministic_options_digest = _deterministic_options_digest(active_options)
     reusable_manifests = _reuse_manifests(
         snapshot.root, structural, previous_manifest=previous_manifest
+    )
+    identity_migration_needed = any(
+        normalize_analyzer_identity(item) != item
+        for item in structural.semantic_analyzers
     )
 
     analyses: dict[str, FileSemanticAnalysis] = {}
@@ -818,7 +864,11 @@ async def build_semantic_index(
                 plan_item.path, code=diagnostic.code, message=diagnostic.message
             )
 
-    if not selected_stale and _manifest_matches_planned_semantics(structural, analyses):
+    if (
+        not selected_stale
+        and not identity_migration_needed
+        and _manifest_matches_planned_semantics(structural, analyses)
+    ):
         tracker.publish()
         return SemanticIndexBuildResult(
             manifest=structural,
@@ -834,6 +884,7 @@ async def build_semantic_index(
         write_index_record(lock, _interpretation_location(path), _serialize(analysis))
 
     semaphore = asyncio.Semaphore(active_options.max_concurrency)
+    failure_causes: dict[str, BaseException] = {}
 
     async def analyze_one(
         project_file: ProjectFile,
@@ -924,6 +975,7 @@ async def build_semantic_index(
                 path=project_file.path,
             )
             tracker.fail(project_file.path, diagnostic)
+            failure_causes[project_file.path] = exc
             emit(
                 "semantic",
                 "semantic.analysis.failed",
@@ -943,41 +995,99 @@ async def build_semantic_index(
                 },
             )
             _emit_status(active_options, project_file.path, "failed")
+            if isinstance(exc, ModelProviderError) and exc.circuit_opened:
+                raise SemanticProviderCircuitError(code, message) from exc
             return project_file.path, None, diagnostic, False
 
     task_results: list[
         tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]
     ] = []
-    for offset in range(0, len(selected_stale), active_options.max_concurrency):
-        batch = selected_stale[offset : offset + active_options.max_concurrency]
-        tasks = [
-            asyncio.create_task(
-                analyze_one(
-                    project_file,
-                    code_map,
-                    state,
-                    route,
-                    expected_analyzer,
-                    expected_digest,
-                )
-            )
-            for (
+    failure_count = 0
+    pending: set[
+        asyncio.Task[tuple[str, _AnalysisWork | None, AnalysisDiagnostic | None, bool]]
+    ] = set()
+    next_work = 0
+
+    def schedule_available() -> None:
+        nonlocal next_work
+        while len(pending) < active_options.max_concurrency and next_work < len(
+            selected_stale
+        ):
+            (
                 project_file,
                 code_map,
                 state,
                 route,
                 expected_analyzer,
                 expected_digest,
-            ) in batch
-        ]
-        try:
-            task_results.extend(await asyncio.gather(*tasks))
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            tracker.abort(cancelled=True)
-            raise
+            ) = selected_stale[next_work]
+            next_work += 1
+            pending.add(
+                asyncio.create_task(
+                    analyze_one(
+                        project_file,
+                        code_map,
+                        state,
+                        route,
+                        expected_analyzer,
+                        expected_digest,
+                    )
+                )
+            )
+
+    schedule_available()
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            limit_diagnostic: AnalysisDiagnostic | None = None
+            completed = await asyncio.gather(*done, return_exceptions=True)
+            first_exception: BaseException | None = None
+            for result in completed:
+                if isinstance(result, BaseException):
+                    if first_exception is None:
+                        first_exception = result
+                    continue
+                task_results.append(result)
+                _, work, diagnostic, _ = result
+                if work is not None:
+                    continue
+                assert diagnostic is not None
+                failure_count += 1
+                if (
+                    active_options.max_failures is not None
+                    and failure_count >= active_options.max_failures
+                    and limit_diagnostic is None
+                ):
+                    limit_diagnostic = diagnostic
+            if first_exception is not None:
+                raise first_exception
+            if limit_diagnostic is not None:
+                cancelled_units = len(pending)
+                for unfinished in pending:
+                    unfinished.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                tracker.abort(
+                    cancelled_units=cancelled_units,
+                    unstarted_units=len(selected_stale) - next_work,
+                )
+                raise SemanticFailureLimitError(failure_count, limit_diagnostic)
+            schedule_available()
+    except BaseException as exc:
+        cancelled_units = len(pending)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if not isinstance(exc, SemanticFailureLimitError):
+            tracker.abort(
+                cancelled=isinstance(
+                    exc, (asyncio.CancelledError, ProviderCancelledError)
+                ),
+                cancelled_units=cancelled_units,
+                unstarted_units=len(selected_stale) - next_work,
+            )
+        raise
 
     failures: list[AnalysisDiagnostic] = []
     for path, work, diagnostic, resumed in task_results:
@@ -1004,9 +1114,20 @@ async def build_semantic_index(
             )
     if failures and active_options.fail_on_error:
         tracker.abort()
-        raise SemanticAnalysisError(
+        error = SemanticAnalysisError(
             f"semantic analysis failed for {len(failures)} file(s); index not published"
         )
+        cause = next(
+            (
+                failure_causes[diagnostic.path]
+                for diagnostic in failures
+                if diagnostic.path in failure_causes
+            ),
+            None,
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
     _raise_if_cancelled(cancellation)
 
     states: list[IndexedFileState] = []
@@ -2527,7 +2648,6 @@ def _semantic_analyzer(
     options: SemanticAnalysisOptions,
     provider_id: str,
     model_id: str,
-    base_url_sha256: str | None,
     *,
     analysis_route: Literal["rich_model_analysis", "generic_model_analysis"],
 ) -> AnalyzerIdentity:
@@ -2543,7 +2663,7 @@ def _semantic_analyzer(
     )
     return AnalyzerIdentity(
         analyzer_id=analyzer_id,
-        analyzer_version=_connection_bound_version(analyzer_version, base_url_sha256),
+        analyzer_version=analyzer_version,
         analysis_prompt_version=options.prompt_version,
         response_schema_version=SEMANTIC_SCHEMA_VERSION,
         model_identity=ModelIdentity(
@@ -2553,7 +2673,7 @@ def _semantic_analyzer(
     )
 
 
-def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
+def _provider_identity(provider: ModelProvider) -> tuple[str, str]:
     provider_id = provider.provider_id
     configuration = getattr(provider, "configuration", None)
     model_id = getattr(configuration, "model_id", None)
@@ -2561,23 +2681,7 @@ def _provider_identity(provider: ModelProvider) -> tuple[str, str, str | None]:
         raise SemanticAnalysisError(
             "semantic provider must expose stable provider and model identity"
         )
-    endpoint = getattr(configuration, "endpoint", None)
-    base_url_sha256 = None
-    if provider_id == "openai-compatible":
-        if not isinstance(endpoint, str):
-            raise SemanticAnalysisError(
-                "OpenAI-compatible provider must expose a stable base URL identity"
-            )
-        base_url_sha256 = hashlib.sha256(
-            endpoint.rstrip("/").encode("utf-8")
-        ).hexdigest()
-    return provider_id, model_id, base_url_sha256
-
-
-def _connection_bound_version(version: str, base_url_sha256: str | None) -> str:
-    if base_url_sha256 is None:
-        return version
-    return f"{version}+base.{base_url_sha256}"
+    return provider_id, model_id
 
 
 def _validate_response_identity(
@@ -2630,7 +2734,7 @@ def _analysis_matches(
         and analysis.language == state.language == code_map.language
         and analysis.fact_record_sha256 == _required_fact_digest(state)
         and analysis.codemap_analyzer == code_map.analyzer
-        and analysis.semantic_analyzer == analyzer
+        and normalize_analyzer_identity(analysis.semantic_analyzer) == analyzer
         and analysis.analysis_options_digest == options_digest
     )
 
@@ -2663,7 +2767,7 @@ def _find_reusable_analysis(
         if analysis.schema_version == SEMANTIC_SCHEMA_VERSION and _analysis_matches(
             analysis, state, code_map, analyzer, options_digest
         ):
-            return analysis
+            return analysis.model_copy(update={"semantic_analyzer": analyzer})
     return None
 
 
@@ -2796,9 +2900,11 @@ __all__ = [
     "SEMANTIC_PROMPT_VERSION",
     "SEMANTIC_SYSTEM_INSTRUCTIONS",
     "SemanticAnalysisError",
+    "SemanticFailureLimitError",
     "SemanticAnalysisOptions",
     "SemanticFileOutcome",
     "SemanticIndexBuildResult",
+    "SemanticProviderCircuitError",
     "SemanticRoute",
     "SemanticWorkPlan",
     "SemanticWorkPlanItem",
