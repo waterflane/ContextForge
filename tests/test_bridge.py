@@ -200,8 +200,8 @@ class _Harness:
         await self.task
 
 
-def test_bridge_progress_publisher_is_bounded_and_uses_one_writer_task() -> None:
-    class SlowWriter:
+def test_bridge_progress_publisher_coalesces_synchronous_bursts() -> None:
+    class ImmediateWriter:
         def __init__(self) -> None:
             self.frames: list[dict[str, Any]] = []
 
@@ -209,7 +209,7 @@ def test_bridge_progress_publisher_is_bounded_and_uses_one_writer_task() -> None
             self.frames.append(frame)
 
     async def exercise() -> None:
-        writer = SlowWriter()
+        writer = ImmediateWriter()
         cancellation = asyncio.Event()
         publisher = bridge_module._ProgressPublisher(
             cast(Any, writer),
@@ -217,21 +217,61 @@ def test_bridge_progress_publisher_is_bounded_and_uses_one_writer_task() -> None
             cancellation,
             "operation-1",
             capacity=1,
+            backpressure_timeout_seconds=0.1,
+        )
+        reporter = ProgressReporter(
+            "operation-1", "repository.index.build", observer=publisher.observe
+        )
+        for sequence in range(300):
+            reporter.report("scan", f"event {sequence}", percentage=sequence / 3)
+
+        await publisher.close()
+
+        assert not cancellation.is_set()
+        assert len(writer.frames) == 2
+        assert writer.frames[0]["params"]["event"]["sequence"] == 0
+        assert writer.frames[-1]["params"]["event"]["sequence"] == 299
+
+    asyncio.run(exercise())
+
+
+def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
+    class BlockedWriter:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def write(self, frame: dict[str, Any]) -> None:
+            del frame
+            self.started.set()
+            await self.release.wait()
+
+    async def exercise() -> None:
+        writer = BlockedWriter()
+        cancellation = asyncio.Event()
+        publisher = bridge_module._ProgressPublisher(
+            cast(Any, writer),
+            "index-1",
+            cancellation,
+            "operation-1",
+            capacity=1,
+            backpressure_timeout_seconds=0.01,
         )
         reporter = ProgressReporter(
             "operation-1", "repository.index.build", observer=publisher.observe
         )
         reporter.report("scan", "first", percentage=1)
+        await asyncio.wait_for(writer.started.wait(), timeout=1)
         reporter.report("scan", "second", percentage=2)
+        reporter.report("scan", "third", percentage=3)
 
-        assert cancellation.is_set()
+        await asyncio.wait_for(cancellation.wait(), timeout=1)
+        writer.release.set()
         with pytest.raises(bridge_module.BridgeFault) as raised:
             await publisher.close()
 
         assert raised.value.typed_code == "INDEX_BUILD_FAILED"
         assert raised.value.data["error_code"] == "progress_backpressure"
-        assert len(writer.frames) == 1
-        assert writer.frames[0]["params"]["event"]["sequence"] == 0
 
     asyncio.run(exercise())
 
@@ -546,6 +586,7 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
 ) -> None:
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     cancellation_seen = threading.Event()
+    release_worker = threading.Event()
     lock_was_active = False
 
     def wait_for_cancellation(
@@ -563,6 +604,8 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
             time.sleep(0.001)
         lock_was_active = lock.active and lock.layout.lock.is_file()
         cancellation_seen.set()
+        if not release_worker.wait(timeout=5):
+            raise AssertionError("test did not release the timed-out index worker")
         raise asyncio.CancelledError
 
     monkeypatch.setattr(
@@ -575,6 +618,7 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
         harness.input.send(_request("hello", "hello", {"protocol_version": "2.0"}))
         await harness.response(1)
         digest = calculate_source_snapshot_digest(scan_repository(tmp_path))
+        started_at = time.monotonic()
         harness.input.send(
             _request(
                 "index-timeout",
@@ -583,15 +627,36 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
                     "action": "build",
                     "expected_snapshot_digest": digest,
                     "provider": "none",
-                    "timeout_ms": 500,
+                    "timeout_ms": 50,
                 },
             )
         )
         response = await asyncio.to_thread(harness.output.wait_for_id, "index-timeout")
+        elapsed = time.monotonic() - started_at
         assert response["error"]["data"]["code"] == "REQUEST_TIMEOUT"
-        assert cancellation_seen.is_set()
+        assert await asyncio.to_thread(cancellation_seen.wait, 1)
         assert lock_was_active is True
+        assert elapsed < 0.5
+        assert (tmp_path / ".contextforge" / "index" / "lock.json").is_file()
+        assert len(harness.server._background_tasks) == 1
+        release_worker.set()
+        deadline = time.monotonic() + 5
+        while harness.server._background_tasks:
+            if time.monotonic() >= deadline:
+                raise AssertionError("timed-out index cleanup did not finish")
+            await asyncio.sleep(0.01)
         assert not (tmp_path / ".contextforge" / "index" / "lock.json").exists()
+        frames = [json.loads(chunk) for chunk in harness.output.chunks]
+        timeout_position = next(
+            index
+            for index, frame in enumerate(frames)
+            if frame.get("id") == "index-timeout"
+        )
+        assert all(
+            frame.get("method") != "$/progress"
+            for frame in frames[timeout_position + 1 :]
+        )
+        assert harness.stderr.getvalue() == ""
         await harness.close()
 
     asyncio.run(exercise())

@@ -106,6 +106,7 @@ MAX_PREPARATIONS = 128
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 FORCED_CANCELLATION_TIMEOUT_SECONDS = 0.1
 MAX_PENDING_PROGRESS_EVENTS = 256
+PROGRESS_BACKPRESSURE_TIMEOUT_SECONDS = 5.0
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -198,7 +199,7 @@ class _SerializedWriter:
 
 
 class _ProgressPublisher:
-    """Serialize one bounded progress stream without spawning per-event tasks."""
+    """Serialize one bounded progress stream with coalesced producer bursts."""
 
     def __init__(
         self,
@@ -208,7 +209,15 @@ class _ProgressPublisher:
         operation_id: str,
         *,
         capacity: int = MAX_PENDING_PROGRESS_EVENTS,
+        backpressure_timeout_seconds: float = PROGRESS_BACKPRESSURE_TIMEOUT_SECONDS,
     ) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        if (
+            not math.isfinite(backpressure_timeout_seconds)
+            or backpressure_timeout_seconds <= 0
+        ):
+            raise ValueError("backpressure_timeout_seconds must be finite and positive")
         self.last_event: ProgressEvent | None = None
         self._writer = writer
         self._request_id = request_id
@@ -217,23 +226,32 @@ class _ProgressPublisher:
         self._queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue(
             maxsize=capacity
         )
+        self._backpressure_timeout_seconds = backpressure_timeout_seconds
+        self._pending_event: ProgressEvent | None = None
+        self._pending_task: asyncio.Task[None] | None = None
         self._overflowed = False
         self._closed = False
         self._task = asyncio.create_task(self._run())
 
     def observe(self, event: ProgressEvent) -> None:
         self.last_event = event
-        if self._closed or self._overflowed:
+        if self._closed or self._overflowed or self._cancellation.is_set():
             return
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
-            self._overflowed = True
-            self._cancellation.set()
+            # Progress events are cumulative snapshots. Keep only the newest event
+            # while one bounded enqueue waits for the writer. This distinguishes a
+            # synchronous producer burst from a client that is actually not reading.
+            self._pending_event = event
+            if self._pending_task is None or self._pending_task.done():
+                self._pending_task = asyncio.create_task(self._enqueue_pending())
 
     async def close(self, *, check_overflow: bool = True) -> None:
         if not self._closed:
             self._closed = True
+            if self._pending_task is not None:
+                await self._pending_task
             if not self._task.done():
                 stopper = asyncio.create_task(self._queue.put(None))
                 try:
@@ -271,18 +289,56 @@ class _ProgressPublisher:
             try:
                 if event is None:
                     return
-                await self._writer.write(
-                    {
-                        "jsonrpc": JSONRPC_VERSION,
-                        "method": "$/progress",
-                        "params": {
-                            "request_id": self._request_id,
-                            "event": event.model_dump(mode="json"),
-                        },
-                    }
-                )
+                if not self._cancellation.is_set():
+                    await self._writer.write(
+                        {
+                            "jsonrpc": JSONRPC_VERSION,
+                            "method": "$/progress",
+                            "params": {
+                                "request_id": self._request_id,
+                                "event": event.model_dump(mode="json"),
+                            },
+                        }
+                    )
             finally:
                 self._queue.task_done()
+
+    async def _enqueue_pending(self) -> None:
+        try:
+            while self._pending_event is not None and not self._overflowed:
+                event = self._pending_event
+                self._pending_event = None
+                put_task = asyncio.create_task(self._queue.put(event))
+                cancellation_task = asyncio.create_task(self._cancellation.wait())
+                done: set[asyncio.Task[Any]] = set()
+                try:
+                    done, _ = await asyncio.wait(
+                        {put_task, cancellation_task},
+                        timeout=self._backpressure_timeout_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for task in (put_task, cancellation_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        put_task, cancellation_task, return_exceptions=True
+                    )
+                if cancellation_task in done:
+                    return
+                if put_task not in done:
+                    self._overflowed = True
+                    self._cancellation.set()
+                    return
+                put_task.result()
+        finally:
+            self._pending_task = None
+            if (
+                self._pending_event is not None
+                and not self._overflowed
+                and not self._cancellation.is_set()
+            ):
+                self._pending_task = asyncio.create_task(self._enqueue_pending())
 
 
 class _BoundedDiagnostics:
@@ -327,6 +383,7 @@ class BridgeServer:
             OrderedDict()
         )
         self._active: dict[tuple[str, str | int], _ActiveRequest] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._writer: _SerializedWriter | None = None
         self._diagnostics = _BoundedDiagnostics(None)
         self._shutting_down = False
@@ -389,6 +446,11 @@ class BridgeServer:
             for request in tuple(self._active.values())
             if request.task is not current and not request.task.done()
         }
+        tasks.update(
+            task
+            for task in tuple(self._background_tasks)
+            if task is not current and not task.done()
+        )
         if not tasks:
             return
         done, pending = await asyncio.wait(
@@ -416,7 +478,7 @@ class BridgeServer:
             task.add_done_callback(self._consume_task_result)
         self._forget_active_tasks(tasks)
 
-    def _consume_task_result(self, task: asyncio.Task[None]) -> None:
+    def _consume_task_result(self, task: asyncio.Task[Any]) -> None:
         """Consume a shutdown outcome and retain a safe unexpected-failure signal."""
 
         if task.cancelled():
@@ -426,12 +488,29 @@ class BridgeServer:
                 "bridge active request ended unexpectedly during shutdown"
             )
 
-    def _forget_active_tasks(self, tasks: set[asyncio.Task[None]]) -> None:
+    def _forget_active_tasks(self, tasks: set[asyncio.Task[Any]]) -> None:
         """Detach drained or abandoned requests from the bridge lifecycle."""
 
         for key, request in tuple(self._active.items()):
             if request.task in tasks:
                 self._active.pop(key, None)
+        self._background_tasks.difference_update(tasks)
+
+    def _track_background_task(self, task: asyncio.Task[Any]) -> None:
+        """Retain timed-out index cleanup until its writer lock is released."""
+
+        self._background_tasks.add(task)
+        task.add_done_callback(self._finish_background_task)
+
+    def _finish_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None and not isinstance(error, BridgeFault):
+            self._diagnostics.write(
+                "bridge timed-out index cleanup ended with an internal error"
+            )
 
     def _decode_frame(self, line: bytes) -> dict[str, Any] | BridgeFault:
         try:
@@ -567,8 +646,7 @@ class BridgeServer:
                 else:
                     cancellation.set()
                     if method == "index":
-                        with suppress(asyncio.CancelledError, Exception):
-                            await operation_task
+                        self._track_background_task(operation_task)
                     else:
                         operation_task.cancel()
                         await asyncio.gather(operation_task, return_exceptions=True)
