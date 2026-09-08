@@ -1,4 +1,4 @@
-"""Persistent generic ContextForge bridge protocol v1."""
+"""Persistent generic ContextForge bridge protocols."""
 
 from .protocol import BRIDGE_PROTOCOL_VERSION, SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
 from .server import (
