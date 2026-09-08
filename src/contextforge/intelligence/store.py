@@ -92,6 +92,28 @@ def index_publication_transaction(
         _publication_transaction.reset(token)
 
 
+def publish_index_checkpoint(
+    lock: IndexWriteLock,
+    *,
+    before_publish: Callable[[], None] | None = None,
+) -> IndexManifest:
+    """Activate the current transaction generation and continue the same job."""
+
+    transaction = _publication_transaction.get()
+    if (
+        transaction is None
+        or transaction.repository_root != lock.layout.repository_root
+        or transaction.pending is None
+    ):
+        raise IndexPublicationError("no pending generation is available to publish")
+    if before_publish is not None:
+        before_publish()
+    manifest = transaction.pending
+    _activate_manifest(lock, manifest)
+    transaction.pending = None
+    return manifest
+
+
 WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS = (0.01, 0.05)
 MAX_WINDOWS_DIRECTORY_REPLACE_RETRIES = len(WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS)
 _WINDOWS_RETRYABLE_DIRECTORY_REPLACE_ERRORS = frozenset({5, 32, 33})
@@ -146,6 +168,11 @@ _STAGED_ROOT_RECORDS = {
     "overview.json": b"null\n",
     "architecture.json": b"null\n",
     "features.json": b"null\n",
+    "relationship-graph.json": b"null\n",
+    "retrieval-structural.json": b"null\n",
+    "retrieval-semantic.json": b"null\n",
+    "orientation.json": b"null\n",
+    "conventions.json": b"null\n",
 }
 _RUN_ID_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -472,6 +499,25 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
     if calculate_generation_id(manifest) != manifest.generation_id:
         raise IndexManifestReadError("generation manifest digest is invalid")
     return manifest
+
+
+def read_active_index_schema(repository_root: str | Path) -> int | None:
+    """Read only the active pointer schema for rebuild diagnostics."""
+
+    layout = _layout(repository_root)
+    if not os.path.lexists(layout.active_manifest):
+        return None
+    _require_safe_existing_chain(layout.contextforge_root, layout.active_manifest)
+    try:
+        value = json.loads(
+            _read_bounded_bytes(layout.active_manifest, MAX_MANIFEST_BYTES)
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise IndexManifestReadError("active index pointer is malformed") from exc
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise IndexManifestReadError("active index pointer has no integer schema")
+    return schema_version
 
 
 def load_generation_manifest(
@@ -928,6 +974,17 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 raise IndexPublicationError(
                     f"interpretation digest does not match manifest for {state.path}"
                 )
+    for reference in manifest.artifacts.model_dump().values():
+        if reference is None:
+            continue
+        location = _validate_record_location(reference["location"])
+        artifact = root.joinpath(*location.split("/"))
+        _require_safe_existing_chain(root, artifact)
+        content = _read_bounded_bytes(artifact, MAX_RECORD_BYTES)
+        if hashlib.sha256(content).hexdigest() != reference["sha256"]:
+            raise IndexPublicationError(
+                f"artifact digest does not match manifest for {location}"
+            )
 
 
 def _validate_record_schema(content: bytes, expected: int) -> None:

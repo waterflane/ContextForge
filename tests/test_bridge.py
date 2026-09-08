@@ -446,9 +446,9 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
         assert capabilities["tracked_index_jobs"] is True
         assert capabilities["progress_notifications"] is True
         assert capabilities["schemas"] == {
-            "index": {"current": 2, "readable": [1, 2]},
-            "manifest": {"current": 2, "readable": [1, 2]},
-            "record": {"current": 2, "readable": [1, 2]},
+            "index": {"current": 3, "readable": [1, 3]},
+            "manifest": {"current": 3, "readable": [1, 3]},
+            "record": {"current": 3, "readable": [1, 3]},
             "progress": {"current": 3, "readable": [1, 2, 3]},
             "context_package": {"current": 1, "readable": [1]},
         }
@@ -471,7 +471,7 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
             response = await asyncio.to_thread(harness.output.wait_for_id, request_id)
             assert response["result"]["action"] == action
             assert response["result"]["snapshot_digest"] == digest
-            assert response["result"]["index_schema"] == 2
+            assert response["result"]["index_schema"] == 3
             assert response["result"]["partial"] is False
             progress = [
                 frame

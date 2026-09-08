@@ -62,6 +62,7 @@ from contextforge.intelligence import (
     SemanticAnalysisOptions,
     SemanticIndexBuildResult,
     StructuralIndexBuildResult,
+    UnsupportedIndexSchemaError,
     acquire_index_lock,
     build_repository_maps,
     build_semantic_index,
@@ -79,7 +80,10 @@ from contextforge.intelligence import (
     write_manifest,
 )
 from contextforge.intelligence.models import AnalyzerIdentity
-from contextforge.intelligence.store import index_publication_transaction
+from contextforge.intelligence.store import (
+    index_publication_transaction,
+    publish_index_checkpoint,
+)
 from contextforge.logging import recent_records
 from contextforge.models import (
     ModelProvider,
@@ -109,6 +113,10 @@ class MissingIndexError(ApplicationError):
 
 class IndexSourceChangedError(ApplicationError):
     """Raised when repository identity changes before atomic publication."""
+
+
+class IndexRebuildRequiredError(ApplicationError):
+    """Raised when update targets an incompatible older index."""
 
 
 class ArtifactReadError(ApplicationError):
@@ -167,6 +175,8 @@ class IndexStatusReport:
     architecture_status: Literal["current", "missing", "stale"]
     feature_status: Literal["current", "missing", "stale"]
     lock_status: Literal["unlocked", "locked", "uninitialized"]
+    status: Literal["ready", "missing", "rebuild_required"] = "ready"
+    rebuild_required: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -190,6 +200,8 @@ class IndexStatusReport:
                 "features": self.feature_status,
             },
             "lock_status": self.lock_status,
+            "status": self.status,
+            "rebuild_required": self.rebuild_required,
         }
 
 
@@ -332,6 +344,12 @@ async def _build_repository_index(
                 "no active repository index exists; run 'contextforge index build'"
             ) from None
         previous = None
+    except UnsupportedIndexSchemaError as exc:
+        if update_only:
+            raise IndexRebuildRequiredError(
+                f"index schema v{exc.schema_version} requires a full v3 rebuild"
+            ) from None
+        previous = None
     model_enabled = provider is not None
     scan_end = 5.0 if model_enabled else 10.0
     compare_end = 8.0 if model_enabled else 15.0
@@ -434,6 +452,36 @@ async def _build_repository_index(
                     "reused": len(structural.reused_paths),
                 },
             )
+            if (
+                previous is None
+                or structural.manifest.generation_id != previous.generation_id
+            ):
+                structural_snapshot = await asyncio.to_thread(scan_repository, root)
+                _raise_if_index_cancelled(cancellation)
+                if (
+                    calculate_source_snapshot_digest(structural_snapshot)
+                    != snapshot_digest
+                ):
+                    raise IndexSourceChangedError(
+                        "repository source identity changed before "
+                        "structural publication"
+                    )
+                publish_index_checkpoint(
+                    lock,
+                    before_publish=lambda: _raise_if_index_cancelled(cancellation),
+                )
+                progress.report(
+                    "structural_publish",
+                    "Structural generation published and available for retrieval.",
+                    percentage=structural_end,
+                    phase_label="Structural publication",
+                    phase_percent=100,
+                    phase_weight=0,
+                    metadata={
+                        "generation_id": structural.manifest.generation_id,
+                        "generation_kind": "structural",
+                    },
+                )
             if provider is not None:
                 semantic_start = 18.0
                 semantic_end = 82.0
@@ -774,6 +822,34 @@ def _inspect_repository_index(
             architecture_status="missing",
             feature_status="missing",
             lock_status=lock_status,
+            status="missing",
+        )
+    except UnsupportedIndexSchemaError as exc:
+        progress.report(
+            "compare",
+            "The active index uses an incompatible schema and must be rebuilt.",
+            percentage=90,
+        )
+        return IndexStatusReport(
+            initialized=initialized,
+            index_schema=exc.schema_version,
+            repository_identity=repository_identity,
+            active_generation_id=None,
+            indexed_files=0,
+            stale_files=tuple(item.path for item in snapshot.files),
+            failed_files=(),
+            deleted_records=(),
+            added_files=tuple(item.path for item in snapshot.files),
+            changed_files=(),
+            provider_id=None,
+            model_id=None,
+            prompt_versions=(),
+            overview_status="missing",
+            architecture_status="missing",
+            feature_status="missing",
+            lock_status=lock_status,
+            status="rebuild_required",
+            rebuild_required=True,
         )
 
     progress.report("compare", "Comparing repository and index state.", percentage=70)

@@ -430,7 +430,7 @@ def test_index_jsonl_progress_is_a_clean_schema_three_stream(tmp_path: Path) -> 
     assert events[-1].status is ProgressStatus.COMPLETED
     assert events[-1].metadata["generation_id"] == load_manifest(tmp_path).generation_id
     assert events[-1].metadata["snapshot_digest"]
-    assert events[-1].metadata["index_schema"] == 2
+    assert events[-1].metadata["index_schema"] == 3
     assert events[-1].metadata["partial"] is False
     assert "\x1b[" not in result.stdout
     assert "Status:" not in result.stdout

@@ -876,6 +876,8 @@ class BridgeServer:
                     "features": report.feature_status,
                 },
                 "lock_status": report.lock_status,
+                "status": report.status,
+                "rebuild_required": report.rebuild_required,
             },
         }
         if self._protocol_version in {"1.1", "2.0"}:

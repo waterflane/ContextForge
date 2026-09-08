@@ -377,12 +377,12 @@ def test_malformed_generation_manifest_is_a_typed_error(tmp_path: Path) -> None:
 
 def test_unsupported_pointer_schema_version_is_not_guessed(tmp_path: Path) -> None:
     layout = initialize_index(tmp_path)
-    layout.active_manifest.write_text('{"schema_version":3}\n', encoding="utf-8")
+    layout.active_manifest.write_text('{"schema_version":4}\n', encoding="utf-8")
 
     with pytest.raises(UnsupportedIndexSchemaError) as error:
         load_manifest(tmp_path)
 
-    assert error.value.schema_version == 3
+    assert error.value.schema_version == 4
 
 
 def test_inspect_status_before_and_after_publication(tmp_path: Path) -> None:

@@ -17,6 +17,12 @@ from contextforge.intelligence.codemap import (
 )
 from contextforge.intelligence.extractors import extract_code_map
 from contextforge.intelligence.fallback import FALLBACK_ANALYZER
+from contextforge.intelligence.graph import (
+    OrientationMap,
+    RelationshipGraph,
+    build_orientation_map,
+    build_relationship_graph,
+)
 from contextforge.intelligence.manifest import (
     build_index_manifest,
     calculate_source_snapshot_digest,
@@ -24,6 +30,8 @@ from contextforge.intelligence.manifest import (
 )
 from contextforge.intelligence.models import (
     AnalyzerIdentity,
+    ArtifactReference,
+    GenerationArtifacts,
     IndexBuildState,
     IndexedFileState,
     IndexManifest,
@@ -43,6 +51,8 @@ from contextforge.intelligence.store import (
     IndexManifestNotFoundError,
     IndexManifestReadError,
     IndexWriteLock,
+    UnsupportedIndexSchemaError,
+    load_generation_record,
     load_index_record,
     load_manifest,
     write_index_record,
@@ -174,12 +184,29 @@ def build_structural_index(
     relationships_digest = write_index_record(
         lock, "relationships.jsonl", relationships_content
     )
+    graph = build_relationship_graph(code_maps, snapshot_digest)
+    graph_content = canonical_json_bytes(graph.model_dump(mode="json"))
+    graph_digest = write_index_record(lock, "relationship-graph.json", graph_content)
+    orientation = build_orientation_map(code_maps, graph)
+    orientation_content = canonical_json_bytes(orientation.model_dump(mode="json"))
+    orientation_digest = write_index_record(
+        lock, "orientation.json", orientation_content
+    )
+    structural_retrieval_content = canonical_json_bytes(
+        _structural_retrieval_document(code_maps, snapshot_digest)
+    )
+    structural_retrieval_digest = write_index_record(
+        lock, "retrieval-structural.json", structural_retrieval_content
+    )
     facts_digest = hashlib.sha256(
         canonical_json_bytes(
             {
                 "records": record_digests,
                 "relationships": relationships_digest,
                 "symbols": symbols_digest,
+                "relationship_graph": graph_digest,
+                "structural_retrieval": structural_retrieval_digest,
+                "orientation": orientation_digest,
             }
         )
     ).hexdigest()
@@ -200,6 +227,19 @@ def build_structural_index(
         build=build,
         files=states,
         structural_analyzers=analyzers,
+        generation_kind="structural",
+        artifacts=GenerationArtifacts(
+            relationship_graph=ArtifactReference(
+                location="relationship-graph.json", sha256=graph_digest
+            ),
+            structural_retrieval=ArtifactReference(
+                location="retrieval-structural.json",
+                sha256=structural_retrieval_digest,
+            ),
+            orientation_map=ArtifactReference(
+                location="orientation.json", sha256=orientation_digest
+            ),
+        ),
     )
     generation = write_manifest(lock, manifest)
     return StructuralIndexBuildResult(
@@ -238,6 +278,89 @@ def load_file_code_map(
             "CodeMap identity does not match its manifest state"
         )
     return code_map
+
+
+def load_relationship_graph(
+    repository_root: str | Path,
+    *,
+    manifest: IndexManifest | None = None,
+) -> RelationshipGraph:
+    """Load the digest-checked relationship graph from a pinned generation."""
+
+    active = manifest if manifest is not None else load_manifest(repository_root)
+    reference = active.artifacts.relationship_graph
+    if reference is None:
+        raise IndexManifestReadError("pinned generation has no relationship graph")
+    try:
+        graph = RelationshipGraph.model_validate_json(
+            load_generation_record(repository_root, reference.location, manifest=active)
+        )
+    except ValueError as exc:
+        raise IndexManifestReadError(
+            "published relationship graph does not match its schema"
+        ) from exc
+    if graph.source_snapshot_digest != active.build.source_snapshot_digest:
+        raise IndexManifestReadError("relationship graph is stale for its generation")
+    return graph
+
+
+def load_orientation_map(
+    repository_root: str | Path,
+    *,
+    manifest: IndexManifest | None = None,
+) -> OrientationMap:
+    """Load the digest-checked all-file orientation map."""
+
+    active = manifest if manifest is not None else load_manifest(repository_root)
+    reference = active.artifacts.orientation_map
+    if reference is None:
+        raise IndexManifestReadError("pinned generation has no orientation map")
+    try:
+        orientation = OrientationMap.model_validate_json(
+            load_generation_record(repository_root, reference.location, manifest=active)
+        )
+    except ValueError as exc:
+        raise IndexManifestReadError(
+            "published orientation map does not match its schema"
+        ) from exc
+    if orientation.source_snapshot_digest != active.build.source_snapshot_digest:
+        raise IndexManifestReadError("orientation map is stale for its generation")
+    return orientation
+
+
+def _structural_retrieval_document(
+    code_maps: tuple[FileCodeMap, ...], source_snapshot_digest: str
+) -> dict[str, object]:
+    return {
+        "schema_version": 3,
+        "record_kind": "structural_retrieval_postings",
+        "source_snapshot_digest": source_snapshot_digest,
+        "documents": [
+            {
+                "path": code_map.path,
+                "source_sha256": code_map.source_sha256,
+                "symbols": sorted(
+                    {
+                        value
+                        for symbol in code_map.symbols
+                        for value in (symbol.name, symbol.qualified_name)
+                    }
+                ),
+                "source_identifiers": sorted(
+                    {
+                        *code_map.top_level_constants,
+                        *(item.name for item in code_map.exports),
+                        *(
+                            key
+                            for symbol in code_map.symbols
+                            for key in symbol.configuration_keys
+                        ),
+                    }
+                ),
+            }
+            for code_map in sorted(code_maps, key=lambda item: item.path)
+        ],
+    }
 
 
 def _reuse_code_map(
@@ -324,7 +447,7 @@ def _raise_if_cancelled(cancellation: asyncio.Event | None) -> None:
 def _optional_manifest(lock: IndexWriteLock) -> IndexManifest | None:
     try:
         return load_manifest(lock.layout.repository_root)
-    except IndexManifestNotFoundError:
+    except (IndexManifestNotFoundError, UnsupportedIndexSchemaError):
         return None
 
 
@@ -364,4 +487,6 @@ __all__ = [
     "StructuralIndexBuildResult",
     "build_structural_index",
     "load_file_code_map",
+    "load_orientation_map",
+    "load_relationship_graph",
 ]

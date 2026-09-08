@@ -2010,6 +2010,8 @@ def _publish_global_records(
         structural_analyzers=current.structural_analyzers,
         semantic_analyzers=semantic_analyzers,
         schema_versions=current.schema_versions,
+        generation_kind="enriched",
+        artifacts=current.artifacts,
     )
     return write_manifest(lock, manifest)
 
@@ -2025,6 +2027,19 @@ def _copy_generation_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
         if location is not None
     }
     locations.update(("symbols.jsonl", "relationships.jsonl"))
+    locations.update(
+        reference.location
+        for reference in (
+            manifest.artifacts.relationship_graph,
+            manifest.artifacts.structural_retrieval,
+            manifest.artifacts.semantic_retrieval,
+            manifest.artifacts.orientation_map,
+            manifest.artifacts.architecture_map,
+            manifest.artifacts.conventions_map,
+            manifest.artifacts.features_map,
+        )
+        if reference is not None
+    )
     for location in sorted(locations):
         write_index_record(
             lock,

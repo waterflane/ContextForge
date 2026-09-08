@@ -18,8 +18,8 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-CODEMAP_SCHEMA_VERSION: Literal[2] = 2
-RESOLVER_VERSION = "2"
+CODEMAP_SCHEMA_VERSION: Literal[3] = 3
+RESOLVER_VERSION = "3"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -237,7 +237,7 @@ class RelationshipRecord(IndexModel):
 class SymbolRecord(IndexModel):
     """Verified declaration and directly contained syntax facts."""
 
-    schema_version: Literal[1, 2] = RECORD_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = RECORD_SCHEMA_VERSION
     record_kind: Literal["verified_symbol"] = "verified_symbol"
     symbol_id: str
     name: str
@@ -318,7 +318,7 @@ class SymbolRecord(IndexModel):
 class FileCodeMap(IndexModel):
     """Complete model-free structural projection for one snapshot file."""
 
-    schema_version: Literal[1, 2] = CODEMAP_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = CODEMAP_SCHEMA_VERSION
     record_kind: Literal["verified_file_codemap"] = "verified_file_codemap"
     path: str
     source_sha256: Sha256

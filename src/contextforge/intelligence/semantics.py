@@ -1186,6 +1186,8 @@ async def build_semantic_index(
         structural_analyzers=structural.structural_analyzers,
         semantic_analyzers=semantic_analyzers,
         schema_versions=structural.schema_versions,
+        generation_kind="enriched",
+        artifacts=structural.artifacts,
     )
     generation = write_manifest(lock, manifest)
     tracker.publish()
@@ -2823,7 +2825,16 @@ def _copy_structural_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
             manifest=manifest,
         )
         write_index_record(lock, state.record_location, content)
-    for location in ("symbols.jsonl", "relationships.jsonl"):
+    artifact_locations = tuple(
+        reference.location
+        for reference in (
+            manifest.artifacts.relationship_graph,
+            manifest.artifacts.structural_retrieval,
+            manifest.artifacts.orientation_map,
+        )
+        if reference is not None
+    )
+    for location in ("symbols.jsonl", "relationships.jsonl", *artifact_locations):
         write_index_record(
             lock,
             location,
