@@ -68,7 +68,7 @@ This roadmap describes broad milestones only. It does not promise dates.
   read-only guarantees inside ContextForge while consumers own model selection.
 - [x] Keep MCP independent and preserve its existing read-only protocol.
 
-### v0.5.1 repository intelligence maintenance release (release prepared)
+### v0.5.1 repository intelligence and host-integration release (complete)
 
 - [x] Add verified Tree-sitter declaration extraction for ten common polyglot
   languages and publish explicit relationship-coverage limitations.
@@ -80,8 +80,6 @@ This roadmap describes broad milestones only. It does not promise dates.
   definition ranking, and reviewed deterministic fallback finalization.
 - [x] Adapt structured model requests to truncation and reported runtime context
   limits without weakening strict validation.
-
-### Unreleased host-integration hardening (complete)
 
 - [x] Add independent fail-fast and bounded-failure index policies while
   preserving the existing `--fail-on-error` contract.

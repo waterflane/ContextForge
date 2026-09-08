@@ -107,5 +107,6 @@ diagnostics, nested-ignore, and CLI usability improvements; it does not claim
 future GUI, remote transport, orchestration, or source-mutation functionality.
 Version 0.5.0 adds the trusted-local, model-free, read-only bridge v1 without
 changing the existing model-assisted discovery or MCP semantics. Version 0.5.1
-adds verified polyglot declarations, resumable semantic coverage, bridge
-protocol 1.1, and stricter exact-symbol and dependency-aware discovery.
+adds verified polyglot declarations, resumable semantic coverage, stricter
+exact-symbol and dependency-aware discovery, bounded failure policies, JSONL
+progress, provider circuit breaking, and opt-in Bridge 2 tracked index jobs.
