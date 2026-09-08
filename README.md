@@ -28,11 +28,10 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. The unreleased API adds bounded failure
-> policies, JSONL progress, and opt-in Bridge 2 tracked index jobs while the
-> package version remains `0.5.1`. Discovery benchmarking is experimental and
-> its results should be reviewed alongside the recorded provider, model,
-> configuration, and source snapshot.
+> ContextForge is pre-alpha software. Version `0.5.1` adds bounded failure
+> policies, JSONL progress, and opt-in Bridge 2 tracked index jobs. Discovery
+> benchmarking is experimental and its results should be reviewed alongside the
+> recorded provider, model, configuration, and source snapshot.
 
 ## Why ContextForge
 
