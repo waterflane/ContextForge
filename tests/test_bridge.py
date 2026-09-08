@@ -228,21 +228,23 @@ def test_bridge_progress_publisher_coalesces_synchronous_bursts() -> None:
         await publisher.close()
 
         assert not cancellation.is_set()
-        assert len(writer.frames) == 2
-        assert writer.frames[0]["params"]["event"]["sequence"] == 0
+        assert publisher.coalesced_event_count > 0
+        assert publisher.dropped_event_count == 0
+        assert len(writer.frames) == 1
         assert writer.frames[-1]["params"]["event"]["sequence"] == 299
 
     asyncio.run(exercise())
 
 
-def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
+def test_bridge_progress_publisher_prioritizes_terminal_during_backpressure() -> None:
     class BlockedWriter:
         def __init__(self) -> None:
             self.started = asyncio.Event()
             self.release = asyncio.Event()
+            self.frames: list[dict[str, Any]] = []
 
         async def write(self, frame: dict[str, Any]) -> None:
-            del frame
+            self.frames.append(frame)
             self.started.set()
             await self.release.wait()
 
@@ -263,15 +265,18 @@ def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
         reporter.report("scan", "first", percentage=1)
         await asyncio.wait_for(writer.started.wait(), timeout=1)
         reporter.report("scan", "second", percentage=2)
-        reporter.report("scan", "third", percentage=3)
+        late_running = reporter.report("scan", "third", percentage=3)
+        reporter.complete()
+        publisher.observe(late_running)
 
-        await asyncio.wait_for(cancellation.wait(), timeout=1)
+        assert not cancellation.is_set()
         writer.release.set()
-        with pytest.raises(bridge_module.BridgeFault) as raised:
-            await publisher.close()
+        await asyncio.wait_for(publisher.close(), timeout=1)
 
-        assert raised.value.typed_code == "INDEX_BUILD_FAILED"
-        assert raised.value.data["error_code"] == "progress_backpressure"
+        assert not cancellation.is_set()
+        assert publisher.coalesced_event_count >= 2
+        assert publisher.dropped_event_count == 1
+        assert writer.frames[-1]["params"]["event"]["status"] == "completed"
 
     asyncio.run(exercise())
 
@@ -581,36 +586,31 @@ def test_bridge_v2_rechecks_expected_snapshot_inside_index_workflow(
     asyncio.run(exercise())
 
 
-def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
+def test_bridge_v2_index_timeout_detaches_worker_and_preserves_lock(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    cancellation_seen = threading.Event()
+    worker_started = threading.Event()
     release_worker = threading.Event()
     lock_was_active = False
+    cancellation_was_set = False
+    original_build_structural_index = application_module.build_structural_index
 
-    def wait_for_cancellation(
+    def wait_for_release(
         snapshot: object,
         lock: Any,
         **kwargs: object,
-    ) -> None:
-        del snapshot
-        nonlocal lock_was_active
+    ) -> object:
+        nonlocal lock_was_active, cancellation_was_set
         cancellation = cast(asyncio.Event, kwargs["cancellation"])
-        deadline = time.monotonic() + 5
-        while not cancellation.is_set():
-            if time.monotonic() >= deadline:
-                raise AssertionError("index timeout did not signal cancellation")
-            time.sleep(0.001)
         lock_was_active = lock.active and lock.layout.lock.is_file()
-        cancellation_seen.set()
+        worker_started.set()
         if not release_worker.wait(timeout=5):
             raise AssertionError("test did not release the timed-out index worker")
-        raise asyncio.CancelledError
+        cancellation_was_set = cancellation.is_set()
+        return original_build_structural_index(snapshot, lock, **kwargs)
 
-    monkeypatch.setattr(
-        application_module, "build_structural_index", wait_for_cancellation
-    )
+    monkeypatch.setattr(application_module, "build_structural_index", wait_for_release)
 
     async def exercise() -> None:
         harness = _Harness(tmp_path)
@@ -634,11 +634,14 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
         response = await asyncio.to_thread(harness.output.wait_for_id, "index-timeout")
         elapsed = time.monotonic() - started_at
         assert response["error"]["data"]["code"] == "REQUEST_TIMEOUT"
-        assert await asyncio.to_thread(cancellation_seen.wait, 1)
+        assert response["error"]["data"]["job_continues"] is True
+        assert response["error"]["data"]["operation_id"].startswith("bridge-index-")
+        assert await asyncio.to_thread(worker_started.wait, 1)
         assert lock_was_active is True
         assert elapsed < 0.5
         assert (tmp_path / ".contextforge" / "index" / "lock.json").is_file()
         assert len(harness.server._background_tasks) == 1
+        assert len(harness.server._background_requests) == 1
         release_worker.set()
         deadline = time.monotonic() + 5
         while harness.server._background_tasks:
@@ -646,16 +649,8 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
                 raise AssertionError("timed-out index cleanup did not finish")
             await asyncio.sleep(0.01)
         assert not (tmp_path / ".contextforge" / "index" / "lock.json").exists()
-        frames = [json.loads(chunk) for chunk in harness.output.chunks]
-        timeout_position = next(
-            index
-            for index, frame in enumerate(frames)
-            if frame.get("id") == "index-timeout"
-        )
-        assert all(
-            frame.get("method") != "$/progress"
-            for frame in frames[timeout_position + 1 :]
-        )
+        assert cancellation_was_set is False
+        assert not harness.server._background_requests
         assert harness.stderr.getvalue() == ""
         await harness.close()
 

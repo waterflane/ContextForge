@@ -48,6 +48,7 @@ class IndexParams(BridgeParams):
     base_url: str | None = Field(default=None, min_length=1, max_length=2_000)
     concurrency: int | None = Field(default=None, ge=1, le=8, strict=True)
     request_timeout: float | None = Field(default=None, ge=1, le=600)
+    operation_timeout: float | None = Field(default=None, ge=1, le=86_400)
     context_window: int | None = Field(
         default=None, ge=1_024, le=2_000_000, strict=True
     )
