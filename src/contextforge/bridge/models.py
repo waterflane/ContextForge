@@ -59,6 +59,12 @@ class IndexParams(BridgeParams):
     max_failures: int | None = Field(default=None, ge=1, strict=True)
     force_reanalyze: bool = False
     max_files: int | None = Field(default=None, ge=1, strict=True)
+    semantic_scope: Literal["priority", "all", "none"] | None = None
+    semantic_max_requests: int | None = Field(default=None, ge=1, strict=True)
+    semantic_max_input_tokens: int | None = Field(default=None, ge=1, strict=True)
+    semantic_max_chunks_per_file: int | None = Field(
+        default=None, ge=1, le=4, strict=True
+    )
     local_only: bool = False
     recover_stale_lock: bool = False
     confirm_unknown_lock: bool = False
@@ -176,18 +182,100 @@ class ShutdownParams(BridgeParams):
     pass
 
 
+class MapParams(StatusParams):
+    """Bridge 2.1 generation-pinned orientation-map request."""
+
+    expected_snapshot_digest: Sha256
+
+
+class SearchParams(BridgeParams):
+    """Bridge 2.1 deterministic retrieval with optional bounded reranking."""
+
+    expected_snapshot_digest: Sha256
+    task: str = Field(min_length=1, max_length=20_000)
+    working_files: tuple[str, ...] = ()
+    diff_paths: tuple[str, ...] = ()
+    limit: int = Field(default=20, ge=1, le=1_000, strict=True)
+    rerank: bool = False
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    base_url: str | None = Field(default=None, min_length=1, max_length=2_000)
+    request_timeout: float | None = Field(default=None, ge=1, le=600)
+
+    @field_validator("working_files", "diff_paths")
+    @classmethod
+    def validate_search_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        paths = tuple(validate_portable_relative_path(path) for path in value)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("search paths must be unique and canonical")
+        return paths
+
+
+class SymbolParams(BridgeParams):
+    """Bridge 2.1 exact/qualified symbol lookup."""
+
+    expected_snapshot_digest: Sha256
+    query: str = Field(min_length=1, max_length=1_000)
+    limit: int = Field(default=50, ge=1, le=1_000, strict=True)
+
+
+class CompileRange(BaseModel):
+    """One exact Working Set source interval."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    path: str
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+
+    @field_validator("path")
+    @classmethod
+    def validate_compile_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_compile_range(self) -> CompileRange:
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must not precede start_line")
+        return self
+
+
+class CompileParams(SearchParams):
+    """Bridge 2.1 retrieval and Context Capsule v2 compilation request."""
+
+    working_lines: tuple[CompileRange, ...] = ()
+    pinned_full_files: tuple[str, ...] = ()
+    context_window_tokens: int = Field(default=32_768, ge=1, strict=True)
+    history_tokens: int = Field(default=0, ge=0, strict=True)
+    response_tokens: int = Field(default=4_096, ge=0, strict=True)
+    safety_margin_tokens: int = Field(default=1_024, ge=0, strict=True)
+    git_diff: str | None = Field(default=None, max_length=2 * 1024 * 1024)
+
+    @field_validator("pinned_full_files")
+    @classmethod
+    def validate_full_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        paths = tuple(validate_portable_relative_path(path) for path in value)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("pinned full paths must be unique and canonical")
+        return paths
+
+
 __all__ = [
     "BridgeParams",
     "BridgeSelectionItem",
     "CancelParams",
+    "CompileParams",
+    "CompileRange",
     "DiscoverParams",
     "ExpandParams",
     "ExpansionOperation",
     "HelloParams",
     "IndexParams",
+    "MapParams",
     "PackageParams",
     "ReadParams",
+    "SearchParams",
     "ShutdownParams",
     "SnapshotParams",
     "StatusParams",
+    "SymbolParams",
 ]

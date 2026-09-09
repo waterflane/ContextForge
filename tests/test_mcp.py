@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 import contextforge.cli.mcp_commands as mcp_cli
 import contextforge.mcp.server as server_module
+from contextforge.application import build_repository_index
 from contextforge.cli.main import app
 from contextforge.context import ContextBuildOptions, build_context_package
 from contextforge.mcp import (
@@ -69,6 +70,10 @@ def test_mcp_tool_schema_is_exactly_read_only() -> None:
         "suggest_context",
         "build_context_package",
         "inspect_context_package",
+        "map",
+        "search",
+        "symbol",
+        "compile",
     )
     forbidden = {
         "shell",
@@ -215,6 +220,88 @@ def test_mcp_suggest_build_and_portable_inspection(tmp_path: Path) -> None:
         asyncio.run(_foundation(tmp_path).call_tool("suggest_context", {"task": "x"}))
     assert unavailable.value.code == "unavailable"
     asyncio.run(provider.close())
+
+
+def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def run(value: int) -> int:\n    return value + 1\n")
+    asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    foundation = _foundation(tmp_path)
+
+    mapped = asyncio.run(foundation.call_tool("map", {"include_graph": True}))
+    orientation_only = asyncio.run(foundation.call_tool("map", {}))
+    searched = asyncio.run(foundation.call_tool("search", {"task": "run"}))
+    symbols = asyncio.run(foundation.call_tool("symbol", {"query": "run"}))
+    compiled = asyncio.run(
+        foundation.call_tool(
+            "compile",
+            {
+                "task": "change run",
+                "working_lines": [{"path": "app.py", "start_line": 1, "end_line": 2}],
+                "context_window_tokens": 2_000,
+                "response_tokens": 200,
+                "safety_margin_tokens": 100,
+            },
+        )
+    )
+
+    assert mapped["orientation"]["files"][0]["path"] == "app.py"
+    assert mapped["relationship_graph"]["record_kind"] == "relationship_graph"
+    assert "relationship_graph" not in orientation_only
+    assert searched["provider_calls"] == 0
+    assert searched["candidates"][0]["path"] == "app.py"
+    assert symbols["symbols"][0]["name"] == "run"
+    assert compiled["capsule"]["schema_version"] == 2
+    assert compiled["token_count"] <= 1_700
+
+    manifest_resource = asyncio.run(
+        foundation.read_resource("contextforge://index/manifest")
+    )
+    assert manifest_resource["schema_version"] == 3
+    with pytest.raises(ReadOnlyToolError, match="no pinned architecture map"):
+        asyncio.run(foundation.read_resource("contextforge://architecture"))
+    with pytest.raises(ReadOnlyToolError, match="no pinned feature map"):
+        asyncio.run(foundation.read_resource("contextforge://features"))
+
+    with pytest.raises(ReadOnlyToolError, match="configured server provider"):
+        asyncio.run(foundation.call_tool("search", {"task": "run", "rerank": True}))
+    with pytest.raises(ReadOnlyToolError, match="configured server provider"):
+        asyncio.run(foundation.call_tool("compile", {"task": "run", "rerank": True}))
+    with pytest.raises(ReadOnlyToolError, match="capsule envelope"):
+        asyncio.run(
+            foundation.call_tool(
+                "compile",
+                {
+                    "task": "run",
+                    "context_window_tokens": 1,
+                    "response_tokens": 0,
+                    "safety_margin_tokens": 0,
+                },
+            )
+        )
+
+    for tool, arguments in (
+        ("map", {"unexpected": True}),
+        ("search", {"task": ""}),
+        ("symbol", {"query": ""}),
+        (
+            "compile",
+            {
+                "task": "run",
+                "working_lines": [{"path": "app.py", "start_line": 2, "end_line": 1}],
+            },
+        ),
+    ):
+        with pytest.raises(ReadOnlyToolError) as invalid:
+            asyncio.run(foundation.call_tool(tool, arguments))
+        assert invalid.value.code == "invalid_input"
+
+
+def test_mcp_v3_tools_require_an_active_generation(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    with pytest.raises(ReadOnlyToolError, match="no pinned Index v3"):
+        asyncio.run(_foundation(tmp_path).call_tool("map", {}))
 
 
 def test_mcp_protocol_initialize_lists_calls_resources_and_no_write_capability(

@@ -24,10 +24,14 @@ from contextforge.application import (
     inspect_repository_index,
 )
 from contextforge.context import (
+    ContextBudget,
+    ContextCompilerError,
+    ContextFreshnessError,
     ContextLimitError,
     ContextReaderError,
     FileChangedError,
     InvalidLineRangeError,
+    compile_context_capsule,
 )
 from contextforge.core.validation import validate_portable_relative_path
 from contextforge.discovery import (
@@ -56,15 +60,20 @@ from contextforge.intelligence import (
     RECORD_SCHEMA_VERSION,
     GlobalMapAnalysisError,
     IndexLockError,
+    IndexManifest,
     IndexStorageError,
+    RetrievalResult,
     SemanticAnalysisError,
     SemanticFailureLimitError,
     SemanticProviderCircuitError,
+    SourceRange,
     calculate_source_snapshot_digest,
     canonical_json_bytes,
     load_file_code_map,
     load_file_semantic_analysis,
     load_manifest,
+    load_orientation_map,
+    retrieve_context_candidates,
 )
 from contextforge.models import (
     ModelProvider,
@@ -86,16 +95,20 @@ from contextforge.repositories import ProjectSnapshot, ScanOptions, scan_reposit
 from .models import (
     BridgeSelectionItem,
     CancelParams,
+    CompileParams,
     DiscoverParams,
     ExpandParams,
     ExpansionOperation,
     HelloParams,
     IndexParams,
+    MapParams,
     PackageParams,
     ReadParams,
+    SearchParams,
     ShutdownParams,
     SnapshotParams,
     StatusParams,
+    SymbolParams,
 )
 from .protocol import BRIDGE_PROTOCOL_VERSION, SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
 
@@ -133,6 +146,10 @@ _METHOD_MODELS: dict[str, type[BaseModel]] = {
     "status": StatusParams,
     "snapshot": SnapshotParams,
     "index": IndexParams,
+    "map": MapParams,
+    "search": SearchParams,
+    "symbol": SymbolParams,
+    "compile": CompileParams,
     "discover": DiscoverParams,
     "expand": ExpandParams,
     "read": ReadParams,
@@ -670,7 +687,11 @@ class BridgeServer:
             )
         except BridgeFault as exc:
             await self._write_error(request_id, exc)
-        except (DiscoveryPreparationMismatchError, FileChangedError):
+        except (
+            DiscoveryPreparationMismatchError,
+            FileChangedError,
+            ContextFreshnessError,
+        ):
             await self._write_error(
                 request_id,
                 BridgeFault(
@@ -686,6 +707,24 @@ class BridgeServer:
                     INVALID_PARAMS,
                     "RESOURCE_LIMIT_EXCEEDED",
                     "The requested source excerpt exceeds an effective limit.",
+                ),
+            )
+        except ContextCompilerError:
+            await self._write_error(
+                request_id,
+                BridgeFault(
+                    INVALID_PARAMS,
+                    "CONTEXT_COMPILATION_REJECTED",
+                    "The Context Capsule request could not be compiled.",
+                ),
+            )
+        except IndexStorageError:
+            await self._write_error(
+                request_id,
+                BridgeFault(
+                    INDEX_STORAGE_FAILURE,
+                    "INDEX_STORAGE_FAILURE",
+                    "The pinned repository index could not be read.",
                 ),
             )
         except (ContextReaderError, InvalidLineRangeError):
@@ -735,15 +774,40 @@ class BridgeServer:
         if method == "snapshot":
             return await self._snapshot(cancellation)
         if method == "index":
-            if self._protocol_version != "2.0":
+            if self._protocol_version not in {"2.0", "2.1"}:
                 raise BridgeFault(
                     METHOD_NOT_FOUND,
                     "METHOD_NOT_FOUND",
                     "The requested method is not supported by this protocol version.",
                 )
-            return await self._index(
-                request_id, _require_type(raw, IndexParams), cancellation
-            )
+            index_params = _require_type(raw, IndexParams)
+            v21_fields = {
+                "semantic_scope",
+                "semantic_max_requests",
+                "semantic_max_input_tokens",
+                "semantic_max_chunks_per_file",
+            }
+            if self._protocol_version == "2.0" and (
+                index_params.model_fields_set & v21_fields
+            ):
+                raise BridgeFault(
+                    INVALID_PARAMS,
+                    "INVALID_PARAMS",
+                    "Bridge 2.0 does not accept Bridge 2.1 semantic scheduler fields.",
+                )
+            return await self._index(request_id, index_params, cancellation)
+        if method == "map":
+            self._require_bridge_v21()
+            return await self._map(_require_type(raw, MapParams), cancellation)
+        if method == "search":
+            self._require_bridge_v21()
+            return await self._search(_require_type(raw, SearchParams), cancellation)
+        if method == "symbol":
+            self._require_bridge_v21()
+            return await self._symbol(_require_type(raw, SymbolParams), cancellation)
+        if method == "compile":
+            self._require_bridge_v21()
+            return await self._compile(_require_type(raw, CompileParams), cancellation)
         if method == "discover":
             return await self._discover(
                 _require_type(raw, DiscoverParams), cancellation
@@ -764,7 +828,8 @@ class BridgeServer:
         )
 
     def _hello(self) -> dict[str, Any]:
-        bridge_v2 = self._protocol_version == "2.0"
+        bridge_v2 = self._protocol_version in {"2.0", "2.1"}
+        bridge_v21 = self._protocol_version == "2.1"
         return {
             "protocol_version": self._protocol_version or BRIDGE_PROTOCOL_VERSION,
             "supported_protocol_versions": list(SUPPORTED_BRIDGE_PROTOCOL_VERSIONS),
@@ -775,6 +840,7 @@ class BridgeServer:
                     "status",
                     "snapshot",
                     *(["index"] if bridge_v2 else []),
+                    *(["map", "search", "symbol", "compile"] if bridge_v21 else []),
                     "discover",
                     "expand",
                     "read",
@@ -788,7 +854,7 @@ class BridgeServer:
                 "concurrent_requests": True,
                 "serialized_responses": True,
                 "max_message_bytes": MAX_JSONRPC_MESSAGE_BYTES,
-                "expansion_candidates": self._protocol_version in {"1.1", "2.0"},
+                "expansion_candidates": self._protocol_version in {"1.1", "2.0", "2.1"},
                 "tracked_index_jobs": bridge_v2,
                 "progress_notifications": bridge_v2,
                 "schemas": {
@@ -809,6 +875,15 @@ class BridgeServer:
                         "readable": [1, 2, PROGRESS_SCHEMA_VERSION],
                     },
                     "context_package": {"current": 1, "readable": [1]},
+                    **(
+                        {
+                            "semantic_card": {"current": 3, "readable": [3]},
+                            "retrieval": {"current": 3, "readable": [3]},
+                            "context_capsule": {"current": 2, "readable": [2]},
+                        }
+                        if bridge_v21
+                        else {}
+                    ),
                 },
             },
             "workspace": {
@@ -880,7 +955,7 @@ class BridgeServer:
                 "rebuild_required": report.rebuild_required,
             },
         }
-        if self._protocol_version in {"1.1", "2.0"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1"}:
             result["index"]["coverage"] = await asyncio.to_thread(self._index_coverage)
         return result
 
@@ -899,6 +974,181 @@ class BridgeServer:
             "languages": dict(sorted(snapshot.summary.languages.items())),
         }
         return response
+
+    def _require_bridge_v21(self) -> None:
+        if self._protocol_version != "2.1":
+            raise BridgeFault(
+                METHOD_NOT_FOUND,
+                "METHOD_NOT_FOUND",
+                "The requested method is not supported by this protocol version.",
+            )
+
+    async def _v21_manifest(
+        self, expected_snapshot_digest: str, cancellation: asyncio.Event
+    ) -> IndexManifest:
+        await self._verified_snapshot(expected_snapshot_digest, cancellation)
+        manifest = await asyncio.to_thread(load_manifest, self.workspace)
+        if manifest.build.source_snapshot_digest != expected_snapshot_digest:
+            raise BridgeFault(
+                SOURCE_IDENTITY_CHANGED,
+                "SOURCE_IDENTITY_CHANGED",
+                "The active index is not current for the expected snapshot.",
+            )
+        return manifest
+
+    async def _map(
+        self, params: MapParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        orientation = await asyncio.to_thread(
+            load_orientation_map, self.workspace, manifest=manifest
+        )
+        return {
+            "generation_id": manifest.generation_id,
+            "orientation": orientation.model_dump(mode="json"),
+        }
+
+    async def _retrieve_v21(
+        self,
+        params: SearchParams,
+        manifest: IndexManifest,
+        cancellation: asyncio.Event,
+    ) -> RetrievalResult:
+        provider: ModelProvider | None = None
+        try:
+            if params.rerank:
+                project = load_project_configuration(self.workspace)
+                configuration = resolve_provider_configuration(
+                    project,
+                    provider=params.provider,
+                    model=params.model,
+                    base_url=params.base_url,
+                    timeout_seconds=params.request_timeout,
+                )
+                if configuration is None:
+                    raise BridgeFault(
+                        INVALID_PARAMS,
+                        "PROVIDER_REQUIRED",
+                        "Reranking requires a configured provider.",
+                    )
+                provider = create_model_provider(configuration)
+            return await retrieve_context_candidates(
+                self.workspace,
+                params.task,
+                manifest=manifest,
+                working_set=params.working_files,
+                diff_paths=params.diff_paths,
+                limit=params.limit,
+                provider=provider,
+                rerank=params.rerank,
+                cancellation=cancellation,
+            )
+        finally:
+            if provider is not None:
+                with suppress(ModelProviderError):
+                    await provider.close()
+
+    async def _search(
+        self, params: SearchParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        result = await self._retrieve_v21(params, manifest, cancellation)
+        return result.model_dump(mode="json")
+
+    async def _symbol(
+        self, params: SymbolParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        query = params.query.strip().casefold()
+        matches: list[tuple[int, str, dict[str, Any]]] = []
+        for state in manifest.files:
+            code_map = await asyncio.to_thread(
+                load_file_code_map, self.workspace, state.path, manifest=manifest
+            )
+            for symbol in code_map.symbols:
+                name = symbol.name.casefold()
+                qualified = symbol.qualified_name.casefold()
+                if query not in {name, qualified} and query not in qualified:
+                    continue
+                exact_rank = 0 if query == qualified else 1 if query == name else 2
+                matches.append(
+                    (
+                        exact_rank,
+                        symbol.qualified_name.casefold(),
+                        {
+                            "path": state.path,
+                            **symbol.model_dump(mode="json"),
+                        },
+                    )
+                )
+            if cancellation.is_set():
+                raise asyncio.CancelledError
+        ordered = [
+            item[2]
+            for item in sorted(matches, key=lambda value: (value[0], value[1]))[
+                : params.limit
+            ]
+        ]
+        return {
+            "generation_id": manifest.generation_id,
+            "query": params.query,
+            "symbols": ordered,
+        }
+
+    async def _compile(
+        self, params: CompileParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        working = tuple(
+            sorted(
+                {
+                    *params.working_files,
+                    *(item.path for item in params.working_lines),
+                    *params.pinned_full_files,
+                }
+            )
+        )
+        search_params = params.model_copy(update={"working_files": working})
+        retrieval = await self._retrieve_v21(search_params, manifest, cancellation)
+        ranges: dict[str, list[SourceRange]] = {}
+        for item in params.working_lines:
+            ranges.setdefault(item.path, []).append(
+                SourceRange(
+                    start_line=item.start_line,
+                    start_column=0,
+                    end_line=item.end_line,
+                    end_column=0,
+                )
+            )
+        compiled = await asyncio.to_thread(
+            compile_context_capsule,
+            self.workspace,
+            params.task,
+            retrieval,
+            budget=ContextBudget(
+                context_window_tokens=params.context_window_tokens,
+                history_tokens=params.history_tokens,
+                response_tokens=params.response_tokens,
+                safety_margin_tokens=params.safety_margin_tokens,
+            ),
+            manifest=manifest,
+            working_files=working,
+            working_lines={
+                path: tuple(sorted(values, key=lambda item: item.start_line))
+                for path, values in ranges.items()
+            },
+            pinned_full_files=params.pinned_full_files,
+            git_diff=params.git_diff,
+        )
+        return compiled.model_dump(mode="json")
 
     async def _index(
         self,
@@ -968,7 +1218,31 @@ class BridgeServer:
                     fail_fast=params.fail_fast,
                     max_failures=params.max_failures,
                     force_reanalyze=params.force_reanalyze,
-                    max_files=params.max_files,
+                    max_files=(
+                        project.models.semantic_max_model_files
+                        if params.max_files is None
+                        else params.max_files
+                    ),
+                    semantic_scope=(
+                        project.models.semantic_scope
+                        if params.semantic_scope is None
+                        else params.semantic_scope
+                    ),
+                    semantic_max_requests=(
+                        project.models.semantic_max_requests
+                        if params.semantic_max_requests is None
+                        else params.semantic_max_requests
+                    ),
+                    semantic_max_input_tokens=(
+                        project.models.semantic_max_input_tokens
+                        if params.semantic_max_input_tokens is None
+                        else params.semantic_max_input_tokens
+                    ),
+                    semantic_max_chunks_per_file=(
+                        project.models.semantic_max_chunks_per_file
+                        if params.semantic_max_chunks_per_file is None
+                        else params.semantic_max_chunks_per_file
+                    ),
                     semantic_max_output_tokens=(
                         project.models.semantic_max_output_tokens
                         if params.max_output_tokens is None
@@ -1111,7 +1385,7 @@ class BridgeServer:
             "made_progress": result.made_progress,
             "budget_usage": result.budget_usage.model_dump(mode="json"),
         }
-        if self._protocol_version in {"1.1", "2.0"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1"}:
             response["candidates"] = self._register_expansion_candidates(
                 snapshot, preparation, params.operation, result.data
             )

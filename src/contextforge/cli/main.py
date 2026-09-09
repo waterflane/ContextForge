@@ -8,6 +8,7 @@ from typing import Annotated, BinaryIO, Never, cast
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.application import canonical_json
 from contextforge.bridge import run_stdio_bridge
 from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
@@ -29,6 +30,7 @@ from contextforge.context import (
     render_project_tree_json,
     render_project_tree_markdown,
 )
+from contextforge.intelligence import IndexStorageError, load_orientation_map
 from contextforge.logging import (
     LogFormat,
     LoggingConfiguration,
@@ -60,6 +62,13 @@ class TreeFormat(StrEnum):
 
     text = "text"
     markdown = "markdown"
+    json = "json"
+
+
+class MapFormat(StrEnum):
+    """Supported repository-orientation map representations."""
+
+    text = "text"
     json = "json"
 
 
@@ -447,6 +456,60 @@ def tree(
         except OutputWriteError as exc:
             _exit_with_error(str(exc), code=1)
         typer.echo(f"Output written to {written_path}")
+
+
+@app.command("map")
+def repository_map(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Repository root with an active Index v3 generation."),
+    ] = Path("."),
+    output_format: Annotated[
+        MapFormat,
+        typer.Option("--format", help="Output representation.", case_sensitive=False),
+    ] = MapFormat.text,
+) -> None:
+    """Render the generation-pinned deterministic repository orientation map."""
+
+    try:
+        orientation = load_orientation_map(path)
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        IndexStorageError,
+        ValueError,
+    ) as exc:
+        _exit_with_error(str(exc), code=1)
+    if output_format is MapFormat.json:
+        typer.echo(canonical_json(orientation.model_dump(mode="json")), nl=False)
+        return
+    lines = [
+        "ContextForge repository map",
+        f"Snapshot: {orientation.source_snapshot_digest}",
+        f"Files: {len(orientation.files)}",
+        f"Modules: {len(orientation.modules)}",
+        "",
+    ]
+    for module in orientation.modules:
+        lines.append(f"[{module.module}] centrality={module.centrality:.6f}")
+        by_path = {item.path: item for item in orientation.files}
+        for file in module.files:
+            item = by_path[file]
+            markers = ",".join(
+                marker
+                for marker, enabled in (
+                    ("entrypoint", item.is_entrypoint),
+                    ("test", item.is_test),
+                )
+                if enabled
+            )
+            suffix = "" if not markers else f" ({markers})"
+            lines.append(
+                f"  {item.path} | {item.language or 'unknown'} | "
+                f"lines={item.line_count} symbols={item.symbol_count} "
+                f"centrality={item.centrality:.6f}{suffix}"
+            )
+    typer.echo("\n".join(lines) + "\n", nl=False)
 
 
 def _exit_with_error(message: str, *, code: int) -> Never:

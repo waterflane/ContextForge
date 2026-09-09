@@ -27,9 +27,11 @@ from contextforge.discovery import (
 )
 from contextforge.discovery.renderers import DiscoveryResultFormat
 from contextforge.intelligence import (
+    CandidateGraphNeighbor,
     IndexManifestNotFoundError,
     calculate_source_snapshot_digest,
     load_manifest,
+    retrieve_context_candidates,
 )
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 from contextforge.progress import ProgressEvent, ProgressStatus
@@ -140,6 +142,117 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert config.read_bytes() == before
     with pytest.raises(IndexManifestNotFoundError):
         load_manifest(tmp_path)
+
+
+def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(value: int) -> int:\n    return value + 1\n",
+    )
+    built = _invoke(
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--semantic-scope",
+        "none",
+        "--semantic-max-requests",
+        "2",
+        "--semantic-max-input-tokens",
+        "1000",
+        "--semantic-max-chunks-per-file",
+        "1",
+    )
+    assert built.exit_code == 0, built.output
+
+    mapped = _invoke("map", str(tmp_path), "--format", "json")
+    suggested = _invoke(
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "run",
+        "--format",
+        "json",
+    )
+    capsule_path = tmp_path / "capsule.json"
+    created = _invoke(
+        "context",
+        "create",
+        str(tmp_path),
+        "--task",
+        "change run",
+        "--working-lines",
+        "app.py:1-2",
+        "--context-tokens",
+        "2000",
+        "--response-tokens",
+        "200",
+        "--safety-margin-tokens",
+        "100",
+        "--format",
+        "json",
+        "--output",
+        str(capsule_path),
+        "--prompt-output",
+        str(tmp_path / "capsule.xml"),
+    )
+    reviewed = _invoke("context", "review", str(capsule_path))
+
+    assert mapped.exit_code == suggested.exit_code == created.exit_code == 0
+    assert reviewed.exit_code == 0
+    assert json.loads(mapped.stdout)["files"][0]["path"] == "app.py"
+    retrieval = json.loads(suggested.stdout)
+    assert retrieval["schema_version"] == 3
+    assert retrieval["provider_calls"] == 0
+    capsule = json.loads(capsule_path.read_text(encoding="utf-8"))
+    assert capsule["schema_version"] == 2
+    assert capsule["working_set"][0]["path"] == "app.py"
+    assert "Capsule schema: 2" in reviewed.stdout
+    assert '<contextforge schema_version="2">' in (tmp_path / "capsule.xml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_retrieval_cli_renderer_explains_grounding_and_graph(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return helper()\n")
+    _write(tmp_path, "helper.py", "def helper():\n    return 1\n")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, "run", manifest=report.manifest)
+    )
+    candidate = retrieval.candidates[0]
+    candidate = candidate.model_copy(
+        update={
+            "matched_concepts": ("execution",),
+            "graph_neighbors": (
+                CandidateGraphNeighbor(
+                    path="helper.py",
+                    distance=1,
+                    relationship_kinds=("call",),
+                    provenance=("verified",),
+                ),
+            ),
+        }
+    )
+    explained = context_cli._render_retrieval_result(
+        retrieval.model_copy(
+            update={"candidates": (candidate,), "diagnostics": ("fallback",)}
+        ),
+        output_format=context_cli.SuggestFormat.markdown,
+        explain=True,
+    )
+
+    assert explained.startswith("# ContextForge retrieval candidates")
+    assert "symbols:" in explained
+    assert "concepts: execution" in explained
+    assert "evidence:" in explained
+    assert "graph: helper.py" in explained
+    assert "Diagnostics:\n  fallback" in explained
 
 
 def test_index_update_requires_existing_index_and_status_handles_missing(

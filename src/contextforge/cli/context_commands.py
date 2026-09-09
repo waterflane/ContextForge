@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from enum import StrEnum
 from pathlib import Path
@@ -24,9 +25,12 @@ from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.context import (
     MAX_JSON_PACKAGE_BYTES,
+    ContextBudget,
     ContextBuildError,
     ContextBuildLimitError,
     ContextBuildOptions,
+    ContextCapsule,
+    ContextCompilerError,
     ContextInspectionError,
     ContextReaderError,
     ContextRenderError,
@@ -35,6 +39,7 @@ from contextforge.context import (
     SelectionError,
     SelectorNoMatchError,
     build_context_package,
+    compile_context_capsule,
     inspect_context_package_json,
     parse_line_range_request,
     render_context_inspection,
@@ -47,9 +52,17 @@ from contextforge.discovery import (
     render_context_suggestion,
 )
 from contextforge.filesystem import FileTooLargeError, StableReadError, read_file_stably
-from contextforge.git import GitDiffRequest
+from contextforge.git import GitDiffRequest, collect_git_diff
 from contextforge.handoff import ContextMaterializationError, PromptCompileError
-from contextforge.intelligence import IndexManifestReadError, IndexStorageError
+from contextforge.intelligence import (
+    INDEX_SCHEMA_VERSION,
+    IndexManifestReadError,
+    IndexStorageError,
+    RetrievalResult,
+    SourceRange,
+    load_manifest,
+    retrieve_context_candidates,
+)
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
     ProjectConfigError,
@@ -58,6 +71,7 @@ from contextforge.project_config import (
     load_project_configuration,
     resolve_provider_configuration,
 )
+from contextforge.repositories import scan_repository
 from contextforge.repositories.ignore import IgnoreRulesError
 
 
@@ -96,6 +110,7 @@ context_app = typer.Typer(
 
 @context_app.command("suggest")
 def suggest_context(
+    ctx: typer.Context,
     path: Annotated[
         Path,
         typer.Argument(help="Repository root to investigate without modification."),
@@ -154,6 +169,20 @@ def suggest_context(
             help="Fail when model response repairs are exhausted; disable fallback.",
         ),
     ] = False,
+    rerank: Annotated[
+        bool,
+        typer.Option(
+            "--rerank/--no-rerank",
+            help="Allow one closed-schema model rerank of supplied candidate IDs.",
+        ),
+    ] = False,
+    legacy_discovery: Annotated[
+        bool,
+        typer.Option(
+            "--legacy-discovery",
+            help="Use the deprecated model-led ContextPackage v1 discovery flow.",
+        ),
+    ] = False,
     output: Annotated[
         Path | None,
         typer.Option("--output", help="Write output atomically to a file."),
@@ -172,6 +201,29 @@ def suggest_context(
     ] = ProgressMode.AUTO,
 ) -> None:
     """Suggest reviewable task context without modifying repository source."""
+
+    parameter_source = ctx.get_parameter_source("discovery")
+    discovery_explicit = (
+        parameter_source is not None and parameter_source.name != "DEFAULT"
+    )
+    legacy_fallback = not rerank and (provider_name is not None or config is not None)
+    if not legacy_discovery and not discovery_explicit and not legacy_fallback:
+        _suggest_retrieval_context(
+            path,
+            task=task,
+            provider_name=provider_name,
+            model=model,
+            config=config,
+            includes=tuple(includes or ()),
+            excludes=tuple(excludes or ()),
+            max_files=max_files,
+            output_format=output_format,
+            explain=explain,
+            rerank=rerank,
+            output=output,
+            force=force,
+        )
+        return
 
     active_provider: ModelProvider | None = None
     progress_renderer = CLIProgressRenderer(progress)
@@ -253,6 +305,124 @@ def suggest_context(
         _close_provider(active_provider)
 
     _publish_or_echo(representation, output=output, force=force)
+
+
+def _suggest_retrieval_context(
+    path: Path,
+    *,
+    task: str,
+    provider_name: str | None,
+    model: str | None,
+    config: Path | None,
+    includes: tuple[str, ...],
+    excludes: tuple[str, ...],
+    max_files: int,
+    output_format: SuggestFormat,
+    explain: bool,
+    rerank: bool,
+    output: Path | None,
+    force: bool,
+) -> None:
+    provider: ModelProvider | None = None
+    try:
+        if not task.strip():
+            raise ValueError("--task must be non-empty")
+        if (provider_name is not None or model is not None) and not rerank:
+            raise ValueError("--provider and --model require --rerank")
+        if rerank:
+            project = load_project_configuration(path, config_path=config)
+            provider_configuration = resolve_provider_configuration(
+                project, provider=provider_name, model=model
+            )
+            if provider_configuration is None:
+                raise ValueError("--rerank requires a model provider")
+            provider = create_model_provider(provider_configuration)
+        result = asyncio.run(
+            retrieve_context_candidates(
+                path,
+                task,
+                working_set=includes,
+                limit=max_files,
+                provider=provider,
+                rerank=rerank,
+            )
+        )
+        if excludes:
+            excluded = set(excludes)
+            result = result.model_copy(
+                update={
+                    "candidates": tuple(
+                        item for item in result.candidates if item.path not in excluded
+                    )
+                }
+            )
+        representation = _render_retrieval_result(
+            result, output_format=output_format, explain=explain
+        )
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        ProjectConfigError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        _exit_with_error(str(exc), code=2)
+    except (IndexStorageError, ModelProviderError, OSError) as exc:
+        _exit_with_error(str(exc), code=1)
+    finally:
+        _close_provider(provider)
+    _publish_or_echo(representation, output=output, force=force)
+
+
+def _render_retrieval_result(
+    result: RetrievalResult, *, output_format: SuggestFormat, explain: bool
+) -> str:
+    if output_format is SuggestFormat.json:
+        return canonical_json(result.model_dump(mode="json"))
+    markdown = output_format is SuggestFormat.markdown
+    lines = [
+        "# ContextForge retrieval candidates"
+        if markdown
+        else "ContextForge retrieval candidates",
+        f"Task: {result.task}",
+        f"Generation: {result.generation_id}",
+        f"Provider calls: {result.provider_calls}",
+        "Candidates:",
+    ]
+    for index, candidate in enumerate(result.candidates, start=1):
+        prefix = f"{index}." if markdown else f"  {index}."
+        lines.append(
+            f"{prefix} {candidate.path} | {candidate.exact_group} | "
+            f"score={candidate.score:.6f} | {candidate.synopsis}"
+        )
+        if explain:
+            if candidate.matched_symbols:
+                lines.append("     symbols: " + ", ".join(candidate.matched_symbols))
+            if candidate.matched_concepts:
+                lines.append("     concepts: " + ", ".join(candidate.matched_concepts))
+            if candidate.evidence_ranges:
+                lines.append(
+                    "     evidence: "
+                    + ", ".join(
+                        f"{item.source_range.start_line}-{item.source_range.end_line}"
+                        for item in candidate.evidence_ranges
+                    )
+                )
+            if candidate.graph_neighbors:
+                lines.append(
+                    "     graph: "
+                    + ", ".join(item.path for item in candidate.graph_neighbors)
+                )
+    if result.diagnostics:
+        lines.extend(("Diagnostics:", *(f"  {item}" for item in result.diagnostics)))
+    return "\n".join(lines) + "\n"
+
+
+def _has_v3_index(path: Path) -> bool:
+    try:
+        return load_manifest(path).schema_version == INDEX_SCHEMA_VERSION
+    except (IndexStorageError, ValueError, OSError):
+        return False
 
 
 @context_app.command("create")
@@ -395,10 +565,65 @@ def create_context(
             case_sensitive=False,
         ),
     ] = ProgressMode.AUTO,
+    working_files: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--working-file",
+            help="Place one exact indexed file in the Capsule v2 Working Set.",
+        ),
+    ] = None,
+    working_lines: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--working-lines",
+            help="Place PATH:START-END in the Capsule v2 Working Set; repeatable.",
+        ),
+    ] = None,
+    full_files: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--full-file",
+            help="Explicitly permit FULL representation for a Working Set file.",
+        ),
+    ] = None,
+    context_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--context-tokens",
+            min=1,
+            help="Model context-window size used by the Capsule v2 budget.",
+        ),
+    ] = None,
+    history_tokens: Annotated[
+        int,
+        typer.Option("--history-tokens", min=0, help="Caller history token cost."),
+    ] = 0,
+    response_tokens: Annotated[
+        int,
+        typer.Option("--response-tokens", min=0, help="Reserved response tokens."),
+    ] = 4_096,
+    safety_margin_tokens: Annotated[
+        int | None,
+        typer.Option("--safety-margin-tokens", min=0),
+    ] = None,
+    rerank: Annotated[
+        bool,
+        typer.Option("--rerank/--no-rerank", help="Enable bounded candidate rerank."),
+    ] = False,
+    legacy_handoff: Annotated[
+        bool,
+        typer.Option(
+            "--legacy-handoff",
+            help="Use the deprecated TaskHandoff/compile_prompt flow.",
+        ),
+    ] = False,
 ) -> None:
     """Build a manual package or an automatic reviewable compiled handoff."""
 
-    if discovery is not None:
+    if task is not None and not task.strip():
+        _exit_with_error("task description must not be empty", code=2)
+
+    if discovery is not None or legacy_handoff:
         _create_automatic_context(
             path,
             task=task,
@@ -407,7 +632,7 @@ def create_context(
             globs=globs,
             exclusions=exclusions,
             line_ranges=line_ranges,
-            discovery=discovery,
+            discovery=discovery or DiscoveryChoice.hybrid,
             provider_name=provider_name,
             model=model,
             config=config,
@@ -425,6 +650,49 @@ def create_context(
         )
         return
 
+    manual_selectors = any((exact_paths, directories, globs, line_ranges))
+    capsule_options = any(
+        (
+            working_files,
+            working_lines,
+            full_files,
+            context_tokens is not None,
+            history_tokens,
+            response_tokens != 4_096,
+            safety_margin_tokens is not None,
+            rerank,
+        )
+    )
+    if task is not None and (
+        capsule_options or (not manual_selectors and _has_v3_index(path))
+    ):
+        if exclusions:
+            _exit_with_error(
+                "--exclude is supported only by manual/legacy flows", code=2
+            )
+        _create_capsule_context(
+            path,
+            task=task,
+            working_files=tuple(working_files or ()),
+            working_lines=tuple(working_lines or ()),
+            full_files=tuple(full_files or ()),
+            provider_name=provider_name,
+            model=model,
+            config=config,
+            git_diff=git_diff,
+            base=base,
+            context_tokens=context_tokens,
+            history_tokens=history_tokens,
+            response_tokens=response_tokens,
+            safety_margin_tokens=safety_margin_tokens,
+            rerank=rerank,
+            output_format=output_format,
+            output=output,
+            prompt_output=prompt_output,
+            force=force,
+        )
+        return
+
     if any(
         value
         for value in (
@@ -436,6 +704,15 @@ def create_context(
             git_diff is not GitDiffChoice.none,
             base,
             prompt_output,
+            working_files,
+            working_lines,
+            full_files,
+            context_tokens is not None,
+            history_tokens,
+            response_tokens != 4_096,
+            safety_margin_tokens is not None,
+            rerank,
+            legacy_handoff,
         )
     ):
         _exit_with_error(
@@ -525,11 +802,155 @@ def inspect_context(
         _exit_with_error(f"unable to read context package: {exc}", code=1)
 
     try:
-        _, inspection = inspect_context_package_json(raw.content)
-        representation = render_context_inspection(inspection)
-    except ContextInspectionError as exc:
+        capsule = _parse_context_capsule(raw.content)
+        if capsule is not None:
+            representation = _render_capsule_review(capsule)
+        else:
+            _, inspection = inspect_context_package_json(raw.content)
+            representation = render_context_inspection(inspection)
+    except (ContextInspectionError, ValidationError, ValueError) as exc:
         _exit_with_error(str(exc), code=1)
     typer.echo(representation, nl=False)
+
+
+def _create_capsule_context(
+    path: Path,
+    *,
+    task: str,
+    working_files: tuple[str, ...],
+    working_lines: tuple[str, ...],
+    full_files: tuple[str, ...],
+    provider_name: str | None,
+    model: str | None,
+    config: Path | None,
+    git_diff: GitDiffChoice,
+    base: str | None,
+    context_tokens: int | None,
+    history_tokens: int,
+    response_tokens: int,
+    safety_margin_tokens: int | None,
+    rerank: bool,
+    output_format: ContextFormat,
+    output: Path | None,
+    prompt_output: Path | None,
+    force: bool,
+) -> None:
+    provider: ModelProvider | None = None
+    try:
+        if git_diff is GitDiffChoice.base and base is None:
+            raise ValueError("--git-diff base requires --base")
+        if git_diff is not GitDiffChoice.base and base is not None:
+            raise ValueError("--base is accepted only with --git-diff base")
+        if (provider_name is not None or model is not None) and not rerank:
+            raise ValueError("--provider and --model require --rerank")
+        project = load_project_configuration(path, config_path=config)
+        provider_configuration = None
+        if rerank:
+            provider_configuration = resolve_provider_configuration(
+                project, provider=provider_name, model=model
+            )
+            if provider_configuration is None:
+                raise ValueError("--rerank requires a model provider")
+            provider = create_model_provider(provider_configuration)
+
+        parsed = tuple(parse_line_range_request(value) for value in working_lines)
+        working = tuple(
+            dict.fromkeys(
+                (*working_files, *(item.path for item in parsed), *full_files)
+            )
+        )
+        range_map: dict[str, list[SourceRange]] = {}
+        for item in parsed:
+            range_map.setdefault(item.path, []).append(
+                SourceRange(
+                    start_line=item.range.start,
+                    start_column=0,
+                    end_line=item.range.end,
+                    end_column=0,
+                )
+            )
+        canonical_ranges = {
+            key: tuple(
+                sorted(values, key=lambda item: (item.start_line, item.end_line))
+            )
+            for key, values in range_map.items()
+        }
+        snapshot = scan_repository(path)
+        diff_context = (
+            None
+            if git_diff is GitDiffChoice.none
+            else collect_git_diff(
+                snapshot,
+                GitDiffRequest(
+                    mode=cast(Literal["working", "staged", "base"], git_diff.value),
+                    base_ref=base,
+                ),
+            )
+        )
+        retrieval = asyncio.run(
+            retrieve_context_candidates(
+                path,
+                task,
+                working_set=working,
+                diff_paths=() if diff_context is None else diff_context.touched_paths,
+                provider=provider,
+                rerank=rerank,
+            )
+        )
+        budget = ContextBudget(
+            context_window_tokens=(
+                project.models.context_window
+                if context_tokens is None
+                else context_tokens
+            ),
+            history_tokens=history_tokens,
+            response_tokens=response_tokens,
+            safety_margin_tokens=(
+                project.models.context_safety_margin
+                if safety_margin_tokens is None
+                else safety_margin_tokens
+            ),
+        )
+        compiled = compile_context_capsule(
+            path,
+            task,
+            retrieval,
+            budget=budget,
+            working_files=working,
+            working_lines=canonical_ranges,
+            pinned_full_files=full_files,
+            git_diff=diff_context,
+        )
+        representation = (
+            canonical_json(compiled.capsule.model_dump(mode="json"))
+            if output_format is ContextFormat.json
+            else compiled.prompt
+        )
+        if prompt_output is not None:
+            written = write_output_atomic(prompt_output, compiled.prompt, force=force)
+            typer.echo(f"Compiled prompt written to {written}", err=True)
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        ProjectConfigError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        _exit_with_error(str(exc), code=2)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    except (
+        ContextCompilerError,
+        IndexStorageError,
+        ModelProviderError,
+        IgnoreRulesError,
+        OutputWriteError,
+        OSError,
+    ) as exc:
+        _exit_with_error(str(exc), code=1)
+    finally:
+        _close_provider(provider)
+    _publish_or_echo(representation, output=output, force=force)
 
 
 @context_app.command("review")
@@ -542,13 +963,67 @@ def review_context(
     """Inspect a generated handoff without requiring its original repository."""
 
     try:
-        handoff = load_task_handoff(package)
-        representation = render_handoff_review(handoff)
+        raw = read_file_stably(
+            package.expanduser(), max_size_bytes=MAX_JSON_PACKAGE_BYTES
+        )
+        capsule = _parse_context_capsule(raw.content)
+        if capsule is not None:
+            representation = _render_capsule_review(capsule)
+        else:
+            handoff = load_task_handoff(package)
+            representation = render_handoff_review(handoff)
     except FileNotFoundError:
         _exit_with_error(f"context handoff does not exist: {package}", code=2)
-    except ArtifactReadError as exc:
+    except (
+        ArtifactReadError,
+        FileTooLargeError,
+        StableReadError,
+        ValidationError,
+        ValueError,
+        OSError,
+    ) as exc:
         _exit_with_error(str(exc), code=1)
     typer.echo(representation, nl=False)
+
+
+def _parse_context_capsule(raw: bytes) -> ContextCapsule | None:
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 2 or "snapshot" not in payload:
+        return None
+    return ContextCapsule.model_validate(payload)
+
+
+def _render_capsule_review(capsule: ContextCapsule) -> str:
+    lines = [
+        "ContextForge Context Capsule",
+        f"Capsule schema: {capsule.schema_version}",
+        f"Index schema: {capsule.snapshot.index_schema_version}",
+        f"Generation: {capsule.snapshot.generation_id}",
+        f"Generation kind: {capsule.snapshot.generation_kind}",
+        f"Task: {capsule.task}",
+        f"Estimator: {capsule.estimator_id}",
+        f"Tokens: {capsule.token_count}",
+        "Working Set:",
+    ]
+    lines.extend(
+        f"  {item.path} | {item.representation.value} | {item.token_count} tokens"
+        for item in capsule.working_set
+    )
+    if not capsule.working_set:
+        lines.append("  (none)")
+    lines.append("Task context:")
+    lines.extend(
+        f"  {item.path} | {item.representation.value} | {item.token_count} tokens"
+        for item in capsule.task_context
+    )
+    if not capsule.task_context:
+        lines.append("  (none)")
+    return "\n".join(lines) + "\n"
 
 
 def _create_automatic_context(

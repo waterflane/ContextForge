@@ -93,6 +93,13 @@ class ProjectModelSettings(_ConfigModel):
     concurrency_limit: int = 2
     retry_limit: int = 2
     semantic_max_output_tokens: int = Field(default=1024, ge=96, le=32_768, strict=True)
+    semantic_scope: Literal["priority", "all", "none"] = "priority"
+    semantic_max_model_files: int = Field(default=64, ge=1, le=100_000, strict=True)
+    semantic_max_requests: int = Field(default=96, ge=1, le=100_000, strict=True)
+    semantic_max_input_tokens: int = Field(
+        default=256_000, ge=1, le=100_000_000, strict=True
+    )
+    semantic_max_chunks_per_file: int = Field(default=4, ge=1, le=4, strict=True)
     reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
         "off"
     )

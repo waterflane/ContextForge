@@ -25,6 +25,7 @@ from contextforge.intelligence import (
     GlobalMapAnalysisError,
     IndexStorageError,
     SemanticAnalysisError,
+    SemanticScope,
 )
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
@@ -65,6 +66,10 @@ def _index_operation(
     max_failures: int | None,
     force_reanalyze: bool,
     max_files: int | None,
+    semantic_scope: SemanticScope | None,
+    semantic_max_requests: int | None,
+    semantic_max_input_tokens: int | None,
+    semantic_max_chunks_per_file: int | None,
     local_only: bool,
     recover_stale_lock: bool,
     confirm_unknown_lock: bool,
@@ -113,7 +118,31 @@ def _index_operation(
                 fail_fast=fail_fast,
                 max_failures=max_failures,
                 force_reanalyze=force_reanalyze,
-                max_files=max_files,
+                max_files=(
+                    project.models.semantic_max_model_files
+                    if max_files is None
+                    else max_files
+                ),
+                semantic_scope=(
+                    project.models.semantic_scope
+                    if semantic_scope is None
+                    else semantic_scope
+                ),
+                semantic_max_requests=(
+                    project.models.semantic_max_requests
+                    if semantic_max_requests is None
+                    else semantic_max_requests
+                ),
+                semantic_max_input_tokens=(
+                    project.models.semantic_max_input_tokens
+                    if semantic_max_input_tokens is None
+                    else semantic_max_input_tokens
+                ),
+                semantic_max_chunks_per_file=(
+                    project.models.semantic_max_chunks_per_file
+                    if semantic_max_chunks_per_file is None
+                    else semantic_max_chunks_per_file
+                ),
                 semantic_max_output_tokens=(
                     project.models.semantic_max_output_tokens
                     if max_output_tokens is None
@@ -246,6 +275,38 @@ def build_index(
             "--max-files", min=1, help="Maximum stale files analyzed semantically."
         ),
     ] = None,
+    semantic_scope: Annotated[
+        SemanticScope | None,
+        typer.Option(
+            "--semantic-scope",
+            help="Semantic scheduler scope: priority, all, or none.",
+        ),
+    ] = None,
+    semantic_max_requests: Annotated[
+        int | None,
+        typer.Option(
+            "--semantic-max-requests",
+            min=1,
+            help="Maximum semantic model requests for the job.",
+        ),
+    ] = None,
+    semantic_max_input_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--semantic-max-input-tokens",
+            min=1,
+            help="Maximum estimated semantic model input tokens for the job.",
+        ),
+    ] = None,
+    semantic_max_chunks_per_file: Annotated[
+        int | None,
+        typer.Option(
+            "--semantic-max-chunks-per-file",
+            min=1,
+            max=4,
+            help="Maximum semantic chunks per large file.",
+        ),
+    ] = None,
     local_only: Annotated[
         bool,
         typer.Option(
@@ -294,6 +355,10 @@ def build_index(
         max_failures=max_failures,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
+        semantic_scope=semantic_scope,
+        semantic_max_requests=semantic_max_requests,
+        semantic_max_input_tokens=semantic_max_input_tokens,
+        semantic_max_chunks_per_file=semantic_max_chunks_per_file,
         local_only=local_only,
         recover_stale_lock=recover_stale_lock,
         confirm_unknown_lock=confirm_unknown_lock,
@@ -344,6 +409,19 @@ def update_index(
     max_failures: Annotated[int | None, typer.Option("--max-failures", min=1)] = None,
     force_reanalyze: Annotated[bool, typer.Option("--force-reanalyze")] = False,
     max_files: Annotated[int | None, typer.Option("--max-files", min=1)] = None,
+    semantic_scope: Annotated[
+        SemanticScope | None, typer.Option("--semantic-scope")
+    ] = None,
+    semantic_max_requests: Annotated[
+        int | None, typer.Option("--semantic-max-requests", min=1)
+    ] = None,
+    semantic_max_input_tokens: Annotated[
+        int | None, typer.Option("--semantic-max-input-tokens", min=1)
+    ] = None,
+    semantic_max_chunks_per_file: Annotated[
+        int | None,
+        typer.Option("--semantic-max-chunks-per-file", min=1, max=4),
+    ] = None,
     local_only: Annotated[bool, typer.Option("--local-only")] = False,
     recover_stale_lock: Annotated[bool, typer.Option("--recover-stale-lock")] = False,
     confirm_unknown_lock: Annotated[
@@ -377,6 +455,10 @@ def update_index(
         max_failures=max_failures,
         force_reanalyze=force_reanalyze,
         max_files=max_files,
+        semantic_scope=semantic_scope,
+        semantic_max_requests=semantic_max_requests,
+        semantic_max_input_tokens=semantic_max_input_tokens,
+        semantic_max_chunks_per_file=semantic_max_chunks_per_file,
         local_only=local_only,
         recover_stale_lock=recover_stale_lock,
         confirm_unknown_lock=confirm_unknown_lock,

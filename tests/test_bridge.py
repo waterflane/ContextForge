@@ -353,6 +353,7 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
             "1.0",
             "1.1",
             "2.0",
+            "2.1",
         ]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
@@ -392,7 +393,7 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         assert incompatible["error"]["data"] == {
             "code": "INCOMPATIBLE_PROTOCOL_VERSION",
             "requested_protocol_version": "3.0",
-            "supported_protocol_versions": ["1.0", "1.1", "2.0"],
+            "supported_protocol_versions": ["1.0", "1.1", "2.0", "2.1"],
         }
 
         harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))
@@ -489,6 +490,68 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
                 events[-1].metadata["generation_id"]
                 == response["result"]["generation_id"]
             )
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def run(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
+    )
+    asyncio.run(
+        application_module.build_repository_index(
+            tmp_path, provider=None, provider_configuration=None
+        )
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.1"}))
+        hello = (await harness.response(1))[-1]["result"]
+        assert {"map", "search", "symbol", "compile"} <= set(
+            hello["capabilities"]["methods"]
+        )
+        assert hello["capabilities"]["schemas"]["context_capsule"]["current"] == 2
+        digest = await _snapshot(harness, 2)
+
+        common = {"expected_snapshot_digest": digest}
+        harness.input.send(_request("map", "map", common))
+        mapped = await asyncio.to_thread(harness.output.wait_for_id, "map")
+        assert mapped["result"]["orientation"]["files"][0]["path"] == "app.py"
+
+        harness.input.send(
+            _request("search", "search", {**common, "task": "run", "limit": 5})
+        )
+        searched = await asyncio.to_thread(harness.output.wait_for_id, "search")
+        assert searched["result"]["candidates"][0]["path"] == "app.py"
+        assert searched["result"]["provider_calls"] == 0
+
+        harness.input.send(_request("symbol", "symbol", {**common, "query": "run"}))
+        symbols = await asyncio.to_thread(harness.output.wait_for_id, "symbol")
+        assert symbols["result"]["symbols"][0]["name"] == "run"
+
+        harness.input.send(
+            _request(
+                "compile",
+                "compile",
+                {
+                    **common,
+                    "task": "change run",
+                    "working_files": ["app.py"],
+                    "context_window_tokens": 2_000,
+                    "response_tokens": 200,
+                    "safety_margin_tokens": 100,
+                },
+            )
+        )
+        compiled = await asyncio.to_thread(harness.output.wait_for_id, "compile")
+        assert compiled["result"]["capsule"]["schema_version"] == 2
+        assert compiled["result"]["token_count"] <= 1_700
+        assert '<contextforge schema_version="2">' in compiled["result"]["prompt"]
         await harness.close()
 
     asyncio.run(exercise())
