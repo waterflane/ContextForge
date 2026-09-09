@@ -47,6 +47,7 @@ from contextforge.intelligence.python import (
     PYTHON_ANALYZER,
 )
 from contextforge.intelligence.relationships import resolve_relationships
+from contextforge.intelligence.retrieval import build_retrieval_index
 from contextforge.intelligence.store import (
     IndexManifestNotFoundError,
     IndexManifestReadError,
@@ -192,8 +193,9 @@ def build_structural_index(
     orientation_digest = write_index_record(
         lock, "orientation.json", orientation_content
     )
+    structural_retrieval = build_retrieval_index(code_maps, (), snapshot_digest)
     structural_retrieval_content = canonical_json_bytes(
-        _structural_retrieval_document(code_maps, snapshot_digest)
+        structural_retrieval.model_dump(mode="json")
     )
     structural_retrieval_digest = write_index_record(
         lock, "retrieval-structural.json", structural_retrieval_content
@@ -326,41 +328,6 @@ def load_orientation_map(
     if orientation.source_snapshot_digest != active.build.source_snapshot_digest:
         raise IndexManifestReadError("orientation map is stale for its generation")
     return orientation
-
-
-def _structural_retrieval_document(
-    code_maps: tuple[FileCodeMap, ...], source_snapshot_digest: str
-) -> dict[str, object]:
-    return {
-        "schema_version": 3,
-        "record_kind": "structural_retrieval_postings",
-        "source_snapshot_digest": source_snapshot_digest,
-        "documents": [
-            {
-                "path": code_map.path,
-                "source_sha256": code_map.source_sha256,
-                "symbols": sorted(
-                    {
-                        value
-                        for symbol in code_map.symbols
-                        for value in (symbol.name, symbol.qualified_name)
-                    }
-                ),
-                "source_identifiers": sorted(
-                    {
-                        *code_map.top_level_constants,
-                        *(item.name for item in code_map.exports),
-                        *(
-                            key
-                            for symbol in code_map.symbols
-                            for key in symbol.configuration_keys
-                        ),
-                    }
-                ),
-            }
-            for code_map in sorted(code_maps, key=lambda item: item.path)
-        ],
-    }
 
 
 def _reuse_code_map(

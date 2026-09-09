@@ -478,8 +478,22 @@ async def build_semantic_card_index(
         "features.json",
         canonical_json_bytes(features.model_dump(mode="json")),
     )
+    from contextforge.intelligence.retrieval import build_retrieval_index
+
+    semantic_retrieval = build_retrieval_index(
+        code_maps, tuple(cards), structural.build.source_snapshot_digest
+    )
+    semantic_retrieval_digest = write_index_record(
+        lock,
+        "retrieval-semantic.json",
+        canonical_json_bytes(semantic_retrieval.model_dump(mode="json")),
+    )
     artifacts = structural.artifacts.model_copy(
         update={
+            "semantic_retrieval": ArtifactReference(
+                location="retrieval-semantic.json",
+                sha256=semantic_retrieval_digest,
+            ),
             "architecture_map": ArtifactReference(
                 location="architecture.json", sha256=architecture_digest
             ),
