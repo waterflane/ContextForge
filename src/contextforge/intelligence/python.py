@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal, Protocol, cast
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     RESOLVER_VERSION,
     CallReference,

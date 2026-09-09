@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange, SymbolKind
 from contextforge.intelligence.manifest import (
     build_index_manifest,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import FileCodeMap, ParserDiagnostic
 from contextforge.intelligence.models import AnalyzerIdentity
 from contextforge.intelligence.python import DEFAULT_CODEMAP_SOURCE_LIMIT

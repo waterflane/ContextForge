@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, Field, JsonValue
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.chunks import SourceChunk, plan_source_chunks
 from contextforge.intelligence.codemap import (
     FileCodeMap,

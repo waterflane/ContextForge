@@ -8,7 +8,7 @@ from typing import Literal
 
 from tree_sitter import Language, Node, Parser
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     FileCodeMap,
     ParserDiagnostic,

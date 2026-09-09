@@ -7,7 +7,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     CODEMAP_SCHEMA_VERSION,
     RESOLVER_VERSION,
