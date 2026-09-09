@@ -10,6 +10,7 @@ from contextforge.benchmarks import (
     BenchmarkMode,
     BenchmarkProviderCounters,
     BenchmarkRunResult,
+    BenchmarkSourceRange,
     calculate_benchmark_metrics,
 )
 from contextforge.discovery import CompletenessWarning
@@ -226,3 +227,50 @@ def test_failed_runs_are_excluded_and_identity_changes_split_cohorts() -> None:
     assert failed_only.duration is None
     assert failed_only.files_read_range is None
     assert failed_only.model_call_range is None
+
+
+def test_efficiency_metrics_cover_files_ranges_tokens_calls_and_warm_latency() -> None:
+    ground_truth = BenchmarkSourceRange(path="a.py", start_line=2, end_line=5)
+    run = _run(1, ("a.py", "noise.py"), duration_ms=12).model_copy(
+        update={
+            "selected_tokens": 20,
+            "useful_tokens": 6,
+            "semantic_claims": 4,
+            "ungrounded_claims": 1,
+            "latency_kind": "warm",
+        }
+    )
+    run = run.model_copy(
+        update={
+            "expectations": run.expectations.model_copy(
+                update={
+                    "required_ranges": (ground_truth,),
+                    "relevant_selected_files": ("a.py",),
+                    "selected_line_count": 10,
+                    "useful_line_count": 4,
+                }
+            ),
+            "provider_counters": run.provider_counters.model_copy(
+                update={"total_provider_http_calls": 2}
+            ),
+        }
+    )
+
+    metric = calculate_benchmark_metrics((run,))[0]
+
+    assert metric.file_precision == 0.5
+    assert metric.precision_at_5 == 0.5
+    assert metric.file_recall == 1.0
+    assert metric.range_precision == 0.4
+    assert metric.token_precision == 0.3
+    assert metric.ungrounded_claim_rate == 0.25
+    assert metric.warm_latency is not None
+    assert metric.warm_latency.mean_ms == 12
+    assert metric.cold_latency is None
+    assert metric.incremental_latency is None
+    assert metric.provider_call_range is not None
+    assert metric.provider_call_range.minimum == metric.provider_call_range.maximum == 2
+    assert metric.selected_token_range is not None
+    assert metric.selected_token_range.maximum == 20
+    assert metric.useful_token_range is not None
+    assert metric.useful_token_range.minimum == 6

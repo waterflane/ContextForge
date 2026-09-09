@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from contextforge.benchmarks.models import (
     BenchmarkCohortMetrics,
+    BenchmarkDurationSummary,
     BenchmarkIntegerRange,
     BenchmarkResult,
     BenchmarkRunResult,
@@ -150,8 +151,12 @@ def _quality_lines(
     metrics: tuple[BenchmarkCohortMetrics, ...], prefix: str
 ) -> tuple[str, ...]:
     return tuple(
-        f"{prefix}{_label(metric)}: required recall "
-        f"{_rate(metric.required_file_recall)}; forbidden selection "
+        f"{prefix}{_label(metric)}: file precision/recall "
+        f"{_rate(metric.file_precision)}/{_rate(metric.file_recall)}; "
+        f"precision@5 {_rate(metric.precision_at_5)}; "
+        f"range precision {_rate(metric.range_precision)}; token precision "
+        f"{_rate(metric.token_precision)}; ungrounded claims "
+        f"{_rate(metric.ungrounded_claim_rate)}; forbidden selection "
         f"{_rate(metric.forbidden_file_selection_rate)}; facet coverage "
         f"{_rate(metric.expected_facet_coverage_rate)}"
         for metric in metrics
@@ -195,9 +200,21 @@ def _performance_lines(
         lines.append(
             f"{prefix}{_label(metric)}: duration {duration_text}; files read "
             f"{_range(metric.files_read_range)}; model calls "
-            f"{_range(metric.model_call_range)}"
+            f"{_range(metric.model_call_range)}; provider calls "
+            f"{_range(metric.provider_call_range)}; selected/useful tokens "
+            f"{_range(metric.selected_token_range)}/"
+            f"{_range(metric.useful_token_range)}; "
+            f"cold/warm/incremental latency {_duration_mean(metric.cold_latency)}/"
+            f"{_duration_mean(metric.warm_latency)}/"
+            f"{_duration_mean(metric.incremental_latency)}"
         )
     return tuple(lines) or (f"{prefix}(none)",)
+
+
+def _duration_mean(value: BenchmarkDurationSummary | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value.mean_ms:.1f} ms"
 
 
 def _run_warning_groups(

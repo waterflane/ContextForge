@@ -10,8 +10,11 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic_core import to_jsonable_python
 
 from contextforge.application import build_discovery_request, suggest_repository_context
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
@@ -25,10 +28,13 @@ from contextforge.benchmarks.models import (
     BenchmarkManifest,
     BenchmarkMode,
     BenchmarkProviderCounters,
+    BenchmarkRangeCoverage,
     BenchmarkResult,
     BenchmarkRunResult,
+    BenchmarkSourceRange,
     BenchmarkTask,
 )
+from contextforge.context import ConservativeTokenEstimator
 from contextforge.discovery import (
     DiscoveryCandidate,
     DiscoveryError,
@@ -63,6 +69,17 @@ class _RunMetrics:
             self.files_considered = max(self.files_considered, value)
         if self.progress is not None:
             self.progress(event)
+
+
+@dataclass(frozen=True)
+class _SelectionMeasurements:
+    selected_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    selected_line_count: int = 0
+    useful_line_count: int = 0
+    selected_tokens: int = 0
+    useful_tokens: int = 0
+    semantic_claims: int = 0
+    ungrounded_claims: int = 0
 
 
 async def run_discovery_benchmark(
@@ -118,6 +135,7 @@ async def _run_once(
     failure: BenchmarkFailure | None = None
     configuration_digest: str | None = None
     expectations_evaluated = True
+    measurements = _SelectionMeasurements()
     try:
         request = build_discovery_request(
             task=task.task,
@@ -135,6 +153,13 @@ async def _run_once(
                 request,
                 progress=metrics.observe,
                 persist_diagnostics=False,
+            )
+            measurements = _measure_selection(
+                prepared,
+                ()
+                if run_record.final_selection is None
+                else run_record.final_selection.selected,
+                _effective(task, mode, "required_ranges"),
             )
     except _BenchmarkPreconditionError as exc:
         expectations_evaluated = False
@@ -159,6 +184,7 @@ async def _run_once(
         metrics.files_considered,
         duration_ms,
         configuration_digest,
+        measurements,
         expectations_evaluated=expectations_evaluated,
     )
 
@@ -173,6 +199,7 @@ def _build_result(
     files_considered: int,
     duration_ms: int,
     configuration_digest: str | None,
+    measurements: _SelectionMeasurements,
     *,
     expectations_evaluated: bool = True,
 ) -> BenchmarkRunResult:
@@ -212,6 +239,7 @@ def _build_result(
             selected_files,
             candidates,
             tuple(item.code for item in warnings),
+            measurements,
         )
         if expectations_evaluated
         else _unevaluated_expectations(task, mode)
@@ -254,9 +282,102 @@ def _build_result(
             selection is not None and selection.provenance == "deterministic_fallback"
         ),
         context_bytes=0 if usage is None else usage.context_bytes,
+        selected_ranges=measurements.selected_ranges,
+        selected_tokens=measurements.selected_tokens,
+        useful_tokens=measurements.useful_tokens,
+        semantic_claims=measurements.semantic_claims,
+        ungrounded_claims=measurements.ungrounded_claims,
+        latency_kind=_latency_kind(mode),
         expectations=expectations,
         budgets=budgets,
         failure=failure,
+    )
+
+
+def _latency_kind(
+    mode: BenchmarkMode,
+) -> Literal["cold", "warm", "incremental"]:
+    if mode is BenchmarkMode.FRESH:
+        return "cold"
+    if mode is BenchmarkMode.INDEXED:
+        return "warm"
+    return "incremental"
+
+
+def _measure_selection(
+    repository: Path,
+    candidates: tuple[DiscoveryCandidate, ...],
+    required_ranges: tuple[BenchmarkSourceRange, ...],
+) -> _SelectionMeasurements:
+    """Measure selected source against declared useful ranges without model calls."""
+
+    estimator = ConservativeTokenEstimator()
+    selected: list[BenchmarkSourceRange] = []
+    selected_chunks: list[str] = []
+    useful_chunks: list[str] = []
+    semantic_claims = len(candidates)
+    ungrounded_claims = sum(not item.reason.evidence for item in candidates)
+    required_by_path: dict[str, list[BenchmarkSourceRange]] = {}
+    for item in required_ranges:
+        required_by_path.setdefault(item.path, []).append(item)
+
+    for candidate in candidates:
+        if candidate.path is None or candidate.kind not in {
+            "full_file",
+            "line_ranges",
+            "related_test",
+        }:
+            continue
+        try:
+            text = repository.joinpath(*candidate.path.split("/")).read_text(
+                encoding="utf-8"
+            )
+        except (OSError, UnicodeError):
+            continue
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            continue
+        ranges = (
+            tuple((item.start_line, item.end_line) for item in candidate.ranges)
+            if candidate.kind == "line_ranges"
+            else ((1, len(lines)),)
+        )
+        for start_line, end_line in ranges:
+            start = max(1, start_line)
+            end = min(len(lines), end_line)
+            if end < start:
+                continue
+            selected.append(
+                BenchmarkSourceRange(
+                    path=candidate.path,
+                    start_line=start,
+                    end_line=end,
+                )
+            )
+            selected_chunks.append("".join(lines[start - 1 : end]))
+            for required in required_by_path.get(candidate.path, ()):
+                overlap_start = max(start, required.start_line)
+                overlap_end = min(end, required.end_line)
+                if overlap_end >= overlap_start:
+                    useful_chunks.append(
+                        "".join(lines[overlap_start - 1 : overlap_end])
+                    )
+
+    canonical = tuple(
+        sorted(selected, key=lambda item: (item.path, item.start_line, item.end_line))
+    )
+    return _SelectionMeasurements(
+        selected_ranges=canonical,
+        selected_line_count=sum(
+            item.end_line - item.start_line + 1 for item in canonical
+        ),
+        useful_line_count=sum(
+            chunk.count("\n") + (not chunk.endswith("\n")) for chunk in useful_chunks
+        ),
+        selected_tokens=estimator.count("".join(selected_chunks)),
+        useful_tokens=estimator.count("".join(useful_chunks)),
+        semantic_claims=semantic_claims,
+        ungrounded_claims=ungrounded_claims,
     )
 
 
@@ -362,14 +483,25 @@ def _unevaluated_expectations(
 ) -> BenchmarkExpectationEvaluation:
     """Retain configured expectations without reporting discovery misses."""
 
+    required_ranges = _effective(task, mode, "required_ranges")
+    required_files = tuple(
+        sorted(
+            {
+                *_effective(task, mode, "required_files_all"),
+                *(item.path for item in required_ranges),
+            }
+        )
+    )
     return BenchmarkExpectationEvaluation(
-        required_files=_effective(task, mode, "required_files_all"),
+        required_files=required_files,
         any_file_groups=tuple(
             BenchmarkAnyFileExpectation(files=group, matched_files=(), passed=True)
             for group in _effective(task, mode, "required_files_any")
         ),
+        optional_files=_effective(task, mode, "optional_files"),
         forbidden_files=_effective(task, mode, "forbidden_files"),
         expected_facets=_effective(task, mode, "expected_facets"),
+        required_ranges=required_ranges,
         passed=True,
     )
 
@@ -380,10 +512,20 @@ def _evaluate_expectations(
     selected_files: tuple[str, ...],
     candidates: tuple[DiscoveryCandidate, ...],
     warning_codes: tuple[str, ...],
+    measurements: _SelectionMeasurements,
 ) -> BenchmarkExpectationEvaluation:
     selected = set(selected_files)
-    required = _effective(task, mode, "required_files_all")
+    required_ranges = _effective(task, mode, "required_ranges")
+    required = tuple(
+        sorted(
+            {
+                *_effective(task, mode, "required_files_all"),
+                *(item.path for item in required_ranges),
+            }
+        )
+    )
     groups = _effective(task, mode, "required_files_any")
+    optional = _effective(task, mode, "optional_files")
     forbidden = _effective(task, mode, "forbidden_files")
     allowed_warnings = set(_effective(task, mode, "allowed_warnings"))
     required_warnings = set(_effective(task, mode, "required_warnings"))
@@ -399,6 +541,23 @@ def _evaluate_expectations(
     matched_required = tuple(path for path in required if path in selected)
     missing_required = tuple(path for path in required if path not in selected)
     selected_forbidden = tuple(path for path in forbidden if path in selected)
+    relevant = (
+        set(required) | set(optional) | {path for group in groups for path in group}
+    )
+    relevant_selected = tuple(path for path in selected_files if path in relevant)
+    irrelevant_selected = tuple(path for path in selected_files if path not in relevant)
+    range_coverage = tuple(
+        BenchmarkRangeCoverage(
+            required_range=required_range,
+            covered_lines=_covered_lines(required_range, measurements.selected_ranges),
+            required_lines=required_range.end_line - required_range.start_line + 1,
+            passed=(
+                _covered_lines(required_range, measurements.selected_ranges)
+                == required_range.end_line - required_range.start_line + 1
+            ),
+        )
+        for required_range in required_ranges
+    )
     expected_facets = _effective(task, mode, "expected_facets")
     covered_facets = tuple(
         facet for facet in expected_facets if _facet_covered(facet, candidates)
@@ -415,21 +574,56 @@ def _evaluate_expectations(
         or missing_warnings
         or missing_facets
         or any(not group.passed for group in any_groups)
+        or any(not item.passed for item in range_coverage)
     )
     return BenchmarkExpectationEvaluation(
         required_files=required,
         matched_required_files=matched_required,
         missing_required_files=missing_required,
         any_file_groups=any_groups,
+        optional_files=optional,
+        relevant_selected_files=relevant_selected,
+        irrelevant_selected_files=irrelevant_selected,
         forbidden_files=forbidden,
         selected_forbidden_files=selected_forbidden,
         expected_facets=expected_facets,
         covered_expected_facets=covered_facets,
         missing_expected_facets=missing_facets,
+        required_ranges=required_ranges,
+        range_coverage=range_coverage,
+        selected_line_count=measurements.selected_line_count,
+        useful_line_count=measurements.useful_line_count,
         unexpected_warnings=unexpected_warnings,
         missing_required_warnings=missing_warnings,
         passed=passed,
     )
+
+
+def _covered_lines(
+    required: BenchmarkSourceRange,
+    selected: tuple[BenchmarkSourceRange, ...],
+) -> int:
+    intervals = [
+        (
+            max(required.start_line, item.start_line),
+            min(required.end_line, item.end_line),
+        )
+        for item in selected
+        if item.path == required.path
+        and item.end_line >= required.start_line
+        and item.start_line <= required.end_line
+    ]
+    if not intervals:
+        return 0
+    covered = 0
+    current_start, current_end = sorted(intervals)[0]
+    for start, end in sorted(intervals)[1:]:
+        if start <= current_end + 1:
+            current_end = max(current_end, end)
+        else:
+            covered += current_end - current_start + 1
+            current_start, current_end = start, end
+    return covered + current_end - current_start + 1
 
 
 def _evaluate_budgets(
@@ -490,7 +684,7 @@ def _configuration_digest(
     }
     encoded = json.dumps(
         {
-            "benchmark": expectations,
+            "benchmark": to_jsonable_python(expectations),
             "discovery_request": request.model_dump(mode="json"),
             "provider": provider.configuration.model_dump(mode="json"),
         },

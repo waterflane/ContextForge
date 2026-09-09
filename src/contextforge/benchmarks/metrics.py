@@ -111,6 +111,43 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
             lambda run: len(run.expectations.matched_required_files),
             lambda run: len(run.expectations.required_files),
         ),
+        file_precision=_quality_rate(
+            complete,
+            lambda run: len(run.expectations.relevant_selected_files),
+            lambda run: len(run.selected_files),
+        ),
+        precision_at_5=_quality_rate(
+            complete,
+            lambda run: len(
+                set(run.selected_files[:5])
+                & set(run.expectations.relevant_selected_files)
+            ),
+            lambda run: min(5, len(run.selected_files)),
+        ),
+        file_recall=_quality_rate(
+            complete,
+            lambda run: len(run.expectations.matched_required_files),
+            lambda run: len(run.expectations.required_files),
+        ),
+        range_precision=_quality_rate(
+            complete,
+            lambda run: run.expectations.useful_line_count,
+            lambda run: (
+                run.expectations.selected_line_count
+                if run.expectations.required_ranges
+                else 0
+            ),
+        ),
+        token_precision=_quality_rate(
+            complete,
+            lambda run: run.useful_tokens,
+            lambda run: run.selected_tokens if run.expectations.required_ranges else 0,
+        ),
+        ungrounded_claim_rate=_quality_rate(
+            complete,
+            lambda run: run.ungrounded_claims,
+            lambda run: run.semantic_claims,
+        ),
         forbidden_file_selection_rate=_quality_rate(
             complete,
             lambda run: len(run.expectations.selected_forbidden_files),
@@ -140,10 +177,26 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
         ),
         confidence=_confidence(complete),
         duration=_duration(complete),
+        cold_latency=_duration(
+            tuple(run for run in complete if run.latency_kind == "cold")
+        ),
+        warm_latency=_duration(
+            tuple(run for run in complete if run.latency_kind == "warm")
+        ),
+        incremental_latency=_duration(
+            tuple(run for run in complete if run.latency_kind == "incremental")
+        ),
         files_read_range=_integer_range(tuple(run.files_read for run in complete)),
         model_call_range=_integer_range(
             tuple(run.provider_counters.model_calls for run in complete)
         ),
+        provider_call_range=_integer_range(
+            tuple(run.provider_counters.total_provider_http_calls for run in complete)
+        ),
+        selected_token_range=_integer_range(
+            tuple(run.selected_tokens for run in complete)
+        ),
+        useful_token_range=_integer_range(tuple(run.useful_tokens for run in complete)),
     )
 
 

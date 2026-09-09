@@ -65,6 +65,29 @@ class BenchmarkIndexPrecondition(BenchmarkModel):
         return self
 
 
+class BenchmarkSourceRange(BenchmarkModel):
+    """One one-based inclusive repository source range."""
+
+    path: RepositoryRelativePath
+    start_line: PositiveInt
+    end_line: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_order(self) -> BenchmarkSourceRange:
+        if self.end_line < self.start_line:
+            raise ValueError("source range end must not precede its start")
+        return self
+
+
+class BenchmarkRangeCoverage(BenchmarkModel):
+    """Observed coverage for one required source range."""
+
+    required_range: BenchmarkSourceRange
+    covered_lines: NonNegativeInt
+    required_lines: PositiveInt
+    passed: bool
+
+
 def _validate_text(value: str, *, label: str) -> str:
     if not value.strip() or value != value.strip() or "\x00" in value:
         raise ValueError(f"{label} must be canonical non-empty text")
@@ -101,7 +124,9 @@ class BenchmarkExpectations(BenchmarkModel):
         tuple[Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...]
         | None
     ) = None
+    optional_files: tuple[RepositoryRelativePath, ...] | None = None
     forbidden_files: tuple[RepositoryRelativePath, ...] | None = None
+    required_ranges: tuple[BenchmarkSourceRange, ...] | None = None
     expected_facets: tuple[ExpectedFacet, ...] | None = None
     max_selected_files: NonNegativeInt | None = None
     max_files_read: NonNegativeInt | None = None
@@ -114,6 +139,7 @@ class BenchmarkExpectations(BenchmarkModel):
         "include_paths",
         "exclude_paths",
         "required_files_all",
+        "optional_files",
         "forbidden_files",
     )
     @classmethod
@@ -143,6 +169,26 @@ class BenchmarkExpectations(BenchmarkModel):
             raise ValueError("required_files_any groups must be sorted and unique")
         return groups
 
+    @field_validator("required_ranges")
+    @classmethod
+    def validate_required_ranges(
+        cls,
+        value: tuple[BenchmarkSourceRange, ...] | None,
+        info: ValidationInfo,
+    ) -> tuple[BenchmarkSourceRange, ...] | None:
+        if value is None:
+            return None
+        keys = tuple((item.path, item.start_line, item.end_line) for item in value)
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("required_ranges must be sorted and unique")
+        _reject_contextforge_state(tuple(item.path for item in value), info)
+        previous_by_path: dict[str, int] = {}
+        for item in value:
+            if item.start_line <= previous_by_path.get(item.path, 0):
+                raise ValueError("required_ranges for one path must not overlap")
+            previous_by_path[item.path] = item.end_line
+        return value
+
     @field_validator("expected_facets")
     @classmethod
     def validate_facets(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
@@ -168,11 +214,17 @@ class BenchmarkExpectations(BenchmarkModel):
         required = set(self.required_files_all or ()) | {
             path for group in self.required_files_any or () for path in group
         }
+        required.update(item.path for item in self.required_ranges or ())
+        optional = set(self.optional_files or ())
         forbidden = set(self.forbidden_files or ())
         if included & excluded:
             raise ValueError("include_paths and exclude_paths must not overlap")
         if required & forbidden:
             raise ValueError("required and forbidden files must not overlap")
+        if optional & (required | forbidden):
+            raise ValueError(
+                "optional files must not overlap required or forbidden files"
+            )
         return self
 
 
@@ -198,7 +250,9 @@ class BenchmarkTask(BenchmarkExpectations):
     required_files_any: tuple[
         Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...
     ] = ()
+    optional_files: tuple[RepositoryRelativePath, ...] = ()
     forbidden_files: tuple[RepositoryRelativePath, ...] = ()
+    required_ranges: tuple[BenchmarkSourceRange, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
     max_selected_files: NonNegativeInt
     max_files_read: NonNegativeInt
@@ -310,11 +364,18 @@ class BenchmarkExpectationEvaluation(BenchmarkModel):
     matched_required_files: tuple[RepositoryRelativePath, ...] = ()
     missing_required_files: tuple[RepositoryRelativePath, ...] = ()
     any_file_groups: tuple[BenchmarkAnyFileExpectation, ...] = ()
+    optional_files: tuple[RepositoryRelativePath, ...] = ()
+    relevant_selected_files: tuple[RepositoryRelativePath, ...] = ()
+    irrelevant_selected_files: tuple[RepositoryRelativePath, ...] = ()
     forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     selected_forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
     covered_expected_facets: tuple[ExpectedFacet, ...] = ()
     missing_expected_facets: tuple[ExpectedFacet, ...] = ()
+    required_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    range_coverage: tuple[BenchmarkRangeCoverage, ...] = ()
+    selected_line_count: NonNegativeInt = 0
+    useful_line_count: NonNegativeInt = 0
     unexpected_warnings: tuple[WarningCode, ...] = ()
     missing_required_warnings: tuple[WarningCode, ...] = ()
     passed: bool
@@ -370,6 +431,12 @@ class BenchmarkRunResult(BenchmarkModel):
     provenance: Literal["model", "deterministic_fallback"] | None = None
     fallback_used: bool = False
     context_bytes: NonNegativeInt = 0
+    selected_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    selected_tokens: NonNegativeInt = 0
+    useful_tokens: NonNegativeInt = 0
+    semantic_claims: NonNegativeInt = 0
+    ungrounded_claims: NonNegativeInt = 0
+    latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation
     budgets: BenchmarkBudgetEvaluation
     failure: BenchmarkFailure | None = None
@@ -435,6 +502,12 @@ class BenchmarkCohortMetrics(BenchmarkModel):
     exact_selected_file_match_rate: Rate | None = None
     exact_ordered_match_rate: Rate | None = None
     required_file_recall: Rate | None = None
+    file_precision: Rate | None = None
+    precision_at_5: Rate | None = None
+    file_recall: Rate | None = None
+    range_precision: Rate | None = None
+    token_precision: Rate | None = None
+    ungrounded_claim_rate: Rate | None = None
     forbidden_file_selection_rate: Rate | None = None
     expected_facet_coverage_rate: Rate | None = None
     pairwise_jaccard: tuple[BenchmarkPairwiseJaccard, ...] = ()
@@ -443,8 +516,14 @@ class BenchmarkCohortMetrics(BenchmarkModel):
     fallback_rate: Rate | None = None
     confidence: BenchmarkConfidenceSummary | None = None
     duration: BenchmarkDurationSummary | None = None
+    cold_latency: BenchmarkDurationSummary | None = None
+    warm_latency: BenchmarkDurationSummary | None = None
+    incremental_latency: BenchmarkDurationSummary | None = None
     files_read_range: BenchmarkIntegerRange | None = None
     model_call_range: BenchmarkIntegerRange | None = None
+    provider_call_range: BenchmarkIntegerRange | None = None
+    selected_token_range: BenchmarkIntegerRange | None = None
+    useful_token_range: BenchmarkIntegerRange | None = None
 
 
 class BenchmarkResult(BenchmarkModel):
@@ -483,8 +562,10 @@ __all__ = [
     "BenchmarkModeOverrides",
     "BenchmarkProviderCounters",
     "BenchmarkPairwiseJaccard",
+    "BenchmarkRangeCoverage",
     "BenchmarkResult",
     "BenchmarkRunResult",
+    "BenchmarkSourceRange",
     "BenchmarkTask",
     "load_benchmark_manifest",
 ]

@@ -15,6 +15,7 @@ from contextforge.benchmarks import (
     BenchmarkManifest,
     BenchmarkMode,
     BenchmarkModeOverrides,
+    BenchmarkSourceRange,
     BenchmarkTask,
     run_discovery_benchmark,
 )
@@ -90,6 +91,9 @@ def _task(task_id: str, repository_path: str, **values: Any) -> BenchmarkTask:
         "include_paths": ("main.py",),
         "required_files_all": ("main.py",),
         "required_files_any": (("alternate.py", "main.py"),),
+        "required_ranges": (
+            BenchmarkSourceRange(path="main.py", start_line=1, end_line=1),
+        ),
         "forbidden_files": ("secret.py",),
         "expected_facets": ("main implementation",),
         "allowed_warnings": ("hybrid-index-unavailable",),
@@ -133,6 +137,14 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert run.files_considered == 2
     assert run.files_read == 3
     assert run.context_bytes == len(b"def main():\n    return 1\n")
+    assert run.selected_ranges == (
+        BenchmarkSourceRange(path="main.py", start_line=1, end_line=2),
+    )
+    assert run.selected_tokens > run.useful_tokens > 0
+    assert run.expectations.selected_line_count == 2
+    assert run.expectations.useful_line_count == 1
+    assert run.expectations.range_coverage[0].passed is True
+    assert run.latency_kind == "incremental"
     assert run.provider_counters.model_generations == 1
     assert run.provider_counters.model_calls == 1
     assert run.provider_counters.repair_generations == 1
@@ -151,9 +163,38 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert metric.stability_kind == "insufficient_data"
     assert metric.exact_selected_file_match_rate is None
     assert metric.required_file_recall == 1.0
+    assert metric.file_precision == 1.0
+    assert metric.file_recall == 1.0
+    assert metric.range_precision == 0.5
+    assert metric.token_precision == pytest.approx(
+        run.useful_tokens / run.selected_tokens
+    )
+    assert metric.provider_call_range is not None
+    assert metric.provider_call_range.minimum == 2
+    assert metric.incremental_latency is not None
+    assert metric.cold_latency is None
     assert metric.expected_facet_coverage_rate == 1.0
     assert metric.duration is not None
     assert metric.duration.percentiles is None
+
+
+def test_required_range_coverage_merges_overlaps_without_counting_gaps() -> None:
+    required = BenchmarkSourceRange(path="main.py", start_line=1, end_line=10)
+    selected = (
+        BenchmarkSourceRange(path="main.py", start_line=1, end_line=2),
+        BenchmarkSourceRange(path="main.py", start_line=2, end_line=4),
+        BenchmarkSourceRange(path="main.py", start_line=7, end_line=8),
+        BenchmarkSourceRange(path="other.py", start_line=1, end_line=10),
+    )
+
+    assert benchmark_runner._covered_lines(required, selected) == 6
+    assert (
+        benchmark_runner._covered_lines(
+            BenchmarkSourceRange(path="missing.py", start_line=1, end_line=2),
+            selected,
+        )
+        == 0
+    )
 
 
 def test_runner_records_deterministic_fallback_state(tmp_path: Path) -> None:
