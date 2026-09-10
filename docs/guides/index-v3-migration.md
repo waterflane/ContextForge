@@ -51,6 +51,17 @@ contextforge context create PATH --task "..." \
 allows FULL for an explicitly pinned file; otherwise automatic FULL applies
 only to files of at most 200 lines and only when it fits.
 
+Automatic task evidence has a soft target of 30% of the available budget.
+Explicit Working Set material, requested ranges, pinned FULL files, and required
+Git material may exceed the soft target but never the hard budget. Reranker
+representation suggestions are advisory and receive only a bounded 10% utility
+bonus.
+
+Package, Capsule, and prompt files created inside the repository are recorded
+in `.contextforge/generated-artifacts.json`. An unchanged registered artifact
+is omitted from later scans and updates; editing it changes the digest and makes
+it ordinary source again. No ignore-file migration is required.
+
 ## Integration migration
 
 Bridge clients may keep negotiating 1.0, 1.1, or 2.0 unchanged. Negotiate 2.1

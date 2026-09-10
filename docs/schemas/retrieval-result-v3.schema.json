@@ -81,7 +81,11 @@
             }
           }
         },
-        "provenance": { "type": "array", "items": { "type": "string" } },
+        "provenance": {
+          "description": "Validated ranking signals, including current-diff and working-set when applicable.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "freshness": { "const": "current" },
         "estimated_cost": { "$ref": "#/$defs/costs" },
         "suggested_representation": { "enum": ["map", "summary", "slice", "full", null] }

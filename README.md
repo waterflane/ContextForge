@@ -46,6 +46,7 @@ commands.
   repository maps, all in immutable generations under `.contextforge/index`.
 - **Evidence-first retrieval.** Rank exact paths and symbols before persisted
   BM25, then add bounded graph, centrality, diff, and Working Set signals.
+  Centrality can refine relevant evidence but cannot admit a file by itself.
 - **Portable artifacts.** Export legacy ContextPackage v1/TaskHandoff artifacts
   or a token-budgeted Context Capsule v2 and stable XML prompt.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,
@@ -261,7 +262,10 @@ CandidateCard retrieval by default. Exact path, qualified-symbol, symbol, and
 source-identifier groups precede approximate scores. Approximate ranking uses
 persisted BM25 plus bounded graph proximity, centrality, current-diff, and
 Working Set signals. `--rerank` permits one closed-schema provider request and
-at most one repair; any failure returns the deterministic order.
+at most one repair; any failure returns the deterministic order. Working Set
+and current-diff membership are retained in each CandidateCard's provenance.
+Automatic compilation requires an exact, lexical/grounded, graph, diff, or
+Working Set signal; centrality alone is not sufficient.
 
 `--legacy-discovery` retains the former model-assisted discovery flow during
 deprecation. Its modes remain:
@@ -319,10 +323,20 @@ Use `--legacy-discovery` for suggestion and `--legacy-handoff` for automatic
 creation to retain the deprecated flow. Manual `context create` without a task
 is unchanged.
 
+Fully automatic task material targets at most 30% of the available context
+budget. Explicit Working Set files/ranges, pinned FULL files, and required Git
+material may exceed that soft target, but never the hard budget. A reranker may
+give its suggested representation a bounded 10% utility bonus; freshness,
+range, FULL, and budget checks remain authoritative.
+
 `context suggest` does not write source or index state, but current diagnostics
 policy may write a safe summary under `.contextforge/runs`. Output artifacts are
 written atomically; existing destinations require `--force` where that option
-is available.
+is available. In-repository package, capsule, and prompt outputs are registered
+by path and SHA-256 in `.contextforge/generated-artifacts.json`; the scanner
+skips them only while that digest still matches. Editing an output makes it a
+normal source file again. Outputs outside the repository are not registered,
+and no filename or content heuristic is used.
 
 ## Benchmark workflow
 

@@ -72,11 +72,13 @@ semantic_max_input_tokens = 256000
 semantic_max_chunks_per_file = 4
 ```
 
-`priority` is the default and favors changed/added files, entrypoints, public
-APIs, central modules, important docs/config, and related tests. `all` considers
-every eligible file within the same hard ceilings. `none` publishes the usable
-structural generation without model calls. CLI options of the same names with
-hyphens override the project values for one build/update.
+`priority` is the default and orders changed/added files, entrypoints, public
+APIs, the top 10% centrality tier (at least one), important docs/config, related
+tests, then stable structural score. `all` considers every eligible file within
+the same hard ceilings. If a tier exceeds a ceiling, deterministic structural
+score selects within it. `none` publishes the usable structural generation
+without model calls. CLI options of the same names with hyphens override the
+project values for one build/update.
 
 Bridge timeouts are intentionally independent: request `timeout_ms` is client
 wait time, `request_timeout` is one provider attempt, and `operation_timeout`

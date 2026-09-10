@@ -14,7 +14,11 @@
     "task_context": { "type": "array", "items": { "$ref": "#/$defs/material" } },
     "git_context": { "type": "string" },
     "interpretations": { "type": "array", "items": { "type": "string" } },
-    "allocations": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "allocations": {
+      "description": "Hard section allocations after bounded redistribution; automatic task material additionally observes the compiler's 30 percent soft target.",
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
     "estimator_id": { "type": "string", "minLength": 1, "maxLength": 200 },
     "token_count": { "type": "integer", "minimum": 0 }
   },

@@ -43,11 +43,20 @@ grounded semantics `2`. It then applies graph proximity (`+0.20` one hop,
 (`+0.25`), and Working Set (`+1.0`). Exact groups always precede approximate
 scores.
 
+Current-diff and Working Set membership are preserved as CandidateCard
+provenance. Centrality is only a bounded ordering signal: a candidate is
+eligible for automatic materialization only when it also has an exact group,
+BM25 or grounded semantic/evidence match, graph proximity, current-diff, or
+Working Set signal. This prevents unrelated metadata, lock, or generated files
+from entering a capsule merely because they are structurally central.
+
 A `CandidateCard` includes source identity, synopsis, matched concepts and
 symbols, evidence ranges, graph neighbors, provenance, freshness, and estimated
 MAP/SUMMARY/SLICE/FULL costs. Default discovery performs no provider call. If a
 provider is explicitly enabled for reranking, one closed-schema request and at
-most one repair may only reorder supplied IDs and suggest representations.
+most one repair may only reorder supplied IDs and suggest representations. A
+matching suggestion contributes a 10% marginal-utility bonus; it cannot bypass
+freshness, source-range, FULL, or token-budget rules.
 
 The normative wire schema is
 [`retrieval-result-v3.schema.json`](../schemas/retrieval-result-v3.schema.json).
@@ -60,6 +69,12 @@ model context window minus caller-supplied history, response limit, and safety
 margin. Initial shares are 20% orientation, 15% Working Set, 55% task evidence,
 and 10% diff/metadata; unused space flows to task evidence, then Working Set,
 then map.
+
+For a fully automatic capsule the compiler uses 30% of available tokens as a
+soft target. Explicit Working Set files, requested ranges, pinned FULL files,
+and required Git material may take the capsule beyond that target, while the
+hard available-token budget remains absolute. Unused allocation still flows to
+evidence, then Working Set, then the repository map.
 
 Representations are:
 
@@ -78,7 +93,9 @@ or section is cut mid-way to satisfy a budget.
 The stable prompt root is `<contextforge schema_version="2">` with separate
 snapshot, verified repository map, Working Set, task context, and Git sections.
 Model selection rationale is labeled interpretation and never merged into
-verified source. See
+verified source. A stable verified-usage section says that source facts are
+evidence, interpretations are not guarantees, and unknown behavior must be
+reported as unknown. See
 [`context-capsule-v2.schema.json`](../schemas/context-capsule-v2.schema.json).
 
 ## Public surface

@@ -60,6 +60,12 @@ model-file, and chunk ceilings are hard limits. `--working-file` (also
 `--rerank` enables the bounded provider reranker; `--no-rerank` guarantees zero
 query-time provider calls.
 
+Successful build/update summaries read the v3 manifest artifacts and report
+`orientation`, `architecture`, `conventions`, and `features` as `current`.
+In-repository package, Capsule, and prompt outputs are registered by digest so
+an unchanged generated artifact does not enter the next scan. If the user edits
+it, it is indexed normally; outputs outside the repository are not registered.
+
 Manual `context create` without `--task` still emits ContextPackage v1.
 `--legacy-discovery` and `--legacy-handoff` retain the deprecated task-based
 flows. `context inspect` and `context review` accept both legacy JSON artifacts

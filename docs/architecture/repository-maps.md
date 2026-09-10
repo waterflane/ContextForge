@@ -40,7 +40,18 @@ source-to-test, entrypoint-to-handler, and config-to-consumer links. Every edge
 is `verified`, `best-effort-structural`, or `model-inferred`. Reverse
 dependencies, fan-in/out, and test connectivity are stored alongside the graph.
 
+Python references cover value, type, and imported-symbol uses separately from
+calls. Declarations, imports, and call targets are excluded from reference
+occurrences, and only an unambiguous target in the pinned snapshot becomes a
+verified edge with a source range. Module-level `os.getenv`,
+`os.environ.get`, and `os.environ[...]` reads contribute config keys even when
+they appear in assignments or constants. Conventional root and config-directory
+settings may connect repository-wide; nested module settings remain scoped to
+their module.
+
 PageRank is deterministic: damping `0.85`, at most 100 iterations, tolerance
-`1e-9`, canonical node order, and no contribution from `model-inferred` edges.
-These scores are retrieval hints, never authority to read a stale or
-unauthorized source file.
+`1e-9`, canonical node order, and no contribution from `model-inferred` or
+synthetic `source-test` edges. The same exclusions apply to reverse
+dependencies and fan-in/out; source/test connectivity is calculated and stored
+separately. These scores are retrieval hints, never authority to read a stale
+or unauthorized source file.

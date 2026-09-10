@@ -2,7 +2,7 @@
 
 ## Declaration extraction and coverage
 
-Polyglot analyzer version 4 supports named object methods, enum/module methods,
+Polyglot analyzer version 5 supports named object methods, enum/module methods,
 JS/TS callable class fields and parenthesized initializers, ambient TS functions,
 C/C++ prototypes, generic Rust impl owners, and C# file-scoped namespaces.
 Contained method IDs must refer to actual callable children of their owner.
@@ -63,6 +63,7 @@ The layout follows the approved immutable-generation design:
       conventions.json                # deterministic enriched map
       features.json                   # deterministic enriched map
     cache/semantic/<prefix>/<key>.json # path-neutral validated model payloads
+  generated-artifacts.json            # digest-bound output registry
   contexts/                           # generated saved context packages
   runs/                               # generated operational diagnostics
 ```
@@ -76,6 +77,14 @@ The scanner treats `.contextforge/` as one non-negatable protected root. The
 user-owned configuration remains readable by the configuration loader and is
 preserved by cleanup, but no file under `.contextforge/` can enter structural,
 generic, or rich semantic analysis.
+
+Package, Capsule, and prompt files written elsewhere inside the repository are
+registered with their portable path, artifact kind, and SHA-256. The scanner
+skips a registry entry only while the file digest matches. A user edit makes
+the path ordinary source on the next scan. A missing or corrupt registry fails
+open, outputs outside the repository are never registered, and neither filename
+nor content matching is used. This mechanism does not modify `.gitignore` or
+`.contextforgeignore`.
 
 ## Public API
 
@@ -157,8 +166,10 @@ source position. Their qualified names append every lexical parent, for example
 `pkg.module.Class.method.nested`; duplicate same-name declarations retain the
 same qualified name and receive distinct deterministic ordinal-based IDs.
 
-Python signatures and annotations are exact canonical source slices. Calls are
-observed syntax facts. A call is `internal` only for an unambiguous local
+Python signatures and annotations are exact canonical source slices. Calls and
+non-call value/type/imported-symbol references are observed separately;
+declarations, imports, and call targets do not duplicate reference facts. A
+call or reference is `internal` only for an unambiguous local
 lexical name or resolved import alias in the applicable lexical scope. Parameter
 or local rebinding, cross-function imports, inexact dotted module prefixes, and
 attributes of imported objects remain `unresolved`. Absolute imports absent
@@ -237,7 +248,8 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 - The CLI orchestrates build, update, status, and policy-bounded cleanup for a
   single repository root. Full multi-root workspaces remain deferred.
-- Python provides declarations plus conservative call/import relationships.
+- Python provides declarations plus conservative call/import/reference and
+  environment-configuration relationships.
   JavaScript, TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby provide
   verified Tree-sitter declarations; their relationship extraction remains
   explicitly unsupported. Other selectable text files receive file-level

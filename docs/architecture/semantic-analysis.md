@@ -14,7 +14,7 @@ provider fails, the operation times out, or the caller cancels enrichment.
   `documentation`, `config`, or `test` profiles;
 - a required grounded synopsis and at least one grounded concept;
 - optional responsibilities, at most 12 verified key symbols, side effects,
-  and profile-specific facts;
+  profile-specific facts, and grounded inferred relationships;
 - a canonical evidence table whose IDs address current source ranges and/or
   verified fact and symbol IDs; and
 - `complete`, `partial`, or `deterministic` quality plus bounded safe
@@ -42,17 +42,23 @@ The four profiles request different bounded facts:
 - `test`: tested subsystem, scenarios, fixtures, and covered symbols.
 
 Empty, generated/control, lock, barrel, and simple metadata files receive
-deterministic cards without a provider call. Model analysis is sparse; it does
-not describe every declaration. Key symbols are limited to verified public,
-exported, central, entrypoint, or side-effect-heavy declarations.
+deterministic cards without a provider call. Barrel classification is
+behavioral: an initializer may contain imports, re-exports, and `__all__`, but
+no executable calls or callable implementations. An executable `__init__.py`
+or `index.js`/`index.ts` remains eligible for model analysis. Model analysis is
+sparse; it does not describe every declaration. Key symbols are limited to
+verified public, exported, central, entrypoint, or side-effect-heavy
+declarations.
 
 ## Scheduler limits
 
-The default `priority` scope considers changed and added files, entrypoints,
-public APIs, the highest centrality tier, important docs/config, and related
-tests. Defaults are 64 model files, 96 requests, 256,000 estimated input tokens,
-and at most four chunks per large file. CLI/config and the Python API may select
-`priority`, `all`, or `none` and lower those ceilings.
+The default `priority` scope orders tiers as changed/added files, entrypoints,
+public APIs, the highest 10% centrality tier (at least one file), important
+docs/config, related tests, then a stable structural score. Defaults are 64
+model files, 96 requests, 256,000 estimated input tokens, and at most four
+chunks per large file. If changed files alone exceed a ceiling, that same
+deterministic structural score selects within the tier. CLI/config and the
+Python API may select `priority`, `all`, or `none` and lower those ceilings.
 
 The scheduler plans the whole bounded priority set before dispatch. Per-attempt
 provider timeout is independent of the operation timeout. A provider response
@@ -68,6 +74,18 @@ It deliberately excludes the repository path. On a cache hit, path-specific
 evidence and symbol IDs are rebound to the current CodeMap and fully validated.
 This permits a byte-identical renamed file to reuse semantic content without a
 model call while preventing stale path evidence from entering the new card.
+
+## Grounded inferred relationships
+
+An eligible card receives at most 24 deterministically selected relationship
+candidates. The provider can return only their content-addressed candidate IDs
+and current-file evidence IDs. Validation independently removes unknown,
+stale, self, and duplicate targets; surviving claims keep the card while any
+rejection marks it `partial`. On source or target rename, candidate paths and
+symbol IDs are rebound from current source SHA and structural identity. These
+relationships are published only in the enriched graph with
+`model-inferred` provenance and never affect centrality or structural
+dependency metrics.
 
 ## Privacy and failure behavior
 

@@ -46,6 +46,18 @@ and Python distribution versions follow PEP 440.
 
 ### Fixed
 
+- Added verified non-call reference edges, module-level environment-key facts,
+  scoped config-consumer projections, and centrality metrics that exclude both
+  inferred and synthetic source-test relationships.
+- Grounded model-inferred relationships in supplied content-addressed targets
+  and source evidence, with item-level validation and source/target rename
+  rebinding. Updated semantic priority scheduling and behavioral barrel routing.
+- Prevented centrality-only task material, added bounded reranker representation
+  influence, and enforced a 30% automatic Capsule soft target without weakening
+  explicit-material or hard-budget rules.
+- Reported all current v3 repository maps after builds and added a digest-bound
+  generated-artifact registry so unchanged package/Capsule/prompt outputs do
+  not enter later index updates.
 - Decoupled Bridge progress delivery from index cancellation: queue overflow
   coalesces intermediate events, counts dropped/coalesced updates, and always
   prioritizes terminal state. A slow progress consumer cannot cancel a job.
