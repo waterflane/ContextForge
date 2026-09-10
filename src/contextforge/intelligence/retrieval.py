@@ -428,6 +428,10 @@ def _rank_candidates(
             provenance.append("grounded-semantic-card")
         if distance in {1, 2}:
             provenance.append(f"graph-{distance}-hop")
+        if document.path in diff:
+            provenance.append("current-diff")
+        if document.path in working:
+            provenance.append("working-set")
         results.append(
             CandidateCard(
                 candidate_id=_candidate_id(document.path),

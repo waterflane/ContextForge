@@ -78,6 +78,8 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert "&lt;greet&gt;" in first.prompt
     assert "&lt;hello&gt;" in first.prompt
     assert first.prompt.startswith('<contextforge schema_version="2">')
+    assert '<usage_rules provenance="contextforge-verified">' in first.prompt
+    assert "report it as unknown" in first.prompt
     assert first.prompt.endswith("</contextforge>\n")
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
 
@@ -185,6 +187,125 @@ def test_large_full_file_requires_explicit_pin(tmp_path: Path) -> None:
     assert automatic.capsule.working_set[0].representation != RepresentationMode.FULL
     assert pinned.capsule.working_set[0].representation == RepresentationMode.FULL
     assert pinned.capsule.working_set[0].content == source
+
+
+def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "service.py",
+        "def handle_request(value: str) -> str:\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from service import handle_request\n\ndef start():\n"
+        "    return handle_request('ready')\n",
+    )
+    _write(tmp_path, "unrelated.py", "def unrelated():\n    return 1\n")
+    report = _build(tmp_path)
+
+    centrality_only = _retrieve(tmp_path, report, "words absent from repository")
+    empty = compile_context_capsule(
+        tmp_path,
+        "words absent from repository",
+        centrality_only,
+        budget=_budget(4_000),
+    )
+    assert empty.capsule.task_context == ()
+
+    graph_result = _retrieve(tmp_path, report, "handle_request")
+    graph_compiled = compile_context_capsule(
+        tmp_path, "handle_request", graph_result, budget=_budget(6_000)
+    )
+    assert {item.path for item in graph_compiled.capsule.task_context} >= {
+        "service.py",
+        "app.py",
+    }
+
+    diff_result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "words absent from repository",
+            manifest=report.manifest,
+            diff_paths=("unrelated.py",),
+        )
+    )
+    diff_compiled = compile_context_capsule(
+        tmp_path,
+        "words absent from repository",
+        diff_result,
+        budget=_budget(4_000),
+    )
+    assert {item.path for item in diff_compiled.capsule.task_context} == {
+        "unrelated.py"
+    }
+
+
+def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> None:
+    for index in range(10):
+        body = "".join(
+            f"    value_{line} = 'common evidence {line:03d}'\n"
+            for line in range(1, 121)
+        )
+        _write(
+            tmp_path,
+            f"module_{index}.py",
+            f"def common_{index}():\n{body}    return value_120\n",
+        )
+    long_source = "".join(
+        f"explicit line {line:03d} with deliberately substantial payload text\n"
+        for line in range(1, 241)
+    )
+    _write(tmp_path, "large.txt", long_source)
+    report = _build(tmp_path)
+    automatic_retrieval = _retrieve(tmp_path, report, "common evidence")
+
+    automatic = compile_context_capsule(
+        tmp_path,
+        "common evidence",
+        automatic_retrieval,
+        budget=_budget(10_000),
+    )
+    assert automatic.token_count <= 3_000
+
+    pinned_retrieval = _retrieve(tmp_path, report, "large.txt")
+    explicit = compile_context_capsule(
+        tmp_path,
+        "inspect large.txt",
+        pinned_retrieval,
+        budget=_budget(10_000),
+        pinned_full_files=("large.txt",),
+    )
+    assert explicit.capsule.working_set[0].representation == RepresentationMode.FULL
+    assert explicit.token_count > 3_000
+    assert explicit.token_count <= 10_000
+
+
+def test_representation_suggestion_bonus_cannot_bypass_full_rule(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import capsule as capsule_module
+
+    source = "".join(f"line {line}\n" for line in range(1, 221))
+    _write(tmp_path, "large.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "large.txt")
+    candidate = retrieval.candidates[0]
+    suggested = candidate.model_copy(update={"suggested_representation": "full"})
+
+    base_utility = capsule_module._utility(candidate, RepresentationMode.FULL)
+    suggested_utility = capsule_module._utility(suggested, RepresentationMode.FULL)
+    assert suggested_utility == pytest.approx(base_utility * 1.10)
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect large.txt",
+        retrieval.model_copy(update={"candidates": (suggested,)}),
+        budget=_budget(10_000),
+    )
+    assert compiled.capsule.task_context[0].representation != RepresentationMode.FULL
 
 
 def test_working_full_falls_back_to_map_and_is_not_selected_twice(

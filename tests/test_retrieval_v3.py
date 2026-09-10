@@ -113,6 +113,9 @@ def test_working_set_and_diff_boosts_are_deterministic(tmp_path: Path) -> None:
     )
 
     assert [item.path for item in first.candidates[:2]] == ["gamma.py", "beta.py"]
+    by_path = {item.path: item for item in first.candidates}
+    assert "working-set" in by_path["gamma.py"].provenance
+    assert "current-diff" in by_path["beta.py"].provenance
     assert first == second
     assert first.provider_calls == 0
 
