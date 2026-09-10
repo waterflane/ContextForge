@@ -11,6 +11,7 @@ from contextforge.intelligence.codemap import (
     CallReference,
     FileCodeMap,
     ImportRecord,
+    ReferenceOccurrence,
     RelationshipRecord,
     RelationshipTarget,
     SourceRange,
@@ -82,7 +83,11 @@ def _clear_repository_resolution(code_map: FileCodeMap) -> FileCodeMap:
                 "direct_calls": tuple(
                     _clear_call_resolution(call, code_map.path)
                     for call in symbol.direct_calls
-                )
+                ),
+                "direct_references": tuple(
+                    _clear_reference_resolution(reference, code_map.path)
+                    for reference in symbol.direct_references
+                ),
             }
         )
         for symbol in code_map.symbols
@@ -111,6 +116,27 @@ def _clear_call_resolution(call: CallReference, source_path: str) -> CallReferen
             "target_symbol_id": None,
             "target_file_path": None,
             "detection_method": "python_ast_call",
+        }
+    )
+
+
+def _clear_reference_resolution(
+    reference: ReferenceOccurrence, source_path: str
+) -> ReferenceOccurrence:
+    if reference.detection_method == "python_shadowed_reference":
+        return reference
+    if (
+        reference.resolution == "internal"
+        and reference.target_file_path == source_path
+        and reference.detection_method == "python_lexical_reference"
+    ):
+        return reference
+    return reference.model_copy(
+        update={
+            "resolution": "unresolved",
+            "target_symbol_id": None,
+            "target_file_path": None,
+            "detection_method": "python_ast_reference",
         }
     )
 
@@ -248,7 +274,68 @@ def _resolve_imported_calls(
             )
         else:
             calls.append(call)
-    return symbol.model_copy(update={"direct_calls": tuple(calls)})
+    references = _resolve_imported_references(symbol, imports, symbols, maps_by_path)
+    return symbol.model_copy(
+        update={
+            "direct_calls": tuple(calls),
+            "direct_references": references,
+        }
+    )
+
+
+def _resolve_imported_references(
+    symbol: SymbolRecord,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+) -> tuple[ReferenceOccurrence, ...]:
+    references: list[ReferenceOccurrence] = []
+    parameter_names = {parameter.name for parameter in symbol.parameters}
+    for reference in symbol.direct_references:
+        if reference.resolution == "internal":
+            references.append(reference)
+            continue
+        if reference.detection_method == "python_shadowed_reference":
+            references.append(reference)
+            continue
+        if reference.observed_name.split(".")[0] in parameter_names:
+            references.append(reference)
+            continue
+        targets: set[tuple[str, str]] = set()
+        for item in imports:
+            if item.resolution != "internal" or item.target_file_path is None:
+                continue
+            containing_symbol = _containing_symbol(symbols, item.source_range)
+            if containing_symbol not in {None, symbol.symbol_id}:
+                continue
+            target_map = maps_by_path.get(item.target_file_path)
+            if target_map is None:
+                continue
+            target_name = _call_target_from_import(reference.observed_name, item)
+            if target_name is None:
+                continue
+            matches = [
+                candidate
+                for candidate in target_map.symbols
+                if candidate.parent_symbol_id is None and candidate.name == target_name
+            ]
+            if len(matches) == 1:
+                targets.add((item.target_file_path, matches[0].symbol_id))
+        if len(targets) == 1:
+            target_path, target_id = next(iter(targets))
+            references.append(
+                reference.model_copy(
+                    update={
+                        "resolution": "internal",
+                        "target_file_path": target_path,
+                        "target_symbol_id": target_id,
+                        "detection_method": "python_unambiguous_import_reference",
+                    }
+                )
+            )
+        else:
+            references.append(reference)
+    return tuple(references)
 
 
 def _call_target_from_import(observed_name: str, item: ImportRecord) -> str | None:
@@ -352,6 +439,23 @@ def _rebuild_resolved_relationships(
                         observed_name=call.observed_name,
                     ),
                     method=call.detection_method,
+                )
+            )
+        for reference in symbol.direct_references:
+            relationships.append(
+                _relationship(
+                    kind="reference",
+                    source_path=code_map.path,
+                    source_symbol_id=symbol.symbol_id,
+                    source_range=reference.source_range,
+                    observed_text=reference.observed_name,
+                    target=RelationshipTarget(
+                        resolution=reference.resolution,
+                        file_path=reference.target_file_path,
+                        symbol_id=reference.target_symbol_id,
+                        observed_name=reference.observed_name,
+                    ),
+                    method=reference.detection_method,
                 )
             )
     return tuple(sorted(relationships, key=_relationship_key))
@@ -460,7 +564,14 @@ def _add_test_relationships(
 def _relationship(
     *,
     kind: Literal[
-        "import", "contains", "call", "export", "tests", "tested_by", "test_reference"
+        "import",
+        "contains",
+        "call",
+        "reference",
+        "export",
+        "tests",
+        "tested_by",
+        "test_reference",
     ],
     source_path: str,
     source_symbol_id: str | None,

@@ -27,6 +27,7 @@ from contextforge.intelligence import (
     build_orientation_map,
     build_relationship_graph,
     build_structural_index,
+    extract_code_maps,
     initialize_index,
     load_file_code_map,
     load_orientation_map,
@@ -248,6 +249,76 @@ def test_graph_builds_config_consumer_edges_and_empty_graph(tmp_path: Path) -> N
     )
     graph = load_relationship_graph(tmp_path, manifest=report.manifest)
     assert any(edge.kind == "config-consumer" for edge in graph.edges)
+
+
+def test_config_consumers_respect_repository_and_module_scope(tmp_path: Path) -> None:
+    (tmp_path / "settings.toml").write_text("port = 8000\n", encoding="utf-8")
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "local.toml").write_text("mode = 'safe'\n", encoding="utf-8")
+    (package / "service.py").write_text(
+        "import os\nVALUE = os.environ.get('MODE')\n", encoding="utf-8"
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "service.py").write_text(
+        "import os\nVALUE = os.getenv('PORT')\n", encoding="utf-8"
+    )
+
+    snapshot = scan_repository(tmp_path)
+    code_maps = extract_code_maps(snapshot)
+    graph = build_relationship_graph(code_maps, "1" * 64)
+    consumers = {
+        (edge.source_file_path, graph_node.path)
+        for edge in graph.edges
+        if edge.kind == "config-consumer"
+        for graph_node in graph.nodes
+        if graph_node.node_id == edge.target_node_id
+    }
+
+    assert ("settings.toml", "pkg/service.py") in consumers
+    assert ("settings.toml", "other/service.py") in consumers
+    assert ("pkg/local.toml", "pkg/service.py") in consumers
+    assert ("pkg/local.toml", "other/service.py") not in consumers
+
+
+def test_source_test_edges_only_affect_test_connectivity(tmp_path: Path) -> None:
+    (tmp_path / "service.py").write_text(
+        "def handle():\n    return 'ok'\n", encoding="utf-8"
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_service.py").write_text(
+        "from service import handle\n\n"
+        "def test_handle():\n"
+        "    assert handle() == 'ok'\n",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+    code_maps = extract_code_maps(snapshot)
+    test_only_maps = tuple(
+        code_map.model_copy(
+            update={
+                "relationships": tuple(
+                    relationship
+                    for relationship in code_map.relationships
+                    if relationship.kind in {"tests", "tested_by", "test_reference"}
+                )
+            }
+        )
+        for code_map in code_maps
+    )
+    graph = build_relationship_graph(test_only_maps, "2" * 64)
+    metrics = {item.path: item for item in graph.file_metrics}
+
+    assert metrics["service.py"].fan_in == 0
+    assert metrics["service.py"].fan_out == 0
+    assert metrics["service.py"].reverse_dependencies == ()
+    assert metrics["service.py"].test_connectivity == 1
+    assert metrics["tests/test_service.py"].test_connectivity == 1
+    assert metrics["service.py"].pagerank == pytest.approx(0.5)
+    assert metrics["tests/test_service.py"].pagerank == pytest.approx(0.5)
 
 
 def test_model_failure_uses_grounded_deterministic_fallback(tmp_path: Path) -> None:

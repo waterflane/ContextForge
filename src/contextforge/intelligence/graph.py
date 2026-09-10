@@ -324,12 +324,14 @@ def _relationship_kind(kind: str) -> RelationshipKind:
     direct: dict[str, RelationshipKind] = {
         "import": "import",
         "call": "call",
+        "reference": "reference",
         "contains": "contains",
         "export": "export",
     }
-    if kind in direct:
+    try:
         return direct[kind]
-    return "reference"
+    except KeyError as exc:
+        raise ValueError(f"unsupported structural relationship kind: {kind}") from exc
 
 
 def _edge(
@@ -401,18 +403,12 @@ def _add_config_consumer_edges(
         if any(symbol.configuration_keys for symbol in item.symbols)
     ]
     for config in configs:
-        config_module = _module_for_path(config.path)
+        repository_wide = _is_repository_configuration(config.path)
         for consumer in consumers:
             if consumer.path == config.path:
                 continue
-            consumer_module = _module_for_path(consumer.path)
-            if (
-                config_module
-                and consumer_module
-                and not (
-                    config_module.startswith(consumer_module)
-                    or consumer_module.startswith(config_module)
-                )
+            if not repository_wide and not _is_module_configuration_consumer(
+                config.path, consumer.path
             ):
                 continue
             edge = _edge(
@@ -422,7 +418,11 @@ def _add_config_consumer_edges(
                 config.path,
                 None,
                 "best-effort-structural",
-                "module_local_configuration_key_consumer",
+                (
+                    "repository_configuration_key_consumer"
+                    if repository_wide
+                    else "module_local_configuration_key_consumer"
+                ),
             )
             if edge.source_node_id in nodes and edge.target_node_id in nodes:
                 edges[edge.edge_id] = edge
@@ -439,17 +439,18 @@ def _file_metrics(
     incoming: dict[str, set[str]] = {path: set() for path in paths}
     test_neighbors: dict[str, set[str]] = {path: set() for path in paths}
     for edge in edges:
-        if edge.provenance == "model-inferred":
-            continue
         source = node_path[edge.source_node_id]
         target = node_path[edge.target_node_id]
         if source == target:
             continue
-        outgoing[source].add(target)
-        incoming[target].add(source)
         if edge.kind == "source-test":
             test_neighbors[source].add(target)
             test_neighbors[target].add(source)
+            continue
+        if edge.provenance == "model-inferred":
+            continue
+        outgoing[source].add(target)
+        incoming[target].add(source)
     ranks = _pagerank(paths, outgoing)
     maximum = max(ranks.values(), default=0.0)
     return tuple(
@@ -516,18 +517,69 @@ def _is_test_path(path: str) -> bool:
 def _is_config_path(path: str) -> bool:
     pure = PurePosixPath(path)
     name = pure.name.casefold()
-    return pure.suffix.casefold() in {
-        ".toml",
-        ".yaml",
-        ".yml",
-        ".ini",
-        ".cfg",
-    } or name in {
+    parts = tuple(part.casefold() for part in pure.parts)
+    conventional_directory = any(
+        part in {"config", "configs", "configuration", "settings"}
+        for part in parts[:-1]
+    )
+    return (
+        pure.suffix.casefold()
+        in {
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".ini",
+            ".cfg",
+        }
+        or (conventional_directory and pure.suffix.casefold() in {".json", ".py"})
+        or name
+        in {
+            ".env",
+            "dockerfile",
+            "pyproject.toml",
+            "package.json",
+        }
+        or (
+            pure.stem.casefold() in {"config", "configuration", "settings"}
+            and pure.suffix.casefold() in {".json", ".py"}
+        )
+    )
+
+
+def _is_repository_configuration(path: str) -> bool:
+    pure = PurePosixPath(path)
+    parts = tuple(part.casefold() for part in pure.parts)
+    if len(parts) > 1 and parts[0] in {
+        "config",
+        "configs",
+        "configuration",
+        "settings",
+    }:
+        return True
+    if len(parts) != 1:
+        return False
+    name = parts[0]
+    stem = pure.stem.casefold()
+    return name in {
         ".env",
         "dockerfile",
-        "pyproject.toml",
         "package.json",
-    }
+        "pyproject.toml",
+    } or stem in {"config", "configuration", "settings"}
+
+
+def _is_module_configuration_consumer(config_path: str, consumer_path: str) -> bool:
+    config_parent = PurePosixPath(config_path).parent
+    if config_parent.name.casefold() in {
+        "config",
+        "configs",
+        "configuration",
+        "settings",
+    }:
+        config_parent = config_parent.parent
+    scope = () if config_parent.as_posix() == "." else config_parent.parts
+    consumer_parent = PurePosixPath(consumer_path).parent.parts
+    return bool(scope) and consumer_parent[: len(scope)] == scope
 
 
 __all__ = [

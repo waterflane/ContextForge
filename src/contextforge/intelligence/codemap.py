@@ -19,7 +19,7 @@ from contextforge.intelligence.models import (
 )
 
 CODEMAP_SCHEMA_VERSION: Literal[3] = 3
-RESOLVER_VERSION = "3"
+RESOLVER_VERSION = "4"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -141,6 +141,32 @@ class CallReference(IndexModel):
         return self
 
 
+class ReferenceOccurrence(IndexModel):
+    """Observed value or type use with conservative snapshot resolution."""
+
+    observed_name: str
+    source_range: SourceRange
+    resolution: Resolution = "unresolved"
+    target_symbol_id: str | None = None
+    target_file_path: str | None = None
+    detection_method: str = "python_ast_reference"
+
+    @field_validator("target_file_path")
+    @classmethod
+    def validate_target_path(cls, value: str | None) -> str | None:
+        return value if value is None else validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> ReferenceOccurrence:
+        if self.resolution == "internal" and self.target_symbol_id is None:
+            raise ValueError("internal reference targets require a symbol ID")
+        if self.resolution != "internal" and (
+            self.target_symbol_id is not None or self.target_file_path is not None
+        ):
+            raise ValueError("non-internal references cannot claim an internal target")
+        return self
+
+
 class ImportRecord(IndexModel):
     """One alias from an import statement, without importing the module."""
 
@@ -215,6 +241,7 @@ class RelationshipRecord(IndexModel):
         "import",
         "contains",
         "call",
+        "reference",
         "export",
         "tests",
         "tested_by",
@@ -255,6 +282,7 @@ class SymbolRecord(IndexModel):
     base_classes: tuple[str, ...] = ()
     contained_methods: tuple[str, ...] = ()
     direct_calls: tuple[CallReference, ...] = ()
+    direct_references: tuple[ReferenceOccurrence, ...] = ()
     raised_exceptions: tuple[str, ...] = ()
     configuration_keys: tuple[str, ...] = ()
     visibility: Visibility = "unknown"
@@ -306,6 +334,13 @@ class SymbolRecord(IndexModel):
             set(call_keys)
         ):
             raise ValueError("direct calls must be unique and canonical")
+        reference_keys = tuple(
+            _reference_order(item) for item in self.direct_references
+        )
+        if reference_keys != tuple(sorted(reference_keys)) or len(
+            reference_keys
+        ) != len(set(reference_keys)):
+            raise ValueError("direct references must be unique and canonical")
         return self
 
     @property
@@ -375,6 +410,14 @@ class FileCodeMap(IndexModel):
                     and call.target_symbol_id not in known
                 ):
                     raise ValueError("local call target is absent from the CodeMap")
+            for reference in symbol.direct_references:
+                if (
+                    reference.target_file_path == self.path
+                    and reference.target_symbol_id not in known
+                ):
+                    raise ValueError(
+                        "local reference target is absent from the CodeMap"
+                    )
         if tuple(self.top_level_constants) != tuple(
             sorted(set(self.top_level_constants))
         ):
@@ -524,6 +567,10 @@ def _call_order(value: CallReference) -> tuple[object, ...]:
     return (*_range_key(value.source_range), value.observed_name)
 
 
+def _reference_order(value: ReferenceOccurrence) -> tuple[object, ...]:
+    return (*_range_key(value.source_range), value.observed_name)
+
+
 def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
     ranges: list[SourceRange] = []
     ranges.extend(item.source_range for item in code_map.imports)
@@ -536,6 +583,7 @@ def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
             ranges.append(symbol.body_range)
         ranges.extend(item.source_range for item in symbol.decorators)
         ranges.extend(item.source_range for item in symbol.direct_calls)
+        ranges.extend(item.source_range for item in symbol.direct_references)
     return tuple(ranges)
 
 
@@ -554,6 +602,7 @@ __all__ = [
     "ImportRecord",
     "ParameterRecord",
     "ParserDiagnostic",
+    "ReferenceOccurrence",
     "RelationshipRecord",
     "RelationshipTarget",
     "SourceRange",

@@ -20,6 +20,7 @@ from contextforge.intelligence.codemap import (
     ImportRecord,
     ParameterRecord,
     ParserDiagnostic,
+    ReferenceOccurrence,
     RelationshipRecord,
     RelationshipTarget,
     SourceRange,
@@ -32,7 +33,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="2",
+    analyzer_version="3",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -65,6 +66,7 @@ class _DirectFactVisitor(ast.NodeVisitor):
     def __init__(self, source: str) -> None:
         self._source = source
         self.calls: list[CallReference] = []
+        self.references: list[ReferenceOccurrence] = []
         self.raises: list[tuple[SourceRange, str]] = []
         self.configuration_keys: set[str] = set()
 
@@ -90,6 +92,30 @@ class _DirectFactVisitor(ast.NodeVisitor):
                 )
             )
         self._record_call_configuration(node)
+        for argument in node.args:
+            self.visit(argument)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            self.references.append(
+                ReferenceOccurrence(
+                    observed_name=node.id,
+                    source_range=_node_range(node),
+                )
+            )
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        name = _dotted_name(node)
+        if isinstance(node.ctx, ast.Load) and name is not None:
+            self.references.append(
+                ReferenceOccurrence(
+                    observed_name=name,
+                    source_range=_node_range(node),
+                )
+            )
+            return
         self.generic_visit(node)
 
     def visit_Raise(self, node: ast.Raise) -> None:
@@ -193,6 +219,7 @@ def extract_python_code_map(
     _assign_symbol_ids(drafts, project_file.path)
     symbols = _build_symbols(drafts, source, project_file.path)
     symbols = _resolve_local_calls(symbols, drafts, project_file.path)
+    symbols = _resolve_local_references(symbols, drafts, project_file.path)
     imports = _extract_imports(module, source, project_file.path)
     exports = _extract_exports(module, symbols, source, project_file.path)
     relationships = _local_relationships(project_file.path, symbols, imports, exports)
@@ -405,6 +432,7 @@ def _build_symbols(
                 ),
                 contained_methods=contained_methods,
                 direct_calls=tuple(direct.calls),
+                direct_references=tuple(direct.references),
                 raised_exceptions=tuple(name for _, name in direct.raises),
                 configuration_keys=tuple(sorted(direct.configuration_keys)),
                 visibility="private" if draft.name.startswith("_") else "public",
@@ -415,15 +443,52 @@ def _build_symbols(
 
 def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
     visitor = _DirectFactVisitor(source)
+    if isinstance(node, _Callable):
+        arguments = node.args
+        annotations = [
+            argument.annotation
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+            if argument.annotation is not None
+        ]
+        if arguments.vararg is not None and arguments.vararg.annotation is not None:
+            annotations.append(arguments.vararg.annotation)
+        if arguments.kwarg is not None and arguments.kwarg.annotation is not None:
+            annotations.append(arguments.kwarg.annotation)
+        if node.returns is not None:
+            annotations.append(node.returns)
+        for annotation in annotations:
+            visitor.visit(annotation)
+    elif isinstance(node, ast.ClassDef):
+        for base in node.bases:
+            visitor.visit(base)
     body = getattr(node, "body", ())
     if isinstance(body, list):
         for statement in body:
             visitor.visit(statement)
+    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+        value = node.value
+        if value is not None:
+            visitor.visit(value)
+        if isinstance(node, ast.AnnAssign) and node.annotation is not None:
+            visitor.visit(node.annotation)
+    elif isinstance(node, ast.TypeAlias):
+        visitor.visit(node.value)
     visitor.calls.sort(
         key=lambda call: (
             call.source_range.start_line,
             call.source_range.start_column,
             call.observed_name,
+        )
+    )
+    visitor.references.sort(
+        key=lambda reference: (
+            reference.source_range.start_line,
+            reference.source_range.start_column,
+            reference.observed_name,
         )
     )
     visitor.raises.sort(key=lambda item: (*_range_tuple(item[0]), item[1]))
@@ -492,6 +557,64 @@ def _resolve_local_calls(
                     else call
                 )
         result.append(symbol.model_copy(update={"direct_calls": tuple(calls)}))
+    return tuple(result)
+
+
+def _resolve_local_references(
+    symbols: tuple[SymbolRecord, ...], drafts: list[_SymbolDraft], path: str
+) -> tuple[SymbolRecord, ...]:
+    by_name: dict[str, list[SymbolRecord]] = {}
+    for symbol in symbols:
+        by_name.setdefault(symbol.name, []).append(symbol)
+    result: list[SymbolRecord] = []
+    for symbol, draft in zip(symbols, drafts, strict=True):
+        shadowed_names = _shadowed_names(draft.node)
+        references: list[ReferenceOccurrence] = []
+        for reference in symbol.direct_references:
+            observed_root = reference.observed_name.split(".", maxsplit=1)[0]
+            candidates = (
+                by_name.get(reference.observed_name, [])
+                if "." not in reference.observed_name
+                else []
+            )
+            siblings = [
+                item
+                for item in candidates
+                if item.parent_symbol_id == symbol.parent_symbol_id
+                and item.symbol_id != symbol.symbol_id
+            ]
+            module_level = [
+                item
+                for item in candidates
+                if item.parent_symbol_id is None and item.symbol_id != symbol.symbol_id
+            ]
+            selected = [] if observed_root in shadowed_names else siblings
+            if not selected and observed_root not in shadowed_names:
+                selected = module_level
+            unique = {item.symbol_id: item for item in selected}
+            if len(unique) == 1:
+                target = next(iter(unique.values()))
+                references.append(
+                    reference.model_copy(
+                        update={
+                            "resolution": "internal",
+                            "target_symbol_id": target.symbol_id,
+                            "target_file_path": path,
+                            "detection_method": "python_lexical_reference",
+                        }
+                    )
+                )
+            elif observed_root in shadowed_names:
+                references.append(
+                    reference.model_copy(
+                        update={"detection_method": "python_shadowed_reference"}
+                    )
+                )
+            else:
+                references.append(reference)
+        result.append(
+            symbol.model_copy(update={"direct_references": tuple(references)})
+        )
     return tuple(result)
 
 
@@ -698,6 +821,23 @@ def _local_relationships(
                     method=call.detection_method,
                 )
             )
+        for reference in symbol.direct_references:
+            relationships.append(
+                _relationship(
+                    kind="reference",
+                    path=path,
+                    source_symbol_id=symbol.symbol_id,
+                    source_range=reference.source_range,
+                    observed_text=reference.observed_name,
+                    target=RelationshipTarget(
+                        resolution=reference.resolution,
+                        file_path=reference.target_file_path,
+                        symbol_id=reference.target_symbol_id,
+                        observed_name=reference.observed_name,
+                    ),
+                    method=reference.detection_method,
+                )
+            )
     for export in exports:
         relationships.append(
             _relationship(
@@ -732,7 +872,14 @@ def _local_relationships(
 def _relationship(
     *,
     kind: Literal[
-        "import", "contains", "call", "export", "tests", "tested_by", "test_reference"
+        "import",
+        "contains",
+        "call",
+        "reference",
+        "export",
+        "tests",
+        "tested_by",
+        "test_reference",
     ],
     path: str,
     source_symbol_id: str | None,
