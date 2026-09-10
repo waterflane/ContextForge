@@ -5,8 +5,16 @@ from pathlib import Path
 import pytest
 
 from contextforge.application import build_repository_index
-from contextforge.intelligence import load_semantic_card
+from contextforge.intelligence import (
+    SemanticCardOptions,
+    build_relationship_graph,
+    extract_code_maps,
+    load_relationship_graph,
+    load_semantic_card,
+)
+from contextforge.intelligence import cards as cards_module
 from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.repositories import scan_repository
 
 
 def _provider(responder: object) -> FakeModelProvider:
@@ -362,8 +370,6 @@ def test_python_file_under_docs_uses_documentation_profile(tmp_path: Path) -> No
 
 
 def test_semantic_card_identity_and_internal_guards_are_strict(tmp_path: Path) -> None:
-    from contextforge.intelligence import cards as cards_module
-
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     report = asyncio.run(
         build_repository_index(
@@ -387,3 +393,204 @@ def test_semantic_card_identity_and_internal_guards_are_strict(tmp_path: Path) -
         cards_module._require_facts_sha(
             state.model_copy(update={"record_sha256": None})
         )
+
+
+def test_changed_low_score_file_wins_priority_in_large_repository(
+    tmp_path: Path,
+) -> None:
+    for index in range(69):
+        (tmp_path / f"public_{index:02d}.py").write_text(
+            f"def public_{index}():\n    return {index}\n", encoding="utf-8"
+        )
+    low = tmp_path / "low.py"
+    low.write_text("def _low():\n    return 1\n", encoding="utf-8")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    low.write_text("def _low():\n    return 2\n", encoding="utf-8")
+    requested: list[str] = []
+
+    def respond(request: object, call: int) -> str:
+        del call
+        source = request.untrusted_sources[0]  # type: ignore[attr-defined]
+        requested.append(source.path)
+        return _response()
+
+    provider = _provider(respond)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+            max_files=1,
+        )
+    )
+
+    assert requested == ["low.py"]
+    assert report.semantic is not None
+    assert report.semantic.analyzed_paths == ("low.py",)  # type: ignore[union-attr]
+
+
+def test_priority_includes_central_tier_and_its_related_test(tmp_path: Path) -> None:
+    (tmp_path / "hub.py").write_text("def _hub():\n    return 1\n", encoding="utf-8")
+    for index in range(4):
+        (tmp_path / f"leaf_{index}.py").write_text(
+            "from hub import _hub\n\ndef _use():\n    return _hub()\n",
+            encoding="utf-8",
+        )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_hub.py").write_text(
+        "from hub import _hub\n\ndef _test_hub():\n    assert _hub() == 1\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_maps = extract_code_maps(snapshot)
+    graph = build_relationship_graph(code_maps, "3" * 64)
+
+    selected = cards_module._priority_paths(
+        code_maps,
+        SemanticCardOptions(max_model_files=2),
+        graph=graph,
+        changed_paths=(),
+    )
+
+    assert selected == {"hub.py", "tests/test_hub.py"}
+
+
+def test_barrel_policy_distinguishes_reexports_from_executable_initializer(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "barrel"
+    package.mkdir()
+    (package / "target.py").write_text("def thing():\n    return 1\n", encoding="utf-8")
+    (package / "__init__.py").write_text(
+        "from .target import thing\n__all__ = ['thing']\n", encoding="utf-8"
+    )
+    executable = tmp_path / "executable"
+    executable.mkdir()
+    (executable / "target.py").write_text(
+        "def thing():\n    return 1\n", encoding="utf-8"
+    )
+    (executable / "__init__.py").write_text(
+        "from .target import thing\nthing()\n", encoding="utf-8"
+    )
+    maps = {item.path: item for item in extract_code_maps(scan_repository(tmp_path))}
+
+    assert cards_module._requires_deterministic_card(maps["barrel/__init__.py"])
+    assert not cards_module._requires_deterministic_card(maps["executable/__init__.py"])
+
+
+def test_inferred_relationships_validate_and_rebind_both_renames(
+    tmp_path: Path,
+) -> None:
+    source_text = "def source():\n    return 'semantic link'\n"
+    target_text = "def target():\n    return 'target'\n"
+    (tmp_path / "source.py").write_text(source_text, encoding="utf-8")
+    (tmp_path / "target.py").write_text(target_text, encoding="utf-8")
+    candidate_counts: list[int] = []
+
+    def respond(request: object, call: int) -> str:
+        del call
+        trusted = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidates = trusted["relationship_candidates"]
+        candidate_counts.append(len(candidates))
+        relationships: list[dict[str, object]] = []
+        if trusted["path"] == "source.py":
+            target = next(item for item in candidates if item["symbol"] == "target")
+            relationships = [
+                {
+                    "target_candidate_id": target["candidate_id"],
+                    "evidence_ids": ["symbol:0000"],
+                },
+                {
+                    "target_candidate_id": target["candidate_id"],
+                    "evidence_ids": ["symbol:0000"],
+                },
+                {
+                    "target_candidate_id": "target:" + "f" * 64,
+                    "evidence_ids": ["symbol:0000"],
+                },
+            ]
+        payload = json.loads(_response())
+        payload["inferred_relationships"] = relationships
+        return json.dumps(payload)
+
+    provider = _provider(respond)
+    initial = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    source_card = load_semantic_card(tmp_path, "source.py", manifest=initial.manifest)
+    structural_graph = load_relationship_graph(
+        tmp_path, manifest=initial.structural.manifest
+    )
+    enriched_graph = load_relationship_graph(tmp_path, manifest=initial.manifest)
+
+    assert candidate_counts and max(candidate_counts) <= 24
+    assert source_card.quality == "partial"
+    assert len(source_card.inferred_relationships) == 1
+    assert source_card.inferred_relationships[0].target_path == "target.py"
+    assert any(edge.provenance == "model-inferred" for edge in enriched_graph.edges)
+    assert enriched_graph.file_metrics == structural_graph.file_metrics
+
+    (tmp_path / "source.py").rename(tmp_path / "renamed_source.py")
+    source_renamed = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    rebound_source = load_semantic_card(
+        tmp_path, "renamed_source.py", manifest=source_renamed.manifest
+    )
+    assert provider.call_count == 2
+    assert rebound_source.path == "renamed_source.py"
+    assert rebound_source.inferred_relationships[0].target_path == "target.py"
+
+    (tmp_path / "target.py").rename(tmp_path / "renamed_target.py")
+    target_renamed = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    rebound_target = load_semantic_card(
+        tmp_path, "renamed_source.py", manifest=target_renamed.manifest
+    )
+    assert provider.call_count == 2
+    assert rebound_target.inferred_relationships[0].target_path == "renamed_target.py"
+
+    (tmp_path / "renamed_target.py").write_text(
+        "def target():\n    return 'changed target'\n", encoding="utf-8"
+    )
+    stale_target = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    stale_source = load_semantic_card(
+        tmp_path, "renamed_source.py", manifest=stale_target.manifest
+    )
+    stale_graph = load_relationship_graph(tmp_path, manifest=stale_target.manifest)
+
+    assert provider.call_count == 3
+    assert stale_source.synopsis.text == "Handles repository requests."
+    assert stale_source.inferred_relationships == ()
+    assert stale_source.quality == "partial"
+    assert not any(edge.provenance == "model-inferred" for edge in stale_graph.edges)

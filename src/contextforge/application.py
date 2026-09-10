@@ -75,6 +75,7 @@ from contextforge.intelligence import (
     load_file_code_map,
     load_file_semantic_analysis,
     load_manifest,
+    load_relationship_graph,
     load_repository_overview,
     load_semantic_card,
     normalize_analyzer_identity,
@@ -514,6 +515,10 @@ async def _build_repository_index(
                 provider,
                 structural=structural.manifest,
                 code_maps=structural.code_maps,
+                relationship_graph=load_relationship_graph(
+                    root, manifest=structural.manifest
+                ),
+                changed_paths=structural.extracted_paths,
                 options=SemanticCardOptions(
                     scope=semantic_scope if provider is not None else "none",
                     max_model_files=64 if max_files is None else max_files,

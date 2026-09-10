@@ -362,6 +362,7 @@ class FileCodeMap(IndexModel):
     analyzer: AnalyzerIdentity
     parse_status: ParseStatus
     line_count: NonNegativeInt
+    module_has_executable_code: bool = False
     source_regions: tuple[SourceRange, ...] = ()
     source_regions_truncated: bool = False
     module_docstring: str | None = None
@@ -474,6 +475,7 @@ class FileCodeMap(IndexModel):
                 raise ValueError("source range exceeds the canonical source line count")
         if self.parse_status in {"unsupported", "parse_error"} and (
             self.module_docstring is not None
+            or self.module_has_executable_code
             or self.imports
             or self.exports
             or self.top_level_constants

@@ -23,7 +23,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="4",
+    analyzer_version="5",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -384,6 +384,9 @@ def extract_polyglot_code_map(
         analyzer=POLYGLOT_ANALYZER,
         parse_status="partial" if diagnostics or omitted else "parsed",
         line_count=selected.source_line_count,
+        module_has_executable_code=_module_has_executable_code(
+            tree.root_node, language_name
+        ),
         symbols=tuple(symbols),
         diagnostics=tuple(
             sorted(
@@ -396,6 +399,13 @@ def extract_polyglot_code_map(
             )
         ),
     )
+
+
+def _module_has_executable_code(root: Node, language: str) -> bool:
+    if language not in {"JavaScript", "TypeScript"}:
+        return False
+    allowed = {"comment", "empty_statement", "export_statement", "import_statement"}
+    return any(child.type not in allowed for child in root.named_children)
 
 
 def _binding(

@@ -90,6 +90,21 @@ class RelationshipGraphEdge(IndexModel):
         return validate_portable_relative_path(value)
 
 
+class InferredGraphLink(IndexModel):
+    """Grounded semantic link ready for projection into an enriched graph."""
+
+    source_file_path: str
+    source_symbol_id: str | None = None
+    source_range: SourceRange
+    target_file_path: str
+    target_symbol_id: str | None = None
+
+    @field_validator("source_file_path", "target_file_path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+
 class FileGraphMetrics(IndexModel):
     """Deterministic file projection used by retrieval and map rendering."""
 
@@ -315,6 +330,45 @@ def build_orientation_map(
         source_snapshot_digest=graph.source_snapshot_digest,
         files=files,
         modules=modules,
+    )
+
+
+def add_model_inferred_edges(
+    graph: RelationshipGraph, links: tuple[InferredGraphLink, ...]
+) -> RelationshipGraph:
+    """Replace inferred projections without changing structural centrality metrics."""
+
+    known = {item.node_id for item in graph.nodes}
+    edges = {
+        item.edge_id: item
+        for item in graph.edges
+        if item.provenance != "model-inferred"
+    }
+    for link in links:
+        source_node_id = (
+            symbol_node_id(link.source_symbol_id)
+            if link.source_symbol_id is not None
+            else file_node_id(link.source_file_path)
+        )
+        target_node_id = (
+            symbol_node_id(link.target_symbol_id)
+            if link.target_symbol_id is not None
+            else file_node_id(link.target_file_path)
+        )
+        if source_node_id not in known or target_node_id not in known:
+            continue
+        edge = _edge(
+            "reference",
+            source_node_id,
+            target_node_id,
+            link.source_file_path,
+            link.source_range,
+            "model-inferred",
+            "semantic_card_closed_candidate",
+        )
+        edges[edge.edge_id] = edge
+    return graph.model_copy(
+        update={"edges": tuple(sorted(edges.values(), key=lambda item: item.edge_id))}
     )
 
 
@@ -590,6 +644,7 @@ __all__ = [
     "PAGERANK_TOLERANCE",
     "EdgeProvenance",
     "FileGraphMetrics",
+    "InferredGraphLink",
     "OrientationFile",
     "OrientationMap",
     "OrientationModule",
@@ -599,6 +654,7 @@ __all__ = [
     "RelationshipKind",
     "build_orientation_map",
     "build_relationship_graph",
+    "add_model_inferred_edges",
     "file_node_id",
     "symbol_node_id",
 ]

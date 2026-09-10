@@ -240,6 +240,7 @@ def extract_python_code_map(
         analyzer=PYTHON_ANALYZER,
         parse_status="parsed",
         line_count=selected.source_line_count,
+        module_has_executable_code=_module_has_executable_code(module),
         module_docstring=ast.get_docstring(module, clean=False),
         imports=imports,
         exports=exports,
@@ -345,6 +346,35 @@ def _collect_symbol_drafts(module: ast.Module, path: str) -> list[_SymbolDraft]:
             item.kind.value,
         ),
     )
+
+
+def _module_has_executable_code(module: ast.Module) -> bool:
+    for statement in module.body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        ):
+            continue
+        if isinstance(statement, ast.Assign):
+            if (
+                len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and statement.targets[0].id == "__all__"
+                and _static_string_collection(statement.value) is not None
+            ):
+                continue
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "__all__"
+            and _static_string_collection(statement.value) is not None
+        ):
+            continue
+        return True
+    return False
 
 
 def _assign_symbol_ids(drafts: list[_SymbolDraft], path: str) -> None:
