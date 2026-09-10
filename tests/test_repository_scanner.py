@@ -8,7 +8,11 @@ from typing import Never, Protocol
 import pytest
 
 import contextforge.repositories.scanner as scanner_module
-from contextforge.repositories import ScanOptions, scan_repository
+from contextforge.repositories import (
+    ScanOptions,
+    register_generated_artifact,
+    scan_repository,
+)
 from contextforge.repositories.files import FileInspection
 from contextforge.repositories.files import inspect_file as file_inspector
 
@@ -687,3 +691,37 @@ def test_root_directory_read_failure_is_not_silently_swallowed(
 
     with pytest.raises(PermissionError, match="cannot list root"):
         scan_repository(tmp_path)
+
+
+def test_generated_artifact_registry_is_digest_bound_and_corruption_is_safe(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    (root / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    artifact = root / "capsule.json"
+    artifact.write_text('{"schema_version":2}\n', encoding="utf-8")
+    lookalike = root / "user-capsule.json"
+    lookalike.write_text('{"schema_version":2}\n', encoding="utf-8")
+
+    assert register_generated_artifact(root, artifact, kind="capsule") is True
+    registered = scan_repository(root)
+    assert _paths(registered.files) == ["source.py", "user-capsule.json"]
+
+    artifact.write_text('{"schema_version":2,"edited":true}\n', encoding="utf-8")
+    edited = scan_repository(root)
+    assert _paths(edited.files) == [
+        "capsule.json",
+        "source.py",
+        "user-capsule.json",
+    ]
+
+    assert register_generated_artifact(root, artifact, kind="capsule") is True
+    registry = root / ".contextforge" / "generated-artifacts.json"
+    registry.write_text("not-json", encoding="utf-8")
+    corrupt = scan_repository(root)
+    assert "capsule.json" in _paths(corrupt.files)
+
+    outside = tmp_path / "outside.xml"
+    outside.write_text("<contextforge />\n", encoding="utf-8")
+    assert register_generated_artifact(root, outside, kind="prompt") is False

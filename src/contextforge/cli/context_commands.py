@@ -71,7 +71,12 @@ from contextforge.project_config import (
     load_project_configuration,
     resolve_provider_configuration,
 )
-from contextforge.repositories import scan_repository
+from contextforge.repositories import (
+    GeneratedArtifactRegistryError,
+    register_generated_artifact,
+    scan_repository,
+)
+from contextforge.repositories.generated import GeneratedArtifactKind
 from contextforge.repositories.ignore import IgnoreRulesError
 
 
@@ -779,7 +784,8 @@ def create_context(
 
     try:
         written_path = write_output_atomic(output, representation, force=force)
-    except OutputWriteError as exc:
+        register_generated_artifact(path, written_path, kind="package")
+    except (GeneratedArtifactRegistryError, OutputWriteError) as exc:
         _exit_with_error(str(exc), code=1)
     typer.echo(f"Output written to {written_path}")
 
@@ -932,6 +938,7 @@ def _create_capsule_context(
         )
         if prompt_output is not None:
             written = write_output_atomic(prompt_output, compiled.prompt, force=force)
+            register_generated_artifact(path, written, kind="prompt")
             typer.echo(f"Compiled prompt written to {written}", err=True)
     except (
         FileNotFoundError,
@@ -954,7 +961,13 @@ def _create_capsule_context(
         _exit_with_error(str(exc), code=1)
     finally:
         _close_provider(provider)
-    _publish_or_echo(representation, output=output, force=force)
+    _publish_or_echo(
+        representation,
+        output=output,
+        force=force,
+        repository_root=path,
+        artifact_kind=("capsule" if output_format is ContextFormat.json else "prompt"),
+    )
 
 
 @context_app.command("review")
@@ -1114,6 +1127,7 @@ def _create_automatic_context(
             written = write_output_atomic(
                 prompt_output, compiled.prompt.body, force=force
             )
+            register_generated_artifact(path, written, kind="prompt")
             typer.echo(f"Compiled prompt written to {written}", err=True)
     except (
         FileNotFoundError,
@@ -1141,7 +1155,13 @@ def _create_automatic_context(
         progress_renderer.close()
         _close_provider(provider)
 
-    _publish_or_echo(representation, output=output, force=force)
+    _publish_or_echo(
+        representation,
+        output=output,
+        force=force,
+        repository_root=path,
+        artifact_kind=("package" if output_format is ContextFormat.json else "prompt"),
+    )
 
 
 def _publish_or_echo(
@@ -1149,13 +1169,19 @@ def _publish_or_echo(
     *,
     output: Path | None,
     force: bool,
+    repository_root: Path | None = None,
+    artifact_kind: GeneratedArtifactKind | None = None,
 ) -> None:
     if output is None:
         typer.echo(representation, nl=False)
         return
     try:
         written_path = write_output_atomic(output, representation, force=force)
-    except OutputWriteError as exc:
+        if repository_root is not None and artifact_kind is not None:
+            register_generated_artifact(
+                repository_root, written_path, kind=artifact_kind
+            )
+    except (GeneratedArtifactRegistryError, OutputWriteError) as exc:
         _exit_with_error(str(exc), code=1)
     typer.echo(f"Output written to {written_path}")
 

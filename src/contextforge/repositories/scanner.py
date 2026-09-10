@@ -12,6 +12,7 @@ from contextforge.repositories.files import (
     inspect_file,
     normalize_relative_path,
 )
+from contextforge.repositories.generated import load_generated_artifact_digests
 from contextforge.repositories.ignore import IgnoreRules, load_ignore_rules
 from contextforge.repositories.language import detect_language
 from contextforge.repositories.models import (
@@ -54,7 +55,14 @@ def scan_repository(
         include_contextforgeignore=active_options.respect_contextforgeignore,
     )
     state = _ScanState()
-    _scan_directories(resolved_root, rules, active_options, state)
+    generated_artifacts = load_generated_artifact_digests(resolved_root)
+    _scan_directories(
+        resolved_root,
+        rules,
+        active_options,
+        state,
+        generated_artifacts,
+    )
 
     files = tuple(sorted(state.files, key=lambda item: item.path))
     ignored_files = tuple(sorted(state.ignored_files, key=lambda item: item.path))
@@ -85,6 +93,7 @@ def _scan_directories(
     rules: IgnoreRules,
     options: ScanOptions,
     state: _ScanState,
+    generated_artifacts: dict[str, str],
 ) -> None:
     pending_directories = [(root, rules)]
     while pending_directories:
@@ -159,7 +168,14 @@ def _scan_directories(
                     child_directories.append(path)
             elif stat.S_ISREG(mode):
                 state.discovered_count += 1
-                _scan_file(path, relative_path, directory_rules, options, state)
+                _scan_file(
+                    path,
+                    relative_path,
+                    directory_rules,
+                    options,
+                    state,
+                    generated_artifacts,
+                )
             else:
                 state.discovered_count += 1
                 state.skipped_files.append(
@@ -184,6 +200,7 @@ def _scan_file(
     rules: IgnoreRules,
     options: ScanOptions,
     state: _ScanState,
+    generated_artifacts: dict[str, str],
 ) -> None:
     ignore_match = rules.match(relative_path)
     if ignore_match is not None:
@@ -208,6 +225,8 @@ def _scan_file(
                     reason=inspection.binary_reason or "binary",
                 )
             )
+            return
+        if generated_artifacts.get(relative_path) == inspection.sha256:
             return
     except FileTooLargeError as exc:
         state.skipped_files.append(

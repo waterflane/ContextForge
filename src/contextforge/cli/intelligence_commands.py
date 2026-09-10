@@ -551,12 +551,21 @@ def clean_index(
 
 def _render_build_summary(report: IndexBuildReport) -> str:
     semantic = report.semantic
-    maps = report.maps
     analyzed_count = 0 if semantic is None else len(semantic.analyzed_paths)
     reused_count = 0 if semantic is None else len(semantic.reused_paths)
     failed_count = 0 if semantic is None else len(semantic.failed_paths)
     provider = report.provider_id or "disabled"
     model = report.model_id or "disabled"
+    artifacts = report.manifest.artifacts
+    map_status = ", ".join(
+        f"{name}={'current' if reference is not None else 'absent'}"
+        for name, reference in (
+            ("orientation", artifacts.orientation_map),
+            ("architecture", artifacts.architecture_map),
+            ("conventions", artifacts.conventions_map),
+            ("features", artifacts.features_map),
+        )
+    )
     lines = [
         "ContextForge repository index",
         f"Generation: {report.manifest.generation_id}",
@@ -567,12 +576,7 @@ def _render_build_summary(report: IndexBuildReport) -> str:
         f"Semantic analyses reused: {reused_count}",
         f"Semantic analyses failed: {failed_count}",
         f"Provider/model: {provider}/{model}",
-        "Global maps: "
-        + (
-            "disabled"
-            if maps is None
-            else ", ".join(f"{item.map_kind}={item.status}" for item in maps.outcomes)
-        ),
+        f"Repository maps: {map_status}",
         f"Status: {'partial' if report.partial else 'complete'}",
     ]
     return "\n".join(lines) + "\n"

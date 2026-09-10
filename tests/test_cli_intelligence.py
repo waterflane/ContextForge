@@ -92,6 +92,10 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
 
     assert built.exit_code == 0, built.output
     assert "Status: complete" in _plain(built.stdout)
+    assert (
+        "Repository maps: orientation=current, architecture=current, "
+        "conventions=current, features=current"
+    ) in _plain(built.stdout)
     first = load_manifest(tmp_path)
     assert all(
         item.semantic_status
@@ -215,6 +219,18 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     assert "Capsule schema: 2" in reviewed.stdout
     assert '<contextforge schema_version="2">' in (tmp_path / "capsule.xml").read_text(
         encoding="utf-8"
+    )
+
+    updated = _invoke("index", "update", str(tmp_path), "--provider", "none")
+    assert updated.exit_code == 0, updated.output
+    assert tuple(item.path for item in load_manifest(tmp_path).files) == ("app.py",)
+
+    capsule_path.write_text('{"edited":true}\n', encoding="utf-8")
+    changed_output = _invoke("index", "update", str(tmp_path), "--provider", "none")
+    assert changed_output.exit_code == 0, changed_output.output
+    assert tuple(item.path for item in load_manifest(tmp_path).files) == (
+        "app.py",
+        "capsule.json",
     )
 
 
