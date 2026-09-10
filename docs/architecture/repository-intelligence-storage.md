@@ -33,13 +33,11 @@ relationship resolution, incremental invalidation, atomic staged records,
 immutable generations, an atomic active pointer, bounded single-writer locking,
 recovery, cleanup, and scanner protection.
 
-The semantic builders may call the approved provider adapter for bounded file,
-symbol, and hierarchical repository analysis. `*.interpretation.json`,
-`architecture.json`, and `features.json` are model interpretations; source and
-CodeMap facts remain authoritative. `overview.json` is a deterministic CodeMap
-projection. This boundary still does not perform task-specific discovery,
-context selection, final prompt compilation, CLI orchestration, or MCP. See
-[Repository architecture and feature maps](repository-maps.md).
+The semantic-card builder may call the approved provider adapter for bounded
+file analysis. Grounded cards remain interpretations; source, CodeMaps, and
+structural graph edges remain authoritative. Repository maps are deterministic
+aggregations and task retrieval/Context Capsule compilation use pinned public
+APIs. See [Index v3 retrieval and Context Capsule compiler](index-v3-context-compiler.md).
 
 ## Ownership and layout
 
@@ -54,12 +52,17 @@ The layout follows the approved immutable-generation design:
     staging/<run-id>/                 # resumable, not visible to readers
     generations/<generation-id>/
       manifest.json                   # complete IndexManifest
-      files/                          # per-file records
-      symbols.jsonl
-      relationships.jsonl
-      overview.json
-      architecture.json
-      features.json
+      files/*.facts.json              # source identity + deterministic CodeMaps
+      files/*.interpretation.json     # sparse grounded Semantic Cards
+      relationships.jsonl             # canonical structural edge records
+      relationship-graph.json         # graph metrics and projections
+      retrieval-structural.json       # structural BM25 inputs/postings
+      retrieval-semantic.json         # enriched BM25 inputs/postings
+      orientation.json                # full structural orientation map
+      architecture.json               # deterministic enriched map
+      conventions.json                # deterministic enriched map
+      features.json                   # deterministic enriched map
+    cache/semantic/<prefix>/<key>.json # path-neutral validated model payloads
   contexts/                           # generated saved context packages
   runs/                               # generated operational diagnostics
 ```
@@ -101,15 +104,17 @@ Mutation APIs require an active `IndexWriteLock`. Readers do not take the lock.
 `load_index_record()` accepts a caller-pinned manifest so a multi-record reader
 does not need to reopen the active pointer between reads.
 
-## Manifest schema version 2
+## Manifest schema version 3
 
-New index pointers, manifests, records, CodeMaps and semantic records use v2.
-The separate legacy loader permits read-only v1 inspection and preserves its
-original digest. Legacy records are stale and are never reused in a v2 build.
-Build/update publishes only a consistent generation. The application workflow
-keeps intermediate structural, semantic and map generations private until the
-final atomic pointer switch; a failure leaves the previous pointer untouched.
-Old generations are not deleted by migration.
+New index pointers, manifests, records, CodeMaps, graph records, retrieval
+postings, maps, and Semantic Cards use v3. A v2 index is recognized by status
+only and reports `rebuild_required`; retrieval refuses it and `index update`
+requires a fresh `index build`. Semantic v2 data is not migrated. Old immutable
+generations are not deleted automatically.
+
+Publication has two transactions in one writer-lock lifetime. The structural
+generation becomes active first. Enrichment then publishes a second generation
+or leaves the structural one active on failure, timeout, or cancellation.
 
 Persisted models are frozen Pydantic models with unknown fields forbidden.
 Canonical manifest JSON is UTF-8, sorted-key compact JSON with LF termination.
@@ -136,7 +141,7 @@ except the self-referential `generation_id` field. File-record content is bound
 through each record's SHA-256. API keys, bearer tokens, headers, and credential
 objects are not fields in any persisted schema and unknown fields are rejected.
 
-## CodeMap schema version 2
+## CodeMap schema version 3
 
 CodeMaps also retain bounded deterministic `source_regions` and
 `source_regions_truncated`, including when no model is configured. These are

@@ -3,7 +3,9 @@
 ContextForge Bridge is a persistent, workspace-bound service for trusted local
 integrations. Protocols 1.0 and 1.1 are model-free and read-only. Protocol 2.0
 adds opt-in, tracked index mutation through the same application workflow used
-by the CLI. Start it as a child process:
+by the CLI. Protocol 2.1 adds generation-pinned read-only map, search, symbol,
+and Context Capsule compilation plus an independent whole-job timeout. Start it
+as a child process:
 
 ```bash
 contextforge bridge --stdio --workspace /path/to/repository
@@ -46,12 +48,14 @@ require a new major version. The normative frame schemas are
 [`contextforge-bridge-v1.schema.json`](../schemas/contextforge-bridge-v1.schema.json)
 and
 [`contextforge-bridge-v2.schema.json`](../schemas/contextforge-bridge-v2.schema.json).
+The 2.1 additions are defined by
+[`contextforge-bridge-v2.1.schema.json`](../schemas/contextforge-bridge-v2.1.schema.json).
 
 `hello.capabilities.schemas` reports independent persisted/wire formats rather
-than inferring them from the bridge version: index, manifest, and record are
-current 2/readable 1–2; progress is current 3/readable 1–3; context package is
-current/readable 1. Bridge 1 response compatibility does not depend on these
-versions.
+than inferring them from the bridge version. Bridge 2.1 advertises index,
+manifest, record, and Semantic Card schema 3, retrieval schema 3, Context
+Capsule schema 2, progress schema 3, and legacy ContextPackage schema 1.
+Earlier negotiated versions retain their original capability shape.
 
 ## Repository flow
 
@@ -95,6 +99,10 @@ index cannot be mistaken for a fully enriched one.
 | `status` | none | Current readiness, source drift, and read-only index status |
 | `snapshot` | none | New authoritative digest and bounded inventory summary |
 | `index` (v2) | action and expected snapshot digest | Atomic tracked build/update job using the application workflow |
+| `map` (v2.1) | expected snapshot digest | Full pinned orientation map |
+| `search` (v2.1) | digest and task | CandidateCards from deterministic retrieval; optional bounded rerank |
+| `symbol` (v2.1) | digest and query | Verified exact/qualified symbol matches |
+| `compile` (v2.1) | digest, task, and token budget | Retrieval plus Context Capsule v2 compilation |
 | `discover` | `expected_snapshot_digest`, `task` | Deterministic candidates and preparation identity; never a model call |
 | `expand` | digest, preparation ID, operation | One bounded read-only evidence result and cumulative usage |
 | `read` | digest, preparation ID, non-empty items | All-or-nothing verified source excerpts and selection identity |
@@ -118,20 +126,21 @@ Negotiate `2.0`, call `snapshot`, then pass the exact digest to `index`:
 ```
 
 `action` is `build` or `update`. Optional fields mirror the bounded CLI provider,
-model, endpoint, concurrency, timeout, context-window, JSON repair, output-token,
-failure, force, file-limit, and stale-lock recovery policies. `fail_fast` and
-`max_failures` are mutually exclusive. `fail_on_error` alone keeps its existing
-meaning: finish all eligible work but do not publish if any semantic file fails.
+model, endpoint, concurrency, per-attempt timeout, context-window, JSON repair,
+output-token, semantic scope/request/input/chunk ceilings, failure, force,
+file-limit, and stale-lock recovery policies. Bridge 2.1 additionally accepts
+`operation_timeout` for the whole job. `fail_fast` and `max_failures` are
+mutually exclusive.
 
 The bridge owns scanning, lock acquisition, staging, generation validation, and
-atomic publication. The application workflow verifies the expected snapshot
-against the exact scan used for the build and rescans immediately before
-publication. Cancellation is checked again at manifest activation. Timeout,
-clean EOF, and shutdown signal the application cancellation token; partial
-generations never become active. A timed-out index request returns
-`REQUEST_TIMEOUT` at the caller's deadline while cooperative worker cleanup
-continues as tracked bridge work. Its writer lock remains held until that cleanup
-finishes, preventing a second writer from observing half-finished staging.
+atomic publication. The application verifies the expected snapshot against the
+exact scan and rescans before each publication. The structural generation is
+published first; enrichment may publish a second generation. `timeout_ms`
+limits only the client's wait for a response and never cancels an index job.
+The job remains tracked by `operation_id`, continues cleanup, and retains the
+writer lock. `request_timeout` limits one provider attempt and
+`operation_timeout` limits the whole job. Explicit cancellation, clean EOF, and
+shutdown still signal the job cancellation token.
 
 While the request runs, Bridge 2 emits notifications before its final response:
 
@@ -145,13 +154,24 @@ operation but may contain gaps when cumulative snapshots from a synchronous
 producer burst are coalesced. A successful result contains `generation_id`,
 `snapshot_digest`, `index_schema`, statistics, and `partial`.
 
-Clients must continuously consume Bridge stdout while an index request is
-active. Progress delivery uses one writer task and a bounded 256-event queue.
-An instantaneous local producer burst retains the newest cumulative snapshot
-instead of being mistaken for a slow client. If no queue slot becomes available
-for 5 seconds, the index job is cancelled without publication and returns
-`INDEX_BUILD_FAILED` with `error.data.error_code` set to
-`progress_backpressure` and `retryable` set to `true`.
+Clients should continuously consume Bridge stdout while an index request is
+active. Progress delivery uses one writer task and a bounded queue. Overflow
+coalesces or replaces intermediate cumulative events and reports coalesced and
+dropped counts. Terminal state has priority and is always delivered. A slow or
+abandoned progress consumer cannot cancel the index job.
+
+## Bridge 2.1 read-only operations
+
+After negotiating `2.1`, call `snapshot` and pass its digest to every new
+operation. `map` returns the pinned orientation record. `search` returns
+RetrievalResult v3; reranking is off by default. `symbol` searches verified
+CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
+files, optional diff text, and context/history/response/safety budgets, then
+returns a Context Capsule v2 and stable prompt.
+
+These methods do not grant source-write, shell, subprocess, Git mutation, or
+index mutation authority. A source or generation identity change fails the
+request instead of silently recompiling against mixed snapshots.
 
 JSON-RPC standard errors retain their numeric meaning. ContextForge also puts a
 stable uppercase typed code in `error.data.code`. Integration-relevant v1 codes
@@ -214,9 +234,10 @@ needed.
 
 Send `shutdown` after outstanding work is resolved, wait for its response, then
 close stdin and wait for the child process. Clean stdin EOF also stops the
-bridge. For Bridge 1 this remains read-only. Bridge 2 cancellation does not
-activate a partial generation; abrupt termination may leave recoverable staging
-or lock metadata, while the prior active generation remains authoritative.
+bridge. For Bridge 1 this remains read-only. Bridge 2 cancellation cannot
+invalidate an already published structural generation; abrupt termination may
+leave recoverable staging or lock metadata, while the last active generation
+remains authoritative.
 
 Shutdown and clean EOF use the same bounded drain. The bridge first stops
 accepting work, signals every active request's cooperative cancellation event,
@@ -224,9 +245,9 @@ and waits at most 5 seconds. Any request task still pending then receives direct
 asyncio cancellation and gets at most another 0.1 seconds for cleanup. After
 that 5.1-second maximum drain budget, the bridge detaches any remaining task and
 does not wait for it again. These internal bridge limits are fixed rather than CLI
-configurable. Caller timeout returns its JSON-RPC error immediately; the timed-out
-index cleanup remains part of this shutdown drain and cannot emit later progress
-or return a partial success. The shutdown response remains a normal serialized
+configurable. Caller timeout returns its JSON-RPC error immediately; the tracked
+index job can continue normally until its operation timeout, explicit
+cancellation, or shutdown. The shutdown response remains a normal serialized
 JSON-RPC frame.
 
 ## Security and mutation boundary
@@ -247,7 +268,8 @@ Bridge v1 cannot write repository source, mutate Git, invoke a shell or arbitrar
 subprocess, call a model/provider, access external data, mutate the index, or
 publish artifacts to disk. Bridge 2 relaxes only model/provider access under the
 configured policy and verified atomic writes beneath `.contextforge/index`.
-Neither version writes source or Git state. `package` returns the canonical
+Bridge 2.1 adds only read-only repository-context operations. No version writes
+source or Git state. `package` returns the canonical
 package in memory. The workspace is fixed at process start and requests cannot
 replace it.
 

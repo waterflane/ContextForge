@@ -140,7 +140,11 @@ def suggest_context(
     ] = None,
     includes: Annotated[
         list[str] | None,
-        typer.Option("--include", help="Pin one exact snapshot path; repeatable."),
+        typer.Option(
+            "--include",
+            "--working-file",
+            help="Pin one exact snapshot path/Working Set file; repeatable.",
+        ),
     ] = None,
     excludes: Annotated[
         list[str] | None,

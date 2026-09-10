@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/retrieval-result-v3.schema.json",
+  "title": "ContextForge Retrieval Result v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_snapshot_digest", "generation_id", "task", "candidates", "reranked", "provider_calls", "diagnostics"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+    "generation_id": { "$ref": "#/$defs/sha256" },
+    "task": { "type": "string", "minLength": 1 },
+    "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+    "reranked": { "type": "boolean" },
+    "provider_calls": { "type": "integer", "minimum": 0 },
+    "diagnostics": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_line", "start_column", "end_line", "end_column"],
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "costs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["map", "summary", "slice", "full"],
+      "properties": {
+        "map": { "type": "integer", "minimum": 0 },
+        "summary": { "type": ["integer", "null"], "minimum": 0 },
+        "slice": { "type": ["integer", "null"], "minimum": 0 },
+        "full": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "path", "source_sha256", "synopsis", "exact_group", "score", "bm25_score", "matched_concepts", "matched_symbols", "evidence_ranges", "graph_neighbors", "provenance", "freshness", "estimated_cost", "suggested_representation"],
+      "properties": {
+        "candidate_id": { "type": "string" },
+        "path": { "type": "string", "minLength": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "synopsis": { "type": "string" },
+        "exact_group": { "enum": ["exact_path", "exact_qualified_symbol", "exact_symbol", "exact_source_identifier", "approximate"] },
+        "score": { "type": "number", "minimum": 0 },
+        "bm25_score": { "type": "number", "minimum": 0 },
+        "matched_concepts": { "type": "array", "items": { "type": "string" } },
+        "matched_symbols": { "type": "array", "items": { "type": "string" } },
+        "evidence_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "source_range", "evidence_id", "strength"],
+            "properties": {
+              "path": { "type": "string" },
+              "source_range": { "$ref": "#/$defs/range" },
+              "evidence_id": { "type": ["string", "null"] },
+              "strength": { "enum": ["verified", "grounded"] }
+            }
+          }
+        },
+        "graph_neighbors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "distance", "relationship_kinds", "provenance"],
+            "properties": {
+              "path": { "type": "string" },
+              "distance": { "enum": [1, 2] },
+              "relationship_kinds": { "type": "array", "items": { "type": "string" } },
+              "provenance": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "provenance": { "type": "array", "items": { "type": "string" } },
+        "freshness": { "const": "current" },
+        "estimated_cost": { "$ref": "#/$defs/costs" },
+        "suggested_representation": { "enum": ["map", "summary", "slice", "full", null] }
+      }
+    }
+  }
+}

@@ -57,3 +57,27 @@ Structured-response repair precedence is CLI `--json-repair-attempts`,
 `CONTEXTFORGE_JSON_REPAIR_ATTEMPTS`, `config.local.toml`, `config.toml`, then
 the built-in default of five. Values are clamped to 0–10; zero keeps validation
 and deterministic normalization but disables model-assisted repair.
+
+## Index v3 semantic scheduler
+
+Project model settings may bound sparse Semantic Card enrichment independently
+of provider retry and transport limits:
+
+```toml
+[models]
+semantic_scope = "priority"
+semantic_max_model_files = 64
+semantic_max_requests = 96
+semantic_max_input_tokens = 256000
+semantic_max_chunks_per_file = 4
+```
+
+`priority` is the default and favors changed/added files, entrypoints, public
+APIs, central modules, important docs/config, and related tests. `all` considers
+every eligible file within the same hard ceilings. `none` publishes the usable
+structural generation without model calls. CLI options of the same names with
+hyphens override the project values for one build/update.
+
+Bridge timeouts are intentionally independent: request `timeout_ms` is client
+wait time, `request_timeout` is one provider attempt, and `operation_timeout`
+is the entire tracked index job. A client timeout does not cancel the job.

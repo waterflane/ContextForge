@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Feature releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html),
 and Python distribution versions follow PEP 440.
 
+## [Unreleased]
+
+### Added
+
+- Added Index v3 structural-first generations containing deterministic
+  CodeMaps, a provenance-bearing relationship graph, PageRank/connectivity
+  metrics, structural retrieval postings, and a complete orientation map.
+- Added sparse grounded Semantic Cards with code/documentation/config/test
+  profiles, item-level validation, one bounded repair, deterministic fallback,
+  priority scheduling, and a path-neutral content-addressed cache.
+- Added persisted exact/BM25/graph retrieval with CandidateCards, optional
+  closed-schema reranking, Working Set and diff boosts, and deterministic
+  fallback on every provider failure.
+- Added TokenEstimator, ContextBudget, MAP/SUMMARY/SLICE/FULL representations,
+  Context Capsule v2, and stable `<contextforge schema_version="2">` prompts.
+- Added public Python map/retrieval/compiler APIs, `contextforge map`, Capsule v2
+  CLI options, read-only MCP and HTTP map/search/symbol/compile operations, and
+  Bridge 2.1 with advertised artifact schemas.
+- Added benchmark required ranges, optional files, useful-token accounting,
+  file precision/recall, precision@5, range/token precision, model/provider
+  calls, lifecycle latency, and ungrounded-claim rate.
+
+### Changed
+
+- Index build/update now publish a usable structural generation before semantic
+  enrichment. Enrichment failure, timeout, or cancellation leaves that
+  structural generation active; old immutable generations remain until explicit
+  `index clean`.
+- Index/manifest/record schemas are version 3. Index v2 is status-readable as
+  `rebuild_required`, excluded from retrieval, rejected by `index update`, and
+  replaced only by a full build without semantic migration.
+- Task-based `context suggest` and `context create` default to Index v3 retrieval
+  and Capsule v2 when available. `--legacy-discovery` and `--legacy-handoff`
+  retain the previous flow; manual ContextPackage v1 creation is unchanged.
+- Repository orientation, architecture, conventions, and feature maps are now
+  deterministic aggregations of graph, CodeMaps, and grounded cards, without
+  separate repository-wide model calls.
+
+### Fixed
+
+- Decoupled Bridge progress delivery from index cancellation: queue overflow
+  coalesces intermediate events, counts dropped/coalesced updates, and always
+  prioritizes terminal state. A slow progress consumer cannot cancel a job.
+- Separated Bridge client wait timeout, per-provider-attempt timeout, and whole
+  operation timeout. Client timeout leaves the job tracked by `operation_id`
+  with its writer lock held through completion/cleanup; explicit cancellation
+  and shutdown still cancel it.
+
 ## [0.5.1] - 2026-09-05
 
 ### Added

@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/contextforge-bridge-v2.1.schema.json",
+  "title": "ContextForge trusted-local bridge protocol v2.1",
+  "description": "Bridge 2.0 plus Index v3 controls and generation-pinned map, search, symbol, and compile operations.",
+  "oneOf": [
+    { "$ref": "contextforge-bridge-v2.schema.json" },
+    { "$ref": "#/$defs/helloRequest" },
+    { "$ref": "#/$defs/indexRequest" },
+    { "$ref": "#/$defs/mapRequest" },
+    { "$ref": "#/$defs/searchRequest" },
+    { "$ref": "#/$defs/symbolRequest" },
+    { "$ref": "#/$defs/compileRequest" },
+    { "$ref": "#/$defs/retrievalSuccess" },
+    { "$ref": "#/$defs/compileSuccess" }
+  ],
+  "$defs": {
+    "id": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "integer" }
+      ]
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 900000 },
+    "baseFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "type": "string" },
+        "params": { "type": "object" }
+      }
+    },
+    "helloRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "hello" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol_version"],
+          "properties": {
+            "protocol_version": { "const": "2.1" },
+            "client_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "timeout_ms": { "$ref": "#/$defs/timeoutMs" }
+          }
+        }
+      }
+    },
+    "indexRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "index" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "expected_snapshot_digest"],
+          "properties": {
+            "action": { "enum": ["build", "update"] },
+            "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+            "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "base_url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "concurrency": { "type": "integer", "minimum": 1, "maximum": 8 },
+            "request_timeout": { "type": "number", "minimum": 1, "maximum": 600 },
+            "operation_timeout": { "type": "number", "minimum": 1, "maximum": 86400 },
+            "context_window": { "type": "integer", "minimum": 1024, "maximum": 2000000 },
+            "json_repair_attempts": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "max_output_tokens": { "type": "integer", "minimum": 96, "maximum": 32768 },
+            "fail_on_error": { "type": "boolean" },
+            "fail_fast": { "type": "boolean" },
+            "max_failures": { "type": "integer", "minimum": 1 },
+            "force_reanalyze": { "type": "boolean" },
+            "max_files": { "type": "integer", "minimum": 1 },
+            "semantic_scope": { "enum": ["priority", "all", "none"] },
+            "semantic_max_requests": { "type": "integer", "minimum": 1 },
+            "semantic_max_input_tokens": { "type": "integer", "minimum": 1 },
+            "semantic_max_chunks_per_file": { "type": "integer", "minimum": 1, "maximum": 4 },
+            "local_only": { "type": "boolean" },
+            "recover_stale_lock": { "type": "boolean" },
+            "confirm_unknown_lock": { "type": "boolean" },
+            "timeout_ms": { "$ref": "#/$defs/timeoutMs" }
+          }
+        }
+      }
+    },
+    "mapRequest": { "$ref": "#/$defs/mapRequestObject" },
+    "mapRequestObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "map" },
+        "params": {
+          "allOf": [{ "$ref": "#/$defs/pinnedParams" }],
+          "unevaluatedProperties": false
+        }
+      }
+    },
+    "pinnedParams": {
+      "type": "object",
+      "required": ["expected_snapshot_digest"],
+      "properties": {
+        "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "timeout_ms": { "$ref": "#/$defs/timeoutMs" }
+      }
+    },
+    "searchParams": {
+      "type": "object",
+      "required": ["expected_snapshot_digest", "task"],
+      "properties": {
+        "expected_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "working_files": { "$ref": "#/$defs/paths" },
+        "diff_paths": { "$ref": "#/$defs/paths" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "rerank": { "type": "boolean" },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "base_url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "request_timeout": { "type": "number", "minimum": 1, "maximum": 600 },
+        "timeout_ms": { "$ref": "#/$defs/timeoutMs" }
+      }
+    },
+    "searchRequest": { "$ref": "#/$defs/searchRequestObject" },
+    "searchRequestObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "search" },
+        "params": {
+          "allOf": [{ "$ref": "#/$defs/searchParams" }],
+          "unevaluatedProperties": false
+        }
+      }
+    },
+    "symbolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "symbol" },
+        "params": {
+          "allOf": [
+            { "$ref": "#/$defs/pinnedParams" },
+            {
+              "type": "object",
+              "required": ["query"],
+              "properties": {
+                "query": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      }
+    },
+    "compileRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "start_line", "end_line"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "compileParams": {
+      "allOf": [
+        { "$ref": "#/$defs/searchParams" },
+        {
+          "type": "object",
+          "properties": {
+            "working_lines": { "type": "array", "items": { "$ref": "#/$defs/compileRange" } },
+            "pinned_full_files": { "$ref": "#/$defs/paths" },
+            "context_window_tokens": { "type": "integer", "minimum": 1 },
+            "history_tokens": { "type": "integer", "minimum": 0 },
+            "response_tokens": { "type": "integer", "minimum": 0 },
+            "safety_margin_tokens": { "type": "integer", "minimum": 0 },
+            "git_diff": { "type": ["string", "null"], "maxLength": 2097152 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "compileRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "compile" },
+        "params": { "$ref": "#/$defs/compileParams" }
+      }
+    },
+    "paths": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "retrievalSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": { "$ref": "retrieval-result-v3.schema.json" }
+      }
+    },
+    "compileSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["capsule", "prompt", "token_count", "estimator_id"],
+          "properties": {
+            "capsule": { "$ref": "context-capsule-v2.schema.json" },
+            "prompt": { "type": "string" },
+            "token_count": { "type": "integer", "minimum": 0 },
+            "estimator_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

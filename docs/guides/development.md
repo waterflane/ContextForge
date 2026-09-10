@@ -52,8 +52,9 @@ ctxf --version
 contextforge doctor
 contextforge index build . --provider fake
 contextforge index status . --format json
-contextforge context suggest . --task "Review this repository" --provider fake
-contextforge --log-level debug context suggest . --task "Review this repository" --provider fake
+contextforge map . --format json
+contextforge context suggest . --task "Review this repository" --no-rerank
+contextforge --log-level debug context suggest . --task "Review this repository"
 contextforge diagnostics config . --format json
 ruff check .
 ruff format --check .
@@ -105,7 +106,12 @@ git diff --check
 Manual offline checks should cover structural/fake `index build`, no-op and
 changed-file `index update`, table/JSON status, clean confirmation/config
 preservation, all discovery modes, automatic and manual context creation,
-portable handoff review, and MCP initialize/list/call/resource exchange.
+portable Capsule v2 and legacy handoff review, and MCP
+initialize/list/call/resource exchange. Index validation must also cover
+structural-first publication, enrichment rollback, v2 rebuild diagnostics,
+graph centrality/provenance, semantic rename-cache reuse, deterministic
+retrieval, all four compiler representations, freshness rejection, and hard
+token budgets.
 Logging validation additionally covers stderr/stdout separation, one-object-
 per-line JSON, rotation retention, Rich live ownership, redirected non-ANSI
 output, secret redaction, local budget rejection without provider dispatch,
@@ -156,7 +162,8 @@ Example client entry:
 
 MCP tests call the protocol adapter directly and exercise a stdio loop with
 in-memory streams. They assert exact tool schemas, structured errors, path and
-byte rejection, resource reads, and the absence of write/sampling capability.
+byte rejection, resource reads, read-only `map`, `search`, `symbol`, and
+`compile`, and the absence of write/sampling capability.
 
 ## Local API
 
@@ -172,3 +179,10 @@ Then check:
 
 - `GET /health`
 - `GET /version`
+- `POST /v1/map`
+- `POST /v1/search`
+- `POST /v1/symbol`
+- `POST /v1/compile`
+
+The `/v1` repository-context endpoints are local, source-read-only, and perform
+no provider calls. They cannot write source, run a shell, or mutate Git.

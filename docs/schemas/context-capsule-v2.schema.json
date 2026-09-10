@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/context-capsule-v2.schema.json",
+  "title": "ContextForge Context Capsule v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task", "snapshot", "repository_map", "working_set", "task_context", "git_context", "interpretations", "allocations", "estimator_id", "token_count"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 20000 },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "repository_map": { "type": "string" },
+    "working_set": { "type": "array", "items": { "$ref": "#/$defs/material" } },
+    "task_context": { "type": "array", "items": { "$ref": "#/$defs/material" } },
+    "git_context": { "type": "string" },
+    "interpretations": { "type": "array", "items": { "type": "string" } },
+    "allocations": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "estimator_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "token_count": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "source_snapshot_digest", "generation_kind", "index_schema_version"],
+      "properties": {
+        "generation_id": { "$ref": "#/$defs/sha256" },
+        "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "generation_kind": { "enum": ["structural", "enriched"] },
+        "index_schema_version": { "const": 3 }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_line", "end_line"],
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "source_sha256", "representation", "content", "ranges", "relevance", "provenance", "token_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "representation": { "enum": ["map", "summary", "slice", "full"] },
+        "content": { "type": "string" },
+        "ranges": { "type": "array", "items": { "$ref": "#/$defs/range" } },
+        "relevance": { "type": "number", "minimum": 0 },
+        "provenance": { "type": "array", "items": { "type": "string" } },
+        "token_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

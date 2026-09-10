@@ -19,9 +19,13 @@ from contextforge.bridge import MAX_JSONRPC_MESSAGE_BYTES, BridgeServer
 from contextforge.bridge.models import (
     BridgeSelectionItem,
     CancelParams,
+    CompileParams,
     DiscoverParams,
     IndexParams,
+    MapParams,
     ReadParams,
+    SearchParams,
+    SymbolParams,
 )
 from contextforge.intelligence import (
     GlobalMapAnalysisError,
@@ -69,6 +73,47 @@ def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
     assert v2["$defs"]["progressNotification"]["properties"]["method"] == {
         "const": "$/progress"
     }
+
+    v21 = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v2.1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert v21["$defs"]["helloRequest"]["properties"]["params"]["properties"][
+        "protocol_version"
+    ] == {"const": "2.1"}
+    index_properties = v21["$defs"]["indexRequest"]["properties"]["params"][
+        "properties"
+    ]
+    assert "operation_timeout" in index_properties
+    assert index_properties["semantic_scope"]["enum"] == ["priority", "all", "none"]
+    assert {
+        v21["$defs"][name]["properties"]["method"]["const"]
+        for name in (
+            "mapRequestObject",
+            "searchRequestObject",
+            "symbolRequest",
+            "compileRequest",
+        )
+    } == {"map", "search", "symbol", "compile"}
+    assert set(index_properties) == set(IndexParams.model_fields)
+    assert set(v21["$defs"]["pinnedParams"]["properties"]) == set(
+        MapParams.model_fields
+    )
+    search_properties = v21["$defs"]["searchParams"]["properties"]
+    assert set(search_properties) == set(SearchParams.model_fields)
+    symbol_properties = {
+        **v21["$defs"]["pinnedParams"]["properties"],
+        **v21["$defs"]["symbolRequest"]["properties"]["params"]["allOf"][1][
+            "properties"
+        ],
+    }
+    assert set(symbol_properties) == set(SymbolParams.model_fields)
+    compile_properties = {
+        **search_properties,
+        **v21["$defs"]["compileParams"]["allOf"][1]["properties"],
+    }
+    assert set(compile_properties) == set(CompileParams.model_fields)
 
 
 def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None:

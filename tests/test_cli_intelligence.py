@@ -174,6 +174,8 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
         str(tmp_path),
         "--task",
         "run",
+        "--working-file",
+        "app.py",
         "--format",
         "json",
     )
