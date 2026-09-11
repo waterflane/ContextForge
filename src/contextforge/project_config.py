@@ -667,15 +667,16 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
             for evidence_id in evidence_ids
             if evidence_id.startswith("symbol:")
         ][:12]
-        profile = request.trusted_code_map_facts.get("profile", "code")
+        path = str(request.trusted_code_map_facts.get("path", "repository-file"))
+        stem = Path(path).stem
         return json.dumps(
             {
                 "schema_version": 1,
                 "synopsis": {
-                    "text": f"Offline fixture {profile} semantic card.",
+                    "text": f"{stem} repository file.",
                     "evidence_ids": [root_evidence],
                 },
-                "concepts": [{"text": str(profile), "evidence_ids": [root_evidence]}],
+                "concepts": [{"text": stem, "evidence_ids": [root_evidence]}],
                 "responsibilities": [],
                 "key_symbols": [
                     {"evidence_id": evidence_id} for evidence_id in symbol_evidence

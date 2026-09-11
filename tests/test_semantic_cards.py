@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,11 @@ def _response(
             "concepts": [{"text": "request handling", "evidence_ids": ["symbol:0000"]}],
             "responsibilities": [
                 {
-                    "text": "Invalid optional claim",
+                    "text": (
+                        "Invalid optional claim"
+                        if invalid_optional
+                        else "Handles repository requests"
+                    ),
                     "evidence_ids": ["unknown"] if invalid_optional else ["file"],
                 }
             ],
@@ -322,6 +327,206 @@ def test_profile_facts_survive_independent_optional_filtering(tmp_path: Path) ->
     assert card.key_symbols == ()
 
 
+def test_lexically_unanchored_optional_claim_is_not_ranking_text(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    payload = json.loads(_response())
+    payload["side_effects"] = [
+        {"text": "quantum banana teleportation", "evidence_ids": ["file"]}
+    ]
+    provider = _provider(lambda request, call: json.dumps(payload))
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+
+    assert card.quality == "partial"
+    assert card.side_effects == ()
+    assert "quantum" not in card.ranking_text()
+
+
+def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(
+        f"def function_{index}(value: str) -> str:\n    return value + 'λ'"
+        for index in range(160)
+    )
+    (tmp_path / "large.py").write_text(source + "\n", encoding="utf-8")
+    observed: list[tuple[int, int]] = []
+
+    def respond(request: object, call: int) -> str:
+        del call
+        trusted = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        chunk_range = trusted["chunk_range"]
+        evidence = trusted["evidence"]
+        assert evidence
+        assert all(
+            chunk_range["start_line"] <= item["source_range"]["start_line"]
+            and item["source_range"]["end_line"] <= chunk_range["end_line"]
+            for item in evidence
+            if item["source_range"] is not None
+        )
+        chunk_index = int(request.metadata["chunk_index"])  # type: ignore[attr-defined]
+        chunk_count = int(request.metadata["chunk_count"])  # type: ignore[attr-defined]
+        observed.append((chunk_index, chunk_count))
+        text = request.untrusted_sources[0].text  # type: ignore[attr-defined]
+        match = re.search(r"function_\d+", text)
+        anchor = match.group(0) if match else "value"
+        root = next(
+            item["evidence_id"]
+            for item in evidence
+            if item["evidence_id"] in {"file", f"chunk:{chunk_index - 1:04d}"}
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {"text": f"{anchor} chunk", "evidence_ids": [root]},
+                "concepts": [{"text": anchor, "evidence_ids": [root]}],
+                "responsibilities": [],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+                "inferred_relationships": [],
+            }
+        )
+
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="http://127.0.0.1:1",
+        model_id="semantic-card-chunk-test",
+        context_window=4_096,
+        context_safety_margin=64,
+        retry_limit=0,
+        max_json_repair_attempts=1,
+    )
+    provider = FakeModelProvider(configuration, responder=respond)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=configuration,
+            semantic_max_output_tokens=256,
+            semantic_max_chunks_per_file=4,
+        )
+    )
+    card = load_semantic_card(tmp_path, "large.py", manifest=report.manifest)
+
+    assert 2 <= provider.call_count <= 4
+    assert observed == [
+        (index, observed[0][1]) for index in range(1, len(observed) + 1)
+    ]
+    assert all(count <= 4 for _, count in observed)
+    assert card.provenance.method == "model"
+    assert card.quality in {"complete", "partial"}
+
+
+def test_global_request_and_full_request_token_ceilings_include_repair(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    invalid = _provider(lambda request, call: _response(synopsis_evidence="unknown"))
+    request_limited = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=invalid,
+            provider_configuration=invalid.configuration,
+            semantic_max_requests=1,
+        )
+    )
+
+    assert invalid.call_count == 1
+    assert request_limited.semantic is not None
+    assert request_limited.semantic.request_count == 1  # type: ignore[union-attr]
+    assert request_limited.semantic.repair_count == 0  # type: ignore[union-attr]
+
+    token_root = tmp_path / "token-case"
+    token_root.mkdir()
+    (token_root / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    token_limited = _provider(lambda request, call: _response())
+    token_report = asyncio.run(
+        build_repository_index(
+            token_root,
+            provider=token_limited,
+            provider_configuration=token_limited.configuration,
+            semantic_max_input_tokens=1,
+        )
+    )
+
+    assert token_limited.call_count == 0
+    assert token_report.semantic is not None
+    assert token_report.semantic.request_count == 0  # type: ignore[union-attr]
+
+
+def test_semantic_scheduler_is_the_only_card_repair_authority(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="http://127.0.0.1:1",
+        model_id="semantic-card-repair-owner",
+        retry_limit=0,
+        max_json_repair_attempts=3,
+    )
+    provider = FakeModelProvider(
+        configuration,
+        responder=lambda request, call: "not-json" if call == 0 else _response(),
+    )
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=configuration,
+        )
+    )
+
+    assert provider.call_count == 2
+    assert report.semantic is not None
+    assert report.semantic.request_count == 2  # type: ignore[union-attr]
+    assert report.semantic.repair_count == 1  # type: ignore[union-attr]
+
+
+def test_semantic_evidence_exposes_structural_fact_ids_without_config_values(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "helper.py").write_text(
+        "def serve() -> str:\n    return 'ok'\n", encoding="utf-8"
+    )
+    (tmp_path / "app.py").write_text(
+        "import os\nfrom helper import serve\n"
+        "API_URL = os.getenv('SERVICE_SECRET_KEY')\n\n"
+        "def run() -> str:\n    return serve()\n",
+        encoding="utf-8",
+    )
+    code_map = next(
+        item
+        for item in extract_code_maps(scan_repository(tmp_path))
+        if item.path == "app.py"
+    )
+
+    evidence = cards_module._evidence_table(code_map)
+    fact_ids = {item.fact_id for item in evidence if item.fact_id is not None}
+    serialized = json.dumps([item.model_dump(mode="json") for item in evidence])
+
+    assert any(value.startswith("relationship:") for value in fact_ids)
+    assert any(value.startswith("config-key-sha256:") for value in fact_ids)
+    assert "SERVICE_SECRET_KEY" not in serialized
+
+
 def test_oversized_semantic_cache_is_ignored(tmp_path: Path) -> None:
     source = "def handle(request: str) -> str:\n    return request\n"
     (tmp_path / "old.py").write_text(source, encoding="utf-8")
@@ -418,7 +623,13 @@ def test_changed_low_score_file_wins_priority_in_large_repository(
         del call
         source = request.untrusted_sources[0]  # type: ignore[attr-defined]
         requested.append(source.path)
-        return _response()
+        payload = json.loads(_response())
+        payload["synopsis"] = {
+            "text": "Low function",
+            "evidence_ids": ["symbol:0000"],
+        }
+        payload["concepts"] = [{"text": "low", "evidence_ids": ["symbol:0000"]}]
+        return json.dumps(payload)
 
     provider = _provider(respond)
     report = asyncio.run(
@@ -518,6 +729,12 @@ def test_inferred_relationships_validate_and_rebind_both_renames(
                 },
             ]
         payload = json.loads(_response())
+        stem = str(trusted["path"]).removesuffix(".py")
+        payload["synopsis"] = {
+            "text": f"{stem} function",
+            "evidence_ids": ["symbol:0000"],
+        }
+        payload["concepts"] = [{"text": stem, "evidence_ids": ["symbol:0000"]}]
         payload["inferred_relationships"] = relationships
         return json.dumps(payload)
 
@@ -590,7 +807,7 @@ def test_inferred_relationships_validate_and_rebind_both_renames(
     stale_graph = load_relationship_graph(tmp_path, manifest=stale_target.manifest)
 
     assert provider.call_count == 3
-    assert stale_source.synopsis.text == "Handles repository requests."
+    assert stale_source.synopsis.text == "source function"
     assert stale_source.inferred_relationships == ()
     assert stale_source.quality == "partial"
     assert not any(edge.provenance == "model-inferred" for edge in stale_graph.edges)
