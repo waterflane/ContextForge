@@ -30,7 +30,14 @@ from contextforge.context import (
     render_project_tree_json,
     render_project_tree_markdown,
 )
-from contextforge.intelligence import IndexStorageError, load_orientation_map
+from contextforge.intelligence import (
+    REPOSITORY_MAP_KINDS,
+    IndexStorageError,
+    RepositoryMapKind,
+    load_manifest,
+    load_orientation_map,
+    load_repository_map_v3,
+)
 from contextforge.logging import (
     LogFormat,
     LoggingConfiguration,
@@ -70,6 +77,16 @@ class MapFormat(StrEnum):
 
     text = "text"
     json = "json"
+
+
+class MapKind(StrEnum):
+    """Generation-pinned map artifact to render."""
+
+    orientation = "orientation"
+    architecture = "architecture"
+    conventions = "conventions"
+    features = "features"
+    all = "all"
 
 
 app = typer.Typer(
@@ -468,11 +485,22 @@ def repository_map(
         MapFormat,
         typer.Option("--format", help="Output representation.", case_sensitive=False),
     ] = MapFormat.text,
+    kind: Annotated[
+        MapKind,
+        typer.Option("--kind", help="Map artifact to render.", case_sensitive=False),
+    ] = MapKind.orientation,
 ) -> None:
-    """Render the generation-pinned deterministic repository orientation map."""
+    """Render deterministic orientation or enriched repository maps."""
 
     try:
-        orientation = load_orientation_map(path)
+        manifest = load_manifest(path)
+        orientation = load_orientation_map(path, manifest=manifest)
+        repository_maps = {
+            map_kind: load_repository_map_v3(path, map_kind, manifest=manifest)
+            for map_kind in REPOSITORY_MAP_KINDS
+            if kind.value in {map_kind, "all"}
+            and getattr(manifest.artifacts, f"{map_kind}_map") is not None
+        }
     except (
         FileNotFoundError,
         NotADirectoryError,
@@ -481,7 +509,45 @@ def repository_map(
     ) as exc:
         _exit_with_error(str(exc), code=1)
     if output_format is MapFormat.json:
-        typer.echo(canonical_json(orientation.model_dump(mode="json")), nl=False)
+        if kind is MapKind.orientation:
+            payload: object = orientation.model_dump(mode="json")
+        elif kind is MapKind.all:
+            payload = {
+                "orientation": orientation.model_dump(mode="json"),
+                "repository_maps": {
+                    map_kind: value.model_dump(mode="json")
+                    for map_kind, value in repository_maps.items()
+                },
+            }
+        else:
+            selected = repository_maps.get(cast(RepositoryMapKind, kind.value))
+            if selected is None:
+                _exit_with_error(
+                    f"{kind.value} repository map is absent from the generation",
+                    code=1,
+                )
+            payload = selected.model_dump(mode="json")
+        typer.echo(canonical_json(payload), nl=False)
+        return
+    if kind not in {MapKind.orientation, MapKind.all}:
+        selected = repository_maps.get(cast(RepositoryMapKind, kind.value))
+        if selected is None:
+            _exit_with_error(
+                f"{kind.value} repository map is absent from the generation", code=1
+            )
+        lines = [
+            f"ContextForge {kind.value} repository map",
+            f"Snapshot: {selected.source_snapshot_digest}",
+            f"Entries: {len(selected.entries)}",
+            "",
+        ]
+        for entry in selected.entries:
+            lines.append(
+                f"[{entry.name}] files={len(entry.paths)} "
+                f"claims={len(entry.claims)} relationships={len(entry.relationships)}"
+            )
+            lines.extend(f"  {item}" for item in entry.paths)
+        typer.echo("\n".join(lines) + "\n", nl=False)
         return
     lines = [
         "ContextForge repository map",
@@ -509,6 +575,12 @@ def repository_map(
                 f"lines={item.line_count} symbols={item.symbol_count} "
                 f"centrality={item.centrality:.6f}{suffix}"
             )
+    if kind is MapKind.all:
+        lines.extend(("", "Enriched repository maps:"))
+        lines.extend(
+            f"  {map_kind}: entries={len(value.entries)}"
+            for map_kind, value in repository_maps.items()
+        )
     typer.echo("\n".join(lines) + "\n", nl=False)
 
 

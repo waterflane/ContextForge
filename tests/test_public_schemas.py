@@ -5,7 +5,12 @@ from typing import Any, cast
 import pytest
 
 from contextforge.context import ContextCapsule
-from contextforge.intelligence import RetrievalResult, SemanticCard
+from contextforge.intelligence import (
+    OrientationMap,
+    RepositoryMap,
+    RetrievalResult,
+    SemanticCard,
+)
 
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "docs" / "schemas"
 
@@ -21,6 +26,8 @@ def _schema(name: str) -> dict[str, Any]:
     ("name", "version"),
     [
         ("semantic-card-v3.schema.json", 3),
+        ("orientation-map-v3.schema.json", 3),
+        ("repository-map-v3.schema.json", 3),
         ("retrieval-result-v3.schema.json", 3),
         ("context-capsule-v2.schema.json", 2),
     ],
@@ -58,11 +65,45 @@ def test_semantic_card_schema_requires_grounding_and_sparse_symbols() -> None:
     assert semantic["properties"]["concepts"]["minItems"] == 1
     assert semantic["properties"]["key_symbols"]["maxItems"] == 12
     assert semantic["$defs"]["claim"]["properties"]["evidence_ids"]["minItems"] == 1
+    assert semantic["$defs"]["diagnostic"]["properties"]["dropped_items"] == {
+        "type": "integer",
+        "minimum": 0,
+    }
+
+
+def test_repository_map_schema_retains_claim_and_relationship_provenance() -> None:
+    repository_map = _schema("repository-map-v3.schema.json")
+
+    assert repository_map["$defs"]["claim"]["properties"]["provenance"]["enum"] == [
+        "verified",
+        "best-effort-structural",
+        "model-inferred",
+        "grounded-semantic-card",
+    ]
+    assert repository_map["$defs"]["relationship"]["properties"]["provenance"][
+        "enum"
+    ] == ["verified", "best-effort-structural", "model-inferred"]
+
+
+def test_bridge_21_map_result_advertises_all_pinned_map_schemas() -> None:
+    bridge = _schema("contextforge-bridge-v2.1.schema.json")
+    result = bridge["$defs"]["mapSuccess"]["properties"]["result"]
+
+    assert result["properties"]["orientation"] == {
+        "$ref": "orientation-map-v3.schema.json"
+    }
+    assert set(result["properties"]["repository_maps"]["properties"]) == {
+        "architecture",
+        "conventions",
+        "features",
+    }
 
 
 def test_public_artifact_schema_fields_match_runtime_models() -> None:
     pairs = (
         (SemanticCard, _schema("semantic-card-v3.schema.json")),
+        (OrientationMap, _schema("orientation-map-v3.schema.json")),
+        (RepositoryMap, _schema("repository-map-v3.schema.json")),
         (RetrievalResult, _schema("retrieval-result-v3.schema.json")),
         (ContextCapsule, _schema("context-capsule-v2.schema.json")),
     )

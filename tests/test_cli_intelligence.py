@@ -172,6 +172,10 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     assert built.exit_code == 0, built.output
 
     mapped = _invoke("map", str(tmp_path), "--format", "json")
+    mapped_all = _invoke("map", str(tmp_path), "--format", "json", "--kind", "all")
+    mapped_architecture = _invoke(
+        "map", str(tmp_path), "--format", "json", "--kind", "architecture"
+    )
     suggested = _invoke(
         "context",
         "suggest",
@@ -207,9 +211,19 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     )
     reviewed = _invoke("context", "review", str(capsule_path))
 
-    assert mapped.exit_code == suggested.exit_code == created.exit_code == 0
+    assert (
+        mapped.exit_code == mapped_all.exit_code == mapped_architecture.exit_code == 0
+    )
+    assert suggested.exit_code == created.exit_code == 0
     assert reviewed.exit_code == 0
     assert json.loads(mapped.stdout)["files"][0]["path"] == "app.py"
+    all_maps = json.loads(mapped_all.stdout)
+    assert set(all_maps["repository_maps"]) == {
+        "architecture",
+        "conventions",
+        "features",
+    }
+    assert json.loads(mapped_architecture.stdout)["map_kind"] == "architecture"
     retrieval = json.loads(suggested.stdout)
     assert retrieval["schema_version"] == 3
     assert retrieval["provider_calls"] == 0

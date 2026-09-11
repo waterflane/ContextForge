@@ -11,6 +11,7 @@
     { "$ref": "#/$defs/searchRequest" },
     { "$ref": "#/$defs/symbolRequest" },
     { "$ref": "#/$defs/compileRequest" },
+    { "$ref": "#/$defs/mapSuccess" },
     { "$ref": "#/$defs/retrievalSuccess" },
     { "$ref": "#/$defs/compileSuccess" }
   ],
@@ -214,6 +215,33 @@
       }
     },
     "paths": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "mapSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation_id", "orientation", "repository_maps"],
+          "properties": {
+            "generation_id": { "$ref": "#/$defs/sha256" },
+            "orientation": { "$ref": "orientation-map-v3.schema.json" },
+            "repository_maps": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "architecture": { "$ref": "repository-map-v3.schema.json" },
+                "conventions": { "$ref": "repository-map-v3.schema.json" },
+                "features": { "$ref": "repository-map-v3.schema.json" }
+              }
+            }
+          }
+        }
+      }
+    },
     "retrievalSuccess": {
       "type": "object",
       "additionalProperties": false,

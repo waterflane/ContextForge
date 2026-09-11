@@ -112,10 +112,11 @@
     "diagnostic": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": ["code", "message", "dropped_items"],
       "properties": {
         "code": { "type": "string", "minLength": 1, "maxLength": 100 },
-        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "dropped_items": { "type": "integer", "minimum": 0 }
       }
     }
   }
