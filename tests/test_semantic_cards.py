@@ -468,6 +468,10 @@ def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
         chunk_range = trusted["chunk_range"]
         evidence = trusted["evidence"]
         assert evidence
+        assert trusted["allowed_evidence_ids"] == [
+            item["evidence_id"] for item in evidence
+        ]
+        assert "container ID is not an evidence ID" in request.system_instructions  # type: ignore[attr-defined]
         assert all(
             chunk_range["start_line"] <= item["source_range"]["start_line"]
             and item["source_range"]["end_line"] <= chunk_range["end_line"]
