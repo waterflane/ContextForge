@@ -46,6 +46,7 @@ from contextforge.intelligence.models import (
 from contextforge.intelligence.repository_maps_v3 import build_repository_maps_v3
 from contextforge.intelligence.store import (
     IndexWriteLock,
+    load_generation_manifest,
     load_generation_record,
     write_index_record,
     write_manifest,
@@ -397,6 +398,12 @@ async def build_semantic_card_index(
             reused_card_paths=tuple(card.path for card in reusable),
         )
     _copy_structural_generation(lock, structural)
+    previous_cards = _previous_reusable_cards(
+        lock,
+        structural,
+        provider,
+        active_options,
+    )
 
     cards: list[SemanticCard] = []
     next_states: list[IndexedFileState] = []
@@ -405,6 +412,7 @@ async def build_semantic_card_index(
     cache_hits = 0
     estimated_tokens = 0
     failed: list[str] = []
+    reused_card_paths: list[str] = []
     analyzers: set[AnalyzerIdentity] = {DETERMINISTIC_CARD_ANALYZER}
 
     for path in sorted(maps):
@@ -437,11 +445,35 @@ async def build_semantic_card_index(
             and path in selected
             and request_count < active_options.max_requests
         )
+        relationship_candidates: tuple[_RelationshipCandidate, ...] = ()
+        previous_card = previous_cards.get(path)
+        if previous_card is not None:
+            relationship_candidates = _relationship_candidates(
+                code_map,
+                code_maps,
+                graph,
+            )
+            card = _rebind_reused_card(
+                previous_card,
+                code_map,
+                state,
+                evidence,
+                relationship_candidates,
+            )
+            reused_card_paths.append(path)
+            should_model = False
+        else:
+            card = _deterministic_card(
+                code_map,
+                state,
+                evidence,
+                method="deterministic-policy",
+                diagnostic="semantic_scope_or_budget",
+            )
         source: str | None = None
         if should_model:
             source = _read_source(snapshot, project_file)
 
-        relationship_candidates: tuple[_RelationshipCandidate, ...] = ()
         if should_model:
             relationship_candidates = _relationship_candidates(
                 code_map,
@@ -455,7 +487,6 @@ async def build_semantic_card_index(
                 ),
             )
 
-        card: SemanticCard
         if should_model and provider is not None and source is not None:
             analyzer = _model_analyzer(provider)
             analyzers.add(analyzer)
@@ -544,7 +575,7 @@ async def build_semantic_card_index(
                     method="deterministic-fallback",
                     diagnostic="model_card_unavailable",
                 )
-        else:
+        elif previous_card is None:
             card = _deterministic_card(
                 code_map,
                 state,
@@ -663,6 +694,7 @@ async def build_semantic_card_index(
         repair_count=repair_count,
         cache_hits=cache_hits,
         failed_paths=tuple(sorted(failed)),
+        reused_card_paths=tuple(sorted(reused_card_paths)),
     )
 
 
@@ -737,6 +769,102 @@ def _reusable_cards(
             return None
         cards.append(card)
     return tuple(cards)
+
+
+def _previous_reusable_cards(
+    lock: IndexWriteLock,
+    structural: IndexManifest,
+    provider: ModelProvider | None,
+    options: SemanticCardOptions,
+) -> dict[str, SemanticCard]:
+    """Load unchanged cards from the generation preceding a structural update."""
+
+    previous_id = structural.build.previous_generation_id
+    if options.force_reanalyze or previous_id is None:
+        return {}
+    try:
+        previous = load_generation_manifest(lock.layout.repository_root, previous_id)
+    except (OSError, ValueError):
+        return {}
+    if previous.generation_kind != "enriched":
+        return {}
+    current_states = {item.path: item for item in structural.files}
+    expected_model = None if provider is None else _model_analyzer(provider)
+    reusable: dict[str, SemanticCard] = {}
+    for old_state in previous.files:
+        current = current_states.get(old_state.path)
+        if (
+            current is None
+            or old_state.semantic_status not in {"complete", "partial"}
+            or old_state.source_sha256 != current.source_sha256
+            or old_state.record_sha256 != current.record_sha256
+        ):
+            continue
+        try:
+            card = load_semantic_card(
+                lock.layout.repository_root,
+                old_state.path,
+                manifest=previous,
+            )
+        except ValueError:
+            continue
+        analyzer = card.provenance.analyzer
+        if card.provenance.method == "model":
+            if options.scope == "none" or analyzer != expected_model:
+                continue
+        elif analyzer != DETERMINISTIC_CARD_ANALYZER:
+            continue
+        reusable[old_state.path] = card
+    return reusable
+
+
+def _rebind_reused_card(
+    card: SemanticCard,
+    code_map: FileCodeMap,
+    state: IndexedFileState,
+    evidence: tuple[SemanticEvidence, ...],
+    candidates: tuple[_RelationshipCandidate, ...],
+) -> SemanticCard:
+    """Refresh current identities and independently drop stale inferred targets."""
+
+    by_candidate = {item.candidate_id: item for item in candidates}
+    relationships: list[SemanticInferredRelationship] = []
+    dropped = 0
+    for relationship in card.inferred_relationships:
+        candidate = by_candidate.get(relationship.target_candidate_id)
+        if candidate is None or candidate.target_path == code_map.path:
+            dropped += 1
+            continue
+        relationships.append(
+            relationship.model_copy(
+                update={
+                    "target_path": candidate.target_path,
+                    "target_source_sha256": candidate.source_sha256,
+                    "target_symbol_id": candidate.target_symbol_id,
+                    "target_symbol_name": candidate.target_symbol_name,
+                }
+            )
+        )
+    diagnostics = list(card.diagnostics)
+    if dropped:
+        diagnostics.append(
+            SemanticCardDiagnostic(
+                code="stale_inferred_relationships_dropped",
+                message=f"Dropped {dropped} stale inferred relationship(s).",
+                dropped_items=dropped,
+            )
+        )
+    return card.model_copy(
+        update={
+            "source_sha256": code_map.source_sha256,
+            "facts_sha256": _require_facts_sha(state),
+            "provenance": card.provenance.model_copy(update={"cache_hit": True}),
+            "inferred_relationships": tuple(relationships),
+            "evidence": evidence,
+            "quality": "partial" if dropped else card.quality,
+            "diagnostics": tuple(diagnostics),
+        }
+    )
 
 
 async def _request_card(

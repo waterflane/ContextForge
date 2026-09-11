@@ -193,6 +193,51 @@ def test_content_cache_rebinds_unchanged_source_after_rename(tmp_path: Path) -> 
     assert all(item.path == "new.py" for item in card.evidence)
 
 
+def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
+    (tmp_path / "failed.py").write_text(
+        "def failed() -> None:\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "old.py").write_text(
+        "def handle() -> None:\n    pass\n", encoding="utf-8"
+    )
+
+    def respond(request: object, call: int) -> str:
+        del call
+        path = request.trusted_code_map_facts["path"]  # type: ignore[attr-defined]
+        return _response(synopsis_evidence="unknown" if path == "failed.py" else "file")
+
+    provider = _provider(respond)
+    initial = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    initial_calls = provider.call_count
+    assert initial_calls == 3
+    initial_failed = load_semantic_card(
+        tmp_path, "failed.py", manifest=initial.manifest
+    )
+    assert initial_failed.provenance.method == "deterministic-fallback"
+
+    (tmp_path / "old.py").rename(tmp_path / "new.py")
+    updated = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+
+    reused_failed = load_semantic_card(tmp_path, "failed.py", manifest=updated.manifest)
+    assert provider.call_count == initial_calls
+    assert updated.semantic is not None
+    assert "failed.py" in updated.semantic.reused_paths
+    assert reused_failed.provenance.method == "deterministic-fallback"
+
+
 def test_semantic_cards_select_all_four_profiles(tmp_path: Path) -> None:
     (tmp_path / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "README.md").write_text("# Guide\n", encoding="utf-8")
