@@ -8,6 +8,7 @@ import pytest
 from contextforge.application import build_repository_index
 from contextforge.intelligence import (
     SemanticCardOptions,
+    SemanticInferredRelationship,
     acquire_index_lock,
     build_relationship_graph,
     extract_code_maps,
@@ -59,6 +60,16 @@ def _response(
             "profile_facts": {},
         }
     )
+
+
+def test_inferred_relationship_evidence_ids_are_canonical() -> None:
+    with pytest.raises(ValueError, match="evidence IDs must be unique"):
+        SemanticInferredRelationship(
+            target_candidate_id="target:" + "a" * 64,
+            target_path="target.py",
+            target_source_sha256="b" * 64,
+            evidence_ids=("file", "file"),
+        )
 
 
 def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
@@ -443,8 +454,14 @@ def test_whole_generation_reuse_rejects_incompatible_semantic_state(
             update={
                 "build": structural.build.model_copy(
                     update={"previous_generation_id": report.manifest.generation_id}
-                )
+                ),
+                "files": report.manifest.files,
             }
+        )
+        monkeypatch.setattr(
+            cards_module,
+            "load_semantic_card",
+            lambda *args, **kwargs: card,
         )
         assert (
             cards_module._previous_reusable_cards(
@@ -466,6 +483,31 @@ def test_whole_generation_reuse_rejects_incompatible_semantic_state(
             )
             == {}
         )
+
+        source_mismatch = enriched_predecessor.model_copy(
+            update={
+                "files": (
+                    structural.files[0].model_copy(update={"source_sha256": "0" * 64}),
+                )
+            }
+        )
+        record_mismatch = enriched_predecessor.model_copy(
+            update={
+                "files": (
+                    structural.files[0].model_copy(update={"record_sha256": "0" * 64}),
+                )
+            }
+        )
+        for mismatch in (source_mismatch, record_mismatch):
+            assert (
+                cards_module._previous_reusable_cards(
+                    lock,
+                    mismatch,
+                    provider,
+                    SemanticCardOptions(),
+                )
+                == {}
+            )
 
         monkeypatch.setattr(
             cards_module,
