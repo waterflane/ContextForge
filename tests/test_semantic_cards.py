@@ -11,6 +11,7 @@ from contextforge.intelligence import (
     build_relationship_graph,
     extract_code_maps,
     load_relationship_graph,
+    load_repository_map_v3,
     load_semantic_card,
 )
 from contextforge.intelligence import cards as cards_module
@@ -82,6 +83,59 @@ def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     assert card.key_symbols[0].name == "handle"
     assert "Invalid optional claim" not in card.ranking_text()
     assert provider.call_count == 1
+
+
+def test_repository_maps_project_grounded_claims_and_enriched_graph(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "handler.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    (tmp_path / "app.py").write_text(
+        "from handler import handle\n\n"
+        "def main(request: str) -> str:\n    return handle(request)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_handler.py").write_text(
+        "from handler import handle\n\n"
+        "def test_handle():\n    assert handle('ok') == 'ok'\n",
+        encoding="utf-8",
+    )
+    provider = _provider(lambda request, call: _response())
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    architecture = load_repository_map_v3(
+        tmp_path, "architecture", manifest=report.manifest
+    )
+    features = load_repository_map_v3(tmp_path, "features", manifest=report.manifest)
+
+    relationships = [
+        item for entry in architecture.entries for item in entry.relationships
+    ]
+    assert {item.kind for item in relationships} >= {
+        "import",
+        "call",
+        "source-test",
+        "entrypoint-handler",
+    }
+    assert {item.provenance for item in relationships} >= {
+        "verified",
+        "best-effort-structural",
+    }
+    assert any(
+        claim.text == "request handling"
+        and claim.provenance == "grounded-semantic-card"
+        for entry in architecture.entries
+        for claim in entry.claims
+    )
+    assert any(entry.claims for entry in features.entries)
 
 
 def test_invalid_required_grounding_gets_exactly_one_repair(tmp_path: Path) -> None:

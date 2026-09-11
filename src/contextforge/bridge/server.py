@@ -58,6 +58,7 @@ from contextforge.intelligence import (
     INDEX_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
     RECORD_SCHEMA_VERSION,
+    REPOSITORY_MAP_KINDS,
     GlobalMapAnalysisError,
     IndexLockError,
     IndexManifest,
@@ -73,6 +74,7 @@ from contextforge.intelligence import (
     load_file_semantic_analysis,
     load_manifest,
     load_orientation_map,
+    load_repository_map_v3,
     retrieve_context_candidates,
 )
 from contextforge.models import (
@@ -1008,6 +1010,18 @@ class BridgeServer:
         return {
             "generation_id": manifest.generation_id,
             "orientation": orientation.model_dump(mode="json"),
+            "repository_maps": {
+                kind: (
+                    await asyncio.to_thread(
+                        load_repository_map_v3,
+                        self.workspace,
+                        kind,
+                        manifest=manifest,
+                    )
+                ).model_dump(mode="json")
+                for kind in REPOSITORY_MAP_KINDS
+                if getattr(manifest.artifacts, f"{kind}_map") is not None
+            },
         }
 
     async def _retrieve_v21(

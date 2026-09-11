@@ -148,6 +148,17 @@ from contextforge.intelligence.python import (
     extract_python_code_map,
 )
 from contextforge.intelligence.relationships import resolve_relationships
+from contextforge.intelligence.repository_maps_v3 import (
+    REPOSITORY_MAP_KINDS,
+    REPOSITORY_MAP_SCHEMA_VERSION,
+    RepositoryMap,
+    RepositoryMapClaim,
+    RepositoryMapEntry,
+    RepositoryMapKind,
+    RepositoryMapRelationship,
+    build_repository_maps_v3,
+    load_repository_map_v3,
+)
 from contextforge.intelligence.retrieval import (
     BM25_B,
     BM25_K1,
@@ -308,6 +319,13 @@ __all__ = [
     "RelationshipProvenance",
     "RelationshipTarget",
     "RepositoryDiagnostic",
+    "REPOSITORY_MAP_KINDS",
+    "REPOSITORY_MAP_SCHEMA_VERSION",
+    "RepositoryMap",
+    "RepositoryMapClaim",
+    "RepositoryMapEntry",
+    "RepositoryMapKind",
+    "RepositoryMapRelationship",
     "RepositoryOverview",
     "RepositoryRelationship",
     "SchemaVersionMetadata",
@@ -384,6 +402,7 @@ __all__ = [
     "build_semantic_index",
     "build_semantic_card_index",
     "build_repository_maps",
+    "build_repository_maps_v3",
     "build_repository_overview",
     "calculate_generation_id",
     "calculate_index_statistics",
@@ -413,6 +432,7 @@ __all__ = [
     "load_file_code_map",
     "load_orientation_map",
     "load_relationship_graph",
+    "load_repository_map_v3",
     "load_file_semantic_analysis",
     "load_semantic_card",
     "load_architecture_map",

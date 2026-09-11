@@ -15,11 +15,13 @@ from contextforge.context import (
 )
 from contextforge.core import HealthStatus, VersionInfo
 from contextforge.intelligence import (
+    REPOSITORY_MAP_KINDS,
     SourceRange,
     load_file_code_map,
     load_manifest,
     load_orientation_map,
     load_relationship_graph,
+    load_repository_map_v3,
     retrieve_context_candidates,
 )
 
@@ -98,6 +100,13 @@ def repository_map(request: MapRequest) -> dict[str, object]:
             "orientation": load_orientation_map(root, manifest=manifest).model_dump(
                 mode="json"
             ),
+            "repository_maps": {
+                kind: load_repository_map_v3(root, kind, manifest=manifest).model_dump(
+                    mode="json"
+                )
+                for kind in REPOSITORY_MAP_KINDS
+                if getattr(manifest.artifacts, f"{kind}_map") is not None
+            },
         }
         if request.include_graph:
             result["relationship_graph"] = load_relationship_graph(

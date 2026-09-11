@@ -33,6 +33,7 @@ from contextforge.discovery import (
 )
 from contextforge.git import GitDiffRequest, collect_git_diff
 from contextforge.intelligence import (
+    REPOSITORY_MAP_KINDS,
     IndexManifest,
     IndexManifestNotFoundError,
     IndexManifestReadError,
@@ -43,6 +44,7 @@ from contextforge.intelligence import (
     load_manifest,
     load_orientation_map,
     load_relationship_graph,
+    load_repository_map_v3,
     retrieve_context_candidates,
 )
 from contextforge.models import ModelProvider
@@ -371,10 +373,18 @@ class ReadOnlyMCPFoundation:
             if self._manifest is None:
                 raise ReadOnlyToolError("unavailable", "no pinned architecture map")
             try:
-                result = load_architecture_map(
-                    self.snapshot.root, manifest=self._manifest
+                result = (
+                    load_repository_map_v3(
+                        self.snapshot.root,
+                        "architecture",
+                        manifest=self._manifest,
+                    )
+                    if self._manifest.schema_version == 3
+                    else load_architecture_map(
+                        self.snapshot.root, manifest=self._manifest
+                    )
                 ).model_dump(mode="json")
-            except IndexManifestReadError as exc:
+            except (IndexManifestReadError, ValueError) as exc:
                 raise ReadOnlyToolError(
                     "unavailable", "no pinned architecture map"
                 ) from exc
@@ -382,10 +392,14 @@ class ReadOnlyMCPFoundation:
             if self._manifest is None:
                 raise ReadOnlyToolError("unavailable", "no pinned feature map")
             try:
-                result = load_feature_map(
-                    self.snapshot.root, manifest=self._manifest
+                result = (
+                    load_repository_map_v3(
+                        self.snapshot.root, "features", manifest=self._manifest
+                    )
+                    if self._manifest.schema_version == 3
+                    else load_feature_map(self.snapshot.root, manifest=self._manifest)
                 ).model_dump(mode="json")
-            except IndexManifestReadError as exc:
+            except (IndexManifestReadError, ValueError) as exc:
                 raise ReadOnlyToolError("unavailable", "no pinned feature map") from exc
         else:
             raise ReadOnlyToolError("not_found", "unknown MCP resource URI")
@@ -475,6 +489,13 @@ class ReadOnlyMCPFoundation:
                 "orientation": load_orientation_map(
                     self.snapshot.root, manifest=manifest
                 ).model_dump(mode="json"),
+                "repository_maps": {
+                    kind: load_repository_map_v3(
+                        self.snapshot.root, kind, manifest=manifest
+                    ).model_dump(mode="json")
+                    for kind in REPOSITORY_MAP_KINDS
+                    if getattr(manifest.artifacts, f"{kind}_map") is not None
+                },
             }
             if value.include_graph:
                 result["relationship_graph"] = load_relationship_graph(

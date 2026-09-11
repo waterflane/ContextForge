@@ -586,7 +586,10 @@ async def build_semantic_card_index(
         canonical_json_bytes(enriched_graph.model_dump(mode="json")),
     )
     architecture, conventions, features = build_repository_maps_v3(
-        code_maps, tuple(cards), structural.build.source_snapshot_digest
+        code_maps,
+        tuple(cards),
+        structural.build.source_snapshot_digest,
+        relationship_graph=enriched_graph,
     )
     architecture_digest = write_index_record(
         lock,

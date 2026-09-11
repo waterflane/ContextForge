@@ -567,6 +567,11 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
         harness.input.send(_request("map", "map", common))
         mapped = await asyncio.to_thread(harness.output.wait_for_id, "map")
         assert mapped["result"]["orientation"]["files"][0]["path"] == "app.py"
+        assert set(mapped["result"]["repository_maps"]) == {
+            "architecture",
+            "conventions",
+            "features",
+        }
 
         harness.input.send(
             _request("search", "search", {**common, "task": "run", "limit": 5})

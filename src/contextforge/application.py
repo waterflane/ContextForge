@@ -1029,8 +1029,9 @@ async def _create_automatic_handoff(
     features = None
     with suppress(IndexManifestNotFoundError, IndexManifestReadError):
         manifest = load_manifest(snapshot.root)
-        architecture = load_architecture_map(snapshot.root, manifest=manifest)
-        features = load_feature_map(snapshot.root, manifest=manifest)
+        if manifest.schema_version != 3:
+            architecture = load_architecture_map(snapshot.root, manifest=manifest)
+            features = load_feature_map(snapshot.root, manifest=manifest)
     progress.report(
         "discovery", "Discovering and reviewing repository context.", percentage=15
     )

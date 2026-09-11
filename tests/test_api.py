@@ -57,6 +57,11 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
     assert mapped.status_code == searched.status_code == 200
     assert symbols.status_code == compiled.status_code == 200
     assert mapped.json()["orientation"]["files"][0]["path"] == "app.py"
+    assert set(mapped.json()["repository_maps"]) == {
+        "architecture",
+        "conventions",
+        "features",
+    }
     assert mapped_with_graph.json()["relationship_graph"]["schema_version"] == 3
     assert searched.json()["provider_calls"] == 0
     assert symbols.json()["symbols"][0]["name"] == "run"

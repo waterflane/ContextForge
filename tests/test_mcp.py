@@ -247,6 +247,11 @@ def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
     )
 
     assert mapped["orientation"]["files"][0]["path"] == "app.py"
+    assert set(mapped["repository_maps"]) == {
+        "architecture",
+        "conventions",
+        "features",
+    }
     assert mapped["relationship_graph"]["record_kind"] == "relationship_graph"
     assert "relationship_graph" not in orientation_only
     assert searched["provider_calls"] == 0
@@ -259,10 +264,10 @@ def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
         foundation.read_resource("contextforge://index/manifest")
     )
     assert manifest_resource["schema_version"] == 3
-    with pytest.raises(ReadOnlyToolError, match="no pinned architecture map"):
-        asyncio.run(foundation.read_resource("contextforge://architecture"))
-    with pytest.raises(ReadOnlyToolError, match="no pinned feature map"):
-        asyncio.run(foundation.read_resource("contextforge://features"))
+    architecture = asyncio.run(foundation.read_resource("contextforge://architecture"))
+    features = asyncio.run(foundation.read_resource("contextforge://features"))
+    assert architecture["schema_version"] == 3
+    assert features["schema_version"] == 3
 
     with pytest.raises(ReadOnlyToolError, match="configured server provider"):
         asyncio.run(foundation.call_tool("search", {"task": "run", "rerank": True}))
