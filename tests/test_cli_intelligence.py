@@ -10,6 +10,7 @@ from typer.testing import CliRunner, Result
 import contextforge.application as application_module
 import contextforge.cli.context_commands as context_cli
 import contextforge.cli.intelligence_commands as index_cli
+import contextforge.cli.main as main_cli
 from contextforge.application import (
     IndexSourceChangedError,
     build_repository_index,
@@ -176,6 +177,9 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     mapped_architecture = _invoke(
         "map", str(tmp_path), "--format", "json", "--kind", "architecture"
     )
+    mapped_text = _invoke("map", str(tmp_path))
+    mapped_all_text = _invoke("map", str(tmp_path), "--kind", "all")
+    mapped_architecture_text = _invoke("map", str(tmp_path), "--kind", "architecture")
     suggested = _invoke(
         "context",
         "suggest",
@@ -214,6 +218,12 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     assert (
         mapped.exit_code == mapped_all.exit_code == mapped_architecture.exit_code == 0
     )
+    assert (
+        mapped_text.exit_code
+        == mapped_all_text.exit_code
+        == mapped_architecture_text.exit_code
+        == 0
+    )
     assert suggested.exit_code == created.exit_code == 0
     assert reviewed.exit_code == 0
     assert json.loads(mapped.stdout)["files"][0]["path"] == "app.py"
@@ -224,6 +234,12 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
         "features",
     }
     assert json.loads(mapped_architecture.stdout)["map_kind"] == "architecture"
+    assert "ContextForge repository map" in mapped_text.stdout
+    assert "app.py | Python" in mapped_text.stdout
+    assert "Enriched repository maps:" in mapped_all_text.stdout
+    assert "architecture: entries=" in mapped_all_text.stdout
+    assert "ContextForge architecture repository map" in mapped_architecture_text.stdout
+    assert "claims=" in mapped_architecture_text.stdout
     retrieval = json.loads(suggested.stdout)
     assert retrieval["schema_version"] == 3
     assert retrieval["provider_calls"] == 0
@@ -246,6 +262,39 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
         "app.py",
         "capsule.json",
     )
+
+
+def test_map_reports_missing_index_as_cli_error(tmp_path: Path) -> None:
+    result = _invoke("map", str(tmp_path), "--kind", "architecture")
+
+    assert result.exit_code == 1
+    assert "no active repository index is published" in result.stderr
+
+
+def test_map_reports_absent_enriched_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    without_architecture = report.manifest.model_copy(
+        update={
+            "artifacts": report.manifest.artifacts.model_copy(
+                update={"architecture_map": None}
+            )
+        }
+    )
+    monkeypatch.setattr(main_cli, "load_manifest", lambda path: without_architecture)
+
+    json_result = _invoke(
+        "map", str(tmp_path), "--kind", "architecture", "--format", "json"
+    )
+    text_result = _invoke("map", str(tmp_path), "--kind", "architecture")
+
+    assert json_result.exit_code == text_result.exit_code == 1
+    assert "architecture repository map is absent" in json_result.stderr
+    assert "architecture repository map is absent" in text_result.stderr
 
 
 def test_retrieval_cli_renderer_explains_grounding_and_graph(tmp_path: Path) -> None:

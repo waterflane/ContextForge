@@ -8,6 +8,7 @@ import pytest
 from contextforge.application import build_repository_index
 from contextforge.intelligence import (
     SemanticCardOptions,
+    acquire_index_lock,
     build_relationship_graph,
     extract_code_maps,
     load_relationship_graph,
@@ -236,6 +237,265 @@ def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
     assert updated.semantic is not None
     assert "failed.py" in updated.semantic.reused_paths
     assert reused_failed.provenance.method == "deterministic-fallback"
+
+
+def test_previous_card_reuse_ignores_unavailable_or_ineligible_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle() -> None:\n    pass\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    structural = report.structural.manifest
+
+    with acquire_index_lock(tmp_path, "previous-card-coverage") as lock:
+        unavailable = structural.model_copy(
+            update={
+                "build": structural.build.model_copy(
+                    update={"previous_generation_id": "0" * 64}
+                )
+            }
+        )
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                unavailable,
+                provider,
+                SemanticCardOptions(),
+            )
+            == {}
+        )
+
+
+def test_whole_generation_reuse_rejects_incompatible_semantic_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle() -> None:\n    pass\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    maps = {item.path: item for item in report.structural.code_maps}
+    structural = report.structural.manifest
+    state = report.manifest.files[0]
+
+    with acquire_index_lock(tmp_path, "whole-card-coverage") as lock:
+        skipped = report.manifest.model_copy(
+            update={
+                "files": (
+                    state.model_copy(
+                        update={
+                            "semantic_status": "skipped",
+                            "interpretation_record_location": None,
+                            "interpretation_record_sha256": None,
+                        }
+                    ),
+                )
+            }
+        )
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                skipped,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                {"app.py"},
+            )
+            is None
+        )
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                skipped,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                set(),
+            )
+            == ()
+        )
+
+        disabled = report.manifest.model_copy(
+            update={
+                "files": (
+                    state.model_copy(
+                        update={
+                            "semantic_status": "disabled",
+                            "interpretation_record_location": None,
+                            "interpretation_record_sha256": None,
+                        }
+                    ),
+                )
+            }
+        )
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                disabled,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                set(),
+            )
+            is None
+        )
+
+        def invalid_card(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise ValueError("corrupt card")
+
+        monkeypatch.setattr(cards_module, "load_semantic_card", invalid_card)
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                report.manifest,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                set(),
+            )
+            is None
+        )
+
+        card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+        stale = card.model_copy(
+            update={
+                "provenance": card.provenance.model_copy(
+                    update={
+                        "analyzer": card.provenance.analyzer.model_copy(
+                            update={"analyzer_version": "stale"}
+                        )
+                    }
+                )
+            }
+        )
+        monkeypatch.setattr(
+            cards_module, "load_semantic_card", lambda *args, **kwargs: stale
+        )
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                report.manifest,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                set(),
+            )
+            is None
+        )
+
+        deterministic = stale.model_copy(
+            update={
+                "provenance": stale.provenance.model_copy(
+                    update={"method": "deterministic-policy"}
+                )
+            }
+        )
+        monkeypatch.setattr(
+            cards_module,
+            "load_semantic_card",
+            lambda *args, **kwargs: deterministic,
+        )
+        assert (
+            cards_module._reusable_cards(
+                lock,
+                report.manifest,
+                provider,
+                SemanticCardOptions(),
+                maps,
+                set(),
+            )
+            is None
+        )
+
+        structural_predecessor = structural.model_copy(
+            update={
+                "build": structural.build.model_copy(
+                    update={"previous_generation_id": structural.generation_id}
+                )
+            }
+        )
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                structural_predecessor,
+                provider,
+                SemanticCardOptions(),
+            )
+            == {}
+        )
+
+        enriched_predecessor = structural.model_copy(
+            update={
+                "build": structural.build.model_copy(
+                    update={"previous_generation_id": report.manifest.generation_id}
+                )
+            }
+        )
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                enriched_predecessor,
+                provider,
+                SemanticCardOptions(scope="none"),
+            )
+            == {}
+        )
+
+        missing_current_file = enriched_predecessor.model_copy(update={"files": ()})
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                missing_current_file,
+                provider,
+                SemanticCardOptions(),
+            )
+            == {}
+        )
+
+        monkeypatch.setattr(
+            cards_module,
+            "load_semantic_card",
+            lambda *args, **kwargs: deterministic,
+        )
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                enriched_predecessor,
+                provider,
+                SemanticCardOptions(),
+            )
+            == {}
+        )
+
+        def invalid_card(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise ValueError("corrupt card")
+
+        monkeypatch.setattr(cards_module, "load_semantic_card", invalid_card)
+        assert (
+            cards_module._previous_reusable_cards(
+                lock,
+                enriched_predecessor,
+                provider,
+                SemanticCardOptions(),
+            )
+            == {}
+        )
 
 
 def test_semantic_cards_select_all_four_profiles(tmp_path: Path) -> None:

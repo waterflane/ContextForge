@@ -765,8 +765,6 @@ def _reusable_cards(
             and analyzer != DETERMINISTIC_CARD_ANALYZER
         ):
             return None
-        if provider is None and card.provenance.method == "model":
-            return None
         cards.append(card)
     return tuple(cards)
 
