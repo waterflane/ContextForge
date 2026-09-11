@@ -79,6 +79,9 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert "&lt;hello&gt;" in first.prompt
     assert first.prompt.startswith('<contextforge schema_version="2">')
     assert '<usage_rules provenance="contextforge-verified">' in first.prompt
+    assert "verify indexed structure, not source contents" in first.prompt
+    assert "exact lines are present" in first.prompt
+    assert "evidence-linked interpretation" in first.prompt
     assert "report it as unknown" in first.prompt
     assert first.prompt.endswith("</contextforge>\n")
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
@@ -269,6 +272,7 @@ def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> Non
         budget=_budget(10_000),
     )
     assert automatic.token_count <= 3_000
+    assert sum(automatic.capsule.allocations.values()) <= 3_000
 
     pinned_retrieval = _retrieve(tmp_path, report, "large.txt")
     explicit = compile_context_capsule(
@@ -281,6 +285,75 @@ def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> Non
     assert explicit.capsule.working_set[0].representation == RepresentationMode.FULL
     assert explicit.token_count > 3_000
     assert explicit.token_count <= 10_000
+
+
+def test_complementary_maps_are_seeded_before_representation_upgrades(
+    tmp_path: Path,
+) -> None:
+    for name in ("alpha", "beta", "gamma"):
+        body = "".join(f"    {name}_{line} = {line}\n" for line in range(1, 121))
+        _write(
+            tmp_path,
+            f"{name}.py",
+            f"def {name}_flow():\n{body}    return {name}_120\n",
+        )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "flow")
+    concepts = {"alpha.py": "ingest", "beta.py": "validate", "gamma.py": "persist"}
+    candidates = tuple(
+        item.model_copy(
+            update={
+                "exact_group": "approximate",
+                "score": 1.0,
+                "bm25_score": 1.0,
+                "matched_concepts": (concepts[item.path],),
+            }
+        )
+        for item in retrieval.candidates
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review flow",
+        retrieval.model_copy(update={"candidates": candidates}),
+        budget=_budget(3_000),
+    )
+
+    assert {item.path for item in compiled.capsule.task_context} == {
+        "alpha.py",
+        "beta.py",
+        "gamma.py",
+    }
+    assert compiled.token_count <= 900
+
+
+def test_marginal_utility_penalizes_duplicate_candidate_coverage(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import capsule as capsule_module
+
+    _write(tmp_path, "alpha.py", "def alpha():\n    return 1\n")
+    _write(tmp_path, "beta.py", "def beta():\n    return 2\n")
+    report = _build(tmp_path)
+    candidates = _retrieve(tmp_path, report, "alpha beta").candidates
+    alpha = next(item for item in candidates if item.path == "alpha.py").model_copy(
+        update={"matched_concepts": ("shared concept",)}
+    )
+    beta_duplicate = next(
+        item for item in candidates if item.path == "beta.py"
+    ).model_copy(update={"matched_concepts": ("shared concept",)})
+    beta_distinct = beta_duplicate.model_copy(
+        update={"matched_concepts": ("distinct concept",)}
+    )
+
+    duplicate_utility = capsule_module._utility(
+        alpha, RepresentationMode.MAP, (beta_duplicate,)
+    )
+    distinct_utility = capsule_module._utility(
+        alpha, RepresentationMode.MAP, (beta_distinct,)
+    )
+
+    assert duplicate_utility < distinct_utility
 
 
 def test_representation_suggestion_bonus_cannot_bypass_full_rule(
