@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Literal
@@ -10,8 +11,11 @@ from tree_sitter import Language, Node, Parser
 
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
+    CallReference,
     FileCodeMap,
+    ImportRecord,
     ParserDiagnostic,
+    ReferenceOccurrence,
     SourceRange,
     SymbolKind,
     SymbolRecord,
@@ -23,7 +27,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="5",
+    analyzer_version="6",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -376,6 +380,10 @@ def extract_polyglot_code_map(
                 visibility=_visibility(draft.node, source_bytes),
             )
         )
+    imports = _extract_imports(source, project_file.path, language_name)
+    symbols = list(
+        _attach_occurrences(tree.root_node, tuple(symbols), imports, source_bytes)
+    )
     return FileCodeMap(
         path=project_file.path,
         source_sha256=project_file.sha256,
@@ -387,6 +395,7 @@ def extract_polyglot_code_map(
         module_has_executable_code=_module_has_executable_code(
             tree.root_node, language_name
         ),
+        imports=imports,
         symbols=tuple(symbols),
         diagnostics=tuple(
             sorted(
@@ -399,6 +408,346 @@ def extract_polyglot_code_map(
             )
         ),
     )
+
+
+_IMPORT_ANCESTORS = {
+    "import_declaration",
+    "import_spec",
+    "import_statement",
+    "include_directive",
+    "namespace_use_clause",
+    "namespace_use_declaration",
+    "preproc_include",
+    "require_relative",
+    "use_declaration",
+    "using_directive",
+}
+_CALL_NODES = {
+    "call",
+    "call_expression",
+    "function_call_expression",
+    "invocation_expression",
+    "member_call_expression",
+    "method_invocation",
+    "scoped_call_expression",
+}
+_IDENTIFIER_NODES = {
+    "constant",
+    "field_identifier",
+    "identifier",
+    "name",
+    "namespace_identifier",
+    "property_identifier",
+    "scoped_identifier",
+    "type_identifier",
+}
+
+
+def _extract_imports(source: str, path: str, language: str) -> tuple[ImportRecord, ...]:
+    values: list[ImportRecord] = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        for module, imported, alias, observed, start, end in _import_specs(
+            line, language
+        ):
+            source_range = SourceRange(
+                start_line=line_number,
+                start_column=start,
+                end_line=line_number,
+                end_column=end,
+            )
+            values.append(
+                ImportRecord(
+                    import_id=stable_fact_id(
+                        "import",
+                        path,
+                        module,
+                        imported,
+                        alias,
+                        line_number,
+                        start,
+                    ),
+                    module=module,
+                    imported_name=imported,
+                    alias=alias,
+                    observed_text=observed[:1_000],
+                    source_range=source_range,
+                )
+            )
+    unique = {item.import_id: item for item in values}
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.module or "",
+                item.imported_name or "",
+                item.alias or "",
+            ),
+        )
+    )
+
+
+def _import_specs(
+    line: str, language: str
+) -> tuple[tuple[str, str | None, str | None, str, int, int], ...]:
+    stripped = line.strip()
+    results: list[tuple[str, str | None, str | None, str, int, int]] = []
+
+    def add(
+        module: str,
+        imported: str | None = None,
+        alias: str | None = None,
+        observed: str | None = None,
+    ) -> None:
+        clean = module.strip().strip("\"'")
+        if not clean:
+            return
+        start = max(line.find(module), 0)
+        results.append((clean, imported, alias, observed or stripped, start, len(line)))
+
+    if language in {"JavaScript", "TypeScript"}:
+        from_match = re.search(
+            r"\b(?:import|export)\s+(.+?)\s+from\s+['\"]([^'\"]+)['\"]",
+            line,
+        )
+        if from_match:
+            bindings, module = from_match.groups()
+            named = re.search(r"\{([^}]*)\}", bindings)
+            if named:
+                for item in named.group(1).split(","):
+                    parts = re.split(r"\s+as\s+", item.strip())
+                    if parts and parts[0]:
+                        add(
+                            module,
+                            parts[0],
+                            parts[1] if len(parts) == 2 else None,
+                        )
+            else:
+                star = re.search(r"\*\s+as\s+(\w+)", bindings)
+                add(module, alias=star.group(1) if star else None)
+        require_matches = tuple(
+            re.finditer(r"\brequire\s*\(\s*['\"]([^'\"]+)['\"]", line)
+        )
+        for require_match in require_matches:
+            add(require_match.group(1))
+        if from_match is None and not require_matches:
+            side_effect = re.search(r"\bimport\s*['\"]([^'\"]+)['\"]", line)
+            if side_effect:
+                add(side_effect.group(1))
+    elif language == "Go":
+        match = re.search(r"(?:^|\s)([A-Za-z_]\w*\s+)?['\"]([^'\"]+)['\"]", line)
+        if match and (stripped.startswith("import") or stripped.startswith(('"', "'"))):
+            add(match.group(2), alias=(match.group(1) or "").strip() or None)
+    elif language == "Rust":
+        match = re.search(r"\b(?:use|mod)\s+([A-Za-z_][\w:]*)", line)
+        if match:
+            parts = match.group(1).split("::")
+            add(
+                "::".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None
+            )
+    elif language in {"Java", "C#"}:
+        keyword = "import" if language == "Java" else "using"
+        match = re.search(rf"\b{keyword}\s+(?:static\s+)?([A-Za-z_][\w.]*)", line)
+        if match:
+            parts = match.group(1).split(".")
+            add(".".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None)
+    elif language in {"C", "C++"}:
+        match = re.search(r"#\s*include\s*([<\"])([^>\"]+)[>\"]", line)
+        if match:
+            add(match.group(2))
+    elif language == "PHP":
+        match = re.search(r"\buse\s+([A-Za-z_\\][\w\\]*)", line)
+        if match:
+            parts = match.group(1).split("\\")
+            add(
+                "\\".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None
+            )
+        for match in re.finditer(
+            r"\b(?:require|require_once|include|include_once)\s*\(?\s*['\"]([^'\"]+)",
+            line,
+        ):
+            add(match.group(1))
+    elif language == "Ruby":
+        match = re.search(r"\brequire(_relative)?\s*\(?\s*['\"]([^'\"]+)", line)
+        if match:
+            module = ("./" if match.group(1) else "") + match.group(2)
+            add(module)
+    return tuple(results)
+
+
+def _attach_occurrences(
+    root: Node,
+    symbols: tuple[SymbolRecord, ...],
+    imports: tuple[ImportRecord, ...],
+    source: bytes,
+) -> tuple[SymbolRecord, ...]:
+    del imports
+    calls: dict[str, list[CallReference]] = {item.symbol_id: [] for item in symbols}
+    references: dict[str, list[ReferenceOccurrence]] = {
+        item.symbol_id: [] for item in symbols
+    }
+    declaration_ranges = {
+        (
+            item.declaration_range.start_line,
+            item.declaration_range.start_column,
+        )
+        for item in symbols
+    }
+    call_target_ranges: list[SourceRange] = []
+
+    def owner(node: Node) -> SymbolRecord | None:
+        region = _range(node)
+        candidates = [
+            item
+            for item in symbols
+            if _contains_range(item.body_range or item.declaration_range, region)
+        ]
+        return min(
+            candidates,
+            key=lambda item: (
+                (item.body_range or item.declaration_range).end_line
+                - (item.body_range or item.declaration_range).start_line,
+                item.qualified_name,
+            ),
+            default=None,
+        )
+
+    def in_import(node: Node) -> bool:
+        current: Node | None = node
+        while current is not None:
+            if current.type in _IMPORT_ANCESTORS:
+                return True
+            current = current.parent
+        return False
+
+    def visit_calls(node: Node) -> None:
+        if node.type in _CALL_NODES and not node.has_error:
+            target = (
+                node.child_by_field_name("function")
+                or node.child_by_field_name("name")
+                or node.child_by_field_name("method")
+                or next(iter(node.named_children), None)
+            )
+            selected_owner = owner(node)
+            if target is not None and selected_owner is not None:
+                observed = _text(source, target).strip()
+                if observed and len(observed) <= 500:
+                    region = _range(target)
+                    call_target_ranges.append(region)
+                    calls[selected_owner.symbol_id].append(
+                        CallReference(
+                            observed_name=observed,
+                            source_range=region,
+                            detection_method="polyglot_ast_call",
+                        )
+                    )
+        for child in node.named_children:
+            visit_calls(child)
+
+    def visit_references(node: Node) -> None:
+        if (
+            node.type in _IDENTIFIER_NODES
+            and not node.has_error
+            and not in_import(node)
+        ):
+            selected_owner = owner(node)
+            region = _range(node)
+            if (
+                selected_owner is not None
+                and not any(
+                    target.start_line <= region.start_line
+                    and region.end_line <= target.end_line
+                    and (
+                        target.start_line != region.start_line
+                        or target.start_column <= region.start_column
+                    )
+                    and (
+                        target.end_line != region.end_line
+                        or region.end_column <= target.end_column
+                    )
+                    for target in call_target_ranges
+                )
+                and (region.start_line, region.start_column) not in declaration_ranges
+                and not _is_declaration_name(node)
+            ):
+                observed = _text(source, node).strip()
+                if observed and len(observed) <= 500:
+                    references[selected_owner.symbol_id].append(
+                        ReferenceOccurrence(
+                            observed_name=observed,
+                            source_range=region,
+                            detection_method="polyglot_ast_reference",
+                        )
+                    )
+        for child in node.named_children:
+            visit_references(child)
+
+    visit_calls(root)
+    visit_references(root)
+    return tuple(
+        item.model_copy(
+            update={
+                "direct_calls": tuple(
+                    sorted(
+                        {
+                            (
+                                call.source_range.start_line,
+                                call.source_range.start_column,
+                                call.observed_name,
+                            ): call
+                            for call in calls[item.symbol_id]
+                        }.values(),
+                        key=lambda call: (
+                            call.source_range.start_line,
+                            call.source_range.start_column,
+                            call.observed_name,
+                        ),
+                    )
+                ),
+                "direct_references": tuple(
+                    sorted(
+                        {
+                            (
+                                reference.source_range.start_line,
+                                reference.source_range.start_column,
+                                reference.observed_name,
+                            ): reference
+                            for reference in references[item.symbol_id]
+                        }.values(),
+                        key=lambda reference: (
+                            reference.source_range.start_line,
+                            reference.source_range.start_column,
+                            reference.observed_name,
+                        ),
+                    )
+                ),
+            }
+        )
+        for item in symbols
+    )
+
+
+def _is_declaration_name(node: Node) -> bool:
+    parent = node.parent
+    if parent is None:
+        return False
+    return parent.child_by_field_name("name") == node and parent.type not in {
+        "attribute",
+        "field_expression",
+        "member_access_expression",
+        "member_expression",
+        "qualified_name",
+        "scoped_identifier",
+    }
+
+
+def _contains_range(container: SourceRange, nested: SourceRange) -> bool:
+    start = (container.start_line, container.start_column)
+    end = (container.end_line, container.end_column)
+    nested_start = (nested.start_line, nested.start_column)
+    nested_end = (nested.end_line, nested.end_column)
+    return start <= nested_start and nested_end <= end
 
 
 def _module_has_executable_code(root: Node, language: str) -> bool:

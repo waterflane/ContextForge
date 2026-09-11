@@ -19,7 +19,7 @@ from contextforge.intelligence.models import (
 )
 
 CODEMAP_SCHEMA_VERSION: Literal[3] = 3
-RESOLVER_VERSION = "4"
+RESOLVER_VERSION = "5"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -369,6 +369,7 @@ class FileCodeMap(IndexModel):
     imports: tuple[ImportRecord, ...] = ()
     exports: tuple[ExportRecord, ...] = ()
     top_level_constants: tuple[str, ...] = ()
+    configuration_key_digests: tuple[Sha256, ...] = ()
     symbols: tuple[SymbolRecord, ...] = ()
     relationships: tuple[RelationshipRecord, ...] = ()
     diagnostics: tuple[ParserDiagnostic, ...] = ()
@@ -423,6 +424,10 @@ class FileCodeMap(IndexModel):
             sorted(set(self.top_level_constants))
         ):
             raise ValueError("top-level constants must be unique and canonical")
+        if self.configuration_key_digests != tuple(
+            sorted(set(self.configuration_key_digests))
+        ):
+            raise ValueError("configuration key digests must be unique and canonical")
         key_groups = (
             (tuple(_import_order(item) for item in self.imports), "imports"),
             (tuple(_export_order(item) for item in self.exports), "exports"),
@@ -491,6 +496,15 @@ def stable_fact_id(prefix: str, *parts: object) -> str:
 
     encoded = canonical_json_bytes([prefix, *parts])
     return f"{prefix}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def configuration_key_digest(value: str) -> str:
+    """Hash a normalized configuration key without persisting its value."""
+
+    normalized = value.strip().casefold()
+    if not normalized or len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError("configuration key must be bounded non-empty text")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def serialize_code_map(code_map: FileCodeMap) -> bytes:
@@ -598,6 +612,7 @@ __all__ = [
     "CODEMAP_SCHEMA_VERSION",
     "RESOLVER_VERSION",
     "CallReference",
+    "configuration_key_digest",
     "DecoratorRecord",
     "ExportRecord",
     "FileCodeMap",

@@ -9,7 +9,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from contextforge.intelligence.codemap import FileCodeMap, SourceRange, SymbolKind
+from contextforge.intelligence.codemap import (
+    FileCodeMap,
+    SourceRange,
+    SymbolKind,
+    configuration_key_digest,
+)
 from contextforge.intelligence.manifest import canonical_json_bytes
 from contextforge.intelligence.models import (
     IndexModel,
@@ -276,7 +281,7 @@ def build_relationship_graph(
                 target_node,
                 code_map.path,
                 relationship.source_range,
-                "verified",
+                _structural_provenance(relationship.detection_method),
                 relationship.detection_method,
             )
             edges[edge.edge_id] = edge
@@ -388,6 +393,16 @@ def _relationship_kind(kind: str) -> RelationshipKind:
         raise ValueError(f"unsupported structural relationship kind: {kind}") from exc
 
 
+def _structural_provenance(detection_method: str) -> EdgeProvenance:
+    if detection_method in {
+        "python_test_path_convention",
+        "polyglot_package_resolution",
+        "polyglot_convention_resolution",
+    }:
+        return "best-effort-structural"
+    return "verified"
+
+
 def _edge(
     kind: RelationshipKind,
     source_node_id: str,
@@ -464,6 +479,13 @@ def _add_config_consumer_edges(
             if not repository_wide and not _is_module_configuration_consumer(
                 config.path, consumer.path
             ):
+                continue
+            consumer_digests = {
+                configuration_key_digest(key)
+                for symbol in consumer.symbols
+                for key in symbol.configuration_keys
+            }
+            if not consumer_digests.intersection(config.configuration_key_digests):
                 continue
             edge = _edge(
                 "config-consumer",

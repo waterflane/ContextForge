@@ -276,7 +276,7 @@ def test_config_consumers_respect_repository_and_module_scope(tmp_path: Path) ->
         if graph_node.node_id == edge.target_node_id
     }
 
-    assert ("settings.toml", "pkg/service.py") in consumers
+    assert ("settings.toml", "pkg/service.py") not in consumers
     assert ("settings.toml", "other/service.py") in consumers
     assert ("pkg/local.toml", "pkg/service.py") in consumers
     assert ("pkg/local.toml", "other/service.py") not in consumers

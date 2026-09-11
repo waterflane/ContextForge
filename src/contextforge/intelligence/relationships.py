@@ -40,17 +40,29 @@ def resolve_relationships(
 
     resolved: list[FileCodeMap] = []
     for code_map in ordered:
-        if code_map.parse_status != "parsed" or code_map.language != "Python":
+        if code_map.parse_status != "parsed":
             resolved.append(code_map)
             continue
-        imports = tuple(
-            _resolve_import(item, code_map.path, module_paths)
-            for item in code_map.imports
-        )
-        symbols = tuple(
-            _resolve_imported_calls(symbol, imports, code_map.symbols, by_path)
-            for symbol in code_map.symbols
-        )
+        if code_map.language == "Python":
+            imports = tuple(
+                _resolve_import(item, code_map.path, module_paths)
+                for item in code_map.imports
+            )
+            symbols = tuple(
+                _resolve_imported_calls(symbol, imports, code_map.symbols, by_path)
+                for symbol in code_map.symbols
+            )
+        else:
+            imports = tuple(
+                _resolve_polyglot_import(item, code_map.path, ordered)
+                for item in code_map.imports
+            )
+            symbols = tuple(
+                _resolve_polyglot_symbol(
+                    symbol, imports, code_map.symbols, by_path, code_map.path
+                )
+                for symbol in code_map.symbols
+            )
         relationships = _rebuild_resolved_relationships(code_map, imports, symbols)
         resolved.append(
             code_map.model_copy(
@@ -110,12 +122,17 @@ def _clear_call_resolution(call: CallReference, source_path: str) -> CallReferen
         and call.detection_method == "python_lexical_name"
     ):
         return call
+    method = (
+        "polyglot_ast_call"
+        if call.detection_method.startswith("polyglot_")
+        else "python_ast_call"
+    )
     return call.model_copy(
         update={
             "resolution": "unresolved",
             "target_symbol_id": None,
             "target_file_path": None,
-            "detection_method": "python_ast_call",
+            "detection_method": method,
         }
     )
 
@@ -131,12 +148,17 @@ def _clear_reference_resolution(
         and reference.detection_method == "python_lexical_reference"
     ):
         return reference
+    method = (
+        "polyglot_ast_reference"
+        if reference.detection_method.startswith("polyglot_")
+        else "python_ast_reference"
+    )
     return reference.model_copy(
         update={
             "resolution": "unresolved",
             "target_symbol_id": None,
             "target_file_path": None,
-            "detection_method": "python_ast_reference",
+            "detection_method": method,
         }
     )
 
@@ -198,6 +220,204 @@ def _resolve_import(
     if item.level == 0 and not candidates:
         return item.model_copy(update={"resolution": "external"})
     return item.model_copy(update={"resolution": "unresolved"})
+
+
+def _resolve_polyglot_import(
+    item: ImportRecord,
+    source_path: str,
+    code_maps: tuple[FileCodeMap, ...],
+) -> ImportRecord:
+    source_language = next(
+        (item.language for item in code_maps if item.path == source_path), None
+    )
+    candidates = _polyglot_import_candidates(
+        item, source_path, code_maps, source_language
+    )
+    if len(candidates) == 1:
+        return item.model_copy(
+            update={
+                "resolution": "internal",
+                "target_file_path": next(iter(candidates)),
+            }
+        )
+    relative = (item.module or "").startswith((".", "crate::", "self::"))
+    return item.model_copy(
+        update={"resolution": "unresolved" if relative or candidates else "external"}
+    )
+
+
+def _polyglot_import_candidates(
+    item: ImportRecord,
+    source_path: str,
+    code_maps: tuple[FileCodeMap, ...],
+    source_language: str | None,
+) -> set[str]:
+    module = (item.module or "").strip()
+    if not module:
+        return set()
+    source_parent = PurePosixPath(source_path).parent
+    relative = module.startswith((".", "crate::", "self::"))
+    normalized = module.replace("::", "/").replace("\\", "/")
+    normalized = normalized.removeprefix("crate/").removeprefix("self/")
+    if source_language in {"Java", "C#"}:
+        normalized = normalized.replace(".", "/")
+    normalized = normalized.strip("/")
+    bases = [normalized]
+    if item.imported_name:
+        bases.append(f"{normalized}/{item.imported_name}".strip("/"))
+    candidates: set[str] = set()
+    exact: set[str] = set()
+    for code_map in code_maps:
+        if code_map.path == source_path:
+            continue
+        pure = PurePosixPath(code_map.path)
+        without_suffix = pure.with_suffix("").as_posix()
+        variants = {pure.as_posix(), without_suffix}
+        if pure.stem in {"index", "mod", "lib"}:
+            variants.add(pure.parent.as_posix())
+        for base in bases:
+            target = (source_parent / base).as_posix() if relative else base
+            target = _normalize_posix(target)
+            if target in variants:
+                exact.add(code_map.path)
+            elif not relative and any(
+                value == target or value.endswith(f"/{target}") for value in variants
+            ):
+                candidates.add(code_map.path)
+    return exact or candidates
+
+
+def _normalize_posix(value: str) -> str:
+    parts: list[str] = []
+    for part in PurePosixPath(value).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _resolve_polyglot_symbol(
+    symbol: SymbolRecord,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+    source_path: str,
+) -> SymbolRecord:
+    calls = tuple(
+        _resolve_polyglot_occurrence(
+            call, imports, symbols, maps_by_path, source_path, is_call=True
+        )
+        for call in symbol.direct_calls
+    )
+    references = tuple(
+        _resolve_polyglot_occurrence(
+            reference,
+            imports,
+            symbols,
+            maps_by_path,
+            source_path,
+            is_call=False,
+        )
+        for reference in symbol.direct_references
+    )
+    return symbol.model_copy(
+        update={"direct_calls": calls, "direct_references": references}
+    )
+
+
+def _resolve_polyglot_occurrence(
+    occurrence: CallReference | ReferenceOccurrence,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+    source_path: str,
+    *,
+    is_call: bool,
+) -> CallReference | ReferenceOccurrence:
+    observed = occurrence.observed_name
+    final_name = _final_observed_name(observed)
+    local = [
+        item
+        for item in symbols
+        if item.parent_symbol_id is None and item.name == final_name
+    ]
+    if len(local) == 1:
+        return occurrence.model_copy(
+            update={
+                "resolution": "internal",
+                "target_file_path": source_path,
+                "target_symbol_id": local[0].symbol_id,
+                "detection_method": (
+                    "polyglot_local_call" if is_call else "polyglot_local_reference"
+                ),
+            }
+        )
+    targets: set[tuple[str, str, bool]] = set()
+    for item in imports:
+        if item.resolution != "internal" or item.target_file_path is None:
+            continue
+        target_names = _polyglot_target_names(observed, item)
+        if not target_names:
+            continue
+        target_map = maps_by_path[item.target_file_path]
+        matches = [
+            candidate
+            for candidate in target_map.symbols
+            if candidate.name in target_names
+        ]
+        if len(matches) == 1:
+            package = not _is_exact_polyglot_import(
+                item, maps_by_path[source_path].language
+            )
+            targets.add((item.target_file_path, matches[0].symbol_id, package))
+    identities = {(path, symbol_id) for path, symbol_id, _ in targets}
+    if len(identities) != 1:
+        return occurrence
+    target_path, target_id = next(iter(identities))
+    package = any(value[2] for value in targets)
+    return occurrence.model_copy(
+        update={
+            "resolution": "internal",
+            "target_file_path": target_path,
+            "target_symbol_id": target_id,
+            "detection_method": (
+                "polyglot_package_resolution"
+                if package
+                else (
+                    "polyglot_unambiguous_import_call"
+                    if is_call
+                    else "polyglot_unambiguous_import_reference"
+                )
+            ),
+        }
+    )
+
+
+def _polyglot_target_names(observed_name: str, item: ImportRecord) -> set[str]:
+    parts = [
+        part.lstrip("$")
+        for part in observed_name.replace("::", ".").replace("->", ".").split(".")
+        if part
+    ]
+    if not parts:
+        return set()
+    if item.imported_name is None:
+        return {parts[-1]}
+    binding = item.alias or item.imported_name
+    if len(parts) == 1:
+        return {parts[0]}
+    if parts[0] != binding:
+        return set()
+    return {parts[-1] if len(parts) > 1 else item.imported_name}
+
+
+def _final_observed_name(value: str) -> str:
+    cleaned = value.replace("::", ".").replace("->", ".")
+    return cleaned.rsplit(".", 1)[-1].lstrip("$")
 
 
 def _absolute_import_modules(item: ImportRecord, source_path: str) -> tuple[str, ...]:
@@ -361,6 +581,7 @@ def _rebuild_resolved_relationships(
     symbols: tuple[SymbolRecord, ...],
 ) -> tuple[RelationshipRecord, ...]:
     relationships: list[RelationshipRecord] = []
+    prefix = "python" if code_map.language == "Python" else "polyglot"
     for symbol in symbols:
         if symbol.parent_symbol_id is not None:
             relationships.append(
@@ -375,7 +596,7 @@ def _rebuild_resolved_relationships(
                         file_path=code_map.path,
                         symbol_id=symbol.symbol_id,
                     ),
-                    method="python_lexical_parent",
+                    method=f"{prefix}_lexical_parent",
                 )
             )
     for export in code_map.exports:
@@ -398,7 +619,7 @@ def _rebuild_resolved_relationships(
                     symbol_id=export.target_symbol_id,
                     observed_name=export.name,
                 ),
-                method=f"python_{export.kind}_export",
+                method=f"{prefix}_{export.kind}_export",
             )
         )
     for item in imports:
@@ -418,8 +639,15 @@ def _rebuild_resolved_relationships(
                 ),
                 method=(
                     "python_snapshot_module_resolution"
-                    if item.resolution == "internal"
+                    if prefix == "python" and item.resolution == "internal"
                     else "python_ast_import"
+                    if prefix == "python"
+                    else "polyglot_snapshot_path_resolution"
+                    if item.resolution == "internal"
+                    and _is_exact_polyglot_import(item, code_map.language)
+                    else "polyglot_package_resolution"
+                    if item.resolution == "internal"
+                    else "polyglot_ast_import"
                 ),
             )
         )
@@ -459,6 +687,15 @@ def _rebuild_resolved_relationships(
                 )
             )
     return tuple(sorted(relationships, key=_relationship_key))
+
+
+def _is_exact_polyglot_import(item: ImportRecord, language: str | None) -> bool:
+    module = item.module or ""
+    if module.startswith((".", "crate::", "self::", "super::")):
+        return True
+    if language == "Rust" and item.observed_text.lstrip().startswith("mod "):
+        return True
+    return language in {"C", "C++"} and '"' in item.observed_text
 
 
 def _add_test_relationships(
