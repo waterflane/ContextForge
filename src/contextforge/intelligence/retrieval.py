@@ -492,6 +492,8 @@ def _graph_distances(graph: object, seeds: set[str]) -> dict[str, int]:
     node_path = {item.node_id: item.path for item in graph.nodes}
     adjacent: dict[str, set[str]] = defaultdict(set)
     for edge in graph.edges:
+        if edge.provenance not in {"verified", "best-effort-structural"}:
+            continue
         source = node_path[edge.source_node_id]
         target = node_path[edge.target_node_id]
         if source != target:

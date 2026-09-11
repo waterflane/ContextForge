@@ -9,6 +9,10 @@ from contextforge.application import build_repository_index
 from contextforge.intelligence import (
     CandidateEvidenceRange,
     CandidateGraphNeighbor,
+    FileGraphMetrics,
+    RelationshipGraph,
+    RelationshipGraphEdge,
+    RelationshipGraphNode,
     RepresentationCosts,
     RetrievalDocument,
     RetrievalField,
@@ -483,6 +487,64 @@ def test_source_identifier_and_two_hop_graph_signals(tmp_path: Path) -> None:
     assert identifier.candidates[0].exact_group == "exact_source_identifier"
     entry = next(item for item in flow.candidates if item.path == "entry.py")
     assert "graph-2-hop" in entry.provenance
+
+
+def test_model_inferred_neighbors_do_not_create_retrieval_distance() -> None:
+    from contextforge.intelligence import retrieval as retrieval_module
+
+    digest = "0" * 64
+    nodes = (
+        RelationshipGraphNode(node_id="file:source.py", kind="file", path="source.py"),
+        RelationshipGraphNode(node_id="file:target.py", kind="file", path="target.py"),
+    )
+    metrics = tuple(
+        FileGraphMetrics(
+            path=path,
+            pagerank=0.5,
+            normalized_centrality=0.0,
+            fan_in=0,
+            fan_out=0,
+        )
+        for path in ("source.py", "target.py")
+    )
+    inferred_edge = RelationshipGraphEdge(
+        edge_id="1" * 64,
+        kind="reference",
+        source_node_id="file:source.py",
+        target_node_id="file:target.py",
+        source_file_path="source.py",
+        provenance="model-inferred",
+        detection_method="semantic_card_closed_candidate",
+    )
+    inferred_graph = RelationshipGraph(
+        source_snapshot_digest=digest,
+        nodes=nodes,
+        edges=(inferred_edge,),
+        file_metrics=metrics,
+    )
+
+    assert retrieval_module._graph_distances(inferred_graph, {"source.py"}) == {
+        "source.py": 0
+    }
+    inferred_neighbor = retrieval_module._candidate_neighbors(inferred_graph)[
+        "source.py"
+    ][0]
+    assert inferred_neighbor.path == "target.py"
+    assert inferred_neighbor.provenance == ("model-inferred",)
+
+    structural_graph = inferred_graph.model_copy(
+        update={
+            "edges": (
+                inferred_edge.model_copy(
+                    update={"provenance": "best-effort-structural"}
+                ),
+            )
+        }
+    )
+    assert (
+        retrieval_module._graph_distances(structural_graph, {"source.py"})["target.py"]
+        == 1
+    )
 
 
 def test_rerank_returns_deterministic_result_after_two_provider_failures(
