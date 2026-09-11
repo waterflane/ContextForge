@@ -20,6 +20,10 @@ The structural generation becomes active before model enrichment. If
 enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
+Resolver/analyzer identities changed with this revision (resolver 5, polyglot
+6, Semantic Card analyzer 5, prompt `semantic-card-v3.2`). Rebuild/update does
+not reuse older CodeMaps or semantic cache entries under those contracts.
+
 ## CLI behavior
 
 With an active v3 index:
@@ -28,6 +32,11 @@ With an active v3 index:
 - task-based `context create --task ...` returns Context Capsule v2;
 - manual `context create` without a task remains ContextPackage v1; and
 - `context inspect`/`context review` accept both artifact generations.
+
+`contextforge map PATH` remains the orientation-map default. Use `--kind
+architecture`, `--kind conventions`, `--kind features`, or `--kind all` for
+the enriched typed maps. JSON for the default stays the raw OrientationMap;
+`--kind all --format json` returns `orientation` plus `repository_maps`.
 
 Use `--legacy-discovery` and `--legacy-handoff` during migration if a consumer
 still expects `FinalContextSelection` or `TaskHandoff`. Remove those flags after
@@ -61,6 +70,8 @@ Package, Capsule, and prompt files created inside the repository are recorded
 in `.contextforge/generated-artifacts.json`. An unchanged registered artifact
 is omitted from later scans and updates; editing it changes the digest and makes
 it ordinary source again. No ignore-file migration is required.
+Concurrent registry writers are serialized by the internal bounded
+`.contextforge/generated-artifacts.lock`; stale ownership is recovered safely.
 
 ## Integration migration
 
@@ -102,3 +113,7 @@ async def build_capsule(root, task):
 
 Legacy `ContextPackage`, `TaskHandoff`, and `compile_prompt` APIs remain
 available for the deprecation period.
+
+Benchmark manifests remain schema 1. The additive task field `pipeline`
+defaults to `legacy_discovery`; set it to `index_v3_capsule` to measure cold
+build, warm retrieval, and isolated incremental update through Capsule v2.

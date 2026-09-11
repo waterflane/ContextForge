@@ -148,6 +148,7 @@ Build a structural-only local index and inspect its status:
 contextforge index build . --provider none
 contextforge index status .
 contextforge map .
+contextforge map . --kind all --format json
 contextforge context suggest . --task "Trace configuration precedence"
 contextforge context create . --task "Trace configuration precedence" `
   --context-tokens 32768 --response-tokens 4096 `
@@ -181,7 +182,7 @@ mutating operations.
 | `contextforge doctor` | Report basic installation settings | Read-only |
 | `contextforge scan [PATH]` | Inventory repository files | Read-only unless `--output` is used |
 | `contextforge tree [PATH]` | Render a project tree | Read-only unless `--output` is used |
-| `contextforge map [PATH]` | Render the active verified orientation map | Read-only |
+| `contextforge map [PATH]` | Render orientation or typed architecture/conventions/features maps | Read-only |
 | `contextforge context suggest [PATH]` | Retrieve Index v3 CandidateCards; legacy discovery is opt-in | Source/index read-only |
 | `contextforge context create [PATH]` | Build a manual package or task-based Capsule v2 | Reads source; optional artifact writes |
 | `contextforge context inspect ARTIFACT` | Validate ContextPackage v1 or Capsule v2 JSON | Read-only |
@@ -196,7 +197,7 @@ mutating operations.
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
 | `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1.0–2.1 | V1 read-only; V2 may atomically mutate only the index |
-| `contextforge benchmark discovery PATH` | Run manifest-driven discovery benchmarks | Repository/index read-only; experimental |
+| `contextforge benchmark discovery PATH` | Run legacy or Index v3 Capsule benchmark pipelines | Source stays unchanged; temporary/index state may be used |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
 repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.

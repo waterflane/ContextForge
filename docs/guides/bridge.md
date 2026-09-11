@@ -99,7 +99,7 @@ index cannot be mistaken for a fully enriched one.
 | `status` | none | Current readiness, source drift, and read-only index status |
 | `snapshot` | none | New authoritative digest and bounded inventory summary |
 | `index` (v2) | action and expected snapshot digest | Atomic tracked build/update job using the application workflow |
-| `map` (v2.1) | expected snapshot digest | Full pinned orientation map |
+| `map` (v2.1) | expected snapshot digest | Pinned orientation plus available typed repository maps |
 | `search` (v2.1) | digest and task | CandidateCards from deterministic retrieval; optional bounded rerank |
 | `symbol` (v2.1) | digest and query | Verified exact/qualified symbol matches |
 | `compile` (v2.1) | digest, task, and token budget | Retrieval plus Context Capsule v2 compilation |
@@ -163,7 +163,9 @@ abandoned progress consumer cannot cancel the index job.
 ## Bridge 2.1 read-only operations
 
 After negotiating `2.1`, call `snapshot` and pass its digest to every new
-operation. `map` returns the pinned orientation record. `search` returns
+operation. `map` returns the generation ID, pinned full orientation record, and
+available architecture/conventions/features maps with typed grounded claims and
+provenance-bearing relationships. `search` returns
 RetrievalResult v3; reranking is off by default. `symbol` searches verified
 CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
 files, optional diff text, and context/history/response/safety budgets, then

@@ -27,6 +27,9 @@ and Python distribution versions follow PEP 440.
 - Added benchmark required ranges, optional files, useful-token accounting,
   file precision/recall, precision@5, range/token precision, model/provider
   calls, lifecycle latency, and ungrounded-claim rate.
+- Added typed evidence/provenance projections to repository maps, normative
+  OrientationMap/RepositoryMap schemas, CLI `map --kind`, and the additive
+  benchmark `index_v3_capsule` pipeline with grounded/dropped-claim metrics.
 
 ### Changed
 
@@ -43,6 +46,9 @@ and Python distribution versions follow PEP 440.
 - Repository orientation, architecture, conventions, and feature maps are now
   deterministic aggregations of graph, CodeMaps, and grounded cards, without
   separate repository-wide model calls.
+- Semantic enrichment now uses analyzer 5 / `semantic-card-v3.2`, declaration-
+  aware one-to-four chunk planning, full-request/schema token accounting, one
+  scheduler-owned repair authority, and lexical anchors for ranking prose.
 
 ### Fixed
 
@@ -55,9 +61,25 @@ and Python distribution versions follow PEP 440.
 - Prevented centrality-only task material, added bounded reranker representation
   influence, and enforced a 30% automatic Capsule soft target without weakening
   explicit-material or hard-budget rules.
+- Restricted retrieval graph scoring to verified/best-effort structural edges,
+  while retaining inferred neighbors as non-authoritative CandidateCard context.
+- Allocated automatic capsule sections inside the post-envelope soft payload,
+  seeded complementary MAPs before upgrades, and penalized duplicate concepts,
+  ranges, and graph neighbors during marginal-utility selection.
 - Reported all current v3 repository maps after builds and added a digest-bound
   generated-artifact registry so unchanged package/Capsule/prompt outputs do
   not enter later index updates.
+- Serialized generated-artifact registry updates with a bounded, ownership-
+  checked stale-recoverable lock so concurrent writers do not lose entries.
+- Completed ten-language import/call/reference extraction, ambiguity-aware
+  provenance, and key-digest-scoped config-consumer relationships without
+  storing configuration values.
+- Reused digest-matched published Semantic Cards across unrelated structural
+  updates, avoiding retries of unchanged fallback/partial files while still
+  rebinding or dropping inferred targets against the current snapshot.
+- Distinguished the closed Semantic Card evidence-ID set from untrusted source
+  container IDs, preventing compatible providers from returning transport IDs
+  that cannot ground ranking claims.
 - Decoupled Bridge progress delivery from index cancellation: queue overflow
   coalesces intermediate events, counts dropped/coalesced updates, and always
   prioritizes terminal state. A slow progress consumer cannot cancel a job.

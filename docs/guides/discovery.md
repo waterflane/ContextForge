@@ -167,6 +167,7 @@ modes use `fresh`, `indexed`, `hybrid` order.
       "task_id": "configuration-loading",
       "repository_path": "ContextForge",
       "task": "Find configuration loading and its focused tests.",
+      "pipeline": "index_v3_capsule",
       "modes": [
         "fresh",
         "indexed",
@@ -219,6 +220,10 @@ modes use `fresh`, `indexed`, `hybrid` order.
 
 The main task fields have these roles:
 
+- `pipeline` is `legacy_discovery` by default. `index_v3_capsule` runs cold
+  build/retrieve/compile for `fresh`, warm retrieve/compile for `indexed`, and
+  an isolated controlled change plus incremental update/retrieve/compile for
+  `hybrid`.
 - `include_paths` and `exclude_paths` constrain discovery with exact snapshot
   paths.
 - `required_files_all` requires every listed file. Each `required_files_any`
@@ -246,7 +251,7 @@ states.
 
 ### Quality, repeatability, and performance metrics
 
-Metrics are calculated per comparable cohort: task, repository, mode, source
+Metrics are calculated per comparable cohort: task, repository, pipeline, mode, source
 snapshot digest, index generation, and effective configuration digest must all
 match. Failed and cancelled runs count toward totals but are excluded from
 quality, repeatability, confidence, duration, and range calculations.
@@ -259,7 +264,9 @@ Quality metrics are aggregated over complete runs:
   lines when required ranges are configured;
 - token precision uses the conservative UTF-8-bytes/3 estimator to compare
   tokens intersecting required ranges with all selected source tokens;
-- ungrounded-claim rate reports selection interpretations without evidence;
+- grounded/dropped-claim rates use validated Semantic Card claims and typed
+  dropped-item diagnostics; ungrounded-claim rate reports rejected or
+  evidence-free interpretations;
 - forbidden-file selection rate is selected forbidden files divided by
   configured forbidden-file opportunities; lower is better;
 - expected-facet coverage is covered facets divided by configured facets; and

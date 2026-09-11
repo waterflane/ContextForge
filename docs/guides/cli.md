@@ -45,6 +45,7 @@ contextforge index update . --semantic-scope priority \
   --semantic-max-requests 96 --semantic-max-input-tokens 256000 \
   --semantic-max-chunks-per-file 4
 contextforge map . --format json
+contextforge map . --kind all --format json
 contextforge context suggest . --task "Trace startup" --working-file src/app.py
 contextforge context create . --task "Trace startup" \
   --working-lines src/app.py:1-80 --context-tokens 32768 \
@@ -65,6 +66,13 @@ Successful build/update summaries read the v3 manifest artifacts and report
 In-repository package, Capsule, and prompt outputs are registered by digest so
 an unchanged generated artifact does not enter the next scan. If the user edits
 it, it is indexed normally; outputs outside the repository are not registered.
+Registry updates use a separate bounded internal lock with ownership and stale
+lock checks, so concurrent artifact writers cannot lose one another's entries.
+
+`map` defaults to the complete structural orientation artifact. `--kind
+architecture|conventions|features` renders one enriched typed map, while
+`--kind all` returns all available pinned maps. The orientation-only JSON shape
+is unchanged for existing clients.
 
 Manual `context create` without `--task` still emits ContextPackage v1.
 `--legacy-discovery` and `--legacy-handoff` retain the deprecated task-based

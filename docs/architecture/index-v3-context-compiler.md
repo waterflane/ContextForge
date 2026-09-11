@@ -33,6 +33,21 @@ retrieval, and is rejected by `index update`. Run `index build` to create v3;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
+Resolver version 5 and polyglot analyzer version 6 extract imports, calls, and
+non-call references for Python plus JavaScript, TypeScript, Java, C#, Go, Rust,
+C, C++, PHP, and Ruby. Exact relative paths and unambiguous snapshot symbols
+are verified; package/convention resolution is best-effort and ambiguity stays
+unresolved. Config consumers match SHA-256 digests of discovered key names in
+permitted root/module scope. Config values are never stored.
+
+Semantic Card analyzer version 5 (`semantic-card-v3.2`) uses one full request
+when it fits or up to four declaration-aware UTF-8 chunks with eight lines of
+overlap. Evidence is constrained to the active chunk and may address verified
+import, call, reference, or config facts. Every primary and scheduler-owned
+repair consumes the shared request and full-request token ceilings; provider
+internal repair is disabled for card requests. Ranking prose must also have a
+lexical or identifier anchor in cited evidence.
+
 ## Retrieval
 
 Retrieval first partitions exact matches in this order: exact path, qualified
@@ -49,6 +64,9 @@ eligible for automatic materialization only when it also has an exact group,
 BM25 or grounded semantic/evidence match, graph proximity, current-diff, or
 Working Set signal. This prevents unrelated metadata, lock, or generated files
 from entering a capsule merely because they are structurally central.
+Only `verified` and `best-effort-structural` edges contribute graph proximity.
+`model-inferred` neighbors remain visible with provenance in CandidateCards but
+cannot be the sole relevance signal.
 
 A `CandidateCard` includes source identity, synopsis, matched concepts and
 symbols, evidence ranges, graph neighbors, provenance, freshness, and estimated
@@ -75,6 +93,11 @@ soft target. Explicit Working Set files, requested ranges, pinned FULL files,
 and required Git material may take the capsule beyond that target, while the
 hard available-token budget remains absolute. Unused allocation still flows to
 evidence, then Working Set, then the repository map.
+For automatic compilation the 20/15/55/10 shares are calculated inside the
+soft payload after the capsule envelope. Relevant complementary MAPs are seeded
+before any representation upgrade. Upgrade utility is recomputed against the
+selected set so repeated concepts, ranges, and graph neighbors lose value; a
+single cheap FULL cannot replace several complementary MAPs.
 
 Representations are:
 
@@ -94,9 +117,25 @@ The stable prompt root is `<contextforge schema_version="2">` with separate
 snapshot, verified repository map, Working Set, task context, and Git sections.
 Model selection rationale is labeled interpretation and never merged into
 verified source. A stable verified-usage section says that source facts are
-evidence, interpretations are not guarantees, and unknown behavior must be
-reported as unknown. See
+evidence, repository maps establish structure rather than source contents,
+only materialized SLICE/FULL lines may be quoted, summaries are evidence-linked
+interpretations rather than guarantees, and unknown behavior must be reported
+as unknown. See
 [`context-capsule-v2.schema.json`](../schemas/context-capsule-v2.schema.json).
+
+## Storage and benchmark concurrency
+
+Package, Capsule, and prompt outputs written inside the repository are recorded
+by digest. Registry read-modify-write is serialized by a separate bounded
+`.contextforge/generated-artifacts.lock`; owner identity is checked on release
+and stale locks are recovered without deleting a replacement lock. Scanner
+suppression remains digest-bound, so a user edit makes the file ordinary source.
+
+Benchmark manifest schema 1 has an additive `pipeline` field. Its default is
+`legacy_discovery`; `index_v3_capsule` measures cold build/retrieve/compile,
+warm retrieve/compile, and isolated incremental update/retrieve/compile for
+fresh/indexed/hybrid modes. Results account for materialized ranges/tokens,
+grounded and dropped card claims, and provider-reported transport/HTTP calls.
 
 ## Public surface
 
@@ -105,3 +144,7 @@ Python exports `load_relationship_graph()`, `load_orientation_map()`,
 public card/candidate/capsule/budget/estimator types. Bridge 2.1, MCP, and the
 development HTTP API expose read-only `map`, `search`, `symbol`, and `compile`
 operations. None can write source, invoke a shell, or mutate Git.
+`contextforge map --kind orientation|architecture|conventions|features|all`
+exposes the same pinned artifacts. Normative schemas are
+[`orientation-map-v3.schema.json`](../schemas/orientation-map-v3.schema.json)
+and [`repository-map-v3.schema.json`](../schemas/repository-map-v3.schema.json).

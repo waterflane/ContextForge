@@ -33,6 +33,13 @@ deleted participating file invalidates affected module projections. Incremental
 update rebuilds changed-file edges, neighboring projections, and affected
 module maps without rereading unchanged source.
 
+Architecture, conventions, and feature entries carry backward-compatible typed
+`claims` and `relationships`. Claims point back to card evidence IDs and retain
+grounded interpretation provenance. Relationship projections retain kind,
+source/target paths and symbols, source range, detection method, and structural
+or model-inferred provenance. See the normative
+[`repository-map-v3.schema.json`](../schemas/repository-map-v3.schema.json).
+
 ## Graph provenance and centrality
 
 Relationship edges cover file/symbol imports, references, calls,
@@ -40,14 +47,16 @@ source-to-test, entrypoint-to-handler, and config-to-consumer links. Every edge
 is `verified`, `best-effort-structural`, or `model-inferred`. Reverse
 dependencies, fan-in/out, and test connectivity are stored alongside the graph.
 
-Python references cover value, type, and imported-symbol uses separately from
-calls. Declarations, imports, and call targets are excluded from reference
-occurrences, and only an unambiguous target in the pinned snapshot becomes a
-verified edge with a source range. Module-level `os.getenv`,
+Python and all ten Tree-sitter languages extract imports, calls, and non-call
+references. Declarations, imports, and call targets are excluded from reference
+occurrences. Exact relative paths and unambiguous snapshot symbols are verified;
+package/convention resolution is best-effort and ambiguity remains unresolved.
+Module-level `os.getenv`,
 `os.environ.get`, and `os.environ[...]` reads contribute config keys even when
-they appear in assignments or constants. Conventional root and config-directory
-settings may connect repository-wide; nested module settings remain scoped to
-their module.
+they appear in assignments or constants. Only SHA-256 digests of key names are
+stored. Conventional root and config-directory settings may connect
+repository-wide when key digests match; nested module settings remain scoped to
+their module. Config values and secrets are not retained.
 
 PageRank is deterministic: damping `0.85`, at most 100 iterations, tolerance
 `1e-9`, canonical node order, and no contribution from `model-inferred` or

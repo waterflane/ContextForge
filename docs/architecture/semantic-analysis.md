@@ -65,6 +65,22 @@ provider timeout is independent of the operation timeout. A provider response
 may never expand the selected file set, evidence table, source ranges, or
 request budget.
 
+A file uses one request when its complete bounded prompt fits. Otherwise the
+UTF-8/declaration-aware planner emits at most four chunks with eight source
+lines of overlap. Evidence IDs are scoped to the current chunk and also cover
+verified import, call, reference, and config facts. An uncovered tail or
+invalid chunk makes the surviving card partial.
+
+Token accounting covers the entire `ModelRequest`, including its response
+schema and protocol wrapper. Every primary and scheduler-owned repair consumes
+one shared request slot; without a slot no repair is sent. Provider-level JSON
+repair is disabled for Semantic Cards, leaving exactly one repair authority.
+Ranking claims require both valid evidence and a lexical/identifier anchor in
+that evidence. Requests enumerate the exact `allowed_evidence_ids`; transport
+container IDs are explicitly non-evidence so compatible providers cannot
+silently substitute them. Safe diagnostics include a typed dropped-item count
+for benchmark accounting without retaining rejected prose.
+
 ## Content-addressed cache and rename reuse
 
 Validated model payloads use the direct cache path
@@ -74,6 +90,11 @@ It deliberately excludes the repository path. On a cache hit, path-specific
 evidence and symbol IDs are rebound to the current CodeMap and fully validated.
 This permits a byte-identical renamed file to reuse semantic content without a
 model call while preventing stale path evidence from entering the new card.
+After an unrelated structural update, an unchanged published card is also
+reused when both its source and CodeMap record digests still match. Its inferred
+targets are rebound against the current closed candidate set; stale targets are
+dropped independently. `--force-reanalyze` remains the explicit way to retry a
+previous deterministic fallback or otherwise bypass both reuse paths.
 
 ## Grounded inferred relationships
 
