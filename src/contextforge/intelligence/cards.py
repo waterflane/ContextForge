@@ -84,6 +84,7 @@ class SemanticCardDiagnostic(IndexModel):
 
     code: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=500)
+    dropped_items: NonNegativeInt = 0
 
 
 class SemanticEvidence(IndexModel):
@@ -1110,6 +1111,7 @@ def _ground_raw_card(
             SemanticCardDiagnostic(
                 code="optional_claims_dropped",
                 message=f"Dropped {dropped} invalid optional semantic item(s).",
+                dropped_items=dropped,
             )
         )
     if force_partial:

@@ -42,6 +42,7 @@ def calculate_benchmark_metrics(
         key = (
             run.task_id,
             run.repository_path,
+            run.pipeline.value,
             run.mode.value,
             run.source_snapshot_digest,
             run.index_generation_id,
@@ -85,6 +86,7 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
     return BenchmarkCohortMetrics(
         task_id=first.task_id,
         repository_path=first.repository_path,
+        pipeline=first.pipeline,
         mode=first.mode,
         source_snapshot_digest=first.source_snapshot_digest,
         index_generation_id=first.index_generation_id,
@@ -147,6 +149,16 @@ def _cohort(runs: tuple[BenchmarkRunResult, ...]) -> BenchmarkCohortMetrics:
             complete,
             lambda run: run.ungrounded_claims,
             lambda run: run.semantic_claims,
+        ),
+        grounded_claim_rate=_quality_rate(
+            complete,
+            lambda run: run.grounded_claims,
+            lambda run: run.grounded_claims + run.dropped_claims,
+        ),
+        dropped_claim_rate=_quality_rate(
+            complete,
+            lambda run: run.dropped_claims,
+            lambda run: run.grounded_claims + run.dropped_claims,
         ),
         forbidden_file_selection_rate=_quality_rate(
             complete,

@@ -50,6 +50,13 @@ class BenchmarkMode(StrEnum):
     HYBRID = "hybrid"
 
 
+class BenchmarkPipeline(StrEnum):
+    """Context selection pipeline exercised by a benchmark task."""
+
+    LEGACY_DISCOVERY = "legacy_discovery"
+    INDEX_V3_CAPSULE = "index_v3_capsule"
+
+
 class BenchmarkIndexPrecondition(BenchmarkModel):
     """Required source/index state for an indexed benchmark task."""
 
@@ -242,6 +249,7 @@ class BenchmarkTask(BenchmarkExpectations):
     task_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
     repository_path: RepositoryRelativePath
     task: str = Field(min_length=1, max_length=20_000)
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     modes: tuple[BenchmarkMode, ...] = Field(min_length=1)
     repeat_count: PositiveInt = 1
     include_paths: tuple[RepositoryRelativePath, ...] = ()
@@ -284,6 +292,11 @@ class BenchmarkTask(BenchmarkExpectations):
                 BenchmarkMode(item) if isinstance(item, str) else item for item in value
             )
         return value
+
+    @field_validator("pipeline", mode="before")
+    @classmethod
+    def parse_pipeline(cls, value: object) -> object:
+        return BenchmarkPipeline(value) if isinstance(value, str) else value
 
     @field_validator("modes")
     @classmethod
@@ -412,6 +425,7 @@ class BenchmarkRunResult(BenchmarkModel):
 
     task_id: str
     repository_path: RepositoryRelativePath
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     mode: BenchmarkMode
     repetition: PositiveInt
     status: Literal["complete", "failed", "cancelled"]
@@ -428,7 +442,9 @@ class BenchmarkRunResult(BenchmarkModel):
     provider_counters: BenchmarkProviderCounters
     confidence: ConfidenceValue | None = None
     warnings: tuple[CompletenessWarning, ...] = ()
-    provenance: Literal["model", "deterministic_fallback"] | None = None
+    provenance: (
+        Literal["model", "deterministic_fallback", "index_v3_deterministic"] | None
+    ) = None
     fallback_used: bool = False
     context_bytes: NonNegativeInt = 0
     selected_ranges: tuple[BenchmarkSourceRange, ...] = ()
@@ -436,6 +452,8 @@ class BenchmarkRunResult(BenchmarkModel):
     useful_tokens: NonNegativeInt = 0
     semantic_claims: NonNegativeInt = 0
     ungrounded_claims: NonNegativeInt = 0
+    grounded_claims: NonNegativeInt = 0
+    dropped_claims: NonNegativeInt = 0
     latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation
     budgets: BenchmarkBudgetEvaluation
@@ -486,6 +504,7 @@ class BenchmarkCohortMetrics(BenchmarkModel):
 
     task_id: str
     repository_path: RepositoryRelativePath
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     mode: BenchmarkMode
     source_snapshot_digest: Sha256 | None
     index_generation_id: Sha256 | None
@@ -508,6 +527,8 @@ class BenchmarkCohortMetrics(BenchmarkModel):
     range_precision: Rate | None = None
     token_precision: Rate | None = None
     ungrounded_claim_rate: Rate | None = None
+    grounded_claim_rate: Rate | None = None
+    dropped_claim_rate: Rate | None = None
     forbidden_file_selection_rate: Rate | None = None
     expected_facet_coverage_rate: Rate | None = None
     pairwise_jaccard: tuple[BenchmarkPairwiseJaccard, ...] = ()
@@ -562,6 +583,7 @@ __all__ = [
     "BenchmarkModeOverrides",
     "BenchmarkProviderCounters",
     "BenchmarkPairwiseJaccard",
+    "BenchmarkPipeline",
     "BenchmarkRangeCoverage",
     "BenchmarkResult",
     "BenchmarkRunResult",

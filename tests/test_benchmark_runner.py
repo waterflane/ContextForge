@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 import contextforge.benchmarks.runner as benchmark_runner
+from contextforge.application import build_repository_index
 from contextforge.application import (
     suggest_repository_context as application_suggest_repository_context,
 )
@@ -15,6 +16,7 @@ from contextforge.benchmarks import (
     BenchmarkManifest,
     BenchmarkMode,
     BenchmarkModeOverrides,
+    BenchmarkPipeline,
     BenchmarkSourceRange,
     BenchmarkTask,
     run_discovery_benchmark,
@@ -74,6 +76,45 @@ def _fallback_provider() -> FakeModelProvider:
         max_json_repair_attempts=1,
     )
     return FakeModelProvider(configuration, responder=lambda _request, _index: "{")
+
+
+def _index_provider() -> FakeModelProvider:
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="benchmark-index-v3",
+        timeout_seconds=2,
+        retry_limit=0,
+        max_json_repair_attempts=0,
+    )
+
+    def respond(request: ModelRequest, call_index: int) -> str:
+        del call_index
+        facts = request.trusted_code_map_facts
+        path = str(facts["path"])
+        stem = Path(path).stem
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": f"{stem} implementation",
+                    "evidence_ids": ["symbol:0000"],
+                },
+                "concepts": [{"text": stem, "evidence_ids": ["symbol:0000"]}],
+                "responsibilities": [
+                    {
+                        "text": "unanchored optional claim",
+                        "evidence_ids": ["symbol:0000"],
+                    }
+                ],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+                "inferred_relationships": [],
+            }
+        )
+
+    return FakeModelProvider(configuration, responder=respond)
 
 
 def _build_index(repository: Path) -> None:
@@ -176,6 +217,83 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert metric.expected_facet_coverage_rate == 1.0
     assert metric.duration is not None
     assert metric.duration.percentiles is None
+
+
+def test_index_v3_pipeline_exercises_cold_warm_and_incremental_capsules(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    _write(repository, "main.py", "def main():\n    return 1\n")
+    _write(repository, "alternate.py", "def alternate():\n    return 2\n")
+    asyncio.run(
+        build_repository_index(
+            repository,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    before = {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    }
+    task = _task(
+        "index-v3",
+        "repository",
+        pipeline=BenchmarkPipeline.INDEX_V3_CAPSULE,
+        modes=(BenchmarkMode.FRESH, BenchmarkMode.INDEXED, BenchmarkMode.HYBRID),
+        expected_facets=(),
+        allowed_warnings=(),
+        max_selected_files=3,
+        max_files_read=3,
+        max_model_generations=10,
+        max_provider_http_calls=10,
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="index-v3-pipeline",
+        tasks=(task,),
+    )
+
+    result = asyncio.run(run_discovery_benchmark(manifest, tmp_path, _index_provider()))
+
+    assert result.passed is True, result.runs
+    assert (
+        tuple(run.pipeline for run in result.runs)
+        == (BenchmarkPipeline.INDEX_V3_CAPSULE,) * 3
+    )
+    assert tuple(run.latency_kind for run in result.runs) == (
+        "cold",
+        "warm",
+        "incremental",
+    )
+    fresh, indexed, hybrid = result.runs
+    assert fresh.provider_counters.total_provider_http_calls > 0
+    assert indexed.provider_counters.total_provider_http_calls == 0
+    assert hybrid.provider_counters.total_provider_http_calls > 0
+    assert all(run.provenance == "index_v3_deterministic" for run in result.runs)
+    assert all("main.py" in run.selected_files for run in result.runs)
+    assert all(run.selected_tokens > 0 for run in result.runs)
+    assert all(run.useful_tokens > 0 for run in result.runs)
+    assert fresh.grounded_claims > 0
+    assert fresh.dropped_claims > 0
+    metrics_by_mode = {item.mode: item for item in result.metrics}
+    assert metrics_by_mode[BenchmarkMode.FRESH].cold_latency is not None
+    assert metrics_by_mode[BenchmarkMode.FRESH].grounded_claim_rate is not None
+    assert metrics_by_mode[BenchmarkMode.FRESH].dropped_claim_rate is not None
+    assert metrics_by_mode[BenchmarkMode.INDEXED].warm_latency is not None
+    assert metrics_by_mode[BenchmarkMode.HYBRID].incremental_latency is not None
+    assert {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_benchmark_pipeline_defaults_to_legacy_discovery() -> None:
+    assert _task("legacy-default", "repository").pipeline is (
+        BenchmarkPipeline.LEGACY_DISCOVERY
+    )
 
 
 def test_required_range_coverage_merges_overlaps_without_counting_gaps() -> None:
