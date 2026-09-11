@@ -6,12 +6,21 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 REGISTRY_SCHEMA_VERSION: Literal[1] = 1
 REGISTRY_RELATIVE_PATH = ".contextforge/generated-artifacts.json"
+REGISTRY_LOCK_RELATIVE_PATH = ".contextforge/generated-artifacts.lock"
 MAX_REGISTRY_BYTES = 1_000_000
+MAX_REGISTRY_LOCK_BYTES = 16_384
+REGISTRY_LOCK_TIMEOUT_SECONDS = 5.0
+REGISTRY_LOCK_STALE_SECONDS = 30.0
+REGISTRY_LOCK_POLL_SECONDS = 0.01
 GeneratedArtifactKind = Literal["package", "capsule", "prompt"]
 
 
@@ -64,25 +73,26 @@ def register_generated_artifact(
             raise GeneratedArtifactRegistryError(
                 "ContextForge state path is not canonical"
             )
-        existing = _load_registry_entries(root)
-        existing[relative] = (digest, kind)
-        artifacts = [
-            {"kind": entry_kind, "path": path, "sha256": entry_digest}
-            for path, (entry_digest, entry_kind) in sorted(existing.items())
-        ]
-        content = (
-            json.dumps(
-                {
-                    "schema_version": REGISTRY_SCHEMA_VERSION,
-                    "artifacts": artifacts,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            + b"\n"
-        )
-        _write_atomic(registry, content)
+        with _registry_write_lock(root):
+            existing = _load_registry_entries(root)
+            existing[relative] = (digest, kind)
+            artifacts = [
+                {"kind": entry_kind, "path": path, "sha256": entry_digest}
+                for path, (entry_digest, entry_kind) in sorted(existing.items())
+            ]
+            content = (
+                json.dumps(
+                    {
+                        "schema_version": REGISTRY_SCHEMA_VERSION,
+                        "artifacts": artifacts,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            _write_atomic(registry, content)
     except GeneratedArtifactRegistryError:
         raise
     except OSError as exc:
@@ -90,6 +100,116 @@ def register_generated_artifact(
             "unable to update generated artifact registry"
         ) from exc
     return True
+
+
+@contextmanager
+def _registry_write_lock(repository_root: Path) -> Iterator[None]:
+    lock_path = repository_root / ".contextforge" / "generated-artifacts.lock"
+    owner_id = uuid.uuid4().hex
+    deadline = time.monotonic() + REGISTRY_LOCK_TIMEOUT_SECONDS
+    content = (
+        json.dumps(
+            {
+                "created_at": time.time(),
+                "owner_id": owner_id,
+                "pid": os.getpid(),
+                "schema_version": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    while True:
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+        except FileExistsError:
+            if lock_path.is_symlink():
+                raise GeneratedArtifactRegistryError(
+                    "generated artifact registry lock must not be a link"
+                ) from None
+            if _remove_stale_registry_lock(lock_path):
+                continue
+            if time.monotonic() >= deadline:
+                raise GeneratedArtifactRegistryError(
+                    "timed out acquiring generated artifact registry lock"
+                ) from None
+            time.sleep(REGISTRY_LOCK_POLL_SECONDS)
+            continue
+        except OSError as exc:
+            raise GeneratedArtifactRegistryError(
+                "unable to acquire generated artifact registry lock"
+            ) from exc
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            lock_path.unlink(missing_ok=True)
+            raise
+        break
+    try:
+        yield
+    finally:
+        _release_registry_lock(lock_path, owner_id)
+
+
+def _remove_stale_registry_lock(lock_path: Path) -> bool:
+    try:
+        before = lock_path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    lock_age = time.time() - before.st_mtime
+    if lock_age <= REGISTRY_LOCK_STALE_SECONDS:
+        return False
+    try:
+        after = lock_path.stat()
+        if (
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            return False
+        lock_path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _release_registry_lock(lock_path: Path, owner_id: str) -> None:
+    try:
+        with lock_path.open("rb") as stream:
+            content = stream.read(MAX_REGISTRY_LOCK_BYTES + 1)
+        if len(content) > MAX_REGISTRY_LOCK_BYTES:
+            raise ValueError("registry lock is oversized")
+        payload = json.loads(content)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise GeneratedArtifactRegistryError(
+            "generated artifact registry lock ownership cannot be verified"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("owner_id") != owner_id:
+        raise GeneratedArtifactRegistryError(
+            "generated artifact registry lock ownership was lost"
+        )
+    try:
+        lock_path.unlink()
+    except OSError as exc:
+        raise GeneratedArtifactRegistryError(
+            "unable to release generated artifact registry lock"
+        ) from exc
 
 
 def _load_registry_entries(
@@ -180,6 +300,7 @@ def _is_sha256(value: str) -> bool:
 
 __all__ = [
     "MAX_REGISTRY_BYTES",
+    "REGISTRY_LOCK_RELATIVE_PATH",
     "REGISTRY_RELATIVE_PATH",
     "REGISTRY_SCHEMA_VERSION",
     "GeneratedArtifactKind",

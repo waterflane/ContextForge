@@ -1,7 +1,10 @@
 import hashlib
+import json
 import os
 import stat
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Never, Protocol
 
@@ -728,6 +731,112 @@ def test_generated_artifact_registry_is_digest_bound_and_corruption_is_safe(
     outside = tmp_path / "outside.xml"
     outside.write_text("<contextforge />\n", encoding="utf-8")
     assert register_generated_artifact(root, outside, kind="prompt") is False
+
+
+def test_generated_artifact_registry_serializes_concurrent_writers(
+    tmp_path: Path,
+) -> None:
+    artifacts = []
+    for index in range(16):
+        artifact = tmp_path / f"artifact-{index}.json"
+        artifact.write_text(f'{{"index":{index}}}\n', encoding="utf-8")
+        artifacts.append(artifact)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        registered = tuple(
+            executor.map(
+                lambda path: register_generated_artifact(
+                    tmp_path, path, kind="capsule"
+                ),
+                artifacts,
+            )
+        )
+
+    assert all(registered)
+    assert set(load_generated_artifact_digests(tmp_path)) == {
+        item.name for item in artifacts
+    }
+    assert not (tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH).exists()
+
+
+def test_generated_artifact_registry_recovers_stale_lock(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+    lock.parent.mkdir()
+    lock.write_text(
+        json.dumps(
+            {
+                "created_at": time.time()
+                - generated_module.REGISTRY_LOCK_STALE_SECONDS
+                - 1,
+                "owner_id": "abandoned",
+                "pid": 1,
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_time = time.time() - generated_module.REGISTRY_LOCK_STALE_SECONDS - 1
+    os.utime(lock, (stale_time, stale_time))
+
+    assert register_generated_artifact(tmp_path, artifact, kind="capsule") is True
+    assert not lock.exists()
+    assert set(load_generated_artifact_digests(tmp_path)) == {"artifact.json"}
+
+
+def test_generated_artifact_registry_lock_wait_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+    lock.parent.mkdir()
+    lock.write_text(
+        json.dumps(
+            {
+                "created_at": time.time(),
+                "owner_id": "active",
+                "pid": os.getpid(),
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generated_module, "REGISTRY_LOCK_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(generated_module, "REGISTRY_LOCK_POLL_SECONDS", 0.001)
+
+    with pytest.raises(GeneratedArtifactRegistryError, match="timed out acquiring"):
+        register_generated_artifact(tmp_path, artifact, kind="capsule")
+
+    assert lock.exists()
+
+
+def test_generated_artifact_registry_does_not_release_another_owner(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".contextforge"
+    state.mkdir()
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+
+    with (
+        pytest.raises(GeneratedArtifactRegistryError, match="ownership was lost"),
+        generated_module._registry_write_lock(tmp_path),
+    ):
+        lock.write_text(
+            json.dumps(
+                {
+                    "created_at": time.time(),
+                    "owner_id": "replacement",
+                    "pid": os.getpid(),
+                    "schema_version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert lock.exists()
 
 
 def test_generated_artifact_registry_rejects_invalid_output_kinds_and_files(
