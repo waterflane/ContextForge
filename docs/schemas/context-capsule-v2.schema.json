@@ -47,13 +47,14 @@
     "material": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "source_sha256", "representation", "content", "ranges", "relevance", "provenance", "token_count"],
+      "required": ["path", "source_sha256", "representation", "content", "ranges", "evidence_ids", "relevance", "provenance", "token_count"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
         "source_sha256": { "$ref": "#/$defs/sha256" },
         "representation": { "enum": ["map", "summary", "slice", "full"] },
         "content": { "type": "string" },
         "ranges": { "type": "array", "items": { "$ref": "#/$defs/range" } },
+        "evidence_ids": { "type": "array", "items": { "type": "string" } },
         "relevance": { "type": "number", "minimum": 0 },
         "provenance": { "type": "array", "items": { "type": "string" } },
         "token_count": { "type": "integer", "minimum": 0 }

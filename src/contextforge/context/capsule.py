@@ -23,6 +23,7 @@ from contextforge.intelligence.models import IndexManifest, Sha256
 from contextforge.intelligence.retrieval import (
     CandidateCard,
     ExactGroup,
+    PlannedEvidence,
     RetrievalResult,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
@@ -121,6 +122,7 @@ class CapsuleMaterial(CapsuleModel):
     representation: RepresentationMode
     content: str
     ranges: tuple[CapsuleRange, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
     relevance: float = Field(ge=0.0, allow_inf_nan=False)
     provenance: tuple[str, ...]
     token_count: NonNegativeInt
@@ -141,6 +143,8 @@ class CapsuleMaterial(CapsuleModel):
             if item.start_line <= previous_end:
                 raise ValueError("capsule ranges must be sorted and disjoint")
             previous_end = item.end_line
+        if self.evidence_ids != tuple(sorted(set(self.evidence_ids))):
+            raise ValueError("material evidence IDs must be unique and canonical")
         return self
 
 
@@ -323,7 +327,10 @@ def compile_context_capsule(
 
     orientation = load_orientation_map(repository_root, manifest=active)
     repository_map = _render_orientation(
-        orientation, allocations["orientation"], selected_estimator
+        orientation,
+        allocations["orientation"],
+        selected_estimator,
+        full=explicit_material,
     )
     git_text = _git_text(git_diff)
     interpretations: list[str] = []
@@ -348,6 +355,11 @@ def compile_context_capsule(
         git_text = ""
 
     candidate_by_path = {item.path: item for item in retrieval.candidates}
+    planned_by_id = (
+        {}
+        if retrieval.evidence_plan is None
+        else {item.candidate_id: item for item in retrieval.evidence_plan.items}
+    )
     working_material: list[CapsuleMaterial] = []
     for path in working:
         candidate = candidate_by_path.get(path)
@@ -392,8 +404,11 @@ def compile_context_capsule(
     remaining = [
         candidate
         for candidate in retrieval.candidates
-        if candidate.path not in set(working) and _is_automatic_candidate(candidate)
-    ]
+        if candidate.path not in set(working)
+        and _is_automatic_candidate(candidate)
+        and (not planned_by_id or candidate.candidate_id in planned_by_id)
+    ][:8]
+    covered: set[str] = set()
     while remaining:
         selected_candidates = tuple(
             candidate_by_path[item.path]
@@ -404,9 +419,11 @@ def compile_context_capsule(
             tuple[float, int, float, str, CandidateCard, CapsuleMaterial]
         ] = []
         for candidate in remaining:
-            material = _materialize(
-                state, candidate.path, RepresentationMode.MAP, candidate, ()
-            )
+            gain = _coverage_keys(candidate) - covered
+            if not gain:
+                continue
+            plan_item = planned_by_id.get(candidate.candidate_id)
+            material = _planned_materialize(state, candidate, plan_item)
             if material is None:
                 continue
             if evidence_tokens + material.token_count > evidence_limit and (
@@ -446,6 +463,7 @@ def compile_context_capsule(
             ):
                 evidence_material.append(material)
                 evidence_tokens += material.token_count
+                covered.update(_coverage_keys(candidate))
                 remaining.remove(candidate)
                 capsule = proposed
                 added = True
@@ -454,17 +472,39 @@ def compile_context_capsule(
             break
     capsule = capsule.model_copy(update={"task_context": tuple(evidence_material)})
 
-    capsule = _apply_greedy_upgrades(
-        state,
-        capsule,
-        retrieval.candidates,
-        lines,
-        budget,
-        selected_estimator,
-        token_limit=automatic_limit,
-        allow_indivisible_upgrade=allow_indivisible_automatic_upgrade,
-    )
+    if not explicit_material:
+        selected_paths = tuple(item.path for item in evidence_material)
+        compact_map = _render_orientation(
+            orientation,
+            allocations["orientation"],
+            selected_estimator,
+            selected_paths=selected_paths,
+            full=False,
+        )
+        capsule = capsule.model_copy(update={"repository_map": compact_map})
+
+    if retrieval.evidence_plan is None:
+        capsule = _apply_greedy_upgrades(
+            state,
+            capsule,
+            retrieval.candidates,
+            lines,
+            budget,
+            selected_estimator,
+            token_limit=automatic_limit,
+            allow_indivisible_upgrade=allow_indivisible_automatic_upgrade,
+        )
     rationales = list(capsule.interpretations)
+    if retrieval.evidence_plan is not None:
+        if retrieval.evidence_plan.interpretation:
+            rationales.append(
+                "Evidence planner interpretation: "
+                + retrieval.evidence_plan.interpretation
+            )
+        if retrieval.evidence_plan.sufficiency == "insufficient":
+            rationales.append(
+                "Evidence planner marked supplied candidates insufficient."
+            )
     for candidate in retrieval.candidates:
         if candidate.suggested_representation is not None:
             rationales.append(
@@ -539,6 +579,8 @@ def _apply_greedy_upgrades(
             ):
                 if _mode_rank(mode) <= _mode_rank(material.representation):
                     continue
+                if _representation_gain(candidate, material.representation, mode) <= 0:
+                    continue
                 ranges = working_lines.get(path, ()) if section == "working" else ()
                 upgraded = _materialize(state, path, mode, candidate, ranges)
                 if upgraded is None:
@@ -587,12 +629,101 @@ def _apply_greedy_upgrades(
     return capsule
 
 
+def _representation_gain(
+    candidate: CandidateCard | None,
+    current: RepresentationMode,
+    proposed: RepresentationMode,
+) -> float:
+    if candidate is None:
+        return 1.0
+    if proposed == RepresentationMode.SUMMARY:
+        return 1.0 if candidate.matched_concepts else 0.0
+    if proposed == RepresentationMode.SLICE:
+        return 1.0 if candidate.evidence_ranges else 0.0
+    if proposed == RepresentationMode.FULL:
+        slice_cost = candidate.estimated_cost.slice
+        compact_full = slice_cost is None or candidate.estimated_cost.full <= slice_cost
+        return 1.0 if compact_full and current != RepresentationMode.FULL else 0.0
+    return 0.0
+
+
+def _planned_materialize(
+    state: _CompilerState,
+    candidate: CandidateCard,
+    plan: PlannedEvidence | None,
+) -> CapsuleMaterial | None:
+    if plan is None:
+        return _materialize(
+            state, candidate.path, RepresentationMode.MAP, candidate, ()
+        )
+    selected = {
+        item.evidence_id: item
+        for item in candidate.evidence_ranges
+        if item.evidence_id is not None
+    }
+    evidence_ids = tuple(
+        evidence_id for evidence_id in plan.evidence_ids if evidence_id in selected
+    )
+    ranges = tuple(selected[evidence_id].source_range for evidence_id in evidence_ids)
+    requested_mode = RepresentationMode(plan.representation)
+    fallback_modes = {
+        RepresentationMode.FULL: (
+            RepresentationMode.FULL,
+            RepresentationMode.SLICE,
+            RepresentationMode.MAP,
+        ),
+        RepresentationMode.SLICE: (RepresentationMode.SLICE, RepresentationMode.MAP),
+        RepresentationMode.SUMMARY: (
+            RepresentationMode.SUMMARY,
+            RepresentationMode.MAP,
+        ),
+        RepresentationMode.MAP: (RepresentationMode.MAP,),
+    }[requested_mode]
+    for mode in fallback_modes:
+        material = _materialize(
+            state,
+            candidate.path,
+            mode,
+            candidate,
+            ranges if mode == RepresentationMode.SLICE else (),
+            evidence_ids,
+        )
+        if material is not None:
+            return material
+    return None
+
+
+def _coverage_keys(candidate: CandidateCard) -> set[str]:
+    keys = {
+        *(f"symbol:{value.casefold()}" for value in candidate.matched_symbols),
+        *(f"concept:{value.casefold()}" for value in candidate.matched_concepts),
+        *(
+            "range:"
+            f"{item.path}:{item.source_range.start_line}:{item.source_range.end_line}"
+            for item in candidate.evidence_ranges
+        ),
+        *(
+            f"flow:{min(candidate.path, item.path)}:{max(candidate.path, item.path)}:"
+            + ",".join(item.relationship_kinds)
+            for item in candidate.graph_neighbors
+        ),
+    }
+    if candidate.exact_group != "approximate":
+        keys.add(f"exact:{candidate.exact_group}:{candidate.path}")
+    if "current-diff" in candidate.provenance:
+        keys.add(f"diff:{candidate.path}")
+    if "working-set" in candidate.provenance:
+        keys.add(f"working:{candidate.path}")
+    return keys
+
+
 def _materialize(
     state: _CompilerState,
     path: str,
     mode: RepresentationMode,
     candidate: CandidateCard | None,
     requested_ranges: tuple[SourceRange, ...],
+    requested_evidence_ids: tuple[str, ...] = (),
 ) -> CapsuleMaterial | None:
     code_map = _code_map(state, path)
     expected_sha = code_map.source_sha256
@@ -602,7 +733,7 @@ def _materialize(
     ranges: tuple[CapsuleRange, ...] = ()
     provenance = ["verified-structure"]
     if mode == RepresentationMode.MAP:
-        content = _map_content(code_map)
+        content = _map_content(code_map, candidate)
     elif mode == RepresentationMode.SUMMARY:
         card = _card(state, path)
         if card is None:
@@ -627,12 +758,28 @@ def _materialize(
         content = source
         provenance.append("verified-full-source")
     relevance = 1.0 if candidate is None else candidate.score
+    material_evidence_ids = requested_evidence_ids
+    if not material_evidence_ids and candidate is not None:
+        material_evidence_ids = tuple(
+            item.evidence_id
+            for item in candidate.evidence_ranges
+            if item.evidence_id is not None
+            and (
+                mode != RepresentationMode.SLICE
+                or any(
+                    item.source_range.start_line <= value.end_line
+                    and item.source_range.end_line >= value.start_line
+                    for value in ranges
+                )
+            )
+        )
     return CapsuleMaterial(
         path=path,
         source_sha256=expected_sha,
         representation=mode,
         content=content,
         ranges=ranges,
+        evidence_ids=tuple(sorted(set(material_evidence_ids))),
         relevance=relevance,
         provenance=tuple(provenance),
         token_count=state.estimator.count(content),
@@ -684,15 +831,53 @@ def _source(state: _CompilerState, path: str, expected_sha: str) -> tuple[str, i
     return state.sources[path]
 
 
-def _map_content(code_map: FileCodeMap) -> str:
+def _map_content(code_map: FileCodeMap, candidate: CandidateCard | None) -> str:
     lines = [f"{code_map.path} [{code_map.parse_status}]"]
-    for symbol in code_map.symbols:
+    matched = (
+        set()
+        if candidate is None
+        else {value.casefold() for value in candidate.matched_symbols}
+    )
+    evidence_ranges = (
+        ()
+        if candidate is None
+        else tuple(item.source_range for item in candidate.evidence_ranges)
+    )
+    selected = [
+        symbol
+        for symbol in code_map.symbols
+        if symbol.name.casefold() in matched
+        or symbol.qualified_name.casefold() in matched
+        or any(
+            evidence.start_line <= symbol.declaration_range.end_line
+            and evidence.end_line >= symbol.declaration_range.start_line
+            for evidence in evidence_ranges
+        )
+    ]
+    if candidate is None:
+        selected = list(code_map.symbols[:12])
+    for symbol in selected:
         signature = symbol.signature or symbol.qualified_name
         lines.append(
             f"{symbol.kind.value} {symbol.qualified_name} :: {signature} "
             f"@ {symbol.declaration_range.start_line}-"
             f"{symbol.declaration_range.end_line}"
         )
+    selected_ids = {item.symbol_id for item in selected}
+    endpoints = []
+    for relationship in code_map.relationships:
+        if relationship.source_symbol_id not in selected_ids:
+            continue
+        target = relationship.target.file_path or relationship.target.observed_name
+        if target:
+            endpoints.append(
+                f"{relationship.kind} -> {target} @ "
+                f"{relationship.source_range.start_line}"
+            )
+    lines.extend(dict.fromkeys(endpoints[:8]))
+    omitted = max(len(code_map.symbols) - len(selected), 0)
+    if omitted:
+        lines.append(f"declarations omitted={omitted}")
     return "\n".join(lines)
 
 
@@ -719,16 +904,53 @@ def _slice_ranges(
 ) -> tuple[CapsuleRange, ...]:
     expanded: list[tuple[int, int]] = []
     for evidence in evidence_ranges:
-        start, end = evidence.start_line, evidence.end_line
+        overlapping = []
         for symbol in code_map.symbols:
             declaration = symbol.body_range or symbol.declaration_range
-            if start <= declaration.end_line and end >= declaration.start_line:
-                start = min(start, symbol.declaration_range.start_line)
-                end = max(end, declaration.end_line)
+            if (
+                evidence.start_line <= declaration.end_line
+                and evidence.end_line >= declaration.start_line
+            ):
+                overlapping.append(
+                    (declaration.end_line - declaration.start_line, symbol)
+                )
+        enclosing_symbol = (
+            min(overlapping, key=lambda item: (item[0], item[1].symbol_id))[1]
+            if overlapping
+            else None
+        )
+        if enclosing_symbol is None:
+            expanded.append(
+                (
+                    max(1, evidence.start_line - SLICE_CONTEXT_LINES),
+                    min(line_count, evidence.end_line + SLICE_CONTEXT_LINES),
+                )
+            )
+            continue
+        declaration = enclosing_symbol.body_range or enclosing_symbol.declaration_range
+        declaration_lines = declaration.end_line - declaration.start_line + 1
+        if declaration_lines <= 80:
+            expanded.append(
+                (
+                    max(1, declaration.start_line - SLICE_CONTEXT_LINES),
+                    min(line_count, declaration.end_line + SLICE_CONTEXT_LINES),
+                )
+            )
+            continue
+        header_end = min(
+            declaration.end_line,
+            (
+                enclosing_symbol.body_range.start_line
+                if enclosing_symbol.body_range is not None
+                else declaration.start_line
+            )
+            + 2,
+        )
+        expanded.append((declaration.start_line, header_end))
         expanded.append(
             (
-                max(1, start - SLICE_CONTEXT_LINES),
-                min(line_count, end + SLICE_CONTEXT_LINES),
+                max(declaration.start_line, evidence.start_line - SLICE_CONTEXT_LINES),
+                min(declaration.end_line, evidence.end_line + SLICE_CONTEXT_LINES),
             )
         )
     merged: list[list[int]] = []
@@ -750,7 +972,12 @@ def _slice_content(path: str, source: str, ranges: tuple[CapsuleRange, ...]) -> 
 
 
 def _render_orientation(
-    orientation: OrientationMap, token_limit: int, estimator: TokenEstimator
+    orientation: OrientationMap,
+    token_limit: int,
+    estimator: TokenEstimator,
+    *,
+    selected_paths: tuple[str, ...] = (),
+    full: bool = True,
 ) -> str:
     file_lines = [
         f"{item.path} | module={item.module} | language={item.language or 'unknown'} | "
@@ -758,9 +985,9 @@ def _render_orientation(
         f"centrality={item.centrality:.6f}"
         for item in orientation.files
     ]
-    full = "\n".join(file_lines)
-    if estimator.count(full) <= token_limit:
-        return full
+    full_listing = "\n".join(file_lines)
+    if full and estimator.count(full_listing) <= token_limit:
+        return full_listing
     detailed_modules = [
         f"module {item.module} | files={len(item.files)} | "
         f"centrality={item.centrality:.6f}"
@@ -779,7 +1006,17 @@ def _render_orientation(
             if estimator.count(candidate) <= token_limit:
                 lines.append(line)
     central = sorted(orientation.files, key=lambda item: (-item.centrality, item.path))
+    selected = set(selected_paths)
+    for file_entry in sorted(
+        (item for item in orientation.files if item.path in selected),
+        key=lambda item: item.path,
+    ):
+        candidate = "\n".join((*lines, f"selected-file {file_entry.path}"))
+        if estimator.count(candidate) <= token_limit:
+            lines.append(f"selected-file {file_entry.path}")
     for file_entry in central:
+        if not full or file_entry.path in selected:
+            continue
         candidate = "\n".join((*lines, f"central-file {file_entry.path}"))
         if estimator.count(candidate) <= token_limit:
             lines.append(f"central-file {file_entry.path}")
@@ -993,9 +1230,11 @@ def _render_capsule(capsule: ContextCapsule) -> str:
 
 def _render_material(item: CapsuleMaterial, indent: str) -> str:
     ranges = ",".join(f"{value.start_line}-{value.end_line}" for value in item.ranges)
+    evidence_ids = ",".join(item.evidence_ids)
     return (
         f'{indent}<material path="{html.escape(item.path, quote=True)}" '
         f'representation="{item.representation.value}" ranges="{ranges}" '
+        f'evidence_ids="{html.escape(evidence_ids, quote=True)}" '
         f'source_sha256="{item.source_sha256}">{html.escape(item.content)}'
         f"</material>"
     )

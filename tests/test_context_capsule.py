@@ -18,7 +18,10 @@ from contextforge.context import (
     compile_context_capsule,
 )
 from contextforge.intelligence import (
+    EvidencePlan,
     GroundedClaim,
+    PlannedEvidence,
+    PlanningDiagnostics,
     SourceRange,
     load_file_code_map,
     load_semantic_card,
@@ -85,6 +88,52 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert "report it as unknown" in first.prompt
     assert first.prompt.endswith("</contextforge>\n")
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
+
+
+def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "service.py",
+        "def handle_request(value: str) -> str:\n    return value.upper()\n",
+    )
+    _write(tmp_path, "noise.py", "def unrelated():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "change handle_request")
+    candidate = retrieval.candidates[0]
+    evidence_id = candidate.evidence_ranges[0].evidence_id
+    assert evidence_id is not None
+    planned = retrieval.model_copy(
+        update={
+            "evidence_plan": EvidencePlan(
+                source_snapshot_digest=retrieval.source_snapshot_digest,
+                items=(
+                    PlannedEvidence(
+                        candidate_id=candidate.candidate_id,
+                        path=candidate.path,
+                        source_sha256=candidate.source_sha256,
+                        evidence_ids=(evidence_id,),
+                        representation="slice",
+                    ),
+                ),
+                sufficiency="sufficient",
+                diagnostics=PlanningDiagnostics(mode="auto", status="planned"),
+            )
+        }
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "change handle_request",
+        planned,
+        budget=_budget(8_000),
+    )
+
+    assert len(compiled.capsule.task_context) == 1
+    material = compiled.capsule.task_context[0]
+    assert material.path == "service.py"
+    assert material.representation == RepresentationMode.SLICE
+    assert material.evidence_ids == (evidence_id,)
+    assert f'evidence_ids="{evidence_id}"' in compiled.prompt
 
 
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(
