@@ -60,8 +60,8 @@ from contextforge.models import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_CARD_SCHEMA_VERSION: Literal[3] = 3
-SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.2"
-SEMANTIC_CARD_ANALYZER_VERSION = "5"
+SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.3"
+SEMANTIC_CARD_ANALYZER_VERSION = "6"
 DEFAULT_MODEL_FILE_LIMIT = 64
 DEFAULT_REQUEST_LIMIT = 96
 DEFAULT_INPUT_TOKEN_LIMIT = 256_000
@@ -193,6 +193,7 @@ class SemanticCard(IndexModel):
     inferred_relationships: tuple[SemanticInferredRelationship, ...] = Field(
         default=(), max_length=24
     )
+    coverage_ranges: tuple[SourceRange, ...] = ()
     evidence: tuple[SemanticEvidence, ...] = Field(min_length=1)
     quality: SemanticQuality
     diagnostics: tuple[SemanticCardDiagnostic, ...] = ()
@@ -204,6 +205,17 @@ class SemanticCard(IndexModel):
 
     @model_validator(mode="after")
     def validate_grounding(self) -> SemanticCard:
+        coverage_keys = tuple(
+            (
+                item.start_line,
+                item.start_column,
+                item.end_line,
+                item.end_column,
+            )
+            for item in self.coverage_ranges
+        )
+        if coverage_keys != tuple(sorted(set(coverage_keys))):
+            raise ValueError("semantic coverage ranges must be unique and canonical")
         evidence_ids = tuple(item.evidence_id for item in self.evidence)
         if evidence_ids != tuple(sorted(set(evidence_ids))):
             raise ValueError("semantic evidence must be unique and canonical")
@@ -516,6 +528,9 @@ async def build_semantic_card_index(
                 cache_hits += 1
             repair_attempted = False
             incomplete = source_truncated
+            coverage_ranges = (
+                tuple(chunk.source_range for chunk in chunks) if cache_hit else ()
+            )
             if raw is None:
                 (
                     raw,
@@ -523,6 +538,7 @@ async def build_semantic_card_index(
                     repair_attempted,
                     used_tokens,
                     request_incomplete,
+                    coverage_ranges,
                 ) = await _request_card(
                     provider,
                     code_map,
@@ -556,6 +572,7 @@ async def build_semantic_card_index(
                         cache_hit=cache_hit,
                         repair_attempted=repair_attempted,
                         force_partial=incomplete,
+                        coverage_ranges=coverage_ranges,
                     )
                 except ValueError:
                     failed.append(path)
@@ -612,11 +629,9 @@ async def build_semantic_card_index(
     enriched_graph = add_model_inferred_edges(
         graph, _inferred_graph_links(tuple(cards))
     )
-    relationship_graph_digest = write_index_record(
-        lock,
-        "relationship-graph.json",
-        canonical_json_bytes(enriched_graph.model_dump(mode="json")),
-    )
+    from contextforge.intelligence.indexer import write_relationship_graph
+
+    relationship_graph_digest = write_relationship_graph(lock, enriched_graph)
     architecture, conventions, features = build_repository_maps_v3(
         code_maps,
         tuple(cards),
@@ -877,12 +892,20 @@ async def _request_card(
     *,
     remaining_requests: int,
     remaining_tokens: int,
-) -> tuple[_RawSemanticCard | None, int, bool, int, bool]:
+) -> tuple[
+    _RawSemanticCard | None,
+    int,
+    bool,
+    int,
+    bool,
+    tuple[SourceRange, ...],
+]:
     completed: list[_RawSemanticCard] = []
     used_requests = 0
     used_tokens = 0
     repair_attempted = False
     incomplete = False
+    completed_ranges: list[SourceRange] = []
     for chunk_index, chunk in enumerate(chunks):
         chunk_evidence = _evidence_for_chunk(evidence, chunk)
         chunk_complete = False
@@ -926,6 +949,7 @@ async def _request_card(
                 code_map,
             ):
                 completed.append(response.value)
+                completed_ranges.append(chunk.source_range)
                 chunk_complete = True
                 break
             if attempt == 0 and used_requests < remaining_requests:
@@ -938,6 +962,7 @@ async def _request_card(
         repair_attempted,
         used_tokens,
         incomplete,
+        tuple(completed_ranges),
     )
 
 
@@ -1141,6 +1166,7 @@ def _ground_raw_card(
     cache_hit: bool,
     repair_attempted: bool,
     force_partial: bool = False,
+    coverage_ranges: tuple[SourceRange, ...] = (),
 ) -> SemanticCard:
     known = {item.evidence_id for item in evidence}
     by_id = {item.evidence_id: item for item in evidence}
@@ -1273,6 +1299,7 @@ def _ground_raw_card(
                 key=lambda item: item.target_candidate_id,
             )
         ),
+        coverage_ranges=coverage_ranges,
         evidence=evidence,
         quality="partial" if dropped or force_partial else "complete",
         diagnostics=tuple(diagnostic_values),
@@ -1331,6 +1358,18 @@ def _deterministic_card(
         synopsis=GroundedClaim(text=synopsis_text, evidence_ids=root_evidence),
         concepts=tuple(concepts),
         key_symbols=key_symbols,
+        coverage_ranges=(
+            (
+                SourceRange(
+                    start_line=1,
+                    start_column=0,
+                    end_line=max(code_map.line_count, 1),
+                    end_column=0,
+                ),
+            )
+            if code_map.line_count
+            else ()
+        ),
         evidence=evidence,
         quality="deterministic",
         diagnostics=(

@@ -171,7 +171,7 @@ def build_structural_index(
         )
 
     graph = build_relationship_graph(code_maps, snapshot_digest)
-    graph_digest = _write_relationship_graph(lock, graph)
+    graph_digest = write_relationship_graph(lock, graph)
     orientation = build_orientation_map(code_maps, graph)
     orientation_content = canonical_json_bytes(orientation.model_dump(mode="json"))
     orientation_digest = write_index_record(
@@ -321,7 +321,9 @@ def relationship_graph_record_locations(
     )
 
 
-def _write_relationship_graph(lock: IndexWriteLock, graph: RelationshipGraph) -> str:
+def write_relationship_graph(lock: IndexWriteLock, graph: RelationshipGraph) -> str:
+    """Persist a bounded digest-bound graph shard set and return header digest."""
+
     manifest = RelationshipGraphShardManifest(
         source_snapshot_digest=graph.source_snapshot_digest,
         node_shards=_write_graph_shards(lock, "nodes", graph.nodes),
@@ -561,4 +563,5 @@ __all__ = [
     "load_orientation_map",
     "load_relationship_graph",
     "relationship_graph_record_locations",
+    "write_relationship_graph",
 ]

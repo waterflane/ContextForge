@@ -832,6 +832,10 @@ def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
     assert all(count <= 4 for _, count in observed)
     assert card.provenance.method == "model"
     assert card.quality in {"complete", "partial"}
+    assert len(card.coverage_ranges) == len(observed)
+    assert tuple(item.start_line for item in card.coverage_ranges) == tuple(
+        sorted(item.start_line for item in card.coverage_ranges)
+    )
 
 
 def test_global_request_and_full_request_token_ceilings_include_repair(

@@ -21,6 +21,7 @@ from contextforge.intelligence import (
     RetrievalIndex,
     SourceRange,
     build_retrieval_index,
+    load_file_code_map,
     retrieve_context_candidates,
 )
 from contextforge.models import FakeModelProvider, ProviderConfiguration
@@ -631,6 +632,39 @@ def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> No
                 planning_mode="required",
             )
         )
+
+
+def test_retrieval_persists_safe_positional_structural_postings(tmp_path: Path) -> None:
+    _write(tmp_path, "dependency.py", "class ServiceClient:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from dependency import ServiceClient\n\n"
+        "def start():\n    client = ServiceClient()\n    return client\n",
+    )
+    report = _build(tmp_path)
+    code_maps = tuple(
+        load_file_code_map(tmp_path, state.path, manifest=report.manifest)
+        for state in report.manifest.files
+    )
+    index = build_retrieval_index(
+        code_maps, (), report.manifest.build.source_snapshot_digest
+    )
+    document = next(item for item in index.documents if item.path == "app.py")
+
+    assert {item.fact_kind for item in document.positional_postings} >= {
+        "declaration",
+        "import",
+        "call",
+        "reference",
+    }
+    assert all(
+        item.evidence_id.startswith("structural-")
+        for item in document.positional_postings
+    )
+    serialized = document.model_dump_json()
+    assert "ServiceClient" in serialized
+    assert "pass" not in {item.identifier for item in document.positional_postings}
 
 
 def test_invalid_semantic_record_is_excluded_from_ranking(tmp_path: Path) -> None:

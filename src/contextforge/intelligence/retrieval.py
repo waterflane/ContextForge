@@ -70,6 +70,16 @@ class RetrievalField(IndexModel):
         return value
 
 
+class PositionalPosting(IndexModel):
+    """A safe structural identifier occurrence bound to stable evidence."""
+
+    identifier: str
+    fact_kind: Literal["declaration", "import", "call", "reference"]
+    fact_id: str
+    evidence_id: str
+    source_range: SourceRange
+
+
 class RetrievalDocument(IndexModel):
     """One source-bound persisted BM25 document."""
 
@@ -79,6 +89,8 @@ class RetrievalDocument(IndexModel):
     symbols: tuple[str, ...] = ()
     qualified_symbols: tuple[str, ...] = ()
     source_identifiers: tuple[str, ...] = ()
+    positional_postings: tuple[PositionalPosting, ...] = ()
+    semantic_quality: Literal["none", "complete", "partial", "deterministic"] = "none"
 
     @field_validator("path")
     @classmethod
@@ -93,6 +105,9 @@ class RetrievalDocument(IndexModel):
         for values in (self.symbols, self.qualified_symbols, self.source_identifiers):
             if values != tuple(sorted(set(values), key=canonical_casefold_key)):
                 raise ValueError("retrieval identifiers must be unique and canonical")
+        posting_keys = tuple(_posting_key(item) for item in self.positional_postings)
+        if posting_keys != tuple(sorted(set(posting_keys))):
+            raise ValueError("positional postings must be unique and canonical")
         return self
 
 
@@ -291,6 +306,7 @@ def build_retrieval_index(
     documents: list[RetrievalDocument] = []
     for code_map in sorted(code_maps, key=lambda item: item.path):
         card = cards_by_path.get(code_map.path)
+        postings = _structural_postings(code_map)
         symbols = tuple(
             sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
         )
@@ -317,7 +333,9 @@ def build_retrieval_index(
         values = {
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
-            "source_identifiers": " ".join(identifiers),
+            "source_identifiers": " ".join(
+                (*identifiers, *(item.identifier for item in postings))
+            ),
             "grounded_semantics": "" if card is None else card.ranking_text(),
         }
         fields = tuple(_retrieval_field(name, values[name]) for name in FIELD_WEIGHTS)
@@ -329,6 +347,8 @@ def build_retrieval_index(
                 symbols=symbols,
                 qualified_symbols=qualified,
                 source_identifiers=identifiers,
+                positional_postings=postings,
+                semantic_quality="none" if card is None else card.quality,
             )
         )
     frequencies: dict[str, dict[str, int]] = {}
@@ -612,7 +632,13 @@ def _bm25(
             denominator = frequency + BM25_K1 * (
                 1.0 - BM25_B + BM25_B * field.length / average
             )
-            score += (
+            semantic_factor = (
+                0.55
+                if field.name == "grounded_semantics"
+                and document.semantic_quality == "partial"
+                else 1.0
+            )
+            score += semantic_factor * (
                 FIELD_WEIGHTS[field.name]
                 * inverse
                 * frequency
@@ -1237,6 +1263,88 @@ def _candidate_id(path: str) -> str:
     return "candidate-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:24]
 
 
+def _structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]:
+    values: dict[tuple[str, str, int, int, str], PositionalPosting] = {}
+
+    def add(
+        identifier: str,
+        fact_kind: Literal["declaration", "import", "call", "reference"],
+        fact_id: str,
+        source_range: SourceRange,
+    ) -> None:
+        for safe_identifier in _safe_structural_identifiers(identifier):
+            evidence_id = _structural_evidence_id(
+                code_map, f"{fact_kind}:{fact_id}", source_range
+            )
+            item = PositionalPosting(
+                identifier=safe_identifier,
+                fact_kind=fact_kind,
+                fact_id=fact_id,
+                evidence_id=evidence_id,
+                source_range=source_range,
+            )
+            values.setdefault(_posting_key(item), item)
+
+    for symbol in code_map.symbols:
+        add(symbol.name, "declaration", symbol.symbol_id, symbol.declaration_range)
+        add(
+            symbol.qualified_name,
+            "declaration",
+            symbol.symbol_id,
+            symbol.declaration_range,
+        )
+    for imported in code_map.imports:
+        for identifier in (
+            imported.module,
+            imported.imported_name,
+            imported.alias,
+        ):
+            if identifier:
+                add(identifier, "import", imported.import_id, imported.source_range)
+    for symbol in code_map.symbols:
+        for kind, occurrences in (
+            ("call", symbol.direct_calls),
+            ("reference", symbol.direct_references),
+        ):
+            for occurrence in occurrences:
+                fact_id = hashlib.sha256(
+                    (
+                        f"{symbol.symbol_id}:{kind}:{occurrence.observed_name}:"
+                        f"{occurrence.source_range.start_line}:"
+                        f"{occurrence.source_range.start_column}:"
+                        f"{occurrence.source_range.end_line}:"
+                        f"{occurrence.source_range.end_column}"
+                    ).encode()
+                ).hexdigest()
+                add(
+                    occurrence.observed_name,
+                    kind,  # type: ignore[arg-type]
+                    fact_id,
+                    occurrence.source_range,
+                )
+    return tuple(values[key] for key in sorted(values))[:4_096]
+
+
+def _safe_structural_identifiers(value: str) -> tuple[str, ...]:
+    identifiers = {
+        item
+        for item in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", value)
+        if item.casefold()
+        not in {"as", "class", "def", "from", "function", "import", "new", "use"}
+    }
+    return tuple(sorted(identifiers, key=canonical_casefold_key))
+
+
+def _posting_key(item: PositionalPosting) -> tuple[str, str, int, int, str]:
+    return (
+        item.identifier.casefold(),
+        item.fact_kind,
+        item.source_range.start_line,
+        item.source_range.start_column,
+        item.fact_id,
+    )
+
+
 def _structural_evidence_id(
     code_map: FileCodeMap, fact_identity: str, source_range: SourceRange
 ) -> str:
@@ -1272,6 +1380,7 @@ __all__ = [
     "PLANNING_REQUEST_TIMEOUT_SECONDS",
     "PlannedEvidence",
     "PlanningDiagnostics",
+    "PositionalPosting",
     "RepresentationCosts",
     "RetrievalDocument",
     "RetrievalField",
