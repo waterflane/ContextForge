@@ -10,6 +10,7 @@ from contextforge.intelligence import (
     initialize_index,
     load_file_code_map,
     load_manifest,
+    load_relationship_graph,
 )
 from contextforge.repositories import scan_repository
 
@@ -45,8 +46,14 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
     )
     expected = next(item for item in first.code_maps if item.path == "src/app.py")
     assert loaded == expected
-    assert (first.generation_path / "symbols.jsonl").read_bytes().endswith(b"\n")
-    assert (first.generation_path / "relationships.jsonl").read_bytes().endswith(b"\n")
+    assert not (first.generation_path / "symbols.jsonl").exists()
+    assert not (first.generation_path / "relationships.jsonl").exists()
+    assert load_relationship_graph(tmp_path) == load_relationship_graph(
+        tmp_path, manifest=first.manifest
+    )
+    graph_shards = tuple((first.generation_path / "graph").glob("*.jsonl"))
+    assert graph_shards
+    assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in graph_shards)
 
 
 def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) -> None:

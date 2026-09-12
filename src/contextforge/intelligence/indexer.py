@@ -18,8 +18,14 @@ from contextforge.intelligence.codemap import (
 from contextforge.intelligence.extractors import extract_code_map
 from contextforge.intelligence.fallback import FALLBACK_ANALYZER
 from contextforge.intelligence.graph import (
+    RELATIONSHIP_GRAPH_SHARD_MAX_BYTES,
+    FileGraphMetrics,
     OrientationMap,
     RelationshipGraph,
+    RelationshipGraphEdge,
+    RelationshipGraphNode,
+    RelationshipGraphShard,
+    RelationshipGraphShardManifest,
     build_orientation_map,
     build_relationship_graph,
 )
@@ -35,6 +41,7 @@ from contextforge.intelligence.models import (
     IndexBuildState,
     IndexedFileState,
     IndexManifest,
+    IndexModel,
     SchemaVersionMetadata,
     analyzer_identity_key,
 )
@@ -163,31 +170,8 @@ def build_structural_index(
             )
         )
 
-    symbols_content = b"".join(
-        canonical_json_bytes(symbol.model_dump(mode="json"))
-        for symbol in sorted(
-            (symbol for code_map in code_maps for symbol in code_map.symbols),
-            key=lambda item: item.symbol_id,
-        )
-    )
-    relationships_content = b"".join(
-        canonical_json_bytes(relationship.model_dump(mode="json"))
-        for relationship in sorted(
-            (
-                relationship
-                for code_map in code_maps
-                for relationship in code_map.relationships
-            ),
-            key=lambda item: item.relationship_id,
-        )
-    )
-    symbols_digest = write_index_record(lock, "symbols.jsonl", symbols_content)
-    relationships_digest = write_index_record(
-        lock, "relationships.jsonl", relationships_content
-    )
     graph = build_relationship_graph(code_maps, snapshot_digest)
-    graph_content = canonical_json_bytes(graph.model_dump(mode="json"))
-    graph_digest = write_index_record(lock, "relationship-graph.json", graph_content)
+    graph_digest = _write_relationship_graph(lock, graph)
     orientation = build_orientation_map(code_maps, graph)
     orientation_content = canonical_json_bytes(orientation.model_dump(mode="json"))
     orientation_digest = write_index_record(
@@ -204,8 +188,6 @@ def build_structural_index(
         canonical_json_bytes(
             {
                 "records": record_digests,
-                "relationships": relationships_digest,
-                "symbols": symbols_digest,
                 "relationship_graph": graph_digest,
                 "structural_retrieval": structural_retrieval_digest,
                 "orientation": orientation_digest,
@@ -294,9 +276,12 @@ def load_relationship_graph(
     if reference is None:
         raise IndexManifestReadError("pinned generation has no relationship graph")
     try:
-        graph = RelationshipGraph.model_validate_json(
-            load_generation_record(repository_root, reference.location, manifest=active)
+        content = load_generation_record(
+            repository_root, reference.location, manifest=active
         )
+        if hashlib.sha256(content).hexdigest() != reference.sha256:
+            raise ValueError("relationship graph digest does not match the manifest")
+        graph = _deserialize_relationship_graph(repository_root, active, content)
     except ValueError as exc:
         raise IndexManifestReadError(
             "published relationship graph does not match its schema"
@@ -304,6 +289,125 @@ def load_relationship_graph(
     if graph.source_snapshot_digest != active.build.source_snapshot_digest:
         raise IndexManifestReadError("relationship graph is stale for its generation")
     return graph
+
+
+def relationship_graph_record_locations(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+) -> tuple[str, ...]:
+    """Return the graph manifest and every digest-bound shard it references."""
+
+    reference = manifest.artifacts.relationship_graph
+    if reference is None:
+        return ()
+    content = load_generation_record(
+        repository_root, reference.location, manifest=manifest
+    )
+    try:
+        shards = RelationshipGraphShardManifest.model_validate_json(content)
+    except ValueError:
+        return (reference.location,)
+    return (
+        reference.location,
+        *(
+            shard.artifact.location
+            for group in (
+                shards.node_shards,
+                shards.edge_shards,
+                shards.metric_shards,
+            )
+            for shard in group
+        ),
+    )
+
+
+def _write_relationship_graph(lock: IndexWriteLock, graph: RelationshipGraph) -> str:
+    manifest = RelationshipGraphShardManifest(
+        source_snapshot_digest=graph.source_snapshot_digest,
+        node_shards=_write_graph_shards(lock, "nodes", graph.nodes),
+        edge_shards=_write_graph_shards(lock, "edges", graph.edges),
+        metric_shards=_write_graph_shards(lock, "metrics", graph.file_metrics),
+    )
+    return write_index_record(
+        lock,
+        "relationship-graph.json",
+        canonical_json_bytes(manifest.model_dump(mode="json")),
+    )
+
+
+def _write_graph_shards(
+    lock: IndexWriteLock,
+    kind: str,
+    records: tuple[IndexModel, ...],
+) -> tuple[RelationshipGraphShard, ...]:
+    shards: list[RelationshipGraphShard] = []
+    pending: list[bytes] = []
+    pending_size = 0
+
+    def flush() -> None:
+        nonlocal pending, pending_size
+        if not pending:
+            return
+        location = f"graph/{kind}-{len(shards):05d}.jsonl"
+        content = b"".join(pending)
+        digest = write_index_record(lock, location, content)
+        shards.append(
+            RelationshipGraphShard(
+                artifact=ArtifactReference(location=location, sha256=digest),
+                record_count=len(pending),
+            )
+        )
+        pending = []
+        pending_size = 0
+
+    for record in records:
+        encoded = canonical_json_bytes(record.model_dump(mode="json"))
+        if len(encoded) > RELATIONSHIP_GRAPH_SHARD_MAX_BYTES:
+            raise ValueError("one relationship graph record exceeds the shard limit")
+        if pending and pending_size + len(encoded) > RELATIONSHIP_GRAPH_SHARD_MAX_BYTES:
+            flush()
+        pending.append(encoded)
+        pending_size += len(encoded)
+    flush()
+    return tuple(shards)
+
+
+def _deserialize_relationship_graph(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    content: bytes,
+) -> RelationshipGraph:
+    try:
+        shard_manifest = RelationshipGraphShardManifest.model_validate_json(content)
+    except ValueError:
+        return RelationshipGraph.model_validate_json(content)
+
+    def load_shards[RecordType](
+        shards: tuple[RelationshipGraphShard, ...], model: type[RecordType]
+    ) -> tuple[RecordType, ...]:
+        values: list[RecordType] = []
+        for shard in shards:
+            encoded = load_generation_record(
+                repository_root,
+                shard.artifact.location,
+                manifest=manifest,
+            )
+            if len(encoded) > RELATIONSHIP_GRAPH_SHARD_MAX_BYTES:
+                raise ValueError("relationship graph shard exceeds its byte limit")
+            if hashlib.sha256(encoded).hexdigest() != shard.artifact.sha256:
+                raise ValueError("relationship graph shard digest mismatch")
+            lines = tuple(line for line in encoded.splitlines() if line)
+            if len(lines) != shard.record_count:
+                raise ValueError("relationship graph shard count mismatch")
+            values.extend(model.model_validate_json(line) for line in lines)  # type: ignore[attr-defined]
+        return tuple(values)
+
+    return RelationshipGraph(
+        source_snapshot_digest=shard_manifest.source_snapshot_digest,
+        nodes=load_shards(shard_manifest.node_shards, RelationshipGraphNode),
+        edges=load_shards(shard_manifest.edge_shards, RelationshipGraphEdge),
+        file_metrics=load_shards(shard_manifest.metric_shards, FileGraphMetrics),
+    )
 
 
 def load_orientation_map(
@@ -456,4 +560,5 @@ __all__ = [
     "load_file_code_map",
     "load_orientation_map",
     "load_relationship_graph",
+    "relationship_graph_record_locations",
 ]

@@ -1938,13 +1938,17 @@ def _store_cached_raw(lock: IndexWriteLock, key: str, raw: _RawSemanticCard) -> 
 
 
 def _copy_structural_generation(lock: IndexWriteLock, manifest: IndexManifest) -> None:
+    from contextforge.intelligence.indexer import relationship_graph_record_locations
+
     locations = {
         state.record_location
         for state in manifest.files
         if state.record_location is not None
     }
-    locations.update(("symbols.jsonl", "relationships.jsonl"))
     locations.update(_artifact_locations(manifest.artifacts))
+    locations.update(
+        relationship_graph_record_locations(lock.layout.repository_root, manifest)
+    )
     for location in sorted(locations):
         write_index_record(
             lock,
@@ -1958,15 +1962,9 @@ def _copy_structural_generation(lock: IndexWriteLock, manifest: IndexManifest) -
 def _load_relationship_graph(
     lock: IndexWriteLock, manifest: IndexManifest
 ) -> RelationshipGraph:
-    reference = manifest.artifacts.relationship_graph
-    if reference is None:
-        raise ValueError("structural generation has no relationship graph")
-    content = load_generation_record(
-        lock.layout.repository_root, reference.location, manifest=manifest
-    )
-    if hashlib.sha256(content).hexdigest() != reference.sha256:
-        raise ValueError("relationship graph digest does not match the manifest")
-    return RelationshipGraph.model_validate_json(content)
+    from contextforge.intelligence.indexer import load_relationship_graph
+
+    return load_relationship_graph(lock.layout.repository_root, manifest=manifest)
 
 
 def _artifact_locations(artifacts: GenerationArtifacts) -> set[str]:

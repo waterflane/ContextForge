@@ -2026,7 +2026,11 @@ def _copy_generation_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
         )
         if location is not None
     }
-    locations.update(("symbols.jsonl", "relationships.jsonl"))
+    from contextforge.intelligence.indexer import relationship_graph_record_locations
+
+    locations.update(
+        relationship_graph_record_locations(lock.layout.repository_root, manifest)
+    )
     locations.update(
         reference.location
         for reference in (

@@ -19,7 +19,7 @@ from contextforge.intelligence.models import (
 )
 
 CODEMAP_SCHEMA_VERSION: Literal[3] = 3
-RESOLVER_VERSION = "5"
+RESOLVER_VERSION = "6"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]

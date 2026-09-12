@@ -17,6 +17,7 @@ from contextforge.intelligence.codemap import (
 )
 from contextforge.intelligence.manifest import canonical_json_bytes
 from contextforge.intelligence.models import (
+    ArtifactReference,
     IndexModel,
     Sha256,
     validate_portable_relative_path,
@@ -27,6 +28,7 @@ ORIENTATION_MAP_SCHEMA_VERSION: Literal[3] = 3
 PAGERANK_DAMPING = 0.85
 PAGERANK_MAX_ITERATIONS = 100
 PAGERANK_TOLERANCE = 1e-9
+RELATIONSHIP_GRAPH_SHARD_MAX_BYTES = 4 * 1024 * 1024
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
@@ -165,6 +167,37 @@ class RelationshipGraph(IndexModel):
         file_paths = {node.path for node in self.nodes if node.kind == "file"}
         if set(metric_paths) != file_paths:
             raise ValueError("graph metrics must cover every file node")
+        return self
+
+
+class RelationshipGraphShard(IndexModel):
+    """Digest-bound bounded shard referenced by the graph manifest."""
+
+    artifact: ArtifactReference
+    record_count: NonNegativeInt
+
+
+class RelationshipGraphShardManifest(IndexModel):
+    """Small authoritative manifest for a sharded RelationshipGraph."""
+
+    schema_version: Literal[3] = GRAPH_SCHEMA_VERSION
+    record_kind: Literal["relationship_graph_shards"] = "relationship_graph_shards"
+    source_snapshot_digest: Sha256
+    node_shards: tuple[RelationshipGraphShard, ...]
+    edge_shards: tuple[RelationshipGraphShard, ...]
+    metric_shards: tuple[RelationshipGraphShard, ...]
+
+    @model_validator(mode="after")
+    def validate_shards(self) -> RelationshipGraphShardManifest:
+        locations = tuple(
+            shard.artifact.location
+            for group in (self.node_shards, self.edge_shards, self.metric_shards)
+            for shard in group
+        )
+        if len(locations) != len(set(locations)):
+            raise ValueError("relationship graph shard locations must be unique")
+        if any(not location.startswith("graph/") for location in locations):
+            raise ValueError("relationship graph shards must use the graph directory")
         return self
 
 
@@ -673,7 +706,10 @@ __all__ = [
     "RelationshipGraph",
     "RelationshipGraphEdge",
     "RelationshipGraphNode",
+    "RelationshipGraphShard",
+    "RelationshipGraphShardManifest",
     "RelationshipKind",
+    "RELATIONSHIP_GRAPH_SHARD_MAX_BYTES",
     "build_orientation_map",
     "build_relationship_graph",
     "add_model_inferred_edges",
