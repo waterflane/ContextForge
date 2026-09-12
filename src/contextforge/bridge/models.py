@@ -259,11 +259,24 @@ class CompileParams(SearchParams):
         return paths
 
 
+class SearchV22Params(SearchParams):
+    """Bridge 2.2 search request with explicit evidence planning mode."""
+
+    planning_mode: Literal["off", "auto", "required"] | None = None
+
+
+class CompileV22Params(CompileParams):
+    """Bridge 2.2 compile request with explicit evidence planning mode."""
+
+    planning_mode: Literal["off", "auto", "required"] | None = None
+
+
 __all__ = [
     "BridgeParams",
     "BridgeSelectionItem",
     "CancelParams",
     "CompileParams",
+    "CompileV22Params",
     "CompileRange",
     "DiscoverParams",
     "ExpandParams",
@@ -274,6 +287,7 @@ __all__ = [
     "PackageParams",
     "ReadParams",
     "SearchParams",
+    "SearchV22Params",
     "ShutdownParams",
     "SnapshotParams",
     "StatusParams",

@@ -56,6 +56,7 @@ from contextforge.git import GitDiffRequest, collect_git_diff
 from contextforge.handoff import ContextMaterializationError, PromptCompileError
 from contextforge.intelligence import (
     INDEX_SCHEMA_VERSION,
+    ContextPlanningMode,
     IndexManifestReadError,
     IndexStorageError,
     RetrievalResult,
@@ -185,6 +186,14 @@ def suggest_context(
             help="Allow one closed-schema model rerank of supplied candidate IDs.",
         ),
     ] = False,
+    planning: Annotated[
+        ContextPlanningMode | None,
+        typer.Option(
+            "--planning",
+            help="Evidence planning mode: auto, off, or required.",
+            case_sensitive=False,
+        ),
+    ] = None,
     legacy_discovery: Annotated[
         bool,
         typer.Option(
@@ -215,8 +224,13 @@ def suggest_context(
     discovery_explicit = (
         parameter_source is not None and parameter_source.name != "DEFAULT"
     )
-    legacy_fallback = not rerank and (provider_name is not None or config is not None)
-    if not legacy_discovery and not discovery_explicit and not legacy_fallback:
+    rerank_source = ctx.get_parameter_source("rerank")
+    rerank_alias = (
+        rerank
+        if rerank_source is not None and rerank_source.name != "DEFAULT"
+        else None
+    )
+    if not legacy_discovery and not discovery_explicit:
         _suggest_retrieval_context(
             path,
             task=task,
@@ -229,6 +243,8 @@ def suggest_context(
             output_format=output_format,
             explain=explain,
             rerank=rerank,
+            planning=planning,
+            rerank_alias=rerank_alias,
             output=output,
             force=force,
         )
@@ -329,6 +345,8 @@ def _suggest_retrieval_context(
     output_format: SuggestFormat,
     explain: bool,
     rerank: bool,
+    planning: ContextPlanningMode | None,
+    rerank_alias: bool | None,
     output: Path | None,
     force: bool,
 ) -> None:
@@ -336,16 +354,24 @@ def _suggest_retrieval_context(
     try:
         if not task.strip():
             raise ValueError("--task must be non-empty")
-        if (provider_name is not None or model is not None) and not rerank:
-            raise ValueError("--provider and --model require --rerank")
-        if rerank:
-            project = load_project_configuration(path, config_path=config)
+        project = load_project_configuration(path, config_path=config)
+        planning_mode = planning or (
+            ContextPlanningMode.AUTO
+            if rerank_alias is True
+            else ContextPlanningMode.OFF
+            if rerank_alias is False
+            else ContextPlanningMode(project.models.context_planning_mode)
+        )
+        if (
+            provider_name is not None or model is not None
+        ) and planning_mode == ContextPlanningMode.OFF:
+            raise ValueError("--provider and --model require model evidence planning")
+        if planning_mode != ContextPlanningMode.OFF:
             provider_configuration = resolve_provider_configuration(
                 project, provider=provider_name, model=model
             )
-            if provider_configuration is None:
-                raise ValueError("--rerank requires a model provider")
-            provider = create_model_provider(provider_configuration)
+            if provider_configuration is not None:
+                provider = create_model_provider(provider_configuration)
         result = asyncio.run(
             retrieve_context_candidates(
                 path,
@@ -354,6 +380,21 @@ def _suggest_retrieval_context(
                 limit=max_files,
                 provider=provider,
                 rerank=rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
             )
         )
         if excludes:
@@ -436,6 +477,7 @@ def _has_v3_index(path: Path) -> bool:
 
 @context_app.command("create")
 def create_context(
+    ctx: typer.Context,
     path: Annotated[
         Path,
         typer.Argument(help="Repository root to package."),
@@ -619,6 +661,14 @@ def create_context(
         bool,
         typer.Option("--rerank/--no-rerank", help="Enable bounded candidate rerank."),
     ] = False,
+    planning: Annotated[
+        ContextPlanningMode | None,
+        typer.Option(
+            "--planning",
+            help="Evidence planning mode: auto, off, or required.",
+            case_sensitive=False,
+        ),
+    ] = None,
     legacy_handoff: Annotated[
         bool,
         typer.Option(
@@ -631,6 +681,12 @@ def create_context(
 
     if task is not None and not task.strip():
         _exit_with_error("task description must not be empty", code=2)
+    rerank_source = ctx.get_parameter_source("rerank")
+    rerank_alias = (
+        rerank
+        if rerank_source is not None and rerank_source.name != "DEFAULT"
+        else None
+    )
 
     if discovery is not None or legacy_handoff:
         _create_automatic_context(
@@ -670,6 +726,7 @@ def create_context(
             response_tokens != 4_096,
             safety_margin_tokens is not None,
             rerank,
+            planning is not None,
         )
     )
     if task is not None and (
@@ -695,6 +752,8 @@ def create_context(
             response_tokens=response_tokens,
             safety_margin_tokens=safety_margin_tokens,
             rerank=rerank,
+            planning=planning,
+            rerank_alias=rerank_alias,
             output_format=output_format,
             output=output,
             prompt_output=prompt_output,
@@ -721,6 +780,7 @@ def create_context(
             response_tokens != 4_096,
             safety_margin_tokens is not None,
             rerank,
+            planning is not None,
             legacy_handoff,
         )
     ):
@@ -840,6 +900,8 @@ def _create_capsule_context(
     response_tokens: int,
     safety_margin_tokens: int | None,
     rerank: bool,
+    planning: ContextPlanningMode | None,
+    rerank_alias: bool | None,
     output_format: ContextFormat,
     output: Path | None,
     prompt_output: Path | None,
@@ -851,17 +913,25 @@ def _create_capsule_context(
             raise ValueError("--git-diff base requires --base")
         if git_diff is not GitDiffChoice.base and base is not None:
             raise ValueError("--base is accepted only with --git-diff base")
-        if (provider_name is not None or model is not None) and not rerank:
-            raise ValueError("--provider and --model require --rerank")
         project = load_project_configuration(path, config_path=config)
+        planning_mode = planning or (
+            ContextPlanningMode.AUTO
+            if rerank_alias is True
+            else ContextPlanningMode.OFF
+            if rerank_alias is False
+            else ContextPlanningMode(project.models.context_planning_mode)
+        )
+        if (
+            provider_name is not None or model is not None
+        ) and planning_mode == ContextPlanningMode.OFF:
+            raise ValueError("--provider and --model require model evidence planning")
         provider_configuration = None
-        if rerank:
+        if planning_mode != ContextPlanningMode.OFF:
             provider_configuration = resolve_provider_configuration(
                 project, provider=provider_name, model=model
             )
-            if provider_configuration is None:
-                raise ValueError("--rerank requires a model provider")
-            provider = create_model_provider(provider_configuration)
+            if provider_configuration is not None:
+                provider = create_model_provider(provider_configuration)
 
         parsed = tuple(parse_line_range_request(value) for value in working_lines)
         working = tuple(
@@ -905,6 +975,21 @@ def _create_capsule_context(
                 diff_paths=() if diff_context is None else diff_context.touched_paths,
                 provider=provider,
                 rerank=rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
             )
         )
         budget = ContextBudget(

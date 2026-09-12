@@ -20,11 +20,13 @@ from contextforge.bridge.models import (
     BridgeSelectionItem,
     CancelParams,
     CompileParams,
+    CompileV22Params,
     DiscoverParams,
     IndexParams,
     MapParams,
     ReadParams,
     SearchParams,
+    SearchV22Params,
     SymbolParams,
 )
 from contextforge.intelligence import (
@@ -114,6 +116,23 @@ def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
         **v21["$defs"]["compileParams"]["allOf"][1]["properties"],
     }
     assert set(compile_properties) == set(CompileParams.model_fields)
+
+    v22 = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v2.2.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert v22["$defs"]["helloRequest"]["properties"]["params"]["properties"][
+        "protocol_version"
+    ] == {"const": "2.2"}
+    assert set(v22["$defs"]["searchParams"]["properties"]) == set(
+        SearchV22Params.model_fields
+    )
+    v22_compile = {
+        **v22["$defs"]["searchParams"]["properties"],
+        **v22["$defs"]["compileParams"]["allOf"][1]["properties"],
+    }
+    assert set(v22_compile) == set(CompileV22Params.model_fields)
 
 
 def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None:
@@ -399,6 +418,7 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
             "1.1",
             "2.0",
             "2.1",
+            "2.2",
         ]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
@@ -438,7 +458,7 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         assert incompatible["error"]["data"] == {
             "code": "INCOMPATIBLE_PROTOCOL_VERSION",
             "requested_protocol_version": "3.0",
-            "supported_protocol_versions": ["1.0", "1.1", "2.0", "2.1"],
+            "supported_protocol_versions": ["1.0", "1.1", "2.0", "2.1", "2.2"],
         }
 
         harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))

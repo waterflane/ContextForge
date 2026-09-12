@@ -40,7 +40,10 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
     mapped_with_graph = client.post(
         "/v1/map", json={"repository_root": root, "include_graph": True}
     )
-    searched = client.post("/v1/search", json={"repository_root": root, "task": "run"})
+    searched = client.post(
+        "/v1/search",
+        json={"repository_root": root, "task": "run", "planning_mode": "off"},
+    )
     symbols = client.post("/v1/symbol", json={"repository_root": root, "query": "run"})
     compiled = client.post(
         "/v1/compile",
@@ -51,6 +54,7 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
             "context_window_tokens": 2_000,
             "response_tokens": 200,
             "safety_margin_tokens": 100,
+            "planning_mode": "off",
         },
     )
 
@@ -78,6 +82,7 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
             "context_window_tokens": 1,
             "response_tokens": 0,
             "safety_margin_tokens": 0,
+            "planning_mode": "off",
         },
     )
     assert missing.status_code == too_small.status_code == 400

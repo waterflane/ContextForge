@@ -269,10 +269,18 @@ def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
     assert architecture["schema_version"] == 3
     assert features["schema_version"] == 3
 
-    with pytest.raises(ReadOnlyToolError, match="configured server provider"):
-        asyncio.run(foundation.call_tool("search", {"task": "run", "rerank": True}))
-    with pytest.raises(ReadOnlyToolError, match="configured server provider"):
-        asyncio.run(foundation.call_tool("compile", {"task": "run", "rerank": True}))
+    rerank_fallback = asyncio.run(
+        foundation.call_tool("search", {"task": "run", "rerank": True})
+    )
+    assert rerank_fallback["diagnostics"] == [
+        "planner_unavailable_deterministic_fallback"
+    ]
+    with pytest.raises(ReadOnlyToolError, match="required planning"):
+        asyncio.run(
+            foundation.call_tool(
+                "compile", {"task": "run", "planning_mode": "required"}
+            )
+        )
     with pytest.raises(ReadOnlyToolError, match="capsule envelope"):
         asyncio.run(
             foundation.call_tool(

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,6 +26,13 @@ from contextforge.intelligence import (
     load_repository_map_v3,
     retrieve_context_candidates,
 )
+from contextforge.models import ModelProvider, ModelProviderError
+from contextforge.project_config import (
+    ProjectConfigError,
+    create_model_provider,
+    load_project_configuration,
+    resolve_provider_configuration,
+)
 
 router = APIRouter()
 
@@ -43,6 +52,7 @@ class SearchRequest(_ReadOnlyRequest):
     working_files: tuple[str, ...] = ()
     diff_paths: tuple[str, ...] = ()
     limit: int = Field(default=20, ge=1, le=1_000)
+    planning_mode: Literal["off", "auto", "required"] = "auto"
 
 
 class SymbolRequest(_ReadOnlyRequest):
@@ -119,19 +129,28 @@ def repository_map(request: MapRequest) -> dict[str, object]:
 
 @router.post("/v1/search")
 async def search(request: SearchRequest) -> dict[str, object]:
-    """Return deterministic CandidateCards; the HTTP API performs no model calls."""
+    """Return CandidateCards with configured, bounded evidence planning."""
 
+    provider: ModelProvider | None = None
     try:
+        root = _root(request.repository_root)
+        provider = _planning_provider(root, request.planning_mode)
         result = await retrieve_context_candidates(
-            _root(request.repository_root),
+            root,
             request.task,
             working_set=request.working_files,
             diff_paths=request.diff_paths,
             limit=request.limit,
+            provider=provider,
+            planning_mode=request.planning_mode,
         )
         return result.model_dump(mode="json")
-    except (OSError, ValueError) as exc:
+    except (OSError, ProjectConfigError, ValueError, RuntimeError) as exc:
         raise _http_error(exc) from exc
+    finally:
+        if provider is not None:
+            with suppress(ModelProviderError):
+                await provider.close()
 
 
 @router.post("/v1/symbol")
@@ -177,9 +196,11 @@ def symbol(request: SymbolRequest) -> dict[str, object]:
 async def compile_capsule(request: CompileRequest) -> dict[str, object]:
     """Compile a source-read-only, generation-pinned Context Capsule v2."""
 
+    provider: ModelProvider | None = None
     try:
         root = _root(request.repository_root)
         manifest = load_manifest(root)
+        provider = _planning_provider(root, request.planning_mode)
         working = tuple(
             sorted(
                 {
@@ -196,6 +217,8 @@ async def compile_capsule(request: CompileRequest) -> dict[str, object]:
             working_set=working,
             diff_paths=request.diff_paths,
             limit=request.limit,
+            provider=provider,
+            planning_mode=request.planning_mode,
         )
         grouped: dict[str, list[SourceRange]] = {}
         for item in request.working_lines:
@@ -224,8 +247,30 @@ async def compile_capsule(request: CompileRequest) -> dict[str, object]:
             git_diff=request.git_diff,
         )
         return compiled.model_dump(mode="json")
-    except (ContextCompilerError, OSError, ValueError) as exc:
+    except (
+        ContextCompilerError,
+        OSError,
+        ProjectConfigError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         raise _http_error(exc) from exc
+    finally:
+        if provider is not None:
+            with suppress(ModelProviderError):
+                await provider.close()
+
+
+def _planning_provider(
+    root: Path, mode: Literal["off", "auto", "required"]
+) -> ModelProvider | None:
+    if mode == "off":
+        return None
+    project = load_project_configuration(root)
+    configuration = resolve_provider_configuration(project)
+    if configuration is None:
+        return None
+    return create_model_provider(configuration)
 
 
 def _root(value: str) -> Path:

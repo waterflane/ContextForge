@@ -106,6 +106,7 @@ class _SearchInput(_ToolInput):
     diff_paths: tuple[str, ...] = ()
     limit: int = Field(default=20, ge=1, le=1_000, strict=True)
     rerank: bool = False
+    planning_mode: Literal["off", "auto", "required"] | None = None
 
 
 class _SymbolInput(_ToolInput):
@@ -509,9 +510,10 @@ class ReadOnlyMCPFoundation:
         try:
             value = _SearchInput.model_validate(arguments)
             manifest = self._require_manifest()
-            if value.rerank and self.provider is None:
+            planning_mode = _mcp_planning_mode(value)
+            if planning_mode == "required" and self.provider is None:
                 raise ReadOnlyToolError(
-                    "unavailable", "rerank requires a configured server provider"
+                    "unavailable", "required planning needs a configured provider"
                 )
             result = await retrieve_context_candidates(
                 self.snapshot.root,
@@ -522,6 +524,7 @@ class ReadOnlyMCPFoundation:
                 limit=value.limit,
                 provider=self.provider,
                 rerank=value.rerank,
+                planning_mode=planning_mode,
             )
             return result.model_dump(mode="json")
         except ReadOnlyToolError:
@@ -570,9 +573,10 @@ class ReadOnlyMCPFoundation:
         try:
             value = _CompileInput.model_validate(arguments)
             manifest = self._require_manifest()
-            if value.rerank and self.provider is None:
+            planning_mode = _mcp_planning_mode(value)
+            if planning_mode == "required" and self.provider is None:
                 raise ReadOnlyToolError(
-                    "unavailable", "rerank requires a configured server provider"
+                    "unavailable", "required planning needs a configured provider"
                 )
             working = tuple(
                 sorted(
@@ -592,6 +596,7 @@ class ReadOnlyMCPFoundation:
                 limit=value.limit,
                 provider=self.provider,
                 rerank=value.rerank,
+                planning_mode=planning_mode,
             )
             ranges: dict[str, list[SourceRange]] = {}
             for item in value.working_lines:
@@ -624,6 +629,14 @@ class ReadOnlyMCPFoundation:
             raise
         except (ContextCompilerError, ValidationError, ValueError, OSError) as exc:
             raise ReadOnlyToolError("invalid_input", _safe_error(exc)) from exc
+
+
+def _mcp_planning_mode(value: _SearchInput) -> Literal["off", "auto", "required"]:
+    if value.planning_mode is not None:
+        return value.planning_mode
+    if "rerank" in value.model_fields_set:
+        return "auto" if value.rerank else "off"
+    return "auto"
 
 
 def _require_result_limit(result: dict[str, Any]) -> None:

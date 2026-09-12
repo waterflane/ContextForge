@@ -98,6 +98,7 @@ from .models import (
     BridgeSelectionItem,
     CancelParams,
     CompileParams,
+    CompileV22Params,
     DiscoverParams,
     ExpandParams,
     ExpansionOperation,
@@ -107,6 +108,7 @@ from .models import (
     PackageParams,
     ReadParams,
     SearchParams,
+    SearchV22Params,
     ShutdownParams,
     SnapshotParams,
     StatusParams,
@@ -149,9 +151,9 @@ _METHOD_MODELS: dict[str, type[BaseModel]] = {
     "snapshot": SnapshotParams,
     "index": IndexParams,
     "map": MapParams,
-    "search": SearchParams,
+    "search": SearchV22Params,
     "symbol": SymbolParams,
-    "compile": CompileParams,
+    "compile": CompileV22Params,
     "discover": DiscoverParams,
     "expand": ExpandParams,
     "read": ReadParams,
@@ -776,7 +778,7 @@ class BridgeServer:
         if method == "snapshot":
             return await self._snapshot(cancellation)
         if method == "index":
-            if self._protocol_version not in {"2.0", "2.1"}:
+            if self._protocol_version not in {"2.0", "2.1", "2.2"}:
                 raise BridgeFault(
                     METHOD_NOT_FOUND,
                     "METHOD_NOT_FOUND",
@@ -830,8 +832,9 @@ class BridgeServer:
         )
 
     def _hello(self) -> dict[str, Any]:
-        bridge_v2 = self._protocol_version in {"2.0", "2.1"}
-        bridge_v21 = self._protocol_version == "2.1"
+        bridge_v2 = self._protocol_version in {"2.0", "2.1", "2.2"}
+        bridge_v21 = self._protocol_version in {"2.1", "2.2"}
+        bridge_v22 = self._protocol_version == "2.2"
         return {
             "protocol_version": self._protocol_version or BRIDGE_PROTOCOL_VERSION,
             "supported_protocol_versions": list(SUPPORTED_BRIDGE_PROTOCOL_VERSIONS),
@@ -856,7 +859,8 @@ class BridgeServer:
                 "concurrent_requests": True,
                 "serialized_responses": True,
                 "max_message_bytes": MAX_JSONRPC_MESSAGE_BYTES,
-                "expansion_candidates": self._protocol_version in {"1.1", "2.0", "2.1"},
+                "expansion_candidates": self._protocol_version
+                in {"1.1", "2.0", "2.1", "2.2"},
                 "tracked_index_jobs": bridge_v2,
                 "progress_notifications": bridge_v2,
                 "schemas": {
@@ -882,6 +886,11 @@ class BridgeServer:
                             "semantic_card": {"current": 3, "readable": [3]},
                             "retrieval": {"current": 3, "readable": [3]},
                             "context_capsule": {"current": 2, "readable": [2]},
+                            **(
+                                {"evidence_plan": {"current": 1, "readable": [1]}}
+                                if bridge_v22
+                                else {}
+                            ),
                         }
                         if bridge_v21
                         else {}
@@ -957,7 +966,7 @@ class BridgeServer:
                 "rebuild_required": report.rebuild_required,
             },
         }
-        if self._protocol_version in {"1.1", "2.0", "2.1"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1", "2.2"}:
             result["index"]["coverage"] = await asyncio.to_thread(self._index_coverage)
         return result
 
@@ -978,7 +987,7 @@ class BridgeServer:
         return response
 
     def _require_bridge_v21(self) -> None:
-        if self._protocol_version != "2.1":
+        if self._protocol_version not in {"2.1", "2.2"}:
             raise BridgeFault(
                 METHOD_NOT_FOUND,
                 "METHOD_NOT_FOUND",
@@ -1032,8 +1041,26 @@ class BridgeServer:
     ) -> RetrievalResult:
         provider: ModelProvider | None = None
         try:
-            if params.rerank:
+            if self._protocol_version == "2.1":
+                if "planning_mode" in params.model_fields_set:
+                    raise BridgeFault(
+                        INVALID_PARAMS,
+                        "INVALID_PARAMS",
+                        "Bridge 2.1 does not accept planning_mode.",
+                    )
+                planning_mode = "auto" if params.rerank else "off"
+                project = None
+            else:
                 project = load_project_configuration(self.workspace)
+                planning_mode = getattr(params, "planning_mode", None) or (
+                    "auto"
+                    if params.rerank
+                    else "off"
+                    if "rerank" in params.model_fields_set
+                    else project.models.context_planning_mode
+                )
+            if planning_mode != "off":
+                project = project or load_project_configuration(self.workspace)
                 configuration = resolve_provider_configuration(
                     project,
                     provider=params.provider,
@@ -1041,13 +1068,14 @@ class BridgeServer:
                     base_url=params.base_url,
                     timeout_seconds=params.request_timeout,
                 )
-                if configuration is None:
+                if configuration is None and planning_mode == "required":
                     raise BridgeFault(
                         INVALID_PARAMS,
                         "PROVIDER_REQUIRED",
-                        "Reranking requires a configured provider.",
+                        "Required evidence planning needs a configured provider.",
                     )
-                provider = create_model_provider(configuration)
+                if configuration is not None:
+                    provider = create_model_provider(configuration)
             return await retrieve_context_candidates(
                 self.workspace,
                 params.task,
@@ -1057,6 +1085,35 @@ class BridgeServer:
                 limit=params.limit,
                 provider=provider,
                 rerank=params.rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=(
+                    32
+                    if project is None
+                    else project.models.context_planning_max_candidates
+                ),
+                planning_max_files=(
+                    8 if project is None else project.models.context_planning_max_files
+                ),
+                planning_max_ranges_per_file=(
+                    8
+                    if project is None
+                    else project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    8_192
+                    if project is None
+                    else project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    768
+                    if project is None
+                    else project.models.context_planning_max_output_tokens
+                ),
+                planning_request_timeout_seconds=(
+                    60.0
+                    if project is None
+                    else project.models.context_planning_request_timeout_seconds
+                ),
                 cancellation=cancellation,
             )
         finally:
@@ -1399,7 +1456,7 @@ class BridgeServer:
             "made_progress": result.made_progress,
             "budget_usage": result.budget_usage.model_dump(mode="json"),
         }
-        if self._protocol_version in {"1.1", "2.0", "2.1"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1", "2.2"}:
             response["candidates"] = self._register_expansion_candidates(
                 snapshot, preparation, params.operation, result.data
             )
