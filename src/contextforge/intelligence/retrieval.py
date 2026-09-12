@@ -17,6 +17,7 @@ from contextforge.core.validation import canonical_casefold_key
 from contextforge.intelligence.cards import SemanticCard
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
 from contextforge.intelligence.models import (
+    ArtifactReference,
     IndexManifest,
     IndexModel,
     Sha256,
@@ -40,6 +41,7 @@ PLANNING_MAX_RANGES_PER_FILE = 8
 PLANNING_MAX_INPUT_TOKENS = 8_192
 PLANNING_MAX_OUTPUT_TOKENS = 768
 PLANNING_REQUEST_TIMEOUT_SECONDS = 60.0
+RETRIEVAL_SHARD_MAX_BYTES = 4 * 1024 * 1024
 ExactGroup = Literal[
     "exact_path",
     "exact_qualified_symbol",
@@ -127,6 +129,41 @@ class RetrievalIndex(IndexModel):
         paths = tuple(item.path for item in self.documents)
         if paths != tuple(sorted(set(paths))) or self.document_count != len(paths):
             raise ValueError("retrieval documents must be unique and canonical")
+        if set(self.document_frequencies) != set(FIELD_WEIGHTS):
+            raise ValueError("document frequencies use an invalid field order")
+        if set(self.average_field_lengths) != set(FIELD_WEIGHTS):
+            raise ValueError("average lengths use an invalid field order")
+        return self
+
+
+class RetrievalDocumentShard(IndexModel):
+    """One bounded document shard referenced by a retrieval header."""
+
+    artifact: ArtifactReference
+    record_count: NonNegativeInt
+
+
+class RetrievalIndexShardManifest(IndexModel):
+    """Digest-bound header for a sharded persisted retrieval index."""
+
+    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    record_kind: Literal["retrieval_posting_shards"] = "retrieval_posting_shards"
+    source_snapshot_digest: Sha256
+    document_count: NonNegativeInt
+    document_shards: tuple[RetrievalDocumentShard, ...]
+    document_frequencies: dict[str, dict[str, NonNegativeInt]]
+    average_field_lengths: dict[str, NonNegativeFloat]
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> RetrievalIndexShardManifest:
+        if (
+            sum(item.record_count for item in self.document_shards)
+            != self.document_count
+        ):
+            raise ValueError("retrieval shard counts do not match document count")
+        locations = tuple(item.artifact.location for item in self.document_shards)
+        if len(locations) != len(set(locations)):
+            raise ValueError("retrieval shard locations must be unique")
         if set(self.document_frequencies) != set(FIELD_WEIGHTS):
             raise ValueError("document frequencies use an invalid field order")
         if set(self.average_field_lengths) != set(FIELD_WEIGHTS):
@@ -375,6 +412,124 @@ def build_retrieval_index(
     )
 
 
+def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) -> str:
+    """Persist retrieval documents in bounded shards and return the header digest."""
+
+    from contextforge.intelligence.store import IndexWriteLock, write_index_record
+
+    if not isinstance(lock, IndexWriteLock):
+        raise TypeError("lock must be an IndexWriteLock")
+    if location not in {"retrieval-structural.json", "retrieval-semantic.json"}:
+        raise ValueError("unsupported retrieval index location")
+    kind = "structural" if "structural" in location else "semantic"
+    shards: list[RetrievalDocumentShard] = []
+    pending: list[bytes] = []
+    pending_size = 0
+
+    def flush() -> None:
+        nonlocal pending, pending_size
+        if not pending:
+            return
+        shard_location = f"retrieval/{kind}-{len(shards):05d}.jsonl"
+        content = b"".join(pending)
+        digest = write_index_record(lock, shard_location, content)
+        shards.append(
+            RetrievalDocumentShard(
+                artifact=ArtifactReference(location=shard_location, sha256=digest),
+                record_count=len(pending),
+            )
+        )
+        pending = []
+        pending_size = 0
+
+    from contextforge.intelligence.manifest import canonical_json_bytes
+
+    for document in index.documents:
+        encoded = canonical_json_bytes(document.model_dump(mode="json"))
+        if len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
+            raise ValueError("one retrieval document exceeds the shard limit")
+        if pending and pending_size + len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
+            flush()
+        pending.append(encoded)
+        pending_size += len(encoded)
+    flush()
+    header = RetrievalIndexShardManifest(
+        source_snapshot_digest=index.source_snapshot_digest,
+        document_count=index.document_count,
+        document_shards=tuple(shards),
+        document_frequencies=index.document_frequencies,
+        average_field_lengths=index.average_field_lengths,
+    )
+    return write_index_record(
+        lock, location, canonical_json_bytes(header.model_dump(mode="json"))
+    )
+
+
+def load_retrieval_index(
+    repository_root: str | Path,
+    reference: ArtifactReference,
+    *,
+    manifest: IndexManifest,
+) -> RetrievalIndex:
+    """Load either a legacy monolith or the current digest-bound shard set."""
+
+    from contextforge.intelligence.store import load_generation_record
+
+    content = load_generation_record(
+        repository_root, reference.location, manifest=manifest
+    )
+    if hashlib.sha256(content).hexdigest() != reference.sha256:
+        raise ValueError("retrieval header digest does not match the manifest")
+    try:
+        header = RetrievalIndexShardManifest.model_validate_json(content)
+    except ValueError:
+        return RetrievalIndex.model_validate_json(content)
+    documents: list[RetrievalDocument] = []
+    for shard in header.document_shards:
+        shard_content = load_generation_record(
+            repository_root, shard.artifact.location, manifest=manifest
+        )
+        if hashlib.sha256(shard_content).hexdigest() != shard.artifact.sha256:
+            raise ValueError("retrieval shard digest does not match its header")
+        lines = tuple(line for line in shard_content.splitlines() if line)
+        if len(lines) != shard.record_count:
+            raise ValueError("retrieval shard record count does not match its header")
+        documents.extend(RetrievalDocument.model_validate_json(line) for line in lines)
+    return RetrievalIndex(
+        source_snapshot_digest=header.source_snapshot_digest,
+        document_count=header.document_count,
+        documents=tuple(documents),
+        document_frequencies=header.document_frequencies,
+        average_field_lengths=header.average_field_lengths,
+    )
+
+
+def retrieval_index_record_locations(
+    repository_root: str | Path, manifest: IndexManifest
+) -> tuple[str, ...]:
+    """Return retrieval headers and every digest-bound document shard."""
+
+    from contextforge.intelligence.store import load_generation_record
+
+    locations: list[str] = []
+    for reference in (
+        manifest.artifacts.structural_retrieval,
+        manifest.artifacts.semantic_retrieval,
+    ):
+        if reference is None:
+            continue
+        locations.append(reference.location)
+        content = load_generation_record(
+            repository_root, reference.location, manifest=manifest
+        )
+        try:
+            header = RetrievalIndexShardManifest.model_validate_json(content)
+        except ValueError:
+            continue
+        locations.extend(item.artifact.location for item in header.document_shards)
+    return tuple(locations)
+
+
 async def retrieve_context_candidates(
     repository_root: str | Path,
     task: str,
@@ -428,7 +583,6 @@ async def retrieve_context_candidates(
     )
     from contextforge.intelligence.store import (
         IndexStorageError,
-        load_generation_record,
         load_manifest,
     )
 
@@ -440,9 +594,7 @@ async def retrieve_context_candidates(
     )
     if reference is None:
         raise ValueError("pinned generation has no persisted retrieval postings")
-    index = RetrievalIndex.model_validate_json(
-        load_generation_record(repository_root, reference.location, manifest=active)
-    )
+    index = load_retrieval_index(repository_root, reference, manifest=active)
     if index.source_snapshot_digest != active.build.source_snapshot_digest:
         raise ValueError("retrieval postings are stale for the pinned generation")
     graph = load_relationship_graph(repository_root, manifest=active)
@@ -1378,6 +1530,7 @@ __all__ = [
     "PLANNING_MAX_OUTPUT_TOKENS",
     "PLANNING_MAX_RANGES_PER_FILE",
     "PLANNING_REQUEST_TIMEOUT_SECONDS",
+    "RETRIEVAL_SHARD_MAX_BYTES",
     "PlannedEvidence",
     "PlanningDiagnostics",
     "PositionalPosting",
@@ -1385,7 +1538,12 @@ __all__ = [
     "RetrievalDocument",
     "RetrievalField",
     "RetrievalIndex",
+    "RetrievalDocumentShard",
+    "RetrievalIndexShardManifest",
     "RetrievalResult",
     "build_retrieval_index",
+    "load_retrieval_index",
+    "retrieval_index_record_locations",
     "retrieve_context_candidates",
+    "write_retrieval_index",
 ]

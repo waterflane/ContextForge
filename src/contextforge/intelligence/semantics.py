@@ -2818,6 +2818,7 @@ def _manifest_matches_planned_semantics(
 
 def _copy_structural_records(lock: IndexWriteLock, manifest: IndexManifest) -> None:
     from contextforge.intelligence.indexer import relationship_graph_record_locations
+    from contextforge.intelligence.retrieval import retrieval_index_record_locations
 
     for state in manifest.files:
         assert state.record_location is not None
@@ -2839,7 +2840,10 @@ def _copy_structural_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
     graph_locations = relationship_graph_record_locations(
         lock.layout.repository_root, manifest
     )
-    for location in (*artifact_locations, *graph_locations):
+    retrieval_locations = retrieval_index_record_locations(
+        lock.layout.repository_root, manifest
+    )
+    for location in (*artifact_locations, *graph_locations, *retrieval_locations):
         write_index_record(
             lock,
             location,

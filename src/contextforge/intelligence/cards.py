@@ -653,15 +653,16 @@ async def build_semantic_card_index(
         "features.json",
         canonical_json_bytes(features.model_dump(mode="json")),
     )
-    from contextforge.intelligence.retrieval import build_retrieval_index
+    from contextforge.intelligence.retrieval import (
+        build_retrieval_index,
+        write_retrieval_index,
+    )
 
     semantic_retrieval = build_retrieval_index(
         code_maps, tuple(cards), structural.build.source_snapshot_digest
     )
-    semantic_retrieval_digest = write_index_record(
-        lock,
-        "retrieval-semantic.json",
-        canonical_json_bytes(semantic_retrieval.model_dump(mode="json")),
+    semantic_retrieval_digest = write_retrieval_index(
+        lock, "retrieval-semantic.json", semantic_retrieval
     )
     artifacts = structural.artifacts.model_copy(
         update={
@@ -1978,6 +1979,7 @@ def _store_cached_raw(lock: IndexWriteLock, key: str, raw: _RawSemanticCard) -> 
 
 def _copy_structural_generation(lock: IndexWriteLock, manifest: IndexManifest) -> None:
     from contextforge.intelligence.indexer import relationship_graph_record_locations
+    from contextforge.intelligence.retrieval import retrieval_index_record_locations
 
     locations = {
         state.record_location
@@ -1987,6 +1989,9 @@ def _copy_structural_generation(lock: IndexWriteLock, manifest: IndexManifest) -
     locations.update(_artifact_locations(manifest.artifacts))
     locations.update(
         relationship_graph_record_locations(lock.layout.repository_root, manifest)
+    )
+    locations.update(
+        retrieval_index_record_locations(lock.layout.repository_root, manifest)
     )
     for location in sorted(locations):
         write_index_record(

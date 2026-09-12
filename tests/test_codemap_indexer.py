@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,16 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
     graph_shards = tuple((first.generation_path / "graph").glob("*.jsonl"))
     assert graph_shards
     assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in graph_shards)
+    retrieval_shards = tuple((first.generation_path / "retrieval").glob("*.jsonl"))
+    assert retrieval_shards
+    assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in retrieval_shards)
+    retrieval_header = json.loads(
+        (first.generation_path / "retrieval-structural.json").read_text("utf-8")
+    )
+    assert retrieval_header["record_kind"] == "retrieval_posting_shards"
+    assert sum(
+        item["record_count"] for item in retrieval_header["document_shards"]
+    ) == len(first.code_maps)
 
 
 def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) -> None:

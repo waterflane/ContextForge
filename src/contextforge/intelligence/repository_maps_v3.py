@@ -36,6 +36,8 @@ REPOSITORY_MAP_KINDS: tuple[RepositoryMapKind, ...] = (
     "conventions",
     "features",
 )
+MAX_MAP_RELATIONSHIPS_PER_ENTRY = 256
+MAX_FEATURE_RELATIONSHIPS_PER_ENTRY = 32
 RepositoryClaimKind = Literal["concept", "responsibility"]
 RepositoryClaimProvenance = Literal[
     "verified",
@@ -286,7 +288,9 @@ def build_repository_maps_v3(
                     )
                 ),
                 relationships=_relationships_for_paths(
-                    tuple(sorted({card.path for card, _ in items})), relationships
+                    tuple(sorted({card.path for card, _ in items})),
+                    relationships,
+                    maximum=MAX_FEATURE_RELATIONSHIPS_PER_ENTRY,
                 ),
             )
             for name, items in sorted(feature_groups.items())
@@ -331,22 +335,37 @@ def _map_relationships(
     graph: RelationshipGraph,
 ) -> tuple[RepositoryMapRelationship, ...]:
     nodes = {item.node_id: item for item in graph.nodes}
+    projected: dict[
+        tuple[RelationshipKind, str, str, EdgeProvenance],
+        RepositoryMapRelationship,
+    ] = {}
+    for edge in graph.edges:
+        source = nodes[edge.source_node_id]
+        target = nodes[edge.target_node_id]
+        key = (edge.kind, source.path, target.path, edge.provenance)
+        candidate = RepositoryMapRelationship(
+            relationship_id=edge.edge_id,
+            kind=edge.kind,
+            source_path=source.path,
+            target_path=target.path,
+            source_symbol_id=source.symbol_id,
+            target_symbol_id=target.symbol_id,
+            source_range=edge.source_range,
+            provenance=edge.provenance,
+            detection_method=edge.detection_method,
+        )
+        current = projected.get(key)
+        if current is None or (
+            candidate.source_range is None,
+            candidate.relationship_id,
+        ) < (
+            current.source_range is None,
+            current.relationship_id,
+        ):
+            projected[key] = candidate
     return tuple(
         sorted(
-            (
-                RepositoryMapRelationship(
-                    relationship_id=edge.edge_id,
-                    kind=edge.kind,
-                    source_path=nodes[edge.source_node_id].path,
-                    target_path=nodes[edge.target_node_id].path,
-                    source_symbol_id=nodes[edge.source_node_id].symbol_id,
-                    target_symbol_id=nodes[edge.target_node_id].symbol_id,
-                    source_range=edge.source_range,
-                    provenance=edge.provenance,
-                    detection_method=edge.detection_method,
-                )
-                for edge in graph.edges
-            ),
+            projected.values(),
             key=lambda item: item.relationship_id,
         )
     )
@@ -357,14 +376,16 @@ def _relationships_for_paths(
     relationships: tuple[RepositoryMapRelationship, ...],
     *,
     kinds: set[RelationshipKind] | None = None,
+    maximum: int = MAX_MAP_RELATIONSHIPS_PER_ENTRY,
 ) -> tuple[RepositoryMapRelationship, ...]:
     selected = set(paths)
-    return tuple(
+    matches = tuple(
         item
         for item in relationships
         if (item.source_path in selected or item.target_path in selected)
         and (kinds is None or item.kind in kinds)
     )
+    return matches[:maximum]
 
 
 def _claims_for_paths(

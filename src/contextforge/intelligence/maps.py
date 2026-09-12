@@ -2027,9 +2027,13 @@ def _copy_generation_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
         if location is not None
     }
     from contextforge.intelligence.indexer import relationship_graph_record_locations
+    from contextforge.intelligence.retrieval import retrieval_index_record_locations
 
     locations.update(
         relationship_graph_record_locations(lock.layout.repository_root, manifest)
+    )
+    locations.update(
+        retrieval_index_record_locations(lock.layout.repository_root, manifest)
     )
     locations.update(
         reference.location

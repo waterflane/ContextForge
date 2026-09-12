@@ -54,7 +54,10 @@ from contextforge.intelligence.python import (
     PYTHON_ANALYZER,
 )
 from contextforge.intelligence.relationships import resolve_relationships
-from contextforge.intelligence.retrieval import build_retrieval_index
+from contextforge.intelligence.retrieval import (
+    build_retrieval_index,
+    write_retrieval_index,
+)
 from contextforge.intelligence.store import (
     IndexManifestNotFoundError,
     IndexManifestReadError,
@@ -178,11 +181,8 @@ def build_structural_index(
         lock, "orientation.json", orientation_content
     )
     structural_retrieval = build_retrieval_index(code_maps, (), snapshot_digest)
-    structural_retrieval_content = canonical_json_bytes(
-        structural_retrieval.model_dump(mode="json")
-    )
-    structural_retrieval_digest = write_index_record(
-        lock, "retrieval-structural.json", structural_retrieval_content
+    structural_retrieval_digest = write_retrieval_index(
+        lock, "retrieval-structural.json", structural_retrieval
     )
     facts_digest = hashlib.sha256(
         canonical_json_bytes(

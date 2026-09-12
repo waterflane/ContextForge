@@ -635,6 +635,7 @@ def load_generation_record(
     layout = _layout(repository_root)
     generation = layout.generations / manifest.generation_id
     referenced.update(_referenced_graph_shards(generation, manifest))
+    referenced.update(_referenced_retrieval_shards(generation, manifest))
     if location not in _STAGED_ROOT_RECORDS and location not in referenced:
         raise IndexManifestReadError(
             "record location is not referenced by the pinned manifest"
@@ -908,7 +909,8 @@ def _validate_record_location(value: str) -> str:
     if location in (ACTIVE_MANIFEST_FILENAME, LOCK_FILENAME):
         raise IndexPathError("record location is reserved by index storage")
     allowed = (
-        location.startswith(("files/", "graph/")) or location in _STAGED_ROOT_RECORDS
+        location.startswith(("files/", "graph/", "retrieval/"))
+        or location in _STAGED_ROOT_RECORDS
     )
     if not allowed:
         raise IndexPathError("record location is outside approved generation data")
@@ -1001,6 +1003,14 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             raise IndexPublicationError(
                 f"graph shard digest does not match manifest for {location}"
             )
+    for location, digest in _referenced_retrieval_shards(root, manifest).items():
+        artifact = root.joinpath(*location.split("/"))
+        _require_safe_existing_chain(root, artifact)
+        content = _read_bounded_bytes(artifact, 4 * 1024 * 1024)
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise IndexPublicationError(
+                f"retrieval shard digest does not match manifest for {location}"
+            )
 
 
 def _validate_record_schema(content: bytes, expected: int) -> None:
@@ -1036,6 +1046,7 @@ def _prune_unreferenced_staged_records(stage: Path, manifest: IndexManifest) -> 
     }
     allowed.update(_STAGED_ROOT_RECORDS)
     allowed.update(_referenced_graph_shards(stage, manifest))
+    allowed.update(_referenced_retrieval_shards(stage, manifest))
     allowed.add(ACTIVE_MANIFEST_FILENAME)
 
     def prune(directory: Path) -> None:
@@ -1100,6 +1111,46 @@ def _referenced_graph_shards(root: Path, manifest: IndexManifest) -> dict[str, s
             if not location.startswith("graph/") or location in result:
                 raise IndexManifestReadError(
                     "relationship graph shard manifest contains invalid locations"
+                )
+            result[location] = digest
+    return result
+
+
+def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for reference in (
+        manifest.artifacts.structural_retrieval,
+        manifest.artifacts.semantic_retrieval,
+    ):
+        if reference is None:
+            continue
+        header = root.joinpath(*reference.location.split("/"))
+        if not header.is_file():
+            continue
+        try:
+            value = json.loads(_read_bounded_bytes(header, MAX_RECORD_BYTES))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if (
+            not isinstance(value, dict)
+            or value.get("record_kind") != "retrieval_posting_shards"
+        ):
+            continue
+        group = value.get("document_shards")
+        if not isinstance(group, list):
+            raise IndexManifestReadError("retrieval shard manifest is malformed")
+        for item in group:
+            artifact = item.get("artifact") if isinstance(item, dict) else None
+            if not isinstance(artifact, dict):
+                raise IndexManifestReadError("retrieval shard manifest is malformed")
+            location = artifact.get("location")
+            digest = artifact.get("sha256")
+            if not isinstance(location, str) or not isinstance(digest, str):
+                raise IndexManifestReadError("retrieval shard manifest is malformed")
+            location = _validate_record_location(location)
+            if not location.startswith("retrieval/") or location in result:
+                raise IndexManifestReadError(
+                    "retrieval shard manifest contains invalid locations"
                 )
             result[location] = digest
     return result
