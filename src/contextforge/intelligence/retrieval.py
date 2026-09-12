@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from contextforge.core.validation import canonical_casefold_key
 from contextforge.intelligence.cards import SemanticCard
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
 from contextforge.intelligence.models import (
@@ -83,7 +84,7 @@ class RetrievalDocument(IndexModel):
         if names != tuple(FIELD_WEIGHTS):
             raise ValueError("retrieval fields must use the canonical weighted order")
         for values in (self.symbols, self.qualified_symbols, self.source_identifiers):
-            if values != tuple(sorted(set(values), key=str.casefold)):
+            if values != tuple(sorted(set(values), key=canonical_casefold_key)):
                 raise ValueError("retrieval identifiers must be unique and canonical")
         return self
 
@@ -206,10 +207,13 @@ def build_retrieval_index(
     for code_map in sorted(code_maps, key=lambda item: item.path):
         card = cards_by_path.get(code_map.path)
         symbols = tuple(
-            sorted({item.name for item in code_map.symbols}, key=str.casefold)
+            sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
         )
         qualified = tuple(
-            sorted({item.qualified_name for item in code_map.symbols}, key=str.casefold)
+            sorted(
+                {item.qualified_name for item in code_map.symbols},
+                key=canonical_casefold_key,
+            )
         )
         identifiers = tuple(
             sorted(
@@ -222,7 +226,7 @@ def build_retrieval_index(
                         for key in item.configuration_keys
                     ),
                 },
-                key=str.casefold,
+                key=canonical_casefold_key,
             )
         )
         values = {

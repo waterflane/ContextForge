@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -110,3 +113,26 @@ def test_public_artifact_schema_fields_match_runtime_models() -> None:
 
     for model, schema in pairs:
         assert set(schema["properties"]) == set(model.model_fields)
+
+
+def test_public_index_api_imports_in_a_fresh_process() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from contextforge import (compile_context_capsule, "
+                "retrieve_context_candidates); "
+                "from contextforge.context import ContextBudget; "
+                "from contextforge.intelligence import SemanticCard; "
+                "print('ok')"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONHASHSEED": "random"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
