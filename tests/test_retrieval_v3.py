@@ -9,6 +9,8 @@ from contextforge.application import build_repository_index
 from contextforge.intelligence import (
     CandidateEvidenceRange,
     CandidateGraphNeighbor,
+    ContextPlanningMode,
+    EvidencePlanningError,
     FileGraphMetrics,
     RelationshipGraph,
     RelationshipGraphEdge,
@@ -567,6 +569,68 @@ def test_rerank_returns_deterministic_result_after_two_provider_failures(
     assert result.reranked is False
     assert result.provider_calls == 2
     assert result.diagnostics == ("rerank_failed_deterministic_fallback",)
+
+
+def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "service.py",
+        "def handle_request(value: str) -> str:\n    return value.upper()\n",
+    )
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = facts["candidates"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "selected": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                        "representation": "slice",
+                    }
+                ],
+                "sufficiency": "sufficient",
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "change handle_request",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode=ContextPlanningMode.AUTO,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.diagnostics.status == "planned"
+    assert result.evidence_plan.items[0].evidence_ids
+    supplied = {
+        item.evidence_id
+        for item in result.candidates[0].evidence_ranges
+        if item.evidence_id is not None
+    }
+    assert set(result.evidence_plan.items[0].evidence_ids) <= supplied
+
+
+def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return None\n")
+    report = _build(tmp_path)
+
+    with pytest.raises(EvidencePlanningError):
+        asyncio.run(
+            retrieve_context_candidates(
+                tmp_path,
+                "serve",
+                manifest=report.manifest,
+                planning_mode="required",
+            )
+        )
 
 
 def test_invalid_semantic_record_is_excluded_from_ranking(tmp_path: Path) -> None:

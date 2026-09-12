@@ -4,7 +4,7 @@
   "title": "ContextForge Retrieval Result v3",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "source_snapshot_digest", "generation_id", "task", "candidates", "reranked", "provider_calls", "diagnostics"],
+  "required": ["schema_version", "source_snapshot_digest", "generation_id", "task", "candidates", "reranked", "provider_calls", "diagnostics", "evidence_plan"],
   "properties": {
     "schema_version": { "const": 3 },
     "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
@@ -13,7 +13,8 @@
     "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
     "reranked": { "type": "boolean" },
     "provider_calls": { "type": "integer", "minimum": 0 },
-    "diagnostics": { "type": "array", "items": { "type": "string" } }
+    "diagnostics": { "type": "array", "items": { "type": "string" } },
+    "evidence_plan": { "oneOf": [{ "$ref": "#/$defs/evidence_plan" }, { "type": "null" }] }
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -37,6 +38,46 @@
         "summary": { "type": ["integer", "null"], "minimum": 0 },
         "slice": { "type": ["integer", "null"], "minimum": 0 },
         "full": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "planning_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "provider_calls", "input_tokens", "output_tokens", "dropped_candidates", "dropped_evidence_ids", "messages"],
+      "properties": {
+        "mode": { "enum": ["off", "auto", "required"] },
+        "status": { "enum": ["planned", "fallback", "failed"] },
+        "provider_calls": { "type": "integer", "minimum": 0 },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "dropped_candidates": { "type": "integer", "minimum": 0 },
+        "dropped_evidence_ids": { "type": "integer", "minimum": 0 },
+        "messages": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "planned_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "path", "source_sha256", "evidence_ids", "representation"],
+      "properties": {
+        "candidate_id": { "type": "string" },
+        "path": { "type": "string", "minLength": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "evidence_ids": { "type": "array", "maxItems": 8, "items": { "type": "string" } },
+        "representation": { "enum": ["map", "summary", "slice", "full"] }
+      }
+    },
+    "evidence_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_snapshot_digest", "items", "sufficiency", "interpretation", "diagnostics"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+        "items": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/planned_evidence" } },
+        "sufficiency": { "enum": ["sufficient", "insufficient"] },
+        "interpretation": { "type": ["string", "null"], "maxLength": 2000 },
+        "diagnostics": { "$ref": "#/$defs/planning_diagnostics" }
       }
     },
     "candidate": {

@@ -100,6 +100,19 @@ class ProjectModelSettings(_ConfigModel):
         default=256_000, ge=1, le=100_000_000, strict=True
     )
     semantic_max_chunks_per_file: int = Field(default=4, ge=1, le=4, strict=True)
+    context_planning_mode: Literal["off", "auto", "required"] = "auto"
+    context_planning_max_candidates: int = Field(default=32, ge=1, le=32, strict=True)
+    context_planning_max_files: int = Field(default=8, ge=1, le=8, strict=True)
+    context_planning_max_ranges_per_file: int = Field(
+        default=8, ge=1, le=8, strict=True
+    )
+    context_planning_max_input_tokens: int = Field(
+        default=8_192, ge=512, le=100_000, strict=True
+    )
+    context_planning_max_output_tokens: int = Field(
+        default=768, ge=64, le=32_768, strict=True
+    )
+    context_planning_request_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
         "off"
     )
