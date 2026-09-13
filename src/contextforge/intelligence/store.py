@@ -1089,8 +1089,15 @@ def _referenced_graph_shards(root: Path, manifest: IndexManifest) -> dict[str, s
     ):
         return {}
     result: dict[str, str] = {}
-    for key in ("node_shards", "edge_shards", "metric_shards"):
+    for key in (
+        "node_shards",
+        "edge_shards",
+        "metric_shards",
+        "file_projection_shards",
+    ):
         group = value.get(key)
+        if key == "file_projection_shards" and group is None:
+            continue
         if not isinstance(group, list):
             raise IndexManifestReadError(
                 "relationship graph shard manifest is malformed"

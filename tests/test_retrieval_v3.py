@@ -667,7 +667,9 @@ def test_retrieval_persists_safe_positional_structural_postings(tmp_path: Path) 
     assert "pass" not in {item.identifier for item in document.positional_postings}
 
 
-def test_invalid_semantic_record_is_excluded_from_ranking(tmp_path: Path) -> None:
+def test_retrieval_uses_digest_bound_grounding_without_reopening_cards(
+    tmp_path: Path,
+) -> None:
     _write(tmp_path, "service.py", "def serve():\n    return None\n")
     report = _build(tmp_path)
     state = report.manifest.files[0].model_copy(
@@ -683,7 +685,8 @@ def test_invalid_semantic_record_is_excluded_from_ranking(tmp_path: Path) -> Non
         retrieve_context_candidates(tmp_path, "serve", manifest=manifest)
     )
 
-    assert result.candidates[0].synopsis == "Structural map for service.py."
+    assert result.candidates[0].synopsis.startswith("Source file service.py")
+    assert "grounded-semantic-card" in result.candidates[0].provenance
 
 
 def test_retrieval_internal_guards_and_tokenization() -> None:
@@ -702,8 +705,6 @@ def test_retrieval_internal_guards_and_tokenization() -> None:
         retrieval_module._rank_candidates(  # type: ignore[arg-type]
             "task",
             build_retrieval_index((), (), "0" * 64),
-            {},
-            {},
             object(),
             working_set=(),
             diff_paths=(),

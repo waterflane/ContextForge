@@ -137,6 +137,86 @@ class FileGraphMetrics(IndexModel):
         return validated
 
 
+class FileRelationshipProjection(IndexModel):
+    """Compact file-to-file relationship used by warm retrieval."""
+
+    source_path: str
+    target_path: str
+    relationship_kinds: tuple[RelationshipKind, ...]
+    provenance: tuple[EdgeProvenance, ...]
+
+    @field_validator("source_path", "target_path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> FileRelationshipProjection:
+        if self.source_path == self.target_path:
+            raise ValueError("file relationship projections cannot be self edges")
+        if not self.relationship_kinds or self.relationship_kinds != tuple(
+            sorted(set(self.relationship_kinds))
+        ):
+            raise ValueError("relationship kinds must be non-empty and canonical")
+        if not self.provenance or self.provenance != tuple(
+            sorted(set(self.provenance))
+        ):
+            raise ValueError("relationship provenance must be non-empty and canonical")
+        return self
+
+
+class RelationshipGraphProjection(IndexModel):
+    """Compact retrieval view that avoids loading symbol nodes and edges."""
+
+    source_snapshot_digest: Sha256
+    relationships: tuple[FileRelationshipProjection, ...]
+    file_metrics: tuple[FileGraphMetrics, ...]
+
+    @model_validator(mode="after")
+    def validate_content(self) -> RelationshipGraphProjection:
+        keys = tuple(
+            (item.source_path, item.target_path) for item in self.relationships
+        )
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("file relationship projections must be canonical")
+        paths = tuple(item.path for item in self.file_metrics)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("file metrics must be canonical")
+        return self
+
+
+def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphProjection:
+    """Collapse symbol edges into deterministic file-to-file routing facts."""
+
+    node_paths = {item.node_id: item.path for item in graph.nodes}
+    grouped: dict[
+        tuple[str, str], tuple[set[RelationshipKind], set[EdgeProvenance]]
+    ] = {}
+    for edge in graph.edges:
+        source_path = node_paths[edge.source_node_id]
+        target_path = node_paths[edge.target_node_id]
+        if source_path == target_path:
+            continue
+        kinds, provenance = grouped.setdefault(
+            (source_path, target_path), (set(), set())
+        )
+        kinds.add(edge.kind)
+        provenance.add(edge.provenance)
+    return RelationshipGraphProjection(
+        source_snapshot_digest=graph.source_snapshot_digest,
+        relationships=tuple(
+            FileRelationshipProjection(
+                source_path=source,
+                target_path=target,
+                relationship_kinds=tuple(sorted(kinds)),
+                provenance=tuple(sorted(provenance)),
+            )
+            for (source, target), (kinds, provenance) in sorted(grouped.items())
+        ),
+        file_metrics=graph.file_metrics,
+    )
+
+
 class RelationshipGraph(IndexModel):
     """Complete deterministic repository relationship graph."""
 
@@ -186,12 +266,18 @@ class RelationshipGraphShardManifest(IndexModel):
     node_shards: tuple[RelationshipGraphShard, ...]
     edge_shards: tuple[RelationshipGraphShard, ...]
     metric_shards: tuple[RelationshipGraphShard, ...]
+    file_projection_shards: tuple[RelationshipGraphShard, ...] = ()
 
     @model_validator(mode="after")
     def validate_shards(self) -> RelationshipGraphShardManifest:
         locations = tuple(
             shard.artifact.location
-            for group in (self.node_shards, self.edge_shards, self.metric_shards)
+            for group in (
+                self.node_shards,
+                self.edge_shards,
+                self.metric_shards,
+                self.file_projection_shards,
+            )
             for shard in group
         )
         if len(locations) != len(set(locations)):
@@ -699,6 +785,7 @@ __all__ = [
     "PAGERANK_TOLERANCE",
     "EdgeProvenance",
     "FileGraphMetrics",
+    "FileRelationshipProjection",
     "InferredGraphLink",
     "OrientationFile",
     "OrientationMap",
@@ -706,6 +793,7 @@ __all__ = [
     "RelationshipGraph",
     "RelationshipGraphEdge",
     "RelationshipGraphNode",
+    "RelationshipGraphProjection",
     "RelationshipGraphShard",
     "RelationshipGraphShardManifest",
     "RelationshipKind",
@@ -714,5 +802,6 @@ __all__ = [
     "build_relationship_graph",
     "add_model_inferred_edges",
     "file_node_id",
+    "project_relationship_graph",
     "symbol_node_id",
 ]

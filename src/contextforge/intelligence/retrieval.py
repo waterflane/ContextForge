@@ -26,6 +26,7 @@ from contextforge.intelligence.models import (
 from contextforge.models import ModelProvider, ModelRequest, UntrustedSource
 
 RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
+RETRIEVAL_BUILD_VERSION = 3
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -42,6 +43,7 @@ PLANNING_MAX_INPUT_TOKENS = 8_192
 PLANNING_MAX_OUTPUT_TOKENS = 768
 PLANNING_REQUEST_TIMEOUT_SECONDS = 60.0
 RETRIEVAL_SHARD_MAX_BYTES = 4 * 1024 * 1024
+MAX_POSITIONAL_POSTINGS_PER_FILE = 128
 ExactGroup = Literal[
     "exact_path",
     "exact_qualified_symbol",
@@ -82,17 +84,37 @@ class PositionalPosting(IndexModel):
     source_range: SourceRange
 
 
+class RetrievalSemanticEvidence(IndexModel):
+    """Grounded semantic evidence copied into the retrieval generation."""
+
+    evidence_id: str
+    source_range: SourceRange
+
+
+class RetrievalSemanticClaim(IndexModel):
+    """One ranking-safe claim and its source-bound evidence."""
+
+    text: str
+    evidence: tuple[RetrievalSemanticEvidence, ...]
+
+
 class RetrievalDocument(IndexModel):
     """One source-bound persisted BM25 document."""
 
     path: str
     source_sha256: Sha256
+    source_size_bytes: NonNegativeInt = 0
+    line_count: NonNegativeInt = 0
+    declaration_count: NonNegativeInt = 0
     fields: tuple[RetrievalField, ...]
     symbols: tuple[str, ...] = ()
     qualified_symbols: tuple[str, ...] = ()
     source_identifiers: tuple[str, ...] = ()
     positional_postings: tuple[PositionalPosting, ...] = ()
     semantic_quality: Literal["none", "complete", "partial", "deterministic"] = "none"
+    semantic_synopsis: str = ""
+    semantic_concepts: tuple[str, ...] = ()
+    semantic_claims: tuple[RetrievalSemanticClaim, ...] = ()
 
     @field_validator("path")
     @classmethod
@@ -344,6 +366,7 @@ def build_retrieval_index(
     for code_map in sorted(code_maps, key=lambda item: item.path):
         card = cards_by_path.get(code_map.path)
         postings = _structural_postings(code_map)
+        semantic_claims = _retrieval_semantic_claims(card)
         symbols = tuple(
             sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
         )
@@ -367,12 +390,11 @@ def build_retrieval_index(
                 key=canonical_casefold_key,
             )
         )
+        structural_identifiers = _all_structural_identifiers(code_map)
         values = {
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
-            "source_identifiers": " ".join(
-                (*identifiers, *(item.identifier for item in postings))
-            ),
+            "source_identifiers": " ".join((*identifiers, *structural_identifiers)),
             "grounded_semantics": "" if card is None else card.ranking_text(),
         }
         fields = tuple(_retrieval_field(name, values[name]) for name in FIELD_WEIGHTS)
@@ -380,12 +402,20 @@ def build_retrieval_index(
             RetrievalDocument(
                 path=code_map.path,
                 source_sha256=code_map.source_sha256,
+                source_size_bytes=code_map.source_size_bytes,
+                line_count=code_map.line_count,
+                declaration_count=len(code_map.symbols),
                 fields=fields,
                 symbols=symbols,
                 qualified_symbols=qualified,
                 source_identifiers=identifiers,
                 positional_postings=postings,
                 semantic_quality="none" if card is None else card.quality,
+                semantic_synopsis="" if card is None else card.synopsis.text,
+                semantic_concepts=(
+                    () if card is None else tuple(item.text for item in card.concepts)
+                ),
+                semantic_claims=semantic_claims,
             )
         )
     frequencies: dict[str, dict[str, int]] = {}
@@ -410,6 +440,41 @@ def build_retrieval_index(
         document_frequencies=frequencies,
         average_field_lengths=averages,
     )
+
+
+def _retrieval_semantic_claims(
+    card: SemanticCard | None,
+) -> tuple[RetrievalSemanticClaim, ...]:
+    if card is None:
+        return ()
+    known = {item.evidence_id: item for item in card.evidence}
+    claims = [
+        card.synopsis,
+        *card.concepts,
+        *card.responsibilities,
+        *card.side_effects,
+        *(claim for values in card.profile_facts.values() for claim in values),
+    ]
+    values: dict[tuple[str, tuple[str, ...]], RetrievalSemanticClaim] = {}
+    for claim in claims:
+        evidence_values: list[RetrievalSemanticEvidence] = []
+        for evidence_id in claim.evidence_ids:
+            source_range = (
+                known[evidence_id].source_range if evidence_id in known else None
+            )
+            if source_range is not None:
+                evidence_values.append(
+                    RetrievalSemanticEvidence(
+                        evidence_id=evidence_id,
+                        source_range=source_range,
+                    )
+                )
+        evidence = tuple(evidence_values)
+        if not evidence:
+            continue
+        key = (claim.text, tuple(item.evidence_id for item in evidence))
+        values[key] = RetrievalSemanticClaim(text=claim.text, evidence=evidence)
+    return tuple(values[key] for key in sorted(values))
 
 
 def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) -> str:
@@ -576,15 +641,8 @@ async def retrieve_context_candidates(
         or not 0 < planning_request_timeout_seconds <= 600
     ):
         raise ValueError("planning_request_timeout_seconds must be between 0 and 600")
-    from contextforge.intelligence.cards import load_semantic_card
-    from contextforge.intelligence.indexer import (
-        load_file_code_map,
-        load_relationship_graph,
-    )
-    from contextforge.intelligence.store import (
-        IndexStorageError,
-        load_manifest,
-    )
+    from contextforge.intelligence.indexer import load_relationship_graph_projection
+    from contextforge.intelligence.store import load_manifest
 
     active = manifest if manifest is not None else load_manifest(repository_root)
     if active.schema_version != 3:
@@ -597,26 +655,10 @@ async def retrieve_context_candidates(
     index = load_retrieval_index(repository_root, reference, manifest=active)
     if index.source_snapshot_digest != active.build.source_snapshot_digest:
         raise ValueError("retrieval postings are stale for the pinned generation")
-    graph = load_relationship_graph(repository_root, manifest=active)
-    code_maps = {
-        state.path: load_file_code_map(repository_root, state.path, manifest=active)
-        for state in active.files
-    }
-    cards: dict[str, SemanticCard] = {}
-    for state in active.files:
-        if state.semantic_status not in {"complete", "partial"}:
-            continue
-        try:
-            cards[state.path] = load_semantic_card(
-                repository_root, state.path, manifest=active
-            )
-        except (ValueError, IndexStorageError):
-            continue
+    graph = load_relationship_graph_projection(repository_root, manifest=active)
     candidates = _rank_candidates(
         task,
         index,
-        code_maps,
-        cards,
         graph,
         working_set=working_set,
         diff_paths=diff_paths,
@@ -639,7 +681,6 @@ async def retrieve_context_candidates(
         provider,
         result,
         Path(repository_root),
-        code_maps,
         mode=mode,
         max_candidates=planning_max_candidates,
         max_files=planning_max_files,
@@ -655,16 +696,17 @@ async def retrieve_context_candidates(
 def _rank_candidates(
     task: str,
     index: RetrievalIndex,
-    code_maps: dict[str, FileCodeMap],
-    cards: dict[str, SemanticCard],
     graph: object,
     *,
     working_set: tuple[str, ...],
     diff_paths: tuple[str, ...],
 ) -> list[CandidateCard]:
-    from contextforge.intelligence.graph import RelationshipGraph
+    from contextforge.intelligence.graph import (
+        RelationshipGraph,
+        RelationshipGraphProjection,
+    )
 
-    if not isinstance(graph, RelationshipGraph):
+    if not isinstance(graph, (RelationshipGraph, RelationshipGraphProjection)):
         raise TypeError("relationship graph is required")
     query_terms = _tokens(task)
     task_folded = task.casefold()
@@ -721,19 +763,17 @@ def _rank_candidates(
             score += 0.25
         if document.path in working:
             score += 1.0
-        card = cards.get(document.path)
-        code_map = code_maps[document.path]
-        concepts = _matched_concepts(card, query_terms)
+        concepts = _matched_concepts(document, query_terms)
         evidence = _candidate_evidence(
-            code_map, card, query_terms, matched_symbols[document.path]
+            document, query_terms, matched_symbols[document.path]
         )
         synopsis = (
-            card.synopsis.text
-            if card is not None
+            document.semantic_synopsis
+            if document.semantic_synopsis
             else f"Structural map for {document.path}."
         )
         provenance = ["verified-structure"]
-        if card is not None:
+        if document.semantic_quality != "none":
             provenance.append("grounded-semantic-card")
         if distance in {1, 2}:
             provenance.append(f"graph-{distance}-hop")
@@ -755,7 +795,7 @@ def _rank_candidates(
                 evidence_ranges=evidence,
                 graph_neighbors=neighbors.get(document.path, ()),
                 provenance=tuple(provenance),
-                estimated_cost=_representation_costs(code_map, card, evidence),
+                estimated_cost=_representation_costs(document, evidence),
             )
         )
     results.sort(
@@ -801,16 +841,24 @@ def _bm25(
 
 
 def _graph_distances(graph: object, seeds: set[str]) -> dict[str, int]:
-    from contextforge.intelligence.graph import RelationshipGraph
+    from contextforge.intelligence.graph import (
+        RelationshipGraph,
+        RelationshipGraphProjection,
+        project_relationship_graph,
+    )
 
-    assert isinstance(graph, RelationshipGraph)
-    node_path = {item.node_id: item.path for item in graph.nodes}
+    assert isinstance(graph, (RelationshipGraph, RelationshipGraphProjection))
+    projection = (
+        project_relationship_graph(graph)
+        if isinstance(graph, RelationshipGraph)
+        else graph
+    )
     adjacent: dict[str, set[str]] = defaultdict(set)
-    for edge in graph.edges:
-        if edge.provenance not in {"verified", "best-effort-structural"}:
+    for edge in projection.relationships:
+        if not set(edge.provenance) & {"verified", "best-effort-structural"}:
             continue
-        source = node_path[edge.source_node_id]
-        target = node_path[edge.target_node_id]
+        source = edge.source_path
+        target = edge.target_path
         if source != target:
             adjacent[source].add(target)
             adjacent[target].add(source)
@@ -830,19 +878,25 @@ def _graph_distances(graph: object, seeds: set[str]) -> dict[str, int]:
 def _candidate_neighbors(
     graph: object,
 ) -> dict[str, tuple[CandidateGraphNeighbor, ...]]:
-    from contextforge.intelligence.graph import RelationshipGraph, RelationshipGraphEdge
+    from contextforge.intelligence.graph import (
+        FileRelationshipProjection,
+        RelationshipGraph,
+        RelationshipGraphProjection,
+        project_relationship_graph,
+    )
 
-    assert isinstance(graph, RelationshipGraph)
-    node_path = {item.node_id: item.path for item in graph.nodes}
-    grouped: dict[tuple[str, str], list[RelationshipGraphEdge]] = defaultdict(list)
-    for edge in graph.edges:
-        source = node_path[edge.source_node_id]
-        target = node_path[edge.target_node_id]
-        if source != target:
-            grouped[(source, target)].append(edge)
-            grouped[(target, source)].append(edge)
+    assert isinstance(graph, (RelationshipGraph, RelationshipGraphProjection))
+    projection = (
+        project_relationship_graph(graph)
+        if isinstance(graph, RelationshipGraph)
+        else graph
+    )
+    grouped: dict[tuple[str, str], list[FileRelationshipProjection]] = defaultdict(list)
+    for edge in projection.relationships:
+        grouped[(edge.source_path, edge.target_path)].append(edge)
+        grouped[(edge.target_path, edge.source_path)].append(edge)
     by_path: dict[str, tuple[CandidateGraphNeighbor, ...]] = {}
-    for source in {item.path for item in graph.file_metrics}:
+    for source in {item.path for item in projection.file_metrics}:
         values = []
         for (candidate_source, target), edges in sorted(grouped.items()):
             if candidate_source != source:
@@ -851,8 +905,14 @@ def _candidate_neighbors(
                 CandidateGraphNeighbor(
                     path=target,
                     distance=1,
-                    relationship_kinds=tuple(sorted({edge.kind for edge in edges})),
-                    provenance=tuple(sorted({edge.provenance for edge in edges})),
+                    relationship_kinds=tuple(
+                        sorted(
+                            {kind for edge in edges for kind in edge.relationship_kinds}
+                        )
+                    ),
+                    provenance=tuple(
+                        sorted({value for edge in edges for value in edge.provenance})
+                    ),
                 )
             )
         by_path[source] = tuple(values[:12])
@@ -860,113 +920,66 @@ def _candidate_neighbors(
 
 
 def _candidate_evidence(
-    code_map: FileCodeMap,
-    card: SemanticCard | None,
+    document: RetrievalDocument,
     query_terms: tuple[str, ...],
     symbol_matches: tuple[str, ...],
 ) -> tuple[CandidateEvidenceRange, ...]:
     values: dict[tuple[int, int], CandidateEvidenceRange] = {}
     matched_folded = {item.casefold() for item in symbol_matches}
-    for symbol in code_map.symbols:
-        if (
-            symbol.name.casefold() in matched_folded
-            or symbol.qualified_name.casefold() in matched_folded
-        ):
-            key = (
-                symbol.declaration_range.start_line,
-                symbol.declaration_range.end_line,
-            )
-            values[key] = CandidateEvidenceRange(
-                path=code_map.path,
-                source_range=symbol.declaration_range,
-                evidence_id=_structural_evidence_id(
-                    code_map,
-                    f"symbol:{symbol.symbol_id}",
-                    symbol.declaration_range,
-                ),
-                strength="verified",
-            )
     query = set(query_terms)
-    for relationship in code_map.relationships:
-        identifiers = {
-            value
-            for value in _tokens(relationship.observed_text)
-            if value
-            not in {
-                "as",
-                "class",
-                "def",
-                "from",
-                "function",
-                "import",
-                "new",
-                "return",
-                "use",
-            }
-        }
-        if not query & identifiers:
-            continue
-        source_range = relationship.source_range
-        key = (source_range.start_line, source_range.end_line)
-        values.setdefault(
-            key,
-            CandidateEvidenceRange(
-                path=code_map.path,
-                source_range=source_range,
-                evidence_id=_structural_evidence_id(
-                    code_map,
-                    f"relationship:{relationship.relationship_id}",
-                    source_range,
-                ),
+    for posting in document.positional_postings:
+        if posting.identifier.casefold() in matched_folded or (
+            posting.fact_kind != "declaration"
+            and set(_tokens(posting.identifier)) & query
+        ):
+            key = (posting.source_range.start_line, posting.source_range.end_line)
+            values[key] = CandidateEvidenceRange(
+                path=document.path,
+                source_range=posting.source_range,
+                evidence_id=posting.evidence_id,
                 strength="verified",
-            ),
-        )
-    if card is not None:
-        known = {item.evidence_id: item for item in card.evidence}
-        claims = [
-            card.synopsis,
-            *card.concepts,
-            *card.responsibilities,
-            *card.side_effects,
-        ]
-        for claim in claims:
-            if not set(_tokens(claim.text)) & set(query_terms):
-                continue
-            for evidence_id in claim.evidence_ids:
-                evidence = known[evidence_id]
-                if evidence.source_range is None:
-                    continue
+            )
+    for claim in document.semantic_claims:
+        if not set(_tokens(claim.text)) & set(query_terms):
+            continue
+        for evidence in claim.evidence:
+            if evidence.source_range is not None:
                 key = (evidence.source_range.start_line, evidence.source_range.end_line)
                 values[key] = CandidateEvidenceRange(
-                    path=code_map.path,
+                    path=document.path,
                     source_range=evidence.source_range,
-                    evidence_id=evidence_id,
+                    evidence_id=evidence.evidence_id,
                     strength="grounded",
                 )
     return tuple(values[key] for key in sorted(values))
 
 
 def _matched_concepts(
-    card: SemanticCard | None, query_terms: tuple[str, ...]
+    document: RetrievalDocument, query_terms: tuple[str, ...]
 ) -> tuple[str, ...]:
-    if card is None:
-        return ()
     query = set(query_terms)
     return tuple(
-        claim.text for claim in card.concepts if set(_tokens(claim.text)) & query
+        concept
+        for concept in document.semantic_concepts
+        if set(_tokens(concept)) & query
     )
 
 
 def _representation_costs(
-    code_map: FileCodeMap,
-    card: SemanticCard | None,
+    document: RetrievalDocument,
     evidence: tuple[CandidateEvidenceRange, ...],
 ) -> RepresentationCosts:
-    signatures = "\n".join(
-        symbol.signature or symbol.qualified_name for symbol in code_map.symbols
+    signatures = "\n".join(document.qualified_symbols or document.symbols)
+    map_cost = _estimate_tokens(signatures or document.path)
+    semantic_text = next(
+        (field for field in document.fields if field.name == "grounded_semantics"),
+        None,
     )
-    map_cost = _estimate_tokens(signatures or code_map.path)
-    summary_cost = None if card is None else _estimate_tokens(card.ranking_text())
+    summary_cost = (
+        None
+        if semantic_text is None or semantic_text.length == 0
+        else semantic_text.length
+    )
     slice_lines = sum(
         item.source_range.end_line - item.source_range.start_line + 11
         for item in evidence
@@ -976,7 +989,7 @@ def _representation_costs(
         map=map_cost,
         summary=summary_cost,
         slice=slice_cost,
-        full=(code_map.source_size_bytes + 2) // 3,
+        full=(document.source_size_bytes + 2) // 3,
     )
 
 
@@ -984,7 +997,6 @@ async def _plan_evidence(
     provider: ModelProvider,
     result: RetrievalResult,
     repository_root: Path,
-    code_maps: dict[str, FileCodeMap],
     *,
     mode: ContextPlanningMode,
     max_candidates: int,
@@ -997,7 +1009,7 @@ async def _plan_evidence(
     cancellation: asyncio.Event | None,
 ) -> RetrievalResult:
     candidates = tuple(result.candidates[:max_candidates])
-    previews = _planner_previews(repository_root, candidates, code_maps)
+    previews = _planner_previews(repository_root, candidates)
     request = _planner_request(
         result,
         candidates,
@@ -1218,7 +1230,6 @@ def _planner_candidate(candidate: CandidateCard) -> dict[str, object]:
 def _planner_previews(
     repository_root: Path,
     candidates: tuple[CandidateCard, ...],
-    code_maps: dict[str, FileCodeMap],
 ) -> dict[str, UntrustedSource]:
     from contextforge.context.reader import ReaderLimits, read_selected_text_file
     from contextforge.repositories import scan_repository
@@ -1228,8 +1239,7 @@ def _planner_previews(
     previews: dict[str, UntrustedSource] = {}
     for candidate in candidates:
         project_file = files.get(candidate.path)
-        code_map = code_maps[candidate.path]
-        if project_file is None or project_file.sha256 != code_map.source_sha256:
+        if project_file is None or project_file.sha256 != candidate.source_sha256:
             continue
         ranges = tuple(item.source_range for item in candidate.evidence_ranges[:8])
         if not ranges:
@@ -1474,7 +1484,22 @@ def _structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]
                     fact_id,
                     occurrence.source_range,
                 )
-    return tuple(values[key] for key in sorted(values))[:4_096]
+    ordered = tuple(values[key] for key in sorted(values))
+    primary: list[PositionalPosting] = []
+    repeated: list[PositionalPosting] = []
+    seen_identifiers: set[tuple[str, str]] = set()
+    for item in ordered:
+        identity = (item.identifier.casefold(), item.fact_kind)
+        if identity in seen_identifiers:
+            repeated.append(item)
+        else:
+            seen_identifiers.add(identity)
+            primary.append(item)
+    selected = primary[:MAX_POSITIONAL_POSTINGS_PER_FILE]
+    selected.extend(
+        repeated[: max(MAX_POSITIONAL_POSTINGS_PER_FILE - len(selected), 0)]
+    )
+    return tuple(sorted(selected, key=_posting_key))
 
 
 def _safe_structural_identifiers(value: str) -> tuple[str, ...]:
@@ -1485,6 +1510,22 @@ def _safe_structural_identifiers(value: str) -> tuple[str, ...]:
         not in {"as", "class", "def", "from", "function", "import", "new", "use"}
     }
     return tuple(sorted(identifiers, key=canonical_casefold_key))
+
+
+def _all_structural_identifiers(code_map: FileCodeMap) -> tuple[str, ...]:
+    values: set[str] = set()
+    for symbol in code_map.symbols:
+        values.update(_safe_structural_identifiers(symbol.name))
+        values.update(_safe_structural_identifiers(symbol.qualified_name))
+        for call in symbol.direct_calls:
+            values.update(_safe_structural_identifiers(call.observed_name))
+        for reference in symbol.direct_references:
+            values.update(_safe_structural_identifiers(reference.observed_name))
+    for imported in code_map.imports:
+        for value in (imported.module, imported.imported_name, imported.alias):
+            if value:
+                values.update(_safe_structural_identifiers(value))
+    return tuple(sorted(values, key=canonical_casefold_key))
 
 
 def _posting_key(item: PositionalPosting) -> tuple[str, str, int, int, str]:
@@ -1530,6 +1571,7 @@ __all__ = [
     "PLANNING_MAX_OUTPUT_TOKENS",
     "PLANNING_MAX_RANGES_PER_FILE",
     "PLANNING_REQUEST_TIMEOUT_SECONDS",
+    "MAX_POSITIONAL_POSTINGS_PER_FILE",
     "RETRIEVAL_SHARD_MAX_BYTES",
     "PlannedEvidence",
     "PlanningDiagnostics",
@@ -1540,6 +1582,8 @@ __all__ = [
     "RetrievalIndex",
     "RetrievalDocumentShard",
     "RetrievalIndexShardManifest",
+    "RetrievalSemanticClaim",
+    "RetrievalSemanticEvidence",
     "RetrievalResult",
     "build_retrieval_index",
     "load_retrieval_index",

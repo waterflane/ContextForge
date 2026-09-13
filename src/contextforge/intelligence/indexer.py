@@ -20,14 +20,17 @@ from contextforge.intelligence.fallback import FALLBACK_ANALYZER
 from contextforge.intelligence.graph import (
     RELATIONSHIP_GRAPH_SHARD_MAX_BYTES,
     FileGraphMetrics,
+    FileRelationshipProjection,
     OrientationMap,
     RelationshipGraph,
     RelationshipGraphEdge,
     RelationshipGraphNode,
+    RelationshipGraphProjection,
     RelationshipGraphShard,
     RelationshipGraphShardManifest,
     build_orientation_map,
     build_relationship_graph,
+    project_relationship_graph,
 )
 from contextforge.intelligence.manifest import (
     build_index_manifest,
@@ -55,6 +58,7 @@ from contextforge.intelligence.python import (
 )
 from contextforge.intelligence.relationships import resolve_relationships
 from contextforge.intelligence.retrieval import (
+    RETRIEVAL_BUILD_VERSION,
     build_retrieval_index,
     write_retrieval_index,
 )
@@ -315,6 +319,7 @@ def relationship_graph_record_locations(
                 shards.node_shards,
                 shards.edge_shards,
                 shards.metric_shards,
+                shards.file_projection_shards,
             )
             for shard in group
         ),
@@ -329,6 +334,11 @@ def write_relationship_graph(lock: IndexWriteLock, graph: RelationshipGraph) -> 
         node_shards=_write_graph_shards(lock, "nodes", graph.nodes),
         edge_shards=_write_graph_shards(lock, "edges", graph.edges),
         metric_shards=_write_graph_shards(lock, "metrics", graph.file_metrics),
+        file_projection_shards=_write_graph_shards(
+            lock,
+            "file-projection",
+            project_relationship_graph(graph).relationships,
+        ),
     )
     return write_index_record(
         lock,
@@ -410,6 +420,59 @@ def _deserialize_relationship_graph(
         edges=load_shards(shard_manifest.edge_shards, RelationshipGraphEdge),
         file_metrics=load_shards(shard_manifest.metric_shards, FileGraphMetrics),
     )
+
+
+def load_relationship_graph_projection(
+    repository_root: str | Path,
+    *,
+    manifest: IndexManifest | None = None,
+) -> RelationshipGraphProjection:
+    """Load the compact file graph used by retrieval without symbol materialization."""
+
+    active = manifest if manifest is not None else load_manifest(repository_root)
+    reference = active.artifacts.relationship_graph
+    if reference is None:
+        raise IndexManifestReadError("pinned generation has no relationship graph")
+    content = load_generation_record(
+        repository_root, reference.location, manifest=active
+    )
+    try:
+        shard_manifest = RelationshipGraphShardManifest.model_validate_json(content)
+    except ValueError:
+        return project_relationship_graph(
+            RelationshipGraph.model_validate_json(content)
+        )
+    if not shard_manifest.file_projection_shards:
+        return project_relationship_graph(
+            _deserialize_relationship_graph(repository_root, active, content)
+        )
+
+    def load_shards[RecordType](
+        shards: tuple[RelationshipGraphShard, ...], model: type[RecordType]
+    ) -> tuple[RecordType, ...]:
+        values: list[RecordType] = []
+        for shard in shards:
+            encoded = load_generation_record(
+                repository_root, shard.artifact.location, manifest=active
+            )
+            if hashlib.sha256(encoded).hexdigest() != shard.artifact.sha256:
+                raise ValueError("relationship graph projection shard digest mismatch")
+            lines = tuple(line for line in encoded.splitlines() if line)
+            if len(lines) != shard.record_count:
+                raise ValueError("relationship graph projection shard count mismatch")
+            values.extend(model.model_validate_json(line) for line in lines)  # type: ignore[attr-defined]
+        return tuple(values)
+
+    projection = RelationshipGraphProjection(
+        source_snapshot_digest=shard_manifest.source_snapshot_digest,
+        relationships=load_shards(
+            shard_manifest.file_projection_shards, FileRelationshipProjection
+        ),
+        file_metrics=load_shards(shard_manifest.metric_shards, FileGraphMetrics),
+    )
+    if projection.source_snapshot_digest != active.build.source_snapshot_digest:
+        raise IndexManifestReadError("relationship graph projection is stale")
+    return projection
 
 
 def load_orientation_map(
@@ -546,6 +609,7 @@ def _build_options_digest(max_source_bytes: int) -> str:
                 "max_source_bytes": max_source_bytes,
                 "polyglot_analyzer": POLYGLOT_ANALYZER.model_dump(mode="json"),
                 "python_analyzer": PYTHON_ANALYZER.model_dump(mode="json"),
+                "retrieval_build_version": RETRIEVAL_BUILD_VERSION,
                 "resolver_version": RESOLVER_VERSION,
             }
         )
@@ -562,6 +626,7 @@ __all__ = [
     "load_file_code_map",
     "load_orientation_map",
     "load_relationship_graph",
+    "load_relationship_graph_projection",
     "relationship_graph_record_locations",
     "write_relationship_graph",
 ]

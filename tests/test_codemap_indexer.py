@@ -13,6 +13,8 @@ from contextforge.intelligence import (
     load_manifest,
     load_relationship_graph,
 )
+from contextforge.intelligence.graph import project_relationship_graph
+from contextforge.intelligence.indexer import load_relationship_graph_projection
 from contextforge.repositories import scan_repository
 
 
@@ -52,6 +54,9 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
     assert load_relationship_graph(tmp_path) == load_relationship_graph(
         tmp_path, manifest=first.manifest
     )
+    assert load_relationship_graph_projection(
+        tmp_path, manifest=first.manifest
+    ) == project_relationship_graph(load_relationship_graph(tmp_path))
     graph_shards = tuple((first.generation_path / "graph").glob("*.jsonl"))
     assert graph_shards
     assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in graph_shards)
