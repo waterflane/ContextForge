@@ -188,6 +188,8 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
         "run",
         "--working-file",
         "app.py",
+        "--planning",
+        "off",
         "--format",
         "json",
     )
@@ -583,6 +585,7 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
         "Review VALUE",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--progress",
@@ -655,6 +658,7 @@ def _invoke_focused_suggestion(tmp_path: Path, *arguments: str) -> Result:
         "Review run",
         "--provider",
         "fake",
+        "--legacy-discovery",
         *arguments,
     )
 
@@ -1013,6 +1017,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -1026,6 +1031,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -1039,6 +1045,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -1244,6 +1251,7 @@ index_generations = 2
         "x",
         "--config",
         str(config),
+        "--legacy-discovery",
         "--format",
         "json",
     )
