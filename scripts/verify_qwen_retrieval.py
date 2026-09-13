@@ -182,7 +182,16 @@ async def main(
                 plan_valid = plan is not None and plan.diagnostics.status == "planned"
                 retrieval_ok = case.expected_path in top_five
                 capsule_ok = case.expected_path in material_paths
-                paired_ok = paired is not None and paired.quality_not_lower
+                paired_ok = bool(
+                    paired is not None
+                    and paired.quality_not_lower
+                    and paired.oracle.assertion_recall == 1.0
+                    and paired.oracle.citation_validity == 1.0
+                    and paired.oracle.invalid_citation_count == 0
+                    and paired.contextforge.assertion_recall == 1.0
+                    and paired.contextforge.citation_validity == 1.0
+                    and paired.contextforge.invalid_citation_count == 0
+                )
                 failures += not (
                     plan_valid and retrieval_ok and capsule_ok and paired_ok
                 )

@@ -144,12 +144,18 @@ async def _run_answer(
         purpose="benchmark-answer-regression",
         system_instructions=(
             "Use only the supplied repository context. Return assertion IDs that "
-            "are supported and citations to the exact supplied path and lines. "
-            "Do not cite MAP or SUMMARY text as source code."
+            "are supported and citations to the exact supplied repository path and "
+            "lines. Every citation must fit wholly within one allowed citation "
+            "range supplied in trusted facts. Never cite the XML wrapper filename "
+            "and never combine separate source blocks into one wider range. Do not "
+            "cite MAP or SUMMARY text as source code."
         ),
         analysis_task=task,
         trusted_code_map_facts={
-            "assertions": [item.model_dump(mode="json") for item in assertions]
+            "assertions": [item.model_dump(mode="json") for item in assertions],
+            "allowed_citation_ranges": [
+                item.model_dump(mode="json") for item in allowed_ranges
+            ],
         },
         untrusted_sources=(UntrustedSource.from_text(f"{label}.xml", context),),
         response_model=_AnswerResponse,
@@ -222,7 +228,7 @@ def _capsule_source_ranges(
                 for item in material.ranges
             )
         elif material.representation is RepresentationMode.FULL:
-            line_count = material.content.count("\n") + bool(material.content)
+            line_count = len(material.content.splitlines())
             if line_count:
                 values.append(
                     BenchmarkSourceRange(

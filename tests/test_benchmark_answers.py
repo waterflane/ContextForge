@@ -13,7 +13,7 @@ from contextforge.benchmarks import (
 )
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
-from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
 
 
 def test_oracle_and_capsule_answers_keep_real_citation_identity(
@@ -46,15 +46,13 @@ def test_oracle_and_capsule_answers_keep_real_citation_identity(
         ),
     )
     ranges = (BenchmarkSourceRange(path="service.py", start_line=1, end_line=2),)
-    provider = FakeModelProvider(
-        ProviderConfiguration(
-            provider_id="fake",
-            endpoint="http://127.0.0.1:1",
-            model_id="answer-test",
-            retry_limit=0,
-            max_json_repair_attempts=0,
-        ),
-        responder=lambda request, call: json.dumps(
+    seen_allowed_ranges: list[list[object]] = []
+
+    def respond(request: ModelRequest, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts
+        seen_allowed_ranges.append(facts["allowed_citation_ranges"])
+        return json.dumps(
             {
                 "schema_version": 1,
                 "assertion_ids": ["upper-result"],
@@ -67,7 +65,17 @@ def test_oracle_and_capsule_answers_keep_real_citation_identity(
                     }
                 ],
             }
+        )
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="answer-test",
+            retry_limit=0,
+            max_json_repair_attempts=0,
         ),
+        responder=respond,
     )
 
     result = asyncio.run(
@@ -87,6 +95,10 @@ def test_oracle_and_capsule_answers_keep_real_citation_identity(
     assert result.oracle.citation_validity == 1.0
     assert result.contextforge.citation_validity == 1.0
     assert result.quality_not_lower is True
+    assert seen_allowed_ranges == [
+        [{"path": "service.py", "start_line": 1, "end_line": 2}],
+        [{"path": "service.py", "start_line": 1, "end_line": 2}],
+    ]
 
 
 def test_oracle_renderer_rejects_missing_and_out_of_bounds_sources(
