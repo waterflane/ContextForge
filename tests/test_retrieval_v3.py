@@ -588,7 +588,9 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
     def respond(request: object, call: int) -> str:
         del call
         facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        assert facts["limits"] == {"max_files": 2, "max_ranges_per_file": 1}
         candidate = facts["candidates"][0]
+        assert candidate["representation_costs"]["map"] > 0
         return json.dumps(
             {
                 "schema_version": 1,
@@ -610,6 +612,8 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
             manifest=report.manifest,
             provider=_provider(respond),
             planning_mode=ContextPlanningMode.AUTO,
+            planning_max_files=2,
+            planning_max_ranges_per_file=1,
         )
     )
 

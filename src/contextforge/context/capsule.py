@@ -34,6 +34,8 @@ SLICE_CONTEXT_LINES = 5
 SLICE_MERGE_GAP = 3
 AUTOMATIC_FULL_FILE_MAX_LINES = 200
 AUTOMATIC_CONTEXT_SOFT_RATIO = 0.30
+AUTOMATIC_SLICE_MAX_RANGES = 3
+AUTOMATIC_MAP_MAX_SYMBOLS = 12
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 
@@ -581,7 +583,11 @@ def _apply_greedy_upgrades(
                     continue
                 if _representation_gain(candidate, material.representation, mode) <= 0:
                     continue
-                ranges = working_lines.get(path, ()) if section == "working" else ()
+                ranges = (
+                    working_lines.get(path, ())
+                    if section == "working"
+                    else _automatic_slice_ranges(candidate)
+                )
                 upgraded = _materialize(state, path, mode, candidate, ranges)
                 if upgraded is None:
                     continue
@@ -697,24 +703,51 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
     keys = {
         *(f"symbol:{value.casefold()}" for value in candidate.matched_symbols),
         *(f"concept:{value.casefold()}" for value in candidate.matched_concepts),
+        *(f"evidence:{item.strength}" for item in candidate.evidence_ranges),
         *(
-            "range:"
-            f"{item.path}:{item.source_range.start_line}:{item.source_range.end_line}"
-            for item in candidate.evidence_ranges
-        ),
-        *(
-            f"flow:{min(candidate.path, item.path)}:{max(candidate.path, item.path)}:"
-            + ",".join(item.relationship_kinds)
+            f"flow:{item.distance}:{kind}:{provenance}"
             for item in candidate.graph_neighbors
+            for kind in item.relationship_kinds
+            for provenance in item.provenance
         ),
+        f"role:{_candidate_role(candidate.path)}",
     }
     if candidate.exact_group != "approximate":
-        keys.add(f"exact:{candidate.exact_group}:{candidate.path}")
+        keys.add(f"exact:{candidate.exact_group}")
     if "current-diff" in candidate.provenance:
         keys.add(f"diff:{candidate.path}")
     if "working-set" in candidate.provenance:
         keys.add(f"working:{candidate.path}")
     return keys
+
+
+def _candidate_role(path: str) -> str:
+    lowered = path.casefold()
+    parts = lowered.split("/")
+    name = parts[-1]
+    suffix = Path(name).suffix
+    if "tests" in parts or name.startswith("test_") or name.endswith("_test.py"):
+        return "test"
+    if suffix in {".md", ".rst", ".adoc"}:
+        return "documentation"
+    if suffix in {".toml", ".yaml", ".yml", ".ini", ".cfg", ".env"}:
+        return "config"
+    return "source"
+
+
+def _automatic_slice_ranges(candidate: CandidateCard | None) -> tuple[SourceRange, ...]:
+    if candidate is None:
+        return ()
+    ordered = sorted(
+        candidate.evidence_ranges,
+        key=lambda item: (
+            -(item.source_range.end_line - item.source_range.start_line),
+            item.source_range.start_line,
+            item.source_range.end_line,
+            item.evidence_id or "",
+        ),
+    )
+    return tuple(item.source_range for item in ordered[:AUTOMATIC_SLICE_MAX_RANGES])
 
 
 def _materialize(
@@ -843,17 +876,26 @@ def _map_content(code_map: FileCodeMap, candidate: CandidateCard | None) -> str:
         if candidate is None
         else tuple(item.source_range for item in candidate.evidence_ranges)
     )
-    selected = [
+    matched_symbols = [
         symbol
         for symbol in code_map.symbols
         if symbol.name.casefold() in matched
         or symbol.qualified_name.casefold() in matched
-        or any(
+    ]
+    enclosing_symbols = [
+        symbol
+        for symbol in code_map.symbols
+        if any(
             evidence.start_line <= symbol.declaration_range.end_line
             and evidence.end_line >= symbol.declaration_range.start_line
             for evidence in evidence_ranges
         )
     ]
+    selected = list(
+        dict.fromkeys(
+            (*matched_symbols, *enclosing_symbols[:AUTOMATIC_MAP_MAX_SYMBOLS])
+        )
+    )[:AUTOMATIC_MAP_MAX_SYMBOLS]
     if candidate is None:
         selected = list(code_map.symbols[:12])
     for symbol in selected:

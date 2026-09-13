@@ -376,6 +376,33 @@ def test_complementary_maps_are_seeded_before_representation_upgrades(
     assert compiled.token_count <= 900
 
 
+def test_deterministic_fallback_stops_after_duplicate_identifier_coverage(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve(value: str) -> str:\n    return value\n")
+    for index in range(6):
+        _write(
+            tmp_path,
+            f"client_{index}.py",
+            "from service import serve\n\n"
+            f"def client_{index}(value: str) -> str:\n    return serve(value)\n",
+        )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "explain serve")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "explain serve",
+        retrieval,
+        budget=_budget(20_000),
+    )
+
+    selected = {item.path for item in compiled.capsule.task_context}
+    assert "service.py" in selected
+    assert len(selected) <= 2
+    assert compiled.token_count < 2_000
+
+
 def test_marginal_utility_penalizes_duplicate_candidate_coverage(
     tmp_path: Path,
 ) -> None:
