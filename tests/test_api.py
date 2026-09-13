@@ -30,6 +30,11 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text(
         "def run(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
     )
+    (tmp_path / ".contextforge").mkdir()
+    (tmp_path / ".contextforge" / "config.toml").write_text(
+        'config_version = 1\n[models]\nprovider = "fake"\nmodel = "fixture"\n',
+        encoding="utf-8",
+    )
     asyncio.run(
         build_repository_index(tmp_path, provider=None, provider_configuration=None)
     )
@@ -51,7 +56,7 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
             "repository_root": root,
             "task": "change run",
             "working_files": ["app.py"],
-            "context_window_tokens": 2_000,
+            "context_window_tokens": 8_000,
             "response_tokens": 200,
             "safety_margin_tokens": 100,
             "planning_mode": "off",
@@ -70,6 +75,41 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
     assert searched.json()["provider_calls"] == 0
     assert symbols.json()["symbols"][0]["name"] == "run"
     assert compiled.json()["capsule"]["schema_version"] == 2
+
+    auto_searched = client.post(
+        "/v1/search",
+        json={"repository_root": root, "task": "run", "planning_mode": "auto"},
+    )
+    required_search = client.post(
+        "/v1/search",
+        json={
+            "repository_root": root,
+            "task": "run",
+            "planning_mode": "required",
+        },
+    )
+    ranged = client.post(
+        "/v1/compile",
+        json={
+            "repository_root": root,
+            "task": "change run",
+            "working_lines": [{"path": "app.py", "start_line": 1, "end_line": 2}],
+            "context_window_tokens": 8_000,
+            "response_tokens": 200,
+            "safety_margin_tokens": 100,
+            "planning_mode": "auto",
+        },
+    )
+    partial_symbol = client.post(
+        "/v1/symbol",
+        json={"repository_root": root, "query": "app.run"},
+    )
+    assert auto_searched.status_code == ranged.status_code == 200
+    assert auto_searched.json()["diagnostics"] == ["planner_provider_failure"]
+    assert required_search.status_code == 400
+    assert "provider" in required_search.json()["detail"]
+    assert ranged.json()["capsule"]["working_set"][0]["path"] == "app.py"
+    assert partial_symbol.status_code == 200
 
     missing = client.post(
         "/v1/map", json={"repository_root": str(tmp_path / "missing")}

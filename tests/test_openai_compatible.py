@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from typer.testing import CliRunner
 
 import contextforge.models.openai_compatible as openai_module
+import contextforge.project_config as project_config_module
 from contextforge.cli.main import app
 from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
@@ -82,6 +83,121 @@ def _models(*model_ids: str) -> OpenAICompatibleHTTPResponse:
             {"object": "list", "data": [{"id": item} for item in model_ids]}
         ).encode(),
     )
+
+
+def test_offline_fixture_provider_covers_supported_analysis_contracts() -> None:
+    def response(
+        purpose: str,
+        *,
+        facts: dict[str, object] | None = None,
+        metadata: dict[str, str] | None = None,
+        task: str = "fixture task",
+    ) -> dict[str, object]:
+        request = replace(
+            _request(),
+            purpose=purpose,
+            trusted_code_map_facts=facts or {},
+            metadata=metadata or {},
+            analysis_task=task,
+        )
+        return json.loads(project_config_module._fixture_response(request, 1))
+
+    semantic = response(
+        "semantic-card",
+        facts={
+            "path": "src/service.py",
+            "evidence": [
+                {"evidence_id": "file"},
+                {"evidence_id": "symbol:serve"},
+            ],
+        },
+    )
+    assert semantic["synopsis"] == {
+        "text": "service repository file.",
+        "evidence_ids": ["file"],
+    }
+    assert semantic["key_symbols"] == [{"evidence_id": "symbol:serve"}]
+    semantic_without_file = response(
+        "semantic-card-repair",
+        facts={
+            "path": "src/worker.py",
+            "evidence": [{"evidence_id": "symbol:work"}],
+        },
+    )
+    assert semantic_without_file["synopsis"] == {
+        "text": "worker repository file.",
+        "evidence_ids": ["symbol:work"],
+    }
+
+    discovery = response(
+        "repository-discovery",
+        facts={
+            "selected": [],
+            "candidates": [{"candidate_id": "candidate-1"}],
+            "all_allowed_paths": ["src/app.py"],
+        },
+    )
+    assert discovery["actions"][0]["tool_name"] == "select_candidates"  # type: ignore[index]
+    discovery_from_allowed = response(
+        "repository-discovery",
+        facts={
+            "selected": [],
+            "candidates": [],
+            "all_allowed_paths": ["src/app.py"],
+        },
+    )
+    assert discovery_from_allowed["actions"][0]["tool_name"] == "add_to_context"  # type: ignore[index]
+    finalized = response(
+        "repository-discovery",
+        facts={"selected": ["src/app.py"], "candidates": [], "all_allowed_paths": []},
+    )
+    assert len(finalized["actions"]) == 1  # type: ignore[arg-type]
+
+    for category, expected_key in (
+        ("readme", "project_purpose"),
+        ("license", "license_type"),
+        ("config", "summary"),
+        ("other", "summary"),
+    ):
+        result = response(
+            "file-semantics",
+            facts={"file_category": category, "known_license_marker": "MIT"},
+            metadata={"analyzer_kind": "generic-text-semantic"},
+        )
+        assert expected_key in result
+
+    source = response(
+        "file-semantics",
+        facts={
+            "symbols": [
+                {"kind": "function", "symbol_id": "serve"},
+                {"kind": "constant", "symbol_id": "VALUE"},
+                "invalid",
+            ]
+        },
+    )
+    assert source["symbols"] == [{"symbol_id": "serve"}]
+    assert response("file-semantics", facts={"symbols": "invalid"})["symbols"] == []
+    assert (
+        response(
+            "package-summary",
+            task="Return scope_id 'pkg' exactly",
+        )["scope_id"]
+        == "pkg"
+    )
+    assert response("group-synthesis")["scope_id"] == "fixture-scope"
+    assert (
+        response(
+            "repository-architecture",
+            task="Return scope_id 'repo' exactly",
+        )["scope_id"]
+        == "repo"
+    )
+    assert response("repository-features")["scope_id"] == "fixture-repository"
+    assert response("task-refinement") == {"schema_version": 1}
+
+    with pytest.raises(ProviderConfigurationError, match="does not support"):
+        response("unsupported-purpose")
 
 
 def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:

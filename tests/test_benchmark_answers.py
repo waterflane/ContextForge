@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from contextforge.application import build_repository_index
 from contextforge.benchmarks import (
     BenchmarkExpectedAssertion,
@@ -85,3 +87,20 @@ def test_oracle_and_capsule_answers_keep_real_citation_identity(
     assert result.oracle.citation_validity == 1.0
     assert result.contextforge.citation_validity == 1.0
     assert result.quality_not_lower is True
+
+
+def test_oracle_renderer_rejects_missing_and_out_of_bounds_sources(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "service.py").write_text("line one\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source path is absent"):
+        render_oracle_context(
+            tmp_path,
+            (BenchmarkSourceRange(path="missing.py", start_line=1, end_line=1),),
+        )
+    with pytest.raises(ValueError, match="source range exceeds"):
+        render_oracle_context(
+            tmp_path,
+            (BenchmarkSourceRange(path="service.py", start_line=1, end_line=2),),
+        )
