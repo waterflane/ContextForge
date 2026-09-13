@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Literal
@@ -143,6 +144,20 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class StructuralCaptureRules:
+    """Declarative Tree-sitter captures for one supported language."""
+
+    grammar_module: str
+    grammar_function: str
+    declarations: Mapping[str, SymbolKind]
+    import_captures: frozenset[str]
+    call_captures: frozenset[str]
+    reference_captures: frozenset[str]
+    binding_captures: frozenset[str]
+    module_executable: bool = False
+
+
 @dataclass(slots=True)
 class _Draft:
     node: Node
@@ -174,6 +189,7 @@ def extract_polyglot_code_map(
     source = selected.blocks[0].text
     source_bytes = source.encode("utf-8")
     language_name = project_file.language or ""
+    rules = STRUCTURAL_CAPTURE_RULES[language_name]
     parser = Parser(_language(language_name, project_file.path))
     tree = parser.parse(source_bytes)
     diagnostics = _diagnostics(tree.root_node)
@@ -189,7 +205,7 @@ def extract_polyglot_code_map(
         while verified and ancestor is not None:
             verified = not ancestor.is_error and not ancestor.is_missing
             ancestor = ancestor.parent
-        kind = _KINDS.get(language_name, {}).get(node.type)
+        kind = rules.declarations.get(node.type)
         if language_name in {"C", "C++"} and node.type == "function_declarator":
             prototype_name, declaration_node = _c_prototype(node)
             if prototype_name is not None and declaration_node is not None:
@@ -210,7 +226,11 @@ def extract_polyglot_code_map(
                     "struct_type": SymbolKind.STRUCT,
                     "interface_type": SymbolKind.INTERFACE,
                 }.get(target_type.type, kind)
-        binding = _binding(node, language_name, source_bytes)
+        binding = (
+            _binding(node, language_name, source_bytes)
+            if node.type in rules.binding_captures
+            else None
+        )
         if binding is not None and verified:
             binding_name, kind, callable_node = binding
             next_parent = len(drafts)
@@ -382,7 +402,9 @@ def extract_polyglot_code_map(
         )
     imports = _extract_imports(source, project_file.path, language_name)
     symbols = list(
-        _attach_occurrences(tree.root_node, tuple(symbols), imports, source_bytes)
+        _attach_occurrences(
+            tree.root_node, tuple(symbols), imports, source_bytes, rules
+        )
     )
     return FileCodeMap(
         path=project_file.path,
@@ -392,9 +414,7 @@ def extract_polyglot_code_map(
         analyzer=POLYGLOT_ANALYZER,
         parse_status="partial" if diagnostics or omitted else "parsed",
         line_count=selected.source_line_count,
-        module_has_executable_code=_module_has_executable_code(
-            tree.root_node, language_name
-        ),
+        module_has_executable_code=_module_has_executable_code(tree.root_node, rules),
         imports=imports,
         symbols=tuple(symbols),
         diagnostics=tuple(
@@ -440,6 +460,37 @@ _IDENTIFIER_NODES = {
     "property_identifier",
     "scoped_identifier",
     "type_identifier",
+}
+
+_BINDING_CAPTURES: dict[str, frozenset[str]] = {
+    "JavaScript": frozenset(
+        {"variable_declarator", "public_field_definition", "field_definition"}
+    ),
+    "TypeScript": frozenset(
+        {"variable_declarator", "public_field_definition", "field_definition"}
+    ),
+    "Rust": frozenset({"const_item", "static_item"}),
+    "Java": frozenset({"variable_declarator"}),
+    "C#": frozenset({"variable_declarator"}),
+    "Go": frozenset({"var_spec", "const_spec"}),
+    "C": frozenset({"init_declarator", "identifier", "field_identifier"}),
+    "C++": frozenset({"init_declarator", "identifier", "field_identifier"}),
+    "PHP": frozenset({"const_element", "property_element"}),
+    "Ruby": frozenset({"assignment"}),
+}
+
+STRUCTURAL_CAPTURE_RULES: Mapping[str, StructuralCaptureRules] = {
+    language: StructuralCaptureRules(
+        grammar_module=grammar[0],
+        grammar_function=grammar[1],
+        declarations=_KINDS[language],
+        import_captures=frozenset(_IMPORT_ANCESTORS),
+        call_captures=frozenset(_CALL_NODES),
+        reference_captures=frozenset(_IDENTIFIER_NODES),
+        binding_captures=_BINDING_CAPTURES[language],
+        module_executable=language in {"JavaScript", "TypeScript"},
+    )
+    for language, grammar in _GRAMMARS.items()
 }
 
 
@@ -581,6 +632,7 @@ def _attach_occurrences(
     symbols: tuple[SymbolRecord, ...],
     imports: tuple[ImportRecord, ...],
     source: bytes,
+    rules: StructuralCaptureRules,
 ) -> tuple[SymbolRecord, ...]:
     del imports
     calls: dict[str, list[CallReference]] = {item.symbol_id: [] for item in symbols}
@@ -616,13 +668,13 @@ def _attach_occurrences(
     def in_import(node: Node) -> bool:
         current: Node | None = node
         while current is not None:
-            if current.type in _IMPORT_ANCESTORS:
+            if current.type in rules.import_captures:
                 return True
             current = current.parent
         return False
 
     def visit_calls(node: Node) -> None:
-        if node.type in _CALL_NODES and not node.has_error:
+        if node.type in rules.call_captures and not node.has_error:
             target = (
                 node.child_by_field_name("function")
                 or node.child_by_field_name("name")
@@ -647,7 +699,7 @@ def _attach_occurrences(
 
     def visit_references(node: Node) -> None:
         if (
-            node.type in _IDENTIFIER_NODES
+            node.type in rules.reference_captures
             and not node.has_error
             and not in_import(node)
         ):
@@ -750,8 +802,8 @@ def _contains_range(container: SourceRange, nested: SourceRange) -> bool:
     return start <= nested_start and nested_end <= end
 
 
-def _module_has_executable_code(root: Node, language: str) -> bool:
-    if language not in {"JavaScript", "TypeScript"}:
+def _module_has_executable_code(root: Node, rules: StructuralCaptureRules) -> bool:
+    if not rules.module_executable:
         return False
     allowed = {"comment", "empty_statement", "export_statement", "import_statement"}
     return any(child.type not in allowed for child in root.named_children)
@@ -901,7 +953,9 @@ def _method_owner(node: Node, language: str, source: bytes) -> str | None:
 
 
 def _language(language_name: str, path: str) -> Language:
-    module_name, function_name = _GRAMMARS[language_name]
+    rules = STRUCTURAL_CAPTURE_RULES[language_name]
+    module_name = rules.grammar_module
+    function_name = rules.grammar_function
     if language_name == "TypeScript" and path.casefold().endswith(".tsx"):
         function_name = "language_tsx"
     capsule = getattr(import_module(module_name), function_name)()
@@ -1050,6 +1104,8 @@ def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
 
 __all__ = [
     "POLYGLOT_ANALYZER",
+    "STRUCTURAL_CAPTURE_RULES",
+    "StructuralCaptureRules",
     "SUPPORTED_POLYGLOT_LANGUAGES",
     "extract_polyglot_code_map",
 ]

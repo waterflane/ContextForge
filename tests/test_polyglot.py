@@ -3,7 +3,20 @@ from pathlib import Path
 import pytest
 
 from contextforge.intelligence import POLYGLOT_ANALYZER, extract_code_map
+from contextforge.intelligence.polyglot import (
+    STRUCTURAL_CAPTURE_RULES,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+)
 from contextforge.repositories import scan_repository
+
+
+def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
+    assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
+    assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.import_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.call_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.reference_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.binding_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
 
 
 @pytest.mark.parametrize(
