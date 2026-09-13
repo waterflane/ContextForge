@@ -89,7 +89,8 @@ def test_exact_symbol_precedes_graph_related_approximate_candidates(
     assert "handle_request" in result.candidates[0].matched_symbols
     assert result.candidates[0].evidence_ranges
     app = next(item for item in result.candidates if item.path == "src/app.py")
-    assert "graph-1-hop" in app.provenance
+    assert app.exact_group == "exact_source_identifier"
+    assert app.evidence_ranges
     assert any(item.path == "src/service.py" for item in app.graph_neighbors)
     assert report.manifest.artifacts.semantic_retrieval is not None
 
@@ -488,8 +489,10 @@ def test_source_identifier_and_two_hop_graph_signals(tmp_path: Path) -> None:
     )
 
     assert identifier.candidates[0].exact_group == "exact_source_identifier"
+    middle = next(item for item in flow.candidates if item.path == "middle.py")
+    assert middle.exact_group == "exact_source_identifier"
     entry = next(item for item in flow.candidates if item.path == "entry.py")
-    assert "graph-2-hop" in entry.provenance
+    assert "graph-1-hop" in entry.provenance
 
 
 def test_model_inferred_neighbors_do_not_create_retrieval_distance() -> None:
@@ -665,6 +668,33 @@ def test_retrieval_persists_safe_positional_structural_postings(tmp_path: Path) 
     serialized = document.model_dump_json()
     assert "ServiceClient" in serialized
     assert "pass" not in {item.identifier for item in document.positional_postings}
+
+
+def test_exact_identifier_restores_evidence_beyond_bounded_postings(
+    tmp_path: Path,
+) -> None:
+    noisy_references = "\n".join(f"    helper_{index:03d}" for index in range(180))
+    _write(
+        tmp_path,
+        "large.py",
+        f"def route(planning_mode):\n{noisy_references}\n    return planning_mode\n",
+    )
+    report = _build(tmp_path)
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Explain planning_mode",
+            manifest=report.manifest,
+        )
+    )
+
+    candidate = result.candidates[0]
+    assert candidate.path == "large.py"
+    assert candidate.exact_group == "exact_source_identifier"
+    assert "planning_mode" in candidate.matched_symbols
+    assert candidate.evidence_ranges
+    assert any(item.source_range.end_line == 182 for item in candidate.evidence_ranges)
 
 
 def test_retrieval_uses_digest_bound_grounding_without_reopening_cards(

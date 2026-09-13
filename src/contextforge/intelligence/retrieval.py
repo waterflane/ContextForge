@@ -26,7 +26,7 @@ from contextforge.intelligence.models import (
 from contextforge.models import ModelProvider, ModelRequest, UntrustedSource
 
 RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
-RETRIEVAL_BUILD_VERSION = 3
+RETRIEVAL_BUILD_VERSION = 4
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -391,6 +391,12 @@ def build_retrieval_index(
             )
         )
         structural_identifiers = _all_structural_identifiers(code_map)
+        exact_identifiers = tuple(
+            sorted(
+                {*identifiers, *structural_identifiers},
+                key=canonical_casefold_key,
+            )
+        )
         values = {
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
@@ -408,7 +414,7 @@ def build_retrieval_index(
                 fields=fields,
                 symbols=symbols,
                 qualified_symbols=qualified,
-                source_identifiers=identifiers,
+                source_identifiers=exact_identifiers,
                 positional_postings=postings,
                 semantic_quality="none" if card is None else card.quality,
                 semantic_synopsis="" if card is None else card.synopsis.text,
@@ -663,6 +669,12 @@ async def retrieve_context_candidates(
         working_set=working_set,
         diff_paths=diff_paths,
     )[:limit]
+    candidates = _restore_exact_identifier_evidence(
+        repository_root,
+        active,
+        index,
+        candidates,
+    )
     result = RetrievalResult(
         source_snapshot_digest=active.build.source_snapshot_digest,
         generation_id=active.generation_id,
@@ -952,6 +964,71 @@ def _candidate_evidence(
                     strength="grounded",
                 )
     return tuple(values[key] for key in sorted(values))
+
+
+def _restore_exact_identifier_evidence(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    index: RetrievalIndex,
+    candidates: list[CandidateCard],
+) -> list[CandidateCard]:
+    """Load only exact-hit CodeMaps whose bounded postings omitted the hit."""
+
+    from contextforge.intelligence.indexer import load_file_code_map
+
+    documents = {item.path: item for item in index.documents}
+    restored: list[CandidateCard] = []
+    for candidate in candidates:
+        document = documents[candidate.path]
+        matched = {value.casefold() for value in candidate.matched_symbols}
+        known = {
+            item.identifier.casefold()
+            for item in document.positional_postings
+            if item.identifier.casefold() in matched
+        }
+        missing = matched - known
+        if candidate.exact_group == "approximate" or not missing:
+            restored.append(candidate)
+            continue
+        code_map = load_file_code_map(
+            repository_root,
+            candidate.path,
+            manifest=manifest,
+        )
+        additions = tuple(
+            item
+            for item in _all_structural_postings(code_map)
+            if item.identifier.casefold() in missing
+        )
+        combined = {
+            _posting_key(item): item
+            for item in (*document.positional_postings, *additions)
+        }
+        evidence = _candidate_evidence(
+            document.model_copy(
+                update={
+                    "positional_postings": tuple(
+                        combined[key] for key in sorted(combined)
+                    )
+                }
+            ),
+            (),
+            candidate.matched_symbols,
+        )
+        merged = {
+            (item.source_range.start_line, item.source_range.end_line): item
+            for item in (*candidate.evidence_ranges, *evidence)
+        }
+        ranges = tuple(merged[key] for key in sorted(merged))
+        restored.append(
+            candidate.model_copy(
+                update={
+                    "evidence_ranges": ranges,
+                    "estimated_cost": _representation_costs(document, ranges),
+                }
+            )
+        )
+    return restored
 
 
 def _matched_concepts(
@@ -1426,6 +1503,25 @@ def _candidate_id(path: str) -> str:
 
 
 def _structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]:
+    ordered = _all_structural_postings(code_map)
+    primary: list[PositionalPosting] = []
+    repeated: list[PositionalPosting] = []
+    seen_identifiers: set[tuple[str, str]] = set()
+    for item in ordered:
+        identity = (item.identifier.casefold(), item.fact_kind)
+        if identity in seen_identifiers:
+            repeated.append(item)
+        else:
+            seen_identifiers.add(identity)
+            primary.append(item)
+    selected = primary[:MAX_POSITIONAL_POSTINGS_PER_FILE]
+    selected.extend(
+        repeated[: max(MAX_POSITIONAL_POSTINGS_PER_FILE - len(selected), 0)]
+    )
+    return tuple(sorted(selected, key=_posting_key))
+
+
+def _all_structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]:
     values: dict[tuple[str, str, int, int, str], PositionalPosting] = {}
 
     def add(
@@ -1484,22 +1580,7 @@ def _structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]
                     fact_id,
                     occurrence.source_range,
                 )
-    ordered = tuple(values[key] for key in sorted(values))
-    primary: list[PositionalPosting] = []
-    repeated: list[PositionalPosting] = []
-    seen_identifiers: set[tuple[str, str]] = set()
-    for item in ordered:
-        identity = (item.identifier.casefold(), item.fact_kind)
-        if identity in seen_identifiers:
-            repeated.append(item)
-        else:
-            seen_identifiers.add(identity)
-            primary.append(item)
-    selected = primary[:MAX_POSITIONAL_POSTINGS_PER_FILE]
-    selected.extend(
-        repeated[: max(MAX_POSITIONAL_POSTINGS_PER_FILE - len(selected), 0)]
-    )
-    return tuple(sorted(selected, key=_posting_key))
+    return tuple(values[key] for key in sorted(values))
 
 
 def _safe_structural_identifiers(value: str) -> tuple[str, ...]:
