@@ -53,7 +53,7 @@ contextforge doctor
 contextforge index build . --provider fake
 contextforge index status . --format json
 contextforge map . --format json
-contextforge context suggest . --task "Review this repository" --no-rerank
+contextforge context suggest . --task "Review this repository" --planning off
 contextforge --log-level debug context suggest . --task "Review this repository"
 contextforge diagnostics config . --format json
 ruff check .

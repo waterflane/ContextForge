@@ -20,8 +20,8 @@ The structural generation becomes active before model enrichment. If
 enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
-Resolver/analyzer identities changed with this revision (resolver 5, polyglot
-6, Semantic Card analyzer 5, prompt `semantic-card-v3.2`). Rebuild/update does
+Resolver/analyzer identities changed with this revision (resolver 6, Python 4,
+polyglot 7, Semantic Card analyzer 6, prompt `semantic-card-v3.3`). Rebuild/update does
 not reuse older CodeMaps or semantic cache entries under those contracts.
 
 ## CLI behavior
@@ -60,11 +60,11 @@ contextforge context create PATH --task "..." \
 allows FULL for an explicitly pinned file; otherwise automatic FULL applies
 only to files of at most 200 lines and only when it fits.
 
-Automatic task evidence has a soft target of 30% of the available budget.
+Automatic task evidence has a soft ceiling of 30% of the available budget and
+stops when its Evidence Plan is covered; it is not padded to that size.
 Explicit Working Set material, requested ranges, pinned FULL files, and required
-Git material may exceed the soft target but never the hard budget. Reranker
-representation suggestions are advisory and receive only a bounded 10% utility
-bonus.
+Git material may exceed the soft ceiling but never the hard budget. Planner
+representation suggestions are advisory and cannot bypass those rules.
 
 Package, Capsule, and prompt files created inside the repository are recorded
 in `.contextforge/generated-artifacts.json`. An unchanged registered artifact

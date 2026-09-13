@@ -50,6 +50,8 @@ and
 [`contextforge-bridge-v2.schema.json`](../schemas/contextforge-bridge-v2.schema.json).
 The 2.1 additions are defined by
 [`contextforge-bridge-v2.1.schema.json`](../schemas/contextforge-bridge-v2.1.schema.json).
+Bridge 2.2 planning fields are defined by
+[`contextforge-bridge-v2.2.schema.json`](../schemas/contextforge-bridge-v2.2.schema.json).
 
 `hello.capabilities.schemas` reports independent persisted/wire formats rather
 than inferring them from the bridge version. Bridge 2.1 advertises index,
@@ -100,7 +102,7 @@ index cannot be mistaken for a fully enriched one.
 | `snapshot` | none | New authoritative digest and bounded inventory summary |
 | `index` (v2) | action and expected snapshot digest | Atomic tracked build/update job using the application workflow |
 | `map` (v2.1) | expected snapshot digest | Pinned orientation plus available typed repository maps |
-| `search` (v2.1) | digest and task | CandidateCards from deterministic retrieval; optional bounded rerank |
+| `search` (v2.1/2.2) | digest and task | CandidateCards plus optional bounded Evidence Plan |
 | `symbol` (v2.1) | digest and query | Verified exact/qualified symbol matches |
 | `compile` (v2.1) | digest, task, and token budget | Retrieval plus Context Capsule v2 compilation |
 | `discover` | `expected_snapshot_digest`, `task` | Deterministic candidates and preparation identity; never a model call |
@@ -166,8 +168,9 @@ After negotiating `2.1`, call `snapshot` and pass its digest to every new
 operation. `map` returns the generation ID, pinned full orientation record, and
 available architecture/conventions/features maps with typed grounded claims and
 provenance-bearing relationships. `search` returns
-RetrievalResult v3; reranking is off by default. `symbol` searches verified
-CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
+RetrievalResult v3; Bridge 2.1 retains its boolean `rerank` switch. Bridge 2.2
+adds `planning_mode=off|auto|required` and advertises the Evidence Plan schema.
+`symbol` searches verified CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
 files, optional diff text, and context/history/response/safety budgets, then
 returns a Context Capsule v2 and stable prompt.
 

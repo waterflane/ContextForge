@@ -15,7 +15,7 @@
     "git_context": { "type": "string" },
     "interpretations": { "type": "array", "items": { "type": "string" } },
     "allocations": {
-      "description": "Hard section allocations after bounded redistribution; automatic task material additionally observes the compiler's 30 percent soft target.",
+      "description": "Hard section allocations after bounded redistribution; automatic task material additionally observes the compiler's 30 percent soft ceiling and stops after sufficient evidence coverage.",
       "type": "object",
       "additionalProperties": { "type": "integer", "minimum": 0 }
     },

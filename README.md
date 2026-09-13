@@ -262,8 +262,10 @@ With an active Index v3 generation, `context suggest` uses deterministic
 CandidateCard retrieval by default. Exact path, qualified-symbol, symbol, and
 source-identifier groups precede approximate scores. Approximate ranking uses
 persisted BM25 plus bounded graph proximity, centrality, current-diff, and
-Working Set signals. `--rerank` permits one closed-schema provider request and
-at most one repair; any failure returns the deterministic order. Working Set
+Working Set signals. `--planning auto|off|required` controls bounded
+model-assisted evidence planning; `auto` safely falls back to deterministic
+selection and `required` fails when no validated plan is available. The legacy
+`--rerank/--no-rerank` flags remain compatibility aliases. Working Set
 and current-diff membership are retained in each CandidateCard's provenance.
 Automatic compilation requires an exact, lexical/grounded, graph, diff, or
 Working Set signal; centrality alone is not sufficient.
@@ -305,7 +307,7 @@ Task-based creation uses Context Capsule v2 by default when Index v3 is active:
 contextforge context suggest . \
   --task "Trace configuration precedence" \
   --working-file src/contextforge/project_config.py \
-  --no-rerank \
+  --planning auto \
   --format markdown
 
 contextforge context create . \
@@ -324,9 +326,11 @@ Use `--legacy-discovery` for suggestion and `--legacy-handoff` for automatic
 creation to retain the deprecated flow. Manual `context create` without a task
 is unchanged.
 
-Fully automatic task material targets at most 30% of the available context
-budget. Explicit Working Set files/ranges, pinned FULL files, and required Git
-material may exceed that soft target, but never the hard budget. A reranker may
+Fully automatic task material uses 30% of the available context budget as a
+ceiling, not a target to fill: compilation stops when the evidence plan is
+covered and no candidate adds useful coverage. Explicit Working Set
+files/ranges, pinned FULL files, and required Git
+material may exceed that soft ceiling, but never the hard budget. A planner may
 give its suggested representation a bounded 10% utility bonus; freshness,
 range, FULL, and budget checks remain authoritative.
 
@@ -430,8 +434,8 @@ owner-triggered workflow protected by GitHub environments and PyPI OIDC.
 
 ContextForge is pre-alpha and under active solo-maintainer development. Manual
 scanning, trees, context packages, local indexing, diagnostics, and read-only
-MCP are implemented. Semantic enrichment and optional reranking depend on the
-configured provider and its structured-output behavior. Remote MCP transport,
+MCP are implemented. Semantic enrichment and optional evidence planning depend
+on the configured provider and its structured-output behavior. Remote MCP transport,
 autonomous source edits, shell/process tools, embeddings, IDE extensions, and
 coding-agent orchestration are not implemented.
 

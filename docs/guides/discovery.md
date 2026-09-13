@@ -24,13 +24,13 @@ contextforge context suggest . `
 
 contextforge context suggest . `
   --task 'Trace configuration loading' `
-  --rerank `
+  --planning auto `
   --format markdown `
   --output 'selection.md'
 
 contextforge context suggest . `
   --task 'Trace configuration loading' `
-  --no-rerank `
+  --planning off `
   --format json `
   --output 'selection.json'
 ```
@@ -38,8 +38,9 @@ contextforge context suggest . `
 Use `--legacy-discovery --discovery fresh|indexed|hybrid` for the legacy result
 schema described below. Index v3 JSON output is `RetrievalResult` schema 3 and
 contains generation/source identities, exact groups, grounded evidence,
-neighbors, freshness, representation costs, rerank state, and provider-call
-count.
+neighbors, freshness, representation costs, validated Evidence Plan, and
+provider-call count. `--rerank/--no-rerank` remain deprecated aliases for
+clients that have not moved to `--planning`.
 
 Text includes the task, mode, confidence, provenance, selected paths and ranges,
 concise warnings, and a short performance summary. `--explain` adds exact
@@ -224,6 +225,10 @@ The main task fields have these roles:
   build/retrieve/compile for `fresh`, warm retrieve/compile for `indexed`, and
   an isolated controlled change plus incremental update/retrieve/compile for
   `hybrid`.
+- Optional canonical `answer_assertions` and `oracle_ranges` enable a paired
+  same-model answer regression. The runner validates every answer citation
+  against the actual oracle or materialized Capsule source range and reports
+  offline-index, query-planner, and final-answer tokens separately.
 - `include_paths` and `exclude_paths` constrain discovery with exact snapshot
   paths.
 - `required_files_all` requires every listed file. Each `required_files_any`

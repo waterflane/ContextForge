@@ -49,7 +49,7 @@ contextforge map . --kind all --format json
 contextforge context suggest . --task "Trace startup" --working-file src/app.py
 contextforge context create . --task "Trace startup" \
   --working-lines src/app.py:1-80 --context-tokens 32768 \
-  --history-tokens 4000 --response-tokens 4096 --no-rerank \
+  --history-tokens 4000 --response-tokens 4096 --planning auto \
   --format json --output capsule.json --prompt-output prompt.xml
 ```
 
@@ -58,8 +58,10 @@ model-file, and chunk ceilings are hard limits. `--working-file` (also
 `--include` for suggestion) gives retrieval a Working Set boost.
 `--working-lines` also requests exact compiler material.
 `--full-file` is the only way to force FULL for files over 200 lines.
-`--rerank` enables the bounded provider reranker; `--no-rerank` guarantees zero
-query-time provider calls.
+`--planning auto|off|required` controls bounded model-assisted evidence
+planning. `off` guarantees zero query-time provider calls, `auto` falls back to
+deterministic planning, and `required` reports failure if no validated plan is
+available. `--rerank/--no-rerank` remain deprecated compatibility aliases.
 
 Successful build/update summaries read the v3 manifest artifacts and report
 `orientation`, `architecture`, `conventions`, and `features` as `current`.

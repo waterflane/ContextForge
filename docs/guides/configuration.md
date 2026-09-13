@@ -80,6 +80,28 @@ score selects within it. `none` publishes the usable structural generation
 without model calls. CLI options of the same names with hyphens override the
 project values for one build/update.
 
+## Evidence planner
+
+Task-based CLI, MCP, and development HTTP operations use the project planner
+policy. Low-level Python calls without a provider remain deterministic.
+
+```toml
+[models]
+context_planning_mode = "auto" # off | auto | required
+context_planning_max_candidates = 32
+context_planning_max_files = 8
+context_planning_max_ranges_per_file = 8
+context_planning_max_input_tokens = 8192
+context_planning_max_output_tokens = 768
+context_planning_request_timeout_seconds = 60
+```
+
+The model receives only supplied CandidateCards, compact verified maps/routes,
+grounded synopsis, and bounded previews around known evidence. It cannot invent
+paths, ranges, symbols, or claims. `auto` falls back deterministically after an
+invalid result, unsupported `json_schema`, timeout, or provider failure;
+`required` surfaces the failure. One locally controlled repair is the maximum.
+
 Bridge timeouts are intentionally independent: request `timeout_ms` is client
 wait time, `request_timeout` is one provider attempt, and `operation_timeout`
 is the entire tracked index job. A client timeout does not cancel the job.

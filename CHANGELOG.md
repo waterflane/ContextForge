@@ -17,7 +17,7 @@ and Python distribution versions follow PEP 440.
   profiles, item-level validation, one bounded repair, deterministic fallback,
   priority scheduling, and a path-neutral content-addressed cache.
 - Added persisted exact/BM25/graph retrieval with CandidateCards, optional
-  closed-schema reranking, Working Set and diff boosts, and deterministic
+  closed-schema evidence planning, Working Set and diff boosts, and deterministic
   fallback on every provider failure.
 - Added TokenEstimator, ContextBudget, MAP/SUMMARY/SLICE/FULL representations,
   Context Capsule v2, and stable `<contextforge schema_version="2">` prompts.
@@ -30,6 +30,9 @@ and Python distribution versions follow PEP 440.
 - Added typed evidence/provenance projections to repository maps, normative
   OrientationMap/RepositoryMap schemas, CLI `map --kind`, and the additive
   benchmark `index_v3_capsule` pipeline with grounded/dropped-claim metrics.
+- Added `off|auto|required` model-assisted Evidence Plans, Bridge 2.2 planning
+  negotiation, and paired same-model answer regressions with range-validated
+  citations and phase-separated token accounting.
 
 ### Changed
 
@@ -46,7 +49,7 @@ and Python distribution versions follow PEP 440.
 - Repository orientation, architecture, conventions, and feature maps are now
   deterministic aggregations of graph, CodeMaps, and grounded cards, without
   separate repository-wide model calls.
-- Semantic enrichment now uses analyzer 5 / `semantic-card-v3.2`, declaration-
+- Semantic enrichment now uses analyzer 6 / `semantic-card-v3.3`, declaration-
   aware one-to-four chunk planning, full-request/schema token accounting, one
   scheduler-owned repair authority, and lexical anchors for ranking prose.
 
@@ -58,8 +61,8 @@ and Python distribution versions follow PEP 440.
 - Grounded model-inferred relationships in supplied content-addressed targets
   and source evidence, with item-level validation and source/target rename
   rebinding. Updated semantic priority scheduling and behavioral barrel routing.
-- Prevented centrality-only task material, added bounded reranker representation
-  influence, and enforced a 30% automatic Capsule soft target without weakening
+- Prevented centrality-only task material, added bounded planner representation
+  influence, and enforced a 30% automatic Capsule soft ceiling without weakening
   explicit-material or hard-budget rules.
 - Restricted retrieval graph scoring to verified/best-effort structural edges,
   while retaining inferred neighbors as non-authoritative CandidateCard context.
@@ -74,6 +77,13 @@ and Python distribution versions follow PEP 440.
 - Completed ten-language import/call/reference extraction, ambiguity-aware
   provenance, and key-digest-scoped config-consumer relationships without
   storing configuration values.
+- Sharded graph and retrieval records into digest-bound 4 MiB artifacts,
+  removed duplicated generation facts, and made warm retrieval load compact
+  file projections plus embedded grounded evidence instead of every CodeMap and
+  Semantic Card.
+- Replaced fill-to-30% automatic compilation with minimum-sufficient Evidence
+  Plan coverage; the 30% allocation is now a soft ceiling while explicit
+  material remains governed by the hard budget.
 - Reused digest-matched published Semantic Cards across unrelated structural
   updates, avoiding retries of unchanged fallback/partial files while still
   rebinding or dropping inferred targets against the current snapshot.

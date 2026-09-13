@@ -33,14 +33,15 @@ retrieval, and is rejected by `index update`. Run `index build` to create v3;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Resolver version 5 and polyglot analyzer version 6 extract imports, calls, and
-non-call references for Python plus JavaScript, TypeScript, Java, C#, Go, Rust,
-C, C++, PHP, and Ruby. Exact relative paths and unambiguous snapshot symbols
-are verified; package/convention resolution is best-effort and ambiguity stays
-unresolved. Config consumers match SHA-256 digests of discovered key names in
-permitted root/module scope. Config values are never stored.
+Resolver version 6, Python analyzer version 4, and polyglot analyzer version 7
+extract imports, calls, and non-call references for Python plus JavaScript,
+TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby. Exact relative paths and
+unambiguous snapshot symbols are verified; package/convention resolution is
+best-effort and ambiguity stays unresolved. Config consumers match SHA-256
+digests of discovered key names in permitted root/module scope. Config values
+are never stored.
 
-Semantic Card analyzer version 5 (`semantic-card-v3.2`) uses one full request
+Semantic Card analyzer version 6 (`semantic-card-v3.3`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of
 overlap. Evidence is constrained to the active chunk and may address verified
 import, call, reference, or config facts. Every primary and scheduler-owned
@@ -48,7 +49,15 @@ repair consumes the shared request and full-request token ceilings; provider
 internal repair is disabled for card requests. Ranking prose must also have a
 lexical or identifier anchor in cited evidence.
 
-## Retrieval
+Graph nodes, edges, metrics, and file projections are stored in digest-bound
+shards of at most 4 MiB. Retrieval documents use the same bounded shard format.
+The public graph loader still reconstructs the complete `RelationshipGraph`,
+while the warm query path reads only the compact file projection and retrieval
+documents. Grounded synopsis, concepts, and evidence are copied into the
+digest-bound retrieval generation, so a query does not reopen every CodeMap or
+Semantic Card.
+
+## Retrieval and evidence planning
 
 Retrieval first partitions exact matches in this order: exact path, qualified
 symbol, symbol, and source identifier. Approximate candidates use BM25 with
@@ -71,10 +80,14 @@ cannot be the sole relevance signal.
 A `CandidateCard` includes source identity, synopsis, matched concepts and
 symbols, evidence ranges, graph neighbors, provenance, freshness, and estimated
 MAP/SUMMARY/SLICE/FULL costs. Default discovery performs no provider call. If a
-provider is explicitly enabled for reranking, one closed-schema request and at
-most one repair may only reorder supplied IDs and suggest representations. A
-matching suggestion contributes a 10% marginal-utility bonus; it cannot bypass
-freshness, source-range, FULL, or token-budget rules.
+`ContextPlanningMode` is `off`, `auto`, or `required`. The default project
+configuration is `auto`: a configured provider may make one closed-schema
+request and at most one scheduler-owned repair. It may only discard/reorder up
+to 32 supplied candidates, select supplied evidence IDs, choose one of the four
+representations, and report sufficiency. The request is capped at 8 selected
+files, 8 ranges per file, 8192 input tokens, and 768 output tokens. `auto`
+falls back deterministically; `required` fails if a validated plan cannot be
+obtained. Legacy `rerank=true/false` remains a compatibility alias.
 
 The normative wire schema is
 [`retrieval-result-v3.schema.json`](../schemas/retrieval-result-v3.schema.json).
@@ -88,8 +101,10 @@ margin. Initial shares are 20% orientation, 15% Working Set, 55% task evidence,
 and 10% diff/metadata; unused space flows to task evidence, then Working Set,
 then map.
 
-For a fully automatic capsule the compiler uses 30% of available tokens as a
-soft target. Explicit Working Set files, requested ranges, pinned FULL files,
+For a fully automatic capsule the compiler treats 30% of available tokens as a
+soft ceiling, not a fill target. It stops as soon as the validated plan is
+covered and no candidate adds a symbol, concept, source range, graph flow, or
+task role. Explicit Working Set files, requested ranges, pinned FULL files,
 and required Git material may take the capsule beyond that target, while the
 hard available-token budget remains absolute. Unused allocation still flows to
 evidence, then Working Set, then the repository map.
@@ -136,6 +151,10 @@ Benchmark manifest schema 1 has an additive `pipeline` field. Its default is
 warm retrieve/compile, and isolated incremental update/retrieve/compile for
 fresh/indexed/hybrid modes. Results account for materialized ranges/tokens,
 grounded and dropped card claims, and provider-reported transport/HTTP calls.
+Optional `answer_assertions` plus real `oracle_ranges` run a paired downstream
+answer regression with the same provider settings. Indexing, evidence planning,
+and final-answer tokens are reported separately; every returned citation must
+fit inside a materialized SLICE/FULL or oracle source range.
 
 ## Public surface
 
@@ -143,7 +162,9 @@ Python exports `load_relationship_graph()`, `load_orientation_map()`,
 `retrieve_context_candidates()`, and `compile_context_capsule()` plus the
 public card/candidate/capsule/budget/estimator types. Bridge 2.1, MCP, and the
 development HTTP API expose read-only `map`, `search`, `symbol`, and `compile`
-operations. None can write source, invoke a shell, or mutate Git.
+operations. Bridge 2.2 adds explicit `planning_mode` and advertises the Evidence
+Plan schema; Bridge 2.1 keeps the unchanged `rerank` wire field. None can write
+source, invoke a shell, or mutate Git.
 `contextforge map --kind orientation|architecture|conventions|features|all`
 exposes the same pinned artifacts. Normative schemas are
 [`orientation-map-v3.schema.json`](../schemas/orientation-map-v3.schema.json)
