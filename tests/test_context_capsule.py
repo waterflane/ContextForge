@@ -1,10 +1,11 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from contextforge.application import build_repository_index
+from contextforge.application import IndexBuildReport, build_repository_index
 from contextforge.context import (
     CapsuleMaterial,
     CapsuleRange,
@@ -18,10 +19,12 @@ from contextforge.context import (
     compile_context_capsule,
 )
 from contextforge.intelligence import (
+    ContextPlanningMode,
     EvidencePlan,
     GroundedClaim,
     PlannedEvidence,
     PlanningDiagnostics,
+    RetrievalResult,
     SourceRange,
     load_file_code_map,
     load_semantic_card,
@@ -35,7 +38,7 @@ def _write(root: Path, path: str, content: str) -> None:
     destination.write_text(content, encoding="utf-8", newline="")
 
 
-def _build(root: Path):
+def _build(root: Path) -> IndexBuildReport:
     return asyncio.run(
         build_repository_index(
             root,
@@ -45,12 +48,12 @@ def _build(root: Path):
     )
 
 
-def _retrieve(root: Path, report: object, task: str):
+def _retrieve(root: Path, report: IndexBuildReport, task: str) -> RetrievalResult:
     return asyncio.run(
         retrieve_context_candidates(
             root,
             task,
-            manifest=report.manifest,  # type: ignore[attr-defined]
+            manifest=report.manifest,
         )
     )
 
@@ -116,7 +119,9 @@ def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None
                     ),
                 ),
                 sufficiency="sufficient",
-                diagnostics=PlanningDiagnostics(mode="auto", status="planned"),
+                diagnostics=PlanningDiagnostics(
+                    mode=ContextPlanningMode.AUTO, status="planned"
+                ),
             )
         }
     )
@@ -190,7 +195,7 @@ def test_working_ranges_expand_context_and_merge_nearby_blocks(tmp_path: Path) -
     _write(tmp_path, "notes.txt", source)
     report = _build(tmp_path)
     retrieval = _retrieve(tmp_path, report, "notes")
-    requested = {
+    requested: dict[str, tuple[SourceRange, ...]] = {
         "notes.txt": (
             SourceRange(start_line=10, start_column=0, end_line=10, end_column=1),
             SourceRange(start_line=18, start_column=0, end_line=18, end_column=1),
@@ -702,8 +707,11 @@ def test_compiler_rejects_unpinned_inputs_and_invalid_selection(tmp_path: Path) 
     retrieval = _retrieve(tmp_path, report, "run")
 
     with pytest.raises(TypeError, match="RetrievalResult"):
-        compile_context_capsule(  # type: ignore[arg-type]
-            tmp_path, "run", object(), budget=_budget(2_000)
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            cast(RetrievalResult, object()),
+            budget=_budget(2_000),
         )
     old_manifest = report.manifest.model_copy(update={"schema_version": 2})
     with pytest.raises(Exception, match="Index v3"):
@@ -725,7 +733,7 @@ def test_compiler_rejects_unpinned_inputs_and_invalid_selection(tmp_path: Path) 
             budget=_budget(2_000),
             estimator=EmptyEstimator(),
         )
-    ranges = {
+    ranges: dict[str, tuple[SourceRange, ...]] = {
         "app.py": (SourceRange(start_line=1, start_column=0, end_line=1, end_column=1),)
     }
     with pytest.raises(ValueError, match="matching working file"):

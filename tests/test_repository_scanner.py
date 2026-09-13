@@ -895,7 +895,7 @@ def test_generated_artifact_registry_wraps_atomic_write_errors(
     def fail_replace(source: Path, destination: Path) -> Never:
         raise OSError(f"cannot replace {source.name} with {destination.name}")
 
-    monkeypatch.setattr(generated_module.os, "replace", fail_replace)
+    monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(
         GeneratedArtifactRegistryError,
         match="unable to update generated artifact registry",

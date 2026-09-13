@@ -601,7 +601,7 @@ def test_unchanged_enriched_generation_reuses_cards_without_provider_call(
 
     assert provider.call_count == 1
     assert updated.semantic is not None
-    assert updated.semantic.reused_paths == ("app.py",)  # type: ignore[union-attr]
+    assert updated.semantic.reused_paths == ("app.py",)
 
 
 def test_invalid_grounded_text_falls_back_after_grounding_validation(
@@ -634,7 +634,7 @@ def test_invalid_grounded_text_falls_back_after_grounding_validation(
     card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
 
     assert report.semantic is not None
-    assert report.semantic.failed_paths == ("app.py",)  # type: ignore[union-attr]
+    assert report.semantic.failed_paths == ("app.py",)
     assert card.provenance.method == "deterministic-fallback"
 
 
@@ -856,7 +856,7 @@ def test_global_request_and_full_request_token_ceilings_include_repair(
 
     assert invalid.call_count == 1
     assert request_limited.semantic is not None
-    assert request_limited.semantic.request_count == 1  # type: ignore[union-attr]
+    assert request_limited.semantic.request_count == 1
     assert request_limited.semantic.repair_count == 0  # type: ignore[union-attr]
 
     token_root = tmp_path / "token-case"
@@ -876,7 +876,7 @@ def test_global_request_and_full_request_token_ceilings_include_repair(
 
     assert token_limited.call_count == 0
     assert token_report.semantic is not None
-    assert token_report.semantic.request_count == 0  # type: ignore[union-attr]
+    assert token_report.semantic.request_count == 0
 
 
 def test_semantic_scheduler_is_the_only_card_repair_authority(tmp_path: Path) -> None:
@@ -905,7 +905,7 @@ def test_semantic_scheduler_is_the_only_card_repair_authority(tmp_path: Path) ->
 
     assert provider.call_count == 2
     assert report.semantic is not None
-    assert report.semantic.request_count == 2  # type: ignore[union-attr]
+    assert report.semantic.request_count == 2
     assert report.semantic.repair_count == 1  # type: ignore[union-attr]
 
 
@@ -1053,7 +1053,7 @@ def test_changed_low_score_file_wins_priority_in_large_repository(
 
     assert requested == ["low.py"]
     assert report.semantic is not None
-    assert report.semantic.analyzed_paths == ("low.py",)  # type: ignore[union-attr]
+    assert report.semantic.analyzed_paths == ("low.py",)
 
 
 def test_priority_includes_central_tier_and_its_related_test(tmp_path: Path) -> None:

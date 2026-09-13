@@ -727,7 +727,9 @@ def test_bridge_v2_index_timeout_detaches_worker_and_preserves_lock(
     release_worker = threading.Event()
     lock_was_active = False
     cancellation_was_set = False
-    original_build_structural_index = application_module.build_structural_index
+    original_build_structural_index = cast(
+        Any, vars(application_module)["build_structural_index"]
+    )
 
     def wait_for_release(
         snapshot: object,

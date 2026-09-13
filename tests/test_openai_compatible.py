@@ -3,7 +3,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 from click import unstyle
@@ -100,7 +100,10 @@ def test_offline_fixture_provider_covers_supported_analysis_contracts() -> None:
             metadata=metadata or {},
             analysis_task=task,
         )
-        return json.loads(project_config_module._fixture_response(request, 1))
+        return cast(
+            dict[str, object],
+            json.loads(project_config_module._fixture_response(request, 1)),
+        )
 
     semantic = response(
         "semantic-card",

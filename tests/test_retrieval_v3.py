@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from contextforge.application import build_repository_index
+from contextforge.application import IndexBuildReport, build_repository_index
 from contextforge.intelligence import (
     CandidateEvidenceRange,
     CandidateGraphNeighbor,
@@ -35,7 +35,7 @@ def _write(root: Path, path: str, content: str) -> None:
     destination.write_text(content, encoding="utf-8", newline="")
 
 
-def _build(root: Path):
+def _build(root: Path) -> IndexBuildReport:
     return asyncio.run(
         build_repository_index(
             root,
@@ -800,7 +800,7 @@ def test_retrieval_internal_guards_and_tokenization() -> None:
     assert retrieval_module._exact_text("runtime", "run") is False
     assert retrieval_module._exact_text("вызвать запуск", "запуск") is True
     with pytest.raises(TypeError, match="relationship graph"):
-        retrieval_module._rank_candidates(  # type: ignore[arg-type]
+        retrieval_module._rank_candidates(
             "task",
             build_retrieval_index((), (), "0" * 64),
             object(),

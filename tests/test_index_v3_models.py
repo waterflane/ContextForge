@@ -353,7 +353,7 @@ def test_model_failure_uses_grounded_deterministic_fallback(tmp_path: Path) -> N
     )
 
     assert report.semantic is not None
-    assert report.semantic.failed_paths == ("service.py",)  # type: ignore[union-attr]
+    assert report.semantic.failed_paths == ("service.py",)
     assert provider.call_count == 2
 
 
