@@ -19,9 +19,11 @@ from contextforge.intelligence import (
     RetrievalDocument,
     RetrievalField,
     RetrievalIndex,
+    RetrievalIndexShardManifest,
     SourceRange,
     build_retrieval_index,
     load_file_code_map,
+    load_retrieval_index,
     retrieve_context_candidates,
 )
 from contextforge.models import FakeModelProvider, ProviderConfiguration
@@ -680,6 +682,13 @@ def test_exact_identifier_restores_evidence_beyond_bounded_postings(
         f"def route(planning_mode):\n{noisy_references}\n    return planning_mode\n",
     )
     report = _build(tmp_path)
+    code_map = load_file_code_map(tmp_path, "large.py", manifest=report.manifest)
+    index = build_retrieval_index(
+        (code_map,), (), report.manifest.build.source_snapshot_digest
+    )
+
+    assert "planning_mode" in index.exact_identifier_documents
+    assert "planning_mode" not in index.documents[0].source_identifiers
 
     result = asyncio.run(
         retrieve_context_candidates(
@@ -744,6 +753,33 @@ def test_retrieval_uses_digest_bound_grounding_without_reopening_cards(
     assert "grounded-semantic-card" in result.candidates[0].provenance
 
 
+def test_retrieval_cache_revalidates_digest_bound_shards(tmp_path: Path) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return None\n")
+    report = _build(tmp_path)
+    reference = report.manifest.artifacts.semantic_retrieval
+    assert reference is not None
+
+    first = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    second = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    assert second is first
+
+    generation = (
+        tmp_path
+        / ".contextforge"
+        / "index"
+        / "generations"
+        / report.manifest.generation_id
+    )
+    header = RetrievalIndexShardManifest.model_validate_json(
+        (generation / reference.location).read_bytes()
+    )
+    shard = generation / header.document_shards[0].artifact.location
+    shard.write_bytes(shard.read_bytes() + b" ")
+
+    with pytest.raises(ValueError, match="shard digest"):
+        load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+
+
 def test_retrieval_internal_guards_and_tokenization() -> None:
     from contextforge.intelligence import retrieval as retrieval_module
 
@@ -756,6 +792,9 @@ def test_retrieval_internal_guards_and_tokenization() -> None:
         "na",
         "ve",
     )
+    assert retrieval_module._exact_text("run runtime", "run") is True
+    assert retrieval_module._exact_text("runtime", "run") is False
+    assert retrieval_module._exact_text("вызвать запуск", "запуск") is True
     with pytest.raises(TypeError, match="relationship graph"):
         retrieval_module._rank_candidates(  # type: ignore[arg-type]
             "task",

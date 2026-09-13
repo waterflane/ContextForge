@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import re
-from collections import Counter, defaultdict, deque
+import threading
+from collections import Counter, OrderedDict, defaultdict, deque
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,7 +28,7 @@ from contextforge.intelligence.models import (
 from contextforge.models import ModelProvider, ModelRequest, UntrustedSource
 
 RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
-RETRIEVAL_BUILD_VERSION = 4
+RETRIEVAL_BUILD_VERSION = 5
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -44,6 +46,7 @@ PLANNING_MAX_OUTPUT_TOKENS = 768
 PLANNING_REQUEST_TIMEOUT_SECONDS = 60.0
 RETRIEVAL_SHARD_MAX_BYTES = 4 * 1024 * 1024
 MAX_POSITIONAL_POSTINGS_PER_FILE = 128
+RETRIEVAL_CACHE_SIZE = 2
 ExactGroup = Literal[
     "exact_path",
     "exact_qualified_symbol",
@@ -53,6 +56,12 @@ ExactGroup = Literal[
 ]
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+_RetrievalCacheKey = tuple[str, str, str, str]
+_retrieval_cache: OrderedDict[
+    _RetrievalCacheKey, tuple[RetrievalIndexShardManifest, RetrievalIndex]
+] = OrderedDict()
+_retrieval_cache_lock = threading.Lock()
 
 
 class RetrievalField(IndexModel):
@@ -143,6 +152,7 @@ class RetrievalIndex(IndexModel):
     source_snapshot_digest: Sha256
     document_count: NonNegativeInt
     documents: tuple[RetrievalDocument, ...]
+    exact_identifier_documents: dict[str, tuple[NonNegativeInt, ...]] = {}
     document_frequencies: dict[str, dict[str, NonNegativeInt]]
     average_field_lengths: dict[str, NonNegativeFloat]
 
@@ -155,6 +165,15 @@ class RetrievalIndex(IndexModel):
             raise ValueError("document frequencies use an invalid field order")
         if set(self.average_field_lengths) != set(FIELD_WEIGHTS):
             raise ValueError("average lengths use an invalid field order")
+        if tuple(self.exact_identifier_documents) != tuple(
+            sorted(self.exact_identifier_documents)
+        ):
+            raise ValueError("exact identifier lookup must be canonical")
+        for ordinals in self.exact_identifier_documents.values():
+            if ordinals != tuple(sorted(set(ordinals))) or any(
+                value >= self.document_count for value in ordinals
+            ):
+                raise ValueError("exact identifier document ordinals are invalid")
         return self
 
 
@@ -173,6 +192,7 @@ class RetrievalIndexShardManifest(IndexModel):
     source_snapshot_digest: Sha256
     document_count: NonNegativeInt
     document_shards: tuple[RetrievalDocumentShard, ...]
+    exact_identifier_documents: dict[str, tuple[NonNegativeInt, ...]] = {}
     document_frequencies: dict[str, dict[str, NonNegativeInt]]
     average_field_lengths: dict[str, NonNegativeFloat]
 
@@ -190,6 +210,15 @@ class RetrievalIndexShardManifest(IndexModel):
             raise ValueError("document frequencies use an invalid field order")
         if set(self.average_field_lengths) != set(FIELD_WEIGHTS):
             raise ValueError("average lengths use an invalid field order")
+        if tuple(self.exact_identifier_documents) != tuple(
+            sorted(self.exact_identifier_documents)
+        ):
+            raise ValueError("exact identifier lookup must be canonical")
+        for ordinals in self.exact_identifier_documents.values():
+            if ordinals != tuple(sorted(set(ordinals))) or any(
+                value >= self.document_count for value in ordinals
+            ):
+                raise ValueError("exact identifier document ordinals are invalid")
         return self
 
 
@@ -363,7 +392,10 @@ def build_retrieval_index(
 
     cards_by_path = {item.path: item for item in cards}
     documents: list[RetrievalDocument] = []
-    for code_map in sorted(code_maps, key=lambda item: item.path):
+    exact_identifier_documents: dict[str, list[int]] = defaultdict(list)
+    for document_ordinal, code_map in enumerate(
+        sorted(code_maps, key=lambda item: item.path)
+    ):
         card = cards_by_path.get(code_map.path)
         postings = _structural_postings(code_map)
         semantic_claims = _retrieval_semantic_claims(card)
@@ -391,12 +423,8 @@ def build_retrieval_index(
             )
         )
         structural_identifiers = _all_structural_identifiers(code_map)
-        exact_identifiers = tuple(
-            sorted(
-                {*identifiers, *structural_identifiers},
-                key=canonical_casefold_key,
-            )
-        )
+        for identifier in sorted({item.casefold() for item in structural_identifiers}):
+            exact_identifier_documents[identifier].append(document_ordinal)
         values = {
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
@@ -414,7 +442,7 @@ def build_retrieval_index(
                 fields=fields,
                 symbols=symbols,
                 qualified_symbols=qualified,
-                source_identifiers=exact_identifiers,
+                source_identifiers=identifiers,
                 positional_postings=postings,
                 semantic_quality="none" if card is None else card.quality,
                 semantic_synopsis="" if card is None else card.synopsis.text,
@@ -443,6 +471,10 @@ def build_retrieval_index(
         source_snapshot_digest=source_snapshot_digest,
         document_count=len(documents),
         documents=tuple(documents),
+        exact_identifier_documents={
+            key: tuple(value)
+            for key, value in sorted(exact_identifier_documents.items())
+        },
         document_frequencies=frequencies,
         average_field_lengths=averages,
     )
@@ -528,6 +560,7 @@ def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) ->
         source_snapshot_digest=index.source_snapshot_digest,
         document_count=index.document_count,
         document_shards=tuple(shards),
+        exact_identifier_documents=index.exact_identifier_documents,
         document_frequencies=index.document_frequencies,
         average_field_lengths=index.average_field_lengths,
     )
@@ -551,28 +584,55 @@ def load_retrieval_index(
     )
     if hashlib.sha256(content).hexdigest() != reference.sha256:
         raise ValueError("retrieval header digest does not match the manifest")
-    try:
-        header = RetrievalIndexShardManifest.model_validate_json(content)
-    except ValueError:
-        return RetrievalIndex.model_validate_json(content)
-    documents: list[RetrievalDocument] = []
+    cache_key = (
+        str(Path(repository_root).resolve()),
+        manifest.generation_id,
+        reference.location,
+        reference.sha256,
+    )
+    with _retrieval_cache_lock:
+        cached = _retrieval_cache.get(cache_key)
+        if cached is not None:
+            _retrieval_cache.move_to_end(cache_key)
+    if cached is None:
+        try:
+            header = RetrievalIndexShardManifest.model_validate_json(content)
+        except ValueError:
+            return RetrievalIndex.model_validate_json(content)
+    else:
+        header = cached[0]
+    shard_contents: list[bytes] = []
     for shard in header.document_shards:
         shard_content = load_generation_record(
             repository_root, shard.artifact.location, manifest=manifest
         )
         if hashlib.sha256(shard_content).hexdigest() != shard.artifact.sha256:
             raise ValueError("retrieval shard digest does not match its header")
+        shard_contents.append(shard_content)
+    if cached is not None:
+        return cached[1]
+    documents: list[RetrievalDocument] = []
+    for shard, shard_content in zip(
+        header.document_shards, shard_contents, strict=True
+    ):
         lines = tuple(line for line in shard_content.splitlines() if line)
         if len(lines) != shard.record_count:
             raise ValueError("retrieval shard record count does not match its header")
         documents.extend(RetrievalDocument.model_validate_json(line) for line in lines)
-    return RetrievalIndex(
+    index = RetrievalIndex(
         source_snapshot_digest=header.source_snapshot_digest,
         document_count=header.document_count,
         documents=tuple(documents),
+        exact_identifier_documents=header.exact_identifier_documents,
         document_frequencies=header.document_frequencies,
         average_field_lengths=header.average_field_lengths,
     )
+    with _retrieval_cache_lock:
+        _retrieval_cache[cache_key] = (header, index)
+        _retrieval_cache.move_to_end(cache_key)
+        while len(_retrieval_cache) > RETRIEVAL_CACHE_SIZE:
+            _retrieval_cache.popitem(last=False)
+    return index
 
 
 def retrieval_index_record_locations(
@@ -727,7 +787,13 @@ def _rank_candidates(
     diff = set(diff_paths)
     exact_by_path: dict[str, ExactGroup] = {}
     matched_symbols: dict[str, tuple[str, ...]] = {}
-    for document in index.documents:
+    indexed_identifier_matches: dict[int, list[str]] = defaultdict(list)
+    for identifier, ordinals in index.exact_identifier_documents.items():
+        if not _exact_text(identifier_task_folded, identifier):
+            continue
+        for ordinal in ordinals:
+            indexed_identifier_matches[ordinal].append(identifier)
+    for document_ordinal, document in enumerate(index.documents):
         groups: list[ExactGroup] = []
         if _exact_text(task_folded, document.path.casefold()):
             groups.append("exact_path")
@@ -742,9 +808,17 @@ def _rank_candidates(
             if _exact_text(identifier_task_folded, value.casefold())
         )
         identifier_matches = tuple(
-            value
-            for value in document.source_identifiers
-            if _exact_text(identifier_task_folded, value.casefold())
+            sorted(
+                {
+                    *indexed_identifier_matches.get(document_ordinal, ()),
+                    *(
+                        value
+                        for value in document.source_identifiers
+                        if _exact_text(identifier_task_folded, value.casefold())
+                    ),
+                },
+                key=canonical_casefold_key,
+            )
         )
         if qualified_matches:
             groups.append("exact_qualified_symbol")
@@ -975,8 +1049,6 @@ def _restore_exact_identifier_evidence(
 ) -> list[CandidateCard]:
     """Load only exact-hit CodeMaps whose bounded postings omitted the hit."""
 
-    from contextforge.intelligence.indexer import load_file_code_map
-
     documents = {item.path: item for item in index.documents}
     restored: list[CandidateCard] = []
     for candidate in candidates:
@@ -991,15 +1063,11 @@ def _restore_exact_identifier_evidence(
         if candidate.exact_group == "approximate" or not missing:
             restored.append(candidate)
             continue
-        code_map = load_file_code_map(
+        additions = _exact_postings_from_persisted_map(
             repository_root,
+            manifest,
             candidate.path,
-            manifest=manifest,
-        )
-        additions = tuple(
-            item
-            for item in _all_structural_postings(code_map)
-            if item.identifier.casefold() in missing
+            missing,
         )
         combined = {
             _posting_key(item): item
@@ -1030,6 +1098,105 @@ def _restore_exact_identifier_evidence(
             )
         )
     return restored
+
+
+def _exact_postings_from_persisted_map(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    path: str,
+    identifiers: set[str],
+) -> tuple[PositionalPosting, ...]:
+    """Read one digest-checked CodeMap as JSON without rebuilding its full model."""
+
+    from contextforge.intelligence.store import (
+        IndexManifestReadError,
+        load_index_record,
+    )
+
+    state = next((item for item in manifest.files if item.path == path), None)
+    if state is None:
+        raise IndexManifestReadError("exact-hit path is absent from the manifest")
+    payload = cast(
+        dict[str, Any],
+        json.loads(load_index_record(repository_root, state, manifest=manifest)),
+    )
+    if (
+        payload.get("path") != path
+        or payload.get("source_sha256") != state.source_sha256
+    ):
+        raise IndexManifestReadError("exact-hit CodeMap identity is stale")
+    values: dict[tuple[str, str, int, int, str], PositionalPosting] = {}
+
+    def add(
+        raw_identifier: object,
+        fact_kind: Literal["declaration", "import", "call", "reference"],
+        fact_id: str,
+        raw_range: object,
+    ) -> None:
+        if not isinstance(raw_identifier, str):
+            return
+        source_range = SourceRange.model_validate(raw_range)
+        for identifier in _safe_structural_identifiers(raw_identifier):
+            if identifier.casefold() not in identifiers:
+                continue
+            evidence_id = _structural_evidence_id_from_source(
+                path,
+                state.source_sha256,
+                f"{fact_kind}:{fact_id}",
+                source_range,
+            )
+            posting = PositionalPosting(
+                identifier=identifier,
+                fact_kind=fact_kind,
+                fact_id=fact_id,
+                evidence_id=evidence_id,
+                source_range=source_range,
+            )
+            values.setdefault(_posting_key(posting), posting)
+
+    for raw_symbol in cast(list[dict[str, Any]], payload.get("symbols", [])):
+        symbol_id = str(raw_symbol["symbol_id"])
+        declaration_range = raw_symbol["declaration_range"]
+        add(raw_symbol.get("name"), "declaration", symbol_id, declaration_range)
+        add(
+            raw_symbol.get("qualified_name"),
+            "declaration",
+            symbol_id,
+            declaration_range,
+        )
+        for fact_kind, field in (
+            ("call", "direct_calls"),
+            ("reference", "direct_references"),
+        ):
+            for occurrence in cast(list[dict[str, Any]], raw_symbol.get(field, [])):
+                source_range = SourceRange.model_validate(occurrence["source_range"])
+                fact_id = hashlib.sha256(
+                    (
+                        f"{symbol_id}:{fact_kind}:{occurrence['observed_name']}:"
+                        f"{source_range.start_line}:{source_range.start_column}:"
+                        f"{source_range.end_line}:{source_range.end_column}"
+                    ).encode()
+                ).hexdigest()
+                add(
+                    occurrence.get("observed_name"),
+                    fact_kind,  # type: ignore[arg-type]
+                    fact_id,
+                    source_range,
+                )
+    for imported in cast(list[dict[str, Any]], payload.get("imports", [])):
+        for identifier in (
+            imported.get("module"),
+            imported.get("imported_name"),
+            imported.get("alias"),
+        ):
+            if identifier:
+                add(
+                    identifier,
+                    "import",
+                    str(imported["import_id"]),
+                    imported["source_range"],
+                )
+    return tuple(values[key] for key in sorted(values))
 
 
 def _matched_concepts(
@@ -1486,7 +1653,19 @@ def _tokens(text: str) -> tuple[str, ...]:
 def _exact_text(task: str, value: str) -> bool:
     if not value:
         return False
-    return re.search(rf"(?<![\w]){re.escape(value)}(?![\w])", task) is not None
+    start = task.find(value)
+    while start >= 0:
+        end = start + len(value)
+        before_word = start > 0 and _identifier_character(task[start - 1])
+        after_word = end < len(task) and _identifier_character(task[end])
+        if not before_word and not after_word:
+            return True
+        start = task.find(value, start + 1)
+    return False
+
+
+def _identifier_character(value: str) -> bool:
+    return value == "_" or value.isalnum()
 
 
 def _exact_identifier_scope(task: str) -> str:
@@ -1638,8 +1817,22 @@ def _posting_key(item: PositionalPosting) -> tuple[str, str, int, int, str]:
 def _structural_evidence_id(
     code_map: FileCodeMap, fact_identity: str, source_range: SourceRange
 ) -> str:
+    return _structural_evidence_id_from_source(
+        code_map.path,
+        code_map.source_sha256,
+        fact_identity,
+        source_range,
+    )
+
+
+def _structural_evidence_id_from_source(
+    path: str,
+    source_sha256: str,
+    fact_identity: str,
+    source_range: SourceRange,
+) -> str:
     payload = (
-        f"{code_map.path}\0{code_map.source_sha256}\0{fact_identity}\0"
+        f"{path}\0{source_sha256}\0{fact_identity}\0"
         f"{source_range.start_line}:{source_range.start_column}:"
         f"{source_range.end_line}:{source_range.end_column}"
     )
