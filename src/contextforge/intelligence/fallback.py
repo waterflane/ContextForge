@@ -17,7 +17,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 FALLBACK_ANALYZER = AnalyzerIdentity(
     analyzer_id="generic-text-structure",
-    analyzer_version="3",
+    analyzer_version="4",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -74,6 +74,7 @@ _CONFIG_NAMES = {
 _KEY_PATTERN = re.compile(
     r"""(?mx)
     ^\s*["']?([A-Za-z][A-Za-z0-9_.-]{1,127})["']?\s*[:=]
+    |["']([A-Za-z][A-Za-z0-9_.-]{1,127})["']\s*:
     |["']([A-Z][A-Z0-9_]{1,127})["']
     """
 )
@@ -83,13 +84,13 @@ def _configuration_key_digests(path: str, source: str) -> tuple[str, ...]:
     pure = PurePosixPath(path.casefold())
     if pure.suffix not in _CONFIG_SUFFIXES and pure.name not in _CONFIG_NAMES:
         return ()
-    values = {
-        value
+    digests = {
+        configuration_key_digest(value)
         for match in _KEY_PATTERN.finditer(source)
         for value in match.groups()
         if value is not None
     }
-    return tuple(sorted(configuration_key_digest(value) for value in values))
+    return tuple(sorted(digests))
 
 
 __all__ = ["FALLBACK_ANALYZER", "extract_fallback_code_map"]

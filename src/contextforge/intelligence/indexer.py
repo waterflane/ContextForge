@@ -93,6 +93,7 @@ def build_structural_index(
     *,
     max_source_bytes: int = DEFAULT_CODEMAP_SOURCE_LIMIT,
     previous_manifest: IndexManifest | None = None,
+    force_reanalyze: bool = False,
     cancellation: asyncio.Event | None = None,
 ) -> StructuralIndexBuildResult:
     """Extract, resolve, and atomically persist facts without semantic analysis."""
@@ -114,7 +115,11 @@ def build_structural_index(
     for project_file in sorted(snapshot.files, key=lambda item: item.path):
         _raise_if_cancelled(cancellation)
         state = previous_states.get(project_file.path)
-        code_map = _reuse_code_map(lock, previous, state, project_file)
+        code_map = (
+            None
+            if force_reanalyze
+            else _reuse_code_map(lock, previous, state, project_file)
+        )
         if code_map is None:
             all_records_valid = False
             code_map = extract_code_map(
@@ -528,7 +533,6 @@ def _reuse_code_map(
         if (
             code_map.schema_version == CODEMAP_SCHEMA_VERSION
             and _map_matches_state(code_map, state)
-            and not any(item.code == "extractor_error" for item in code_map.diagnostics)
         )
         else None
     )

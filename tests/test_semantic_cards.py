@@ -582,7 +582,7 @@ def test_unchanged_enriched_generation_reuses_cards_without_provider_call(
         "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
     provider = _provider(lambda request, call: _response())
-    asyncio.run(
+    initial = asyncio.run(
         build_repository_index(
             tmp_path,
             provider=provider,
@@ -602,6 +602,7 @@ def test_unchanged_enriched_generation_reuses_cards_without_provider_call(
     assert provider.call_count == 1
     assert updated.semantic is not None
     assert updated.semantic.reused_paths == ("app.py",)
+    assert updated.manifest.generation_id == initial.manifest.generation_id
 
 
 def test_invalid_grounded_text_falls_back_after_grounding_validation(

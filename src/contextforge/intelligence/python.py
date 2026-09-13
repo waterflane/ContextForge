@@ -33,7 +33,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="4",
+    analyzer_version="5",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
