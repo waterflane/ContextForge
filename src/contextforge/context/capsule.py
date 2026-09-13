@@ -22,6 +22,7 @@ from contextforge.intelligence.indexer import (
 from contextforge.intelligence.models import IndexManifest, Sha256
 from contextforge.intelligence.retrieval import (
     CandidateCard,
+    CandidateEvidenceRange,
     ExactGroup,
     PlannedEvidence,
     RetrievalResult,
@@ -586,7 +587,7 @@ def _apply_greedy_upgrades(
                 ranges = (
                     working_lines.get(path, ())
                     if section == "working"
-                    else _automatic_slice_ranges(candidate)
+                    else _automatic_slice_ranges(state, candidate)
                 )
                 upgraded = _materialize(state, path, mode, candidate, ranges)
                 if upgraded is None:
@@ -735,7 +736,9 @@ def _candidate_role(path: str) -> str:
     return "source"
 
 
-def _automatic_slice_ranges(candidate: CandidateCard | None) -> tuple[SourceRange, ...]:
+def _automatic_slice_ranges(
+    state: _CompilerState, candidate: CandidateCard | None
+) -> tuple[SourceRange, ...]:
     if candidate is None:
         return ()
     ordered = sorted(
@@ -747,7 +750,51 @@ def _automatic_slice_ranges(candidate: CandidateCard | None) -> tuple[SourceRang
             item.evidence_id or "",
         ),
     )
-    return tuple(item.source_range for item in ordered[:AUTOMATIC_SLICE_MAX_RANGES])
+    if not ordered:
+        return ()
+    primary = ordered[0]
+    code_map = _code_map(state, candidate.path)
+    declaration = next(
+        (
+            (
+                symbol.declaration_range.start_line,
+                (symbol.body_range or symbol.declaration_range).end_line,
+            )
+            for symbol in code_map.symbols
+            if primary.source_range.start_line <= symbol.declaration_range.start_line
+            and primary.source_range.end_line >= symbol.declaration_range.end_line
+        ),
+        None,
+    )
+    if declaration is None or declaration[1] - declaration[0] < 80:
+        return tuple(item.source_range for item in ordered[:AUTOMATIC_SLICE_MAX_RANGES])
+    matched = {value.casefold() for value in candidate.matched_symbols}
+
+    def local_key(item: CandidateEvidenceRange) -> tuple[int, int, int, str]:
+        source_range = item.source_range
+        anchors_matched = any(
+            relationship.kind in {"call", "reference", "import"}
+            and relationship.target.observed_name is not None
+            and relationship.target.observed_name.casefold() in matched
+            and relationship.source_range.start_line <= source_range.end_line
+            and relationship.source_range.end_line >= source_range.start_line
+            for relationship in code_map.relationships
+        )
+        return (
+            0 if anchors_matched else 1,
+            source_range.start_line,
+            source_range.end_line,
+            item.evidence_id or "",
+        )
+
+    local = [
+        item
+        for item in sorted(ordered[1:], key=local_key)
+        if declaration[0] <= item.source_range.start_line
+        and item.source_range.end_line <= declaration[1]
+    ]
+    selected = (primary, *local[: AUTOMATIC_SLICE_MAX_RANGES - 1])
+    return tuple(item.source_range for item in selected)
 
 
 def _materialize(
@@ -948,14 +995,13 @@ def _slice_ranges(
     for evidence in evidence_ranges:
         overlapping = []
         for symbol in code_map.symbols:
-            declaration = symbol.body_range or symbol.declaration_range
+            declaration_start = symbol.declaration_range.start_line
+            declaration_end = (symbol.body_range or symbol.declaration_range).end_line
             if (
-                evidence.start_line <= declaration.end_line
-                and evidence.end_line >= declaration.start_line
+                evidence.start_line <= declaration_end
+                and evidence.end_line >= declaration_start
             ):
-                overlapping.append(
-                    (declaration.end_line - declaration.start_line, symbol)
-                )
+                overlapping.append((declaration_end - declaration_start, symbol))
         enclosing_symbol = (
             min(overlapping, key=lambda item: (item[0], item[1].symbol_id))[1]
             if overlapping
@@ -969,32 +1015,43 @@ def _slice_ranges(
                 )
             )
             continue
-        declaration = enclosing_symbol.body_range or enclosing_symbol.declaration_range
-        declaration_lines = declaration.end_line - declaration.start_line + 1
+        declaration_start = enclosing_symbol.declaration_range.start_line
+        declaration_end = (
+            enclosing_symbol.body_range or enclosing_symbol.declaration_range
+        ).end_line
+        declaration_lines = declaration_end - declaration_start + 1
         if declaration_lines <= 80:
             expanded.append(
                 (
-                    max(1, declaration.start_line - SLICE_CONTEXT_LINES),
-                    min(line_count, declaration.end_line + SLICE_CONTEXT_LINES),
+                    max(1, declaration_start - SLICE_CONTEXT_LINES),
+                    min(line_count, declaration_end + SLICE_CONTEXT_LINES),
                 )
             )
             continue
         header_end = min(
-            declaration.end_line,
+            declaration_end,
             (
                 enclosing_symbol.body_range.start_line
                 if enclosing_symbol.body_range is not None
-                else declaration.start_line
+                else declaration_start
             )
             + 2,
         )
-        expanded.append((declaration.start_line, header_end))
-        expanded.append(
-            (
-                max(declaration.start_line, evidence.start_line - SLICE_CONTEXT_LINES),
-                min(declaration.end_line, evidence.end_line + SLICE_CONTEXT_LINES),
+        expanded.append((declaration_start, header_end))
+        evidence_lines = evidence.end_line - evidence.start_line + 1
+        if evidence_lines <= 80:
+            expanded.append(
+                (
+                    max(
+                        declaration_start,
+                        evidence.start_line - SLICE_CONTEXT_LINES,
+                    ),
+                    min(
+                        declaration_end,
+                        evidence.end_line + SLICE_CONTEXT_LINES,
+                    ),
+                )
             )
-        )
     merged: list[list[int]] = []
     for start, end in sorted(set(expanded)):
         if merged and start <= merged[-1][1] + SLICE_MERGE_GAP + 1:

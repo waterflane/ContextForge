@@ -241,6 +241,41 @@ def test_large_full_file_requires_explicit_pin(tmp_path: Path) -> None:
     assert pinned.capsule.working_set[0].content == source
 
 
+def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
+    tmp_path: Path,
+) -> None:
+    body = "".join(
+        (
+            "    target_marker = target_step(value)\n"
+            if line == 60
+            else f"    padding_{line} = value + {line}\n"
+        )
+        for line in range(1, 151)
+    )
+    _write(
+        tmp_path,
+        "large_service.py",
+        "def target_step(value: int) -> int:\n    return value + 60\n\n"
+        f"def process_value(value: int) -> int:\n{body}    return target_marker\n",
+    )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "process_value target_step")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "explain process_value target_step",
+        retrieval,
+        budget=_budget(10_000),
+    )
+
+    material = compiled.capsule.task_context[0]
+    assert material.representation == RepresentationMode.SLICE
+    assert "def process_value" in material.content
+    assert "target_marker = target_step(value)" in material.content
+    assert "padding_120" not in material.content
+    assert material.token_count < 800
+
+
 def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
     tmp_path: Path,
 ) -> None:
