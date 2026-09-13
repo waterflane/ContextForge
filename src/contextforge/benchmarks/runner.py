@@ -22,6 +22,7 @@ from contextforge.application import (
     build_repository_index,
     suggest_repository_context,
 )
+from contextforge.benchmarks.answers import run_paired_answer_regression
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
 from contextforge.benchmarks.models import (
     BenchmarkAnyFileExpectation,
@@ -32,6 +33,7 @@ from contextforge.benchmarks.models import (
     BenchmarkLimitEvaluation,
     BenchmarkManifest,
     BenchmarkMode,
+    BenchmarkPairedAnswerEvaluation,
     BenchmarkPipeline,
     BenchmarkProviderCounters,
     BenchmarkRangeCoverage,
@@ -55,6 +57,7 @@ from contextforge.discovery import (
 )
 from contextforge.intelligence import (
     CandidateCard,
+    ContextPlanningMode,
     IndexManifest,
     IndexManifestNotFoundError,
     IndexManifestReadError,
@@ -107,6 +110,8 @@ class _CountingModelProvider:
         self.provider_capability_calls = 0
         self.transport_attempts = 0
         self.total_provider_http_calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
 
     @property
     def provider_id(self) -> str:
@@ -122,6 +127,10 @@ class _CountingModelProvider:
         cancellation: asyncio.Event | None = None,
     ) -> ModelResponse:
         self.model_calls += 1
+        estimated_input = sum(
+            (len(message.content.encode("utf-8")) + 2) // 3
+            for message in request.messages(include_response_schema=True)
+        )
         try:
             response = await self._provider.complete_structured(
                 request, cancellation=cancellation
@@ -134,6 +143,13 @@ class _CountingModelProvider:
             if exc.diagnostic is not None:
                 self.model_generations += exc.diagnostic.model_generations
                 self.repair_generations += exc.diagnostic.repair_generations
+                if exc.diagnostic.usage is not None:
+                    self.input_tokens += exc.diagnostic.usage.input_tokens or 0
+                    self.output_tokens += exc.diagnostic.usage.output_tokens or 0
+                else:
+                    self.input_tokens += estimated_input
+            else:
+                self.input_tokens += estimated_input
             raise
         diagnostic = response.diagnostic
         if diagnostic is None:
@@ -147,6 +163,15 @@ class _CountingModelProvider:
             self.provider_capability_calls += diagnostic.provider_capability_calls
             self.transport_attempts += diagnostic.transport_attempts
             self.total_provider_http_calls += diagnostic.total_provider_http_calls
+        usage = response.usage
+        if usage is None:
+            self.input_tokens += estimated_input
+            self.output_tokens += (
+                len(response.normalized_json.encode("utf-8")) + 2
+            ) // 3
+        else:
+            self.input_tokens += usage.input_tokens or estimated_input
+            self.output_tokens += usage.output_tokens or 0
         return response
 
     async def close(self) -> None:
@@ -311,6 +336,11 @@ async def _run_index_v3_once(
     candidates: tuple[CandidateCard, ...] = ()
     measurements = _SelectionMeasurements()
     counters = BenchmarkProviderCounters()
+    index_input_tokens = 0
+    index_output_tokens = 0
+    planning_input_tokens = 0
+    planning_output_tokens = 0
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     try:
         request = build_discovery_request(
             task=task.task,
@@ -355,11 +385,21 @@ async def _run_index_v3_once(
                     )
             else:
                 manifest = load_manifest(prepared)
+            index_input_tokens = counting_provider.input_tokens
+            index_output_tokens = counting_provider.output_tokens
             retrieval = await retrieve_context_candidates(
                 prepared,
                 task.task,
                 manifest=manifest,
                 diff_paths=diff_paths,
+                provider=counting_provider,
+                planning_mode=ContextPlanningMode.AUTO,
+            )
+            planning_input_tokens = max(
+                counting_provider.input_tokens - index_input_tokens, 0
+            )
+            planning_output_tokens = max(
+                counting_provider.output_tokens - index_output_tokens, 0
             )
             compiled = compile_context_capsule(
                 prepared,
@@ -372,6 +412,15 @@ async def _run_index_v3_once(
                     safety_margin_tokens=1_024,
                 ),
             )
+            if task.answer_assertions:
+                paired_answer = await run_paired_answer_regression(
+                    prepared,
+                    task.task,
+                    task.answer_assertions,
+                    task.oracle_ranges,
+                    compiled,
+                    counting_provider,
+                )
             candidates = tuple(
                 item
                 for item in retrieval.candidates
@@ -465,7 +514,12 @@ async def _run_index_v3_once(
         mode=mode,
         repetition=repetition,
         status=status,
-        passed=status == "complete" and expectations.passed and budgets.passed,
+        passed=(
+            status == "complete"
+            and expectations.passed
+            and budgets.passed
+            and (paired_answer is None or paired_answer.quality_not_lower)
+        ),
         duration_ms=duration_ms,
         selected_files=selected_files,
         files_considered=max(files_considered, len(selected_files)),
@@ -485,6 +539,11 @@ async def _run_index_v3_once(
         ungrounded_claims=measurements.ungrounded_claims,
         grounded_claims=measurements.grounded_claims,
         dropped_claims=measurements.dropped_claims,
+        index_input_tokens=index_input_tokens,
+        index_output_tokens=index_output_tokens,
+        planning_input_tokens=planning_input_tokens,
+        planning_output_tokens=planning_output_tokens,
+        paired_answer=paired_answer,
         latency_kind=_latency_kind(mode),
         expectations=expectations,
         budgets=budgets,

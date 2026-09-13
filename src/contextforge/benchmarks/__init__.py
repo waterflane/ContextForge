@@ -1,8 +1,14 @@
 """Public discovery benchmark manifest contracts."""
 
+from contextforge.benchmarks.answers import (
+    render_oracle_context,
+    run_paired_answer_regression,
+)
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
 from contextforge.benchmarks.models import (
     BENCHMARK_SCHEMA_VERSION,
+    BenchmarkAnswerCitation,
+    BenchmarkAnswerEvaluation,
     BenchmarkAnyFileExpectation,
     BenchmarkBudgetEvaluation,
     BenchmarkCohortMetrics,
@@ -11,6 +17,7 @@ from contextforge.benchmarks.models import (
     BenchmarkDurationSummary,
     BenchmarkExpectationEvaluation,
     BenchmarkExpectations,
+    BenchmarkExpectedAssertion,
     BenchmarkFailure,
     BenchmarkIndexPrecondition,
     BenchmarkIntegerRange,
@@ -18,6 +25,7 @@ from contextforge.benchmarks.models import (
     BenchmarkManifest,
     BenchmarkMode,
     BenchmarkModeOverrides,
+    BenchmarkPairedAnswerEvaluation,
     BenchmarkPairwiseJaccard,
     BenchmarkPipeline,
     BenchmarkProviderCounters,
@@ -33,6 +41,8 @@ from contextforge.benchmarks.runner import run_discovery_benchmark
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkAnyFileExpectation",
+    "BenchmarkAnswerCitation",
+    "BenchmarkAnswerEvaluation",
     "BenchmarkBudgetEvaluation",
     "BenchmarkCohortMetrics",
     "BenchmarkConfidenceSummary",
@@ -40,6 +50,7 @@ __all__ = [
     "BenchmarkDurationSummary",
     "BenchmarkExpectations",
     "BenchmarkExpectationEvaluation",
+    "BenchmarkExpectedAssertion",
     "BenchmarkFailure",
     "BenchmarkIndexPrecondition",
     "BenchmarkIntegerRange",
@@ -50,6 +61,7 @@ __all__ = [
     "BenchmarkProviderCounters",
     "BenchmarkRangeCoverage",
     "BenchmarkPairwiseJaccard",
+    "BenchmarkPairedAnswerEvaluation",
     "BenchmarkPipeline",
     "BenchmarkResult",
     "BenchmarkRunResult",
@@ -57,5 +69,7 @@ __all__ = [
     "BenchmarkTask",
     "calculate_benchmark_metrics",
     "load_benchmark_manifest",
+    "render_oracle_context",
     "run_discovery_benchmark",
+    "run_paired_answer_regression",
 ]

@@ -86,6 +86,58 @@ class BenchmarkSourceRange(BenchmarkModel):
         return self
 
 
+class BenchmarkExpectedAssertion(BenchmarkModel):
+    """One answer fact whose support is compared across paired contexts."""
+
+    assertion_id: str = Field(
+        min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
+    description: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return _validate_text(value, label="assertion description")
+
+
+class BenchmarkAnswerCitation(BenchmarkModel):
+    """One answer citation validated against a materialized source range."""
+
+    assertion_id: str
+    path: RepositoryRelativePath
+    start_line: PositiveInt
+    end_line: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_order(self) -> BenchmarkAnswerCitation:
+        if self.end_line < self.start_line:
+            raise ValueError("citation end must not precede its start")
+        return self
+
+
+class BenchmarkAnswerEvaluation(BenchmarkModel):
+    """Quality and token accounting for one downstream answer."""
+
+    assertion_ids: tuple[str, ...] = ()
+    citations: tuple[BenchmarkAnswerCitation, ...] = ()
+    valid_citation_count: NonNegativeInt = 0
+    invalid_citation_count: NonNegativeInt = 0
+    assertion_recall: Rate
+    citation_validity: Rate
+    input_tokens: NonNegativeInt = 0
+    output_tokens: NonNegativeInt = 0
+    duration_ms: NonNegativeInt = 0
+
+
+class BenchmarkPairedAnswerEvaluation(BenchmarkModel):
+    """Same-model comparison of manual oracle and ContextForge context."""
+
+    oracle: BenchmarkAnswerEvaluation
+    contextforge: BenchmarkAnswerEvaluation
+    input_token_reduction: float = Field(allow_inf_nan=False)
+    quality_not_lower: bool
+
+
 class BenchmarkRangeCoverage(BenchmarkModel):
     """Observed coverage for one required source range."""
 
@@ -249,6 +301,9 @@ class BenchmarkTask(BenchmarkExpectations):
     task_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
     repository_path: RepositoryRelativePath
     task: str = Field(min_length=1, max_length=20_000)
+    answer_assertions: tuple[BenchmarkExpectedAssertion, ...] = ()
+    oracle_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    dataset_split: Literal["none", "tuning", "holdout"] = "none"
     pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     modes: tuple[BenchmarkMode, ...] = Field(min_length=1)
     repeat_count: PositiveInt = 1
@@ -283,6 +338,21 @@ class BenchmarkTask(BenchmarkExpectations):
     @classmethod
     def validate_task_text(cls, value: str) -> str:
         return _validate_text(value, label="task")
+
+    @field_validator("oracle_ranges")
+    @classmethod
+    def validate_oracle_ranges(
+        cls, value: tuple[BenchmarkSourceRange, ...]
+    ) -> tuple[BenchmarkSourceRange, ...]:
+        keys = tuple((item.path, item.start_line, item.end_line) for item in value)
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("oracle_ranges must be sorted and unique")
+        previous_by_path: dict[str, int] = {}
+        for item in value:
+            if item.start_line <= previous_by_path.get(item.path, 0):
+                raise ValueError("oracle_ranges for one path must not overlap")
+            previous_by_path[item.path] = item.end_line
+        return value
 
     @field_validator("modes", mode="before")
     @classmethod
@@ -322,6 +392,13 @@ class BenchmarkTask(BenchmarkExpectations):
         ):
             raise ValueError(
                 "index_precondition requires an indexed or hybrid task mode"
+            )
+        assertion_ids = tuple(item.assertion_id for item in self.answer_assertions)
+        if assertion_ids != tuple(sorted(set(assertion_ids))):
+            raise ValueError("answer assertions must use canonical unique IDs")
+        if bool(self.answer_assertions) != bool(self.oracle_ranges):
+            raise ValueError(
+                "answer_assertions and oracle_ranges must be configured together"
             )
         return self
 
@@ -454,6 +531,11 @@ class BenchmarkRunResult(BenchmarkModel):
     ungrounded_claims: NonNegativeInt = 0
     grounded_claims: NonNegativeInt = 0
     dropped_claims: NonNegativeInt = 0
+    index_input_tokens: NonNegativeInt = 0
+    index_output_tokens: NonNegativeInt = 0
+    planning_input_tokens: NonNegativeInt = 0
+    planning_output_tokens: NonNegativeInt = 0
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation
     budgets: BenchmarkBudgetEvaluation
@@ -567,6 +649,8 @@ def load_benchmark_manifest(path: str | Path) -> BenchmarkManifest:
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkAnyFileExpectation",
+    "BenchmarkAnswerCitation",
+    "BenchmarkAnswerEvaluation",
     "BenchmarkBudgetEvaluation",
     "BenchmarkCohortMetrics",
     "BenchmarkConfidenceSummary",
@@ -574,6 +658,7 @@ __all__ = [
     "BenchmarkDurationSummary",
     "BenchmarkExpectations",
     "BenchmarkExpectationEvaluation",
+    "BenchmarkExpectedAssertion",
     "BenchmarkFailure",
     "BenchmarkIntegerRange",
     "BenchmarkIndexPrecondition",
@@ -583,6 +668,7 @@ __all__ = [
     "BenchmarkModeOverrides",
     "BenchmarkProviderCounters",
     "BenchmarkPairwiseJaccard",
+    "BenchmarkPairedAnswerEvaluation",
     "BenchmarkPipeline",
     "BenchmarkRangeCoverage",
     "BenchmarkResult",
