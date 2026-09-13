@@ -697,6 +697,31 @@ def test_exact_identifier_restores_evidence_beyond_bounded_postings(
     assert any(item.source_range.end_line == 182 for item in candidate.evidence_ranges)
 
 
+def test_code_shaped_identifier_suppresses_incidental_exact_prose_symbols(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "noise.py", "def search():\n    return None\n")
+    _write(
+        tmp_path,
+        "target.py",
+        "def route(planning_mode):\n    return planning_mode\n",
+    )
+    report = _build(tmp_path)
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Search where planning_mode is applied",
+            manifest=report.manifest,
+        )
+    )
+
+    assert result.candidates[0].path == "target.py"
+    assert result.candidates[0].exact_group == "exact_source_identifier"
+    noise = next(item for item in result.candidates if item.path == "noise.py")
+    assert noise.exact_group == "approximate"
+
+
 def test_retrieval_uses_digest_bound_grounding_without_reopening_cards(
     tmp_path: Path,
 ) -> None:

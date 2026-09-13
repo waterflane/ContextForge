@@ -722,6 +722,7 @@ def _rank_candidates(
         raise TypeError("relationship graph is required")
     query_terms = _tokens(task)
     task_folded = task.casefold()
+    identifier_task_folded = _exact_identifier_scope(task)
     working = set(working_set)
     diff = set(diff_paths)
     exact_by_path: dict[str, ExactGroup] = {}
@@ -733,17 +734,17 @@ def _rank_candidates(
         qualified_matches = tuple(
             value
             for value in document.qualified_symbols
-            if _exact_text(task_folded, value.casefold())
+            if _exact_text(identifier_task_folded, value.casefold())
         )
         symbol_matches = tuple(
             value
             for value in document.symbols
-            if _exact_text(task_folded, value.casefold())
+            if _exact_text(identifier_task_folded, value.casefold())
         )
         identifier_matches = tuple(
             value
             for value in document.source_identifiers
-            if _exact_text(task_folded, value.casefold())
+            if _exact_text(identifier_task_folded, value.casefold())
         )
         if qualified_matches:
             groups.append("exact_qualified_symbol")
@@ -1486,6 +1487,21 @@ def _exact_text(task: str, value: str) -> bool:
     if not value:
         return False
     return re.search(rf"(?<![\w]){re.escape(value)}(?![\w])", task) is not None
+
+
+def _exact_identifier_scope(task: str) -> str:
+    """Prefer explicit code-shaped identifiers over incidental prose words."""
+
+    values = re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*", task)
+    explicit = tuple(
+        value
+        for value in values
+        if "_" in value
+        or "." in value
+        or "::" in value
+        or re.search(r"[a-z][A-Z]", value) is not None
+    )
+    return " ".join(explicit).casefold() if explicit else task
 
 
 def _group_order(group: ExactGroup) -> int:
