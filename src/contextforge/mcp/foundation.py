@@ -48,6 +48,7 @@ from contextforge.intelligence import (
     retrieve_context_candidates,
 )
 from contextforge.models import ModelProvider
+from contextforge.project_config import load_project_configuration
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 MCP_MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -510,6 +511,7 @@ class ReadOnlyMCPFoundation:
         try:
             value = _SearchInput.model_validate(arguments)
             manifest = self._require_manifest()
+            project = load_project_configuration(self.snapshot.root)
             planning_mode = _mcp_planning_mode(value)
             if planning_mode == "required" and self.provider is None:
                 raise ReadOnlyToolError(
@@ -525,6 +527,30 @@ class ReadOnlyMCPFoundation:
                 provider=self.provider,
                 rerank=value.rerank,
                 planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=project.models.context_planning_max_rounds,
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
             )
             return result.model_dump(mode="json")
         except ReadOnlyToolError:
@@ -573,6 +599,7 @@ class ReadOnlyMCPFoundation:
         try:
             value = _CompileInput.model_validate(arguments)
             manifest = self._require_manifest()
+            project = load_project_configuration(self.snapshot.root)
             planning_mode = _mcp_planning_mode(value)
             if planning_mode == "required" and self.provider is None:
                 raise ReadOnlyToolError(
@@ -597,6 +624,30 @@ class ReadOnlyMCPFoundation:
                 provider=self.provider,
                 rerank=value.rerank,
                 planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=project.models.context_planning_max_rounds,
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
             )
             ranges: dict[str, list[SourceRange]] = {}
             for item in value.working_lines:

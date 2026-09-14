@@ -628,6 +628,100 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
     assert set(result.evidence_plan.items[0].evidence_ids) <= supplied
 
 
+def test_agentic_planner_discovers_candidate_outside_initial_pool(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "decoy.py", "def unrelated():\n    return 'decoy'\n")
+    _write(
+        tmp_path,
+        "lifecycle.py",
+        "def shutdown_worker():\n    return 'stopped'\n",
+    )
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            assert len(facts["candidates"]) == 1
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {
+                            "action": "symbol",
+                            "identifier": "shutdown_worker",
+                            "limit": 4,
+                        }
+                    ],
+                }
+            )
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "lifecycle.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "explain unrelated",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.items[0].path == "lifecycle.py"
+    assert result.evidence_plan.diagnostics.rounds == 2
+    assert result.provider_calls == 2
+
+
+def test_agentic_planner_rejects_unsupplied_graph_target(tmp_path: Path) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return None\n")
+    report = _build(tmp_path)
+    provider = _provider(
+        lambda request, call: json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {"action": "graph", "candidate_id": "not-supplied", "hops": 2}
+                ],
+            }
+        )
+    )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "serve",
+            manifest=report.manifest,
+            provider=provider,
+            planning_mode="auto",
+        )
+    )
+
+    assert result.evidence_plan is None
+    assert result.diagnostics == ("planner_unknown_action_target",)
+    assert result.provider_calls == 1
+
+
 def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> None:
     _write(tmp_path, "service.py", "def serve():\n    return None\n")
     report = _build(tmp_path)

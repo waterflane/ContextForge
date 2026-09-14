@@ -1109,6 +1109,24 @@ class BridgeServer:
                     if project is None
                     else project.models.context_planning_max_output_tokens
                 ),
+                planning_max_rounds=(
+                    3 if project is None else project.models.context_planning_max_rounds
+                ),
+                planning_max_total_input_tokens=(
+                    24_576
+                    if project is None
+                    else project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    4
+                    if project is None
+                    else project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    64
+                    if project is None
+                    else project.models.context_planning_max_pool_candidates
+                ),
                 planning_request_timeout_seconds=(
                     60.0
                     if project is None

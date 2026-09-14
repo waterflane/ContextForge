@@ -208,8 +208,11 @@ async def main(
                     "plan_valid": plan_valid,
                     "plan_sufficiency": plan.sufficiency if plan else None,
                     "planning_diagnostics": (
-                        plan.diagnostics.model_dump(mode="json") if plan else None
+                        planned.planning_diagnostics.model_dump(mode="json")
+                        if planned.planning_diagnostics is not None
+                        else None
                     ),
+                    "retrieval_diagnostics": list(planned.diagnostics),
                     "material": [
                         {
                             "path": item.path,

@@ -999,6 +999,18 @@ def _card_request(
         "allowed_symbol_evidence_ids": [
             item.evidence_id for item in evidence if item.symbol_id is not None
         ],
+        "verified_symbols": [
+            {
+                "evidence_id": item.evidence_id,
+                "name": symbol.name,
+                "qualified_name": symbol.qualified_name,
+                "kind": symbol.kind,
+            }
+            for item in evidence
+            if item.symbol_id is not None
+            for symbol in code_map.symbols
+            if symbol.symbol_id == item.symbol_id
+        ],
         "relationship_candidates": [
             {
                 "candidate_id": item.candidate_id,
@@ -1453,7 +1465,23 @@ def _claim_has_anchor(
     verified_identifiers = {
         value.casefold().lstrip("_")
         for symbol in code_map.symbols
-        for value in (symbol.name, symbol.qualified_name)
+        for value in (
+            symbol.name,
+            symbol.qualified_name,
+            *(parameter.name for parameter in symbol.parameters),
+            *(
+                part
+                for call in symbol.direct_calls
+                for part in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", call.observed_name)
+            ),
+            *(
+                part
+                for reference in symbol.direct_references
+                for part in re.findall(
+                    r"[A-Za-z_][A-Za-z0-9_]*", reference.observed_name
+                )
+            ),
+        )
     }
     claim_identifiers = {
         item.casefold().lstrip("_")
@@ -1467,6 +1495,8 @@ def _claim_has_anchor(
         return False
     anchor_tokens = _lexical_roots(_anchor_tokens(joined_anchor_text))
     claim_tokens = _lexical_roots(claim_tokens)
+    if claim_tokens.intersection(_lexical_roots(verified_identifiers)):
+        return True
     return len(claim_tokens.intersection(anchor_tokens)) >= 2
 
 

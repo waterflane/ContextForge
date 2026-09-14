@@ -134,6 +134,7 @@ async def search(request: SearchRequest) -> dict[str, object]:
     provider: ModelProvider | None = None
     try:
         root = _root(request.repository_root)
+        project = load_project_configuration(root)
         provider = _planning_provider(root, request.planning_mode)
         result = await retrieve_context_candidates(
             root,
@@ -143,6 +144,28 @@ async def search(request: SearchRequest) -> dict[str, object]:
             limit=request.limit,
             provider=provider,
             planning_mode=request.planning_mode,
+            planning_max_candidates=project.models.context_planning_max_candidates,
+            planning_max_files=project.models.context_planning_max_files,
+            planning_max_ranges_per_file=(
+                project.models.context_planning_max_ranges_per_file
+            ),
+            planning_max_input_tokens=project.models.context_planning_max_input_tokens,
+            planning_max_output_tokens=(
+                project.models.context_planning_max_output_tokens
+            ),
+            planning_max_rounds=project.models.context_planning_max_rounds,
+            planning_max_total_input_tokens=(
+                project.models.context_planning_max_total_input_tokens
+            ),
+            planning_max_actions_per_round=(
+                project.models.context_planning_max_actions_per_round
+            ),
+            planning_max_pool_candidates=(
+                project.models.context_planning_max_pool_candidates
+            ),
+            planning_request_timeout_seconds=(
+                project.models.context_planning_request_timeout_seconds
+            ),
         )
         return result.model_dump(mode="json")
     except (OSError, ProjectConfigError, ValueError, RuntimeError) as exc:
@@ -200,6 +223,7 @@ async def compile_capsule(request: CompileRequest) -> dict[str, object]:
     try:
         root = _root(request.repository_root)
         manifest = load_manifest(root)
+        project = load_project_configuration(root)
         provider = _planning_provider(root, request.planning_mode)
         working = tuple(
             sorted(
@@ -219,6 +243,28 @@ async def compile_capsule(request: CompileRequest) -> dict[str, object]:
             limit=request.limit,
             provider=provider,
             planning_mode=request.planning_mode,
+            planning_max_candidates=project.models.context_planning_max_candidates,
+            planning_max_files=project.models.context_planning_max_files,
+            planning_max_ranges_per_file=(
+                project.models.context_planning_max_ranges_per_file
+            ),
+            planning_max_input_tokens=project.models.context_planning_max_input_tokens,
+            planning_max_output_tokens=(
+                project.models.context_planning_max_output_tokens
+            ),
+            planning_max_rounds=project.models.context_planning_max_rounds,
+            planning_max_total_input_tokens=(
+                project.models.context_planning_max_total_input_tokens
+            ),
+            planning_max_actions_per_round=(
+                project.models.context_planning_max_actions_per_round
+            ),
+            planning_max_pool_candidates=(
+                project.models.context_planning_max_pool_candidates
+            ),
+            planning_request_timeout_seconds=(
+                project.models.context_planning_request_timeout_seconds
+            ),
         )
         grouped: dict[str, list[SourceRange]] = {}
         for item in request.working_lines:

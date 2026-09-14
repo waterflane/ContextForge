@@ -194,6 +194,15 @@ def suggest_context(
             case_sensitive=False,
         ),
     ] = None,
+    planning_rounds: Annotated[
+        int | None,
+        typer.Option(
+            "--planning-rounds",
+            min=1,
+            max=3,
+            help="Maximum bounded model discovery rounds (1-3).",
+        ),
+    ] = None,
     legacy_discovery: Annotated[
         bool,
         typer.Option(
@@ -244,6 +253,7 @@ def suggest_context(
             explain=explain,
             rerank=rerank,
             planning=planning,
+            planning_rounds=planning_rounds,
             rerank_alias=rerank_alias,
             output=output,
             force=force,
@@ -346,6 +356,7 @@ def _suggest_retrieval_context(
     explain: bool,
     rerank: bool,
     planning: ContextPlanningMode | None,
+    planning_rounds: int | None,
     rerank_alias: bool | None,
     output: Path | None,
     force: bool,
@@ -391,6 +402,20 @@ def _suggest_retrieval_context(
                 ),
                 planning_max_output_tokens=(
                     project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=(
+                    project.models.context_planning_max_rounds
+                    if planning_rounds is None
+                    else planning_rounds
+                ),
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
                 ),
                 planning_request_timeout_seconds=(
                     project.models.context_planning_request_timeout_seconds
@@ -669,6 +694,15 @@ def create_context(
             case_sensitive=False,
         ),
     ] = None,
+    planning_rounds: Annotated[
+        int | None,
+        typer.Option(
+            "--planning-rounds",
+            min=1,
+            max=3,
+            help="Maximum bounded model discovery rounds (1-3).",
+        ),
+    ] = None,
     legacy_handoff: Annotated[
         bool,
         typer.Option(
@@ -727,6 +761,7 @@ def create_context(
             safety_margin_tokens is not None,
             rerank,
             planning is not None,
+            planning_rounds is not None,
         )
     )
     if task is not None and (
@@ -753,6 +788,7 @@ def create_context(
             safety_margin_tokens=safety_margin_tokens,
             rerank=rerank,
             planning=planning,
+            planning_rounds=planning_rounds,
             rerank_alias=rerank_alias,
             output_format=output_format,
             output=output,
@@ -901,6 +937,7 @@ def _create_capsule_context(
     safety_margin_tokens: int | None,
     rerank: bool,
     planning: ContextPlanningMode | None,
+    planning_rounds: int | None,
     rerank_alias: bool | None,
     output_format: ContextFormat,
     output: Path | None,
@@ -986,6 +1023,20 @@ def _create_capsule_context(
                 ),
                 planning_max_output_tokens=(
                     project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=(
+                    project.models.context_planning_max_rounds
+                    if planning_rounds is None
+                    else planning_rounds
+                ),
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
                 ),
                 planning_request_timeout_seconds=(
                     project.models.context_planning_request_timeout_seconds
