@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.cards import SemanticCard, load_semantic_card
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.graph import OrientationMap
 from contextforge.intelligence.indexer import (
     load_file_code_map,
@@ -723,17 +724,7 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
 
 
 def _candidate_role(path: str) -> str:
-    lowered = path.casefold()
-    parts = lowered.split("/")
-    name = parts[-1]
-    suffix = Path(name).suffix
-    if "tests" in parts or name.startswith("test_") or name.endswith("_test.py"):
-        return "test"
-    if suffix in {".md", ".rst", ".adoc"}:
-        return "documentation"
-    if suffix in {".toml", ".yaml", ".yml", ".ini", ".cfg", ".env"}:
-        return "config"
-    return "source"
+    return FILE_POLICY_REGISTRY.candidate_role(path)
 
 
 def _automatic_slice_ranges(

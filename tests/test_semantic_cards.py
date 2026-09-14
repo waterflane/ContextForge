@@ -152,7 +152,7 @@ def test_repository_maps_project_grounded_claims_and_enriched_graph(
 
 def test_invalid_required_grounding_gets_exactly_one_repair(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text(
-        "def handle() -> None:\n    pass\n", encoding="utf-8"
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
     provider = _provider(
         lambda request, call: _response(
@@ -175,7 +175,7 @@ def test_invalid_required_grounding_gets_exactly_one_repair(tmp_path: Path) -> N
 
 
 def test_content_cache_rebinds_unchanged_source_after_rename(tmp_path: Path) -> None:
-    source = "def handle() -> None:\n    pass\n"
+    source = "def handle(request: str) -> str:\n    return request\n"
     (tmp_path / "old.py").write_text(source, encoding="utf-8")
     provider = _provider(lambda request, call: _response())
     asyncio.run(
@@ -207,10 +207,10 @@ def test_content_cache_rebinds_unchanged_source_after_rename(tmp_path: Path) -> 
 
 def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
     (tmp_path / "failed.py").write_text(
-        "def failed() -> None:\n    pass\n", encoding="utf-8"
+        "def failed(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
     (tmp_path / "old.py").write_text(
-        "def handle() -> None:\n    pass\n", encoding="utf-8"
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
 
     def respond(request: object, call: int) -> str:
@@ -254,7 +254,7 @@ def test_previous_card_reuse_ignores_unavailable_or_ineligible_generations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "app.py").write_text(
-        "def handle() -> None:\n    pass\n", encoding="utf-8"
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
     provider = _provider(lambda request, call: _response())
     report = asyncio.run(
@@ -289,7 +289,7 @@ def test_whole_generation_reuse_rejects_incompatible_semantic_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "app.py").write_text(
-        "def handle() -> None:\n    pass\n", encoding="utf-8"
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
     provider = _provider(lambda request, call: _response())
     report = asyncio.run(
@@ -707,7 +707,10 @@ def test_profile_facts_survive_independent_optional_filtering(tmp_path: Path) ->
                 "side_effects": [],
                 "profile_facts": {
                     "apis": [
-                        {"text": "Public handler API", "evidence_ids": ["symbol:0000"]},
+                        {
+                            "text": "Public handle API",
+                            "evidence_ids": ["symbol:0000"],
+                        },
                         {"text": "Ungrounded API", "evidence_ids": ["unknown"]},
                     ]
                 },
@@ -725,7 +728,7 @@ def test_profile_facts_survive_independent_optional_filtering(tmp_path: Path) ->
     card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
 
     assert card.quality == "partial"
-    assert [item.text for item in card.profile_facts["apis"]] == ["Public handler API"]
+    assert [item.text for item in card.profile_facts["apis"]] == ["Public handle API"]
     assert card.key_symbols == ()
 
 
@@ -737,7 +740,8 @@ def test_lexically_unanchored_optional_claim_is_not_ranking_text(
     )
     payload = json.loads(_response())
     payload["side_effects"] = [
-        {"text": "quantum banana teleportation", "evidence_ids": ["file"]}
+        {"text": "quantum banana teleportation", "evidence_ids": ["file"]},
+        {"text": "Likely handles requests", "evidence_ids": ["file"]},
     ]
     provider = _provider(lambda request, call: json.dumps(payload))
 
@@ -753,6 +757,7 @@ def test_lexically_unanchored_optional_claim_is_not_ranking_text(
     assert card.quality == "partial"
     assert card.side_effects == ()
     assert "quantum" not in card.ranking_text()
+    assert "likely" not in card.ranking_text().casefold()
 
 
 def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
@@ -837,6 +842,98 @@ def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
     assert tuple(item.start_line for item in card.coverage_ranges) == tuple(
         sorted(item.start_line for item in card.coverage_ranges)
     )
+
+
+def test_source_first_request_covers_142_line_typescript_in_one_call(
+    tmp_path: Path,
+) -> None:
+    padding = "\n".join(
+        f"// progress state transition documentation line {index:03d}"
+        for index in range(139)
+    )
+    source = (
+        f"{padding}\n"
+        "export function preparationProgressStage(value: number): number {\n"
+        "  return value + 1\n"
+        "}\n"
+    )
+    assert len(source.splitlines()) == 142
+    (tmp_path / "progress.ts").write_text(source, encoding="utf-8")
+    observed_ranges: list[dict[str, int]] = []
+
+    def respond(request: object, call: int) -> str:
+        del call
+        trusted = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        observed_ranges.append(trusted["chunk_range"])
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": "preparationProgressStage function",
+                    "evidence_ids": ["symbol:0000"],
+                },
+                "concepts": [
+                    {
+                        "text": "preparationProgressStage",
+                        "evidence_ids": ["symbol:0000"],
+                    }
+                ],
+                "responsibilities": [],
+                "key_symbols": [{"evidence_id": "symbol:0000"}],
+                "side_effects": [],
+                "profile_facts": {},
+                "inferred_relationships": [],
+            }
+        )
+
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="http://127.0.0.1:1",
+        model_id="semantic-card-source-first",
+        context_window=32_768,
+        context_safety_margin=256,
+        retry_limit=0,
+        max_json_repair_attempts=0,
+    )
+    provider = FakeModelProvider(configuration, responder=respond)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=configuration,
+            semantic_max_output_tokens=256,
+        )
+    )
+    card = load_semantic_card(tmp_path, "progress.ts", manifest=report.manifest)
+
+    assert provider.call_count == 1
+    assert observed_ranges == [
+        {"start_line": 1, "start_column": 0, "end_line": 142, "end_column": 2}
+    ]
+    assert card.coverage_ranges[0].start_line == 1
+    assert card.coverage_ranges[0].end_line == 142
+
+
+def test_deterministic_card_evidence_and_record_size_are_bounded(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(
+        f"def function_{index}():\n    return {index}" for index in range(100)
+    )
+    (tmp_path / "many.py").write_text(source + "\n", encoding="utf-8")
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    card = load_semantic_card(tmp_path, "many.py", manifest=report.manifest)
+
+    assert len(card.evidence) <= 32
+    assert len(card.key_symbols) <= 12
+    assert len(card.model_dump_json().encode("utf-8")) <= 128 * 1024
 
 
 def test_global_request_and_full_request_token_ceilings_include_repair(
@@ -1139,7 +1236,7 @@ def test_inferred_relationships_validate_and_rebind_both_renames(
                 },
             ]
         payload = json.loads(_response())
-        stem = str(trusted["path"]).removesuffix(".py")
+        stem = "source" if "source" in str(trusted["path"]) else "target"
         payload["synopsis"] = {
             "text": f"{stem} function",
             "evidence_ids": ["symbol:0000"],
