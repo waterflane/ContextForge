@@ -259,7 +259,7 @@ def _polyglot_import_candidates(
     relative = module.startswith((".", "crate::", "self::"))
     normalized = module.replace("::", "/").replace("\\", "/")
     normalized = normalized.removeprefix("crate/").removeprefix("self/")
-    if source_language in {"Java", "C#"}:
+    if source_language in {"Java", "C#", "Kotlin"}:
         normalized = normalized.replace(".", "/")
     normalized = normalized.strip("/")
     bases = [normalized]

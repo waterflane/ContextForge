@@ -69,12 +69,15 @@ def relationship_coverage(
         code_map = maps.get(path)
         status = "unknown"
         if code_map is not None:
-            if code_map.language == "Python" and code_map.analyzer == PYTHON_ANALYZER:
-                status = "supported" if code_map.parse_status == "parsed" else "partial"
-            elif (
+            rich_analyzer = (
+                code_map.language == "Python" and code_map.analyzer == PYTHON_ANALYZER
+            ) or (
                 code_map.language in SUPPORTED_POLYGLOT_LANGUAGES
                 and code_map.analyzer == POLYGLOT_ANALYZER
-            ) or (
+            )
+            if rich_analyzer:
+                status = "supported" if code_map.parse_status == "parsed" else "partial"
+            elif (
                 code_map.language in RELATIONSHIP_SOURCE_LANGUAGES
                 and code_map.analyzer == FALLBACK_ANALYZER
                 and code_map.parse_status == "unsupported"
@@ -88,13 +91,14 @@ def relationship_coverage(
         "scope": "recognized programming-language files in the current repository",
         "file_counts": groups,
         "limitations": [
-            "Only Python static calls and imports are extracted and resolved.",
-            "TypeScript and other polyglot calls/imports are not indexed.",
+            "Python and registered Tree-sitter languages expose static declarations, "
+            "imports, calls, and references.",
+            "Package- and convention-based polyglot resolution is best-effort.",
             "Recognized source languages without relationship extraction are counted "
             "as unsupported.",
             "Zero matches does not establish absence of dynamic "
             "or unindexed references.",
-            "Unresolved counts include only observed calls.",
+            "Dynamic dispatch and ambiguous identifiers remain unresolved.",
         ],
     }
 

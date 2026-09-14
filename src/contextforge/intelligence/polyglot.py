@@ -28,7 +28,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="7",
+    analyzer_version="8",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -40,6 +40,7 @@ SUPPORTED_POLYGLOT_LANGUAGES = (
     "Go",
     "Java",
     "JavaScript",
+    "Kotlin",
     "PHP",
     "Ruby",
     "Rust",
@@ -53,6 +54,7 @@ _GRAMMARS: dict[str, tuple[str, str]] = {
     "Go": ("tree_sitter_go", "language"),
     "Java": ("tree_sitter_java", "language"),
     "JavaScript": ("tree_sitter_javascript", "language"),
+    "Kotlin": ("tree_sitter_kotlin", "language"),
     "PHP": ("tree_sitter_php", "language_php"),
     "Ruby": ("tree_sitter_ruby", "language"),
     "Rust": ("tree_sitter_rust", "language"),
@@ -86,6 +88,13 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
         "interface_declaration": SymbolKind.INTERFACE,
         "method_declaration": SymbolKind.METHOD,
         "record_declaration": SymbolKind.STRUCT,
+    },
+    "Kotlin": {
+        "class_declaration": SymbolKind.CLASS,
+        "function_declaration": SymbolKind.FUNCTION,
+        "object_declaration": SymbolKind.CLASS,
+        "secondary_constructor": SymbolKind.CONSTRUCTOR,
+        "type_alias": SymbolKind.TYPE_ALIAS,
     },
     "C#": {
         "class_declaration": SymbolKind.CLASS,
@@ -192,7 +201,7 @@ def extract_polyglot_code_map(
     rules = STRUCTURAL_CAPTURE_RULES[language_name]
     parser = Parser(_language(language_name, project_file.path))
     tree = parser.parse(source_bytes)
-    diagnostics = _diagnostics(tree.root_node)
+    diagnostics = _diagnostics(tree.root_node, selected.source_line_count)
     drafts: list[_Draft] = []
     omitted: list[ParserDiagnostic] = []
 
@@ -200,7 +209,7 @@ def extract_polyglot_code_map(
         next_parent = parent_index
         declaration_node: Node | None = None
         prototype_name: Node | None = None
-        verified = not node.has_error
+        verified = _declaration_node_is_verified(node, language_name)
         ancestor = node.parent
         while verified and ancestor is not None:
             verified = not ancestor.is_error and not ancestor.is_missing
@@ -431,6 +440,7 @@ def extract_polyglot_code_map(
 
 
 _IMPORT_ANCESTORS = {
+    "import",
     "import_declaration",
     "import_spec",
     "import_statement",
@@ -471,6 +481,7 @@ _BINDING_CAPTURES: dict[str, frozenset[str]] = {
     ),
     "Rust": frozenset({"const_item", "static_item"}),
     "Java": frozenset({"variable_declarator"}),
+    "Kotlin": frozenset({"property_declaration"}),
     "C#": frozenset({"variable_declarator"}),
     "Go": frozenset({"var_spec", "const_spec"}),
     "C": frozenset({"init_declarator", "identifier", "field_identifier"}),
@@ -597,8 +608,8 @@ def _import_specs(
             add(
                 "::".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None
             )
-    elif language in {"Java", "C#"}:
-        keyword = "import" if language == "Java" else "using"
+    elif language in {"Java", "C#", "Kotlin"}:
+        keyword = "import" if language in {"Java", "Kotlin"} else "using"
         match = re.search(rf"\b{keyword}\s+(?:static\s+)?([A-Za-z_][\w.]*)", line)
         if match:
             parts = match.group(1).split(".")
@@ -802,6 +813,22 @@ def _contains_range(container: SourceRange, nested: SourceRange) -> bool:
     return start <= nested_start and nested_end <= end
 
 
+def _declaration_node_is_verified(node: Node, language: str) -> bool:
+    """Reject malformed declarations while tolerating Kotlin virtual semicolons."""
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.is_error:
+            return False
+        if current.is_missing and not (
+            language == "Kotlin" and current.type == "_class_member_semi"
+        ):
+            return False
+        stack.extend(current.children)
+    return True
+
+
 def _module_has_executable_code(root: Node, rules: StructuralCaptureRules) -> bool:
     if not rules.module_executable:
         return False
@@ -870,6 +897,45 @@ def _binding(
                 else b"const" in header.split()
             )
             return name, SymbolKind.CONSTANT if constant else SymbolKind.VARIABLE, None
+    if language == "Kotlin" and node.type == "property_declaration":
+        variable = next(
+            (
+                child
+                for child in node.named_children
+                if child.type == "variable_declaration"
+            ),
+            None,
+        )
+        name = (
+            None
+            if variable is None
+            else next(
+                (
+                    child
+                    for child in variable.named_children
+                    if child.type == "identifier"
+                ),
+                None,
+            )
+        )
+        if name is not None:
+            callable_node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "lambda_literal"
+                ),
+                None,
+            )
+            return (
+                name,
+                SymbolKind.FUNCTION
+                if callable_node is not None
+                else SymbolKind.CONSTANT
+                if "const" in _modifier_words(node, source)
+                else SymbolKind.VARIABLE,
+                callable_node,
+            )
     if language == "Go" and node.type in {"var_spec", "const_spec"}:
         name = node.child_by_field_name("name")
         if name is not None:
@@ -1076,7 +1142,7 @@ def _modifier_words(node: Node, source: bytes) -> set[str]:
     return words
 
 
-def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
+def _diagnostics(root: Node, line_count: int) -> tuple[ParserDiagnostic, ...]:
     result: list[ParserDiagnostic] = []
     stack = [root]
     while stack and len(result) < 20:
@@ -1087,7 +1153,7 @@ def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
                     code="tree_sitter_parse_error",
                     message=f"Tree-sitter reported {node.type!r} syntax",
                     severity="error",
-                    range=_range(node),
+                    range=_bounded_range(node, line_count),
                 )
             )
         stack.extend(reversed(node.named_children))
@@ -1099,6 +1165,19 @@ def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
                 item.range.start_column if item.range else 0,
             ),
         )
+    )
+
+
+def _bounded_range(node: Node, line_count: int) -> SourceRange:
+    source_range = _range(node)
+    maximum = max(line_count, 1)
+    start_line = min(source_range.start_line, maximum)
+    end_line = min(max(source_range.end_line, start_line), maximum)
+    return SourceRange(
+        start_line=start_line,
+        start_column=source_range.start_column if start_line < maximum else 0,
+        end_line=end_line,
+        end_column=source_range.end_column if end_line < maximum else 0,
     )
 
 
