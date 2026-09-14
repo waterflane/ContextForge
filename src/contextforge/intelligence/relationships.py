@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Literal
@@ -15,6 +16,7 @@ from contextforge.intelligence.codemap import (
     RelationshipRecord,
     RelationshipTarget,
     SourceRange,
+    StructuralOccurrenceCount,
     SymbolRecord,
     stable_fact_id,
 )
@@ -63,12 +65,14 @@ def resolve_relationships(
                 )
                 for symbol in code_map.symbols
             )
+        symbols, occurrence_counts = _compact_occurrences(symbols)
         relationships = _rebuild_resolved_relationships(code_map, imports, symbols)
         resolved.append(
             code_map.model_copy(
                 update={
                     "imports": imports,
                     "symbols": symbols,
+                    "occurrence_counts": occurrence_counts,
                     "relationships": relationships,
                 }
             )
@@ -600,6 +604,8 @@ def _rebuild_resolved_relationships(
                 )
             )
     for export in code_map.exports:
+        if export.target_symbol_id is None:
+            continue
         relationships.append(
             _relationship(
                 kind="export",
@@ -608,14 +614,8 @@ def _rebuild_resolved_relationships(
                 source_range=export.source_range,
                 observed_text=export.name,
                 target=RelationshipTarget(
-                    resolution=(
-                        "internal"
-                        if export.target_symbol_id is not None
-                        else "unresolved"
-                    ),
-                    file_path=(
-                        code_map.path if export.target_symbol_id is not None else None
-                    ),
+                    resolution="internal",
+                    file_path=code_map.path,
                     symbol_id=export.target_symbol_id,
                     observed_name=export.name,
                 ),
@@ -623,6 +623,8 @@ def _rebuild_resolved_relationships(
             )
         )
     for item in imports:
+        if item.resolution != "internal":
+            continue
         module_name = "." * item.level + (item.module or "")
         relationships.append(
             _relationship(
@@ -653,6 +655,8 @@ def _rebuild_resolved_relationships(
         )
     for symbol in symbols:
         for call in symbol.direct_calls:
+            if call.resolution != "internal":
+                continue
             relationships.append(
                 _relationship(
                     kind="call",
@@ -670,6 +674,8 @@ def _rebuild_resolved_relationships(
                 )
             )
         for reference in symbol.direct_references:
+            if reference.resolution != "internal":
+                continue
             relationships.append(
                 _relationship(
                     kind="reference",
@@ -687,6 +693,65 @@ def _rebuild_resolved_relationships(
                 )
             )
     return tuple(sorted(relationships, key=_relationship_key))
+
+
+_MAX_RETAINED_POSITIONS_PER_IDENTIFIER = 8
+_MAX_OCCURRENCE_COUNTS_PER_FILE = 256
+
+
+def _compact_occurrences(
+    symbols: tuple[SymbolRecord, ...],
+) -> tuple[tuple[SymbolRecord, ...], tuple[StructuralOccurrenceCount, ...]]:
+    """Retain bounded positions and summarize only the omitted repetitions."""
+
+    totals: Counter[tuple[str, Literal["call", "reference"]]] = Counter()
+    retained: Counter[tuple[str, Literal["call", "reference"]]] = Counter()
+    spellings: dict[tuple[str, Literal["call", "reference"]], str] = {}
+    compacted: list[SymbolRecord] = []
+
+    def keep(observed_name: str, fact_kind: Literal["call", "reference"]) -> bool:
+        key = (observed_name.casefold(), fact_kind)
+        totals[key] += 1
+        existing = spellings.get(key)
+        if existing is None or (observed_name.casefold(), observed_name) < (
+            existing.casefold(),
+            existing,
+        ):
+            spellings[key] = observed_name
+        if retained[key] >= _MAX_RETAINED_POSITIONS_PER_IDENTIFIER:
+            return False
+        retained[key] += 1
+        return True
+
+    for symbol in symbols:
+        calls = tuple(
+            item for item in symbol.direct_calls if keep(item.observed_name, "call")
+        )
+        references = tuple(
+            item
+            for item in symbol.direct_references
+            if keep(item.observed_name, "reference")
+        )
+        compacted.append(
+            symbol.model_copy(
+                update={"direct_calls": calls, "direct_references": references}
+            )
+        )
+
+    repeated = [
+        StructuralOccurrenceCount(
+            identifier=spellings[key],
+            fact_kind=key[1],
+            total_count=count,
+            retained_count=retained[key],
+        )
+        for key, count in totals.items()
+        if count > retained[key]
+    ]
+    repeated.sort(
+        key=lambda item: (item.identifier.casefold(), item.identifier, item.fact_kind)
+    )
+    return tuple(compacted), tuple(repeated[:_MAX_OCCURRENCE_COUNTS_PER_FILE])
 
 
 def _is_exact_polyglot_import(item: ImportRecord, language: str | None) -> bool:

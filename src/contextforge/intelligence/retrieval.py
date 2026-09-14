@@ -46,6 +46,7 @@ PLANNING_MAX_OUTPUT_TOKENS = 768
 PLANNING_REQUEST_TIMEOUT_SECONDS = 60.0
 RETRIEVAL_SHARD_MAX_BYTES = 4 * 1024 * 1024
 MAX_POSITIONAL_POSTINGS_PER_FILE = 128
+MAX_POSITIONAL_POSTINGS_PER_IDENTIFIER_KIND = 8
 RETRIEVAL_CACHE_SIZE = 2
 ExactGroup = Literal[
     "exact_path",
@@ -1712,17 +1713,22 @@ def _structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, ...]
     ordered = _all_structural_postings(code_map)
     primary: list[PositionalPosting] = []
     repeated: list[PositionalPosting] = []
-    seen_identifiers: set[tuple[str, str]] = set()
+    retained: Counter[tuple[str, str]] = Counter()
     for item in ordered:
         identity = (item.identifier.casefold(), item.fact_kind)
-        if identity in seen_identifiers:
-            repeated.append(item)
-        else:
-            seen_identifiers.add(identity)
-            primary.append(item)
+        if retained[identity] >= MAX_POSITIONAL_POSTINGS_PER_IDENTIFIER_KIND:
+            continue
+        retained[identity] += 1
+        (primary if retained[identity] == 1 else repeated).append(item)
     selected = primary[:MAX_POSITIONAL_POSTINGS_PER_FILE]
+    selected_identities = {
+        (item.identifier.casefold(), item.fact_kind) for item in selected
+    }
     selected.extend(
-        repeated[: max(MAX_POSITIONAL_POSTINGS_PER_FILE - len(selected), 0)]
+        item
+        for item in repeated
+        if len(selected) < MAX_POSITIONAL_POSTINGS_PER_FILE
+        and (item.identifier.casefold(), item.fact_kind) in selected_identities
     )
     return tuple(sorted(selected, key=_posting_key))
 

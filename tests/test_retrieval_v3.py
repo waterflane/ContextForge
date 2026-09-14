@@ -676,6 +676,25 @@ def test_retrieval_persists_safe_positional_structural_postings(tmp_path: Path) 
     assert "pass" not in {item.identifier for item in document.positional_postings}
 
 
+def test_positional_postings_retain_at_most_eight_positions_per_identifier_kind(
+    tmp_path: Path,
+) -> None:
+    calls = "".join("    missing()\n" for _ in range(20))
+    _write(tmp_path, "app.py", f"def run():\n{calls}")
+    report = _build(tmp_path)
+    code_map = load_file_code_map(tmp_path, "app.py", manifest=report.manifest)
+    index = build_retrieval_index(
+        (code_map,), (), report.manifest.build.source_snapshot_digest
+    )
+
+    missing_calls = [
+        item
+        for item in index.documents[0].positional_postings
+        if item.fact_kind == "call" and item.identifier == "missing"
+    ]
+    assert len(missing_calls) == 8
+
+
 def test_exact_identifier_restores_evidence_beyond_bounded_postings(
     tmp_path: Path,
 ) -> None:

@@ -93,6 +93,26 @@ def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) ->
     )
 
 
+def test_repeated_unresolved_occurrences_are_compact_not_graph_relationships(
+    tmp_path: Path,
+) -> None:
+    initialize_index(tmp_path)
+    calls = "".join("    missing()\n" for _ in range(20))
+    _write(tmp_path, "app.py", f"def run():\n{calls}")
+    snapshot = scan_repository(tmp_path)
+
+    with acquire_index_lock(tmp_path, "compact") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    code_map = result.code_maps[0]
+    run = code_map.symbols[0]
+    assert len(run.direct_calls) == 8
+    assert code_map.occurrence_counts[0].identifier == "missing"
+    assert code_map.occurrence_counts[0].total_count == 20
+    assert code_map.occurrence_counts[0].retained_count == 8
+    assert not [item for item in code_map.relationships if item.kind == "call"]
+
+
 def test_cached_record_does_not_bypass_stale_snapshot_detection(tmp_path: Path) -> None:
     initialize_index(tmp_path)
     _write(tmp_path, "app.py", "value = 1\n")

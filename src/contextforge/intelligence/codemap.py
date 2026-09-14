@@ -167,6 +167,28 @@ class ReferenceOccurrence(IndexModel):
         return self
 
 
+class StructuralOccurrenceCount(IndexModel):
+    """Count source occurrences omitted after bounded positional retention."""
+
+    identifier: str
+    fact_kind: Literal["call", "reference"]
+    total_count: PositiveInt
+    retained_count: Annotated[int, Field(ge=1, le=8, strict=True)]
+
+    @field_validator("identifier")
+    @classmethod
+    def validate_identifier(cls, value: str) -> str:
+        if not value or len(value) > 500 or "\x00" in value:
+            raise ValueError("occurrence identifier must be bounded text")
+        return value
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> StructuralOccurrenceCount:
+        if self.total_count <= self.retained_count:
+            raise ValueError("occurrence counts describe only omitted positions")
+        return self
+
+
 class ImportRecord(IndexModel):
     """One alias from an import statement, without importing the module."""
 
@@ -371,6 +393,7 @@ class FileCodeMap(IndexModel):
     top_level_constants: tuple[str, ...] = ()
     configuration_key_digests: tuple[Sha256, ...] = ()
     symbols: tuple[SymbolRecord, ...] = ()
+    occurrence_counts: tuple[StructuralOccurrenceCount, ...] = ()
     relationships: tuple[RelationshipRecord, ...] = ()
     diagnostics: tuple[ParserDiagnostic, ...] = ()
 
@@ -428,6 +451,12 @@ class FileCodeMap(IndexModel):
             sorted(set(self.configuration_key_digests))
         ):
             raise ValueError("configuration key digests must be unique and canonical")
+        occurrence_keys = tuple(
+            (item.identifier.casefold(), item.identifier, item.fact_kind)
+            for item in self.occurrence_counts
+        )
+        if occurrence_keys != tuple(sorted(set(occurrence_keys))):
+            raise ValueError("occurrence counts must be unique and canonical")
         key_groups = (
             (tuple(_import_order(item) for item in self.imports), "imports"),
             (tuple(_export_order(item) for item in self.exports), "exports"),
@@ -620,6 +649,7 @@ __all__ = [
     "ParameterRecord",
     "ParserDiagnostic",
     "ReferenceOccurrence",
+    "StructuralOccurrenceCount",
     "RelationshipRecord",
     "RelationshipTarget",
     "SourceRange",
