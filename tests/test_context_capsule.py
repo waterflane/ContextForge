@@ -141,6 +141,160 @@ def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None
     assert f'evidence_ids="{evidence_id}"' in compiled.prompt
 
 
+def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
+    _write(tmp_path, "alpha.py", "def shared_alpha():\n    return 1\n")
+    _write(tmp_path, "beta.py", "def shared_beta():\n    return 2\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "shared")
+    by_path = {item.path: item for item in retrieval.candidates}
+    ordered = (by_path["beta.py"], by_path["alpha.py"])
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=tuple(
+            PlannedEvidence(
+                candidate_id=item.candidate_id,
+                path=item.path,
+                source_sha256=item.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            )
+            for item in ordered
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review shared implementations",
+        retrieval.model_copy(update={"candidates": ordered, "evidence_plan": plan}),
+        budget=_budget(4_000),
+    )
+
+    assert tuple(item.path for item in compiled.capsule.task_context) == (
+        "beta.py",
+        "alpha.py",
+    )
+
+
+def test_compiler_replaces_entire_stale_plan_with_deterministic_selection(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "serve")
+    candidate = retrieval.candidates[0]
+    stale_plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id="candidate-not-present",
+                path="missing.py",
+                source_sha256="f" * 64,
+                evidence_ids=(),
+                representation="full",
+            ),
+        ),
+        sufficiency="sufficient",
+        interpretation="Use a missing file.",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "serve",
+        retrieval.model_copy(update={"evidence_plan": stale_plan}),
+        budget=_budget(4_000),
+    )
+
+    assert tuple(item.path for item in compiled.capsule.task_context) == (
+        candidate.path,
+    )
+    assert any(
+        "replaced the entire plan" in value
+        for value in compiled.capsule.interpretations
+    )
+    assert all(
+        "Use a missing file" not in value for value in compiled.capsule.interpretations
+    )
+
+
+def test_compiler_replaces_empty_plan_when_retrieval_has_candidates(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "serve")
+    empty_plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "serve",
+        retrieval.model_copy(update={"evidence_plan": empty_plan}),
+        budget=_budget(4_000),
+    )
+
+    assert compiled.capsule.task_context
+    assert compiled.capsule.task_context[0].path == "service.py"
+    assert any(
+        "replaced the entire plan" in value
+        for value in compiled.capsule.interpretations
+    )
+
+
+def test_planned_full_large_file_downgrades_to_selected_slice(tmp_path: Path) -> None:
+    source = (
+        "def process(value: int) -> int:\n"
+        + "".join(f"    value += {line}\n" for line in range(1, 221))
+        + "    return value\n"
+    )
+    _write(tmp_path, "large.py", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "process")
+    candidate = retrieval.candidates[0]
+    evidence_id = candidate.evidence_ranges[0].evidence_id
+    assert evidence_id is not None
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(evidence_id,),
+                representation="full",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "process",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
+    )
+
+    material = compiled.capsule.task_context[0]
+    assert material.representation == RepresentationMode.SLICE
+    assert material.evidence_ids == (evidence_id,)
+    assert material.token_count < candidate.estimated_cost.full
+
+
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(
     tmp_path: Path,
 ) -> None:

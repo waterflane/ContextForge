@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.cards import SemanticCard, load_semantic_card
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
-from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.graph import OrientationMap
 from contextforge.intelligence.indexer import (
     load_file_code_map,
@@ -35,6 +34,7 @@ CONTEXT_CAPSULE_SCHEMA_VERSION: Literal[2] = 2
 SLICE_CONTEXT_LINES = 5
 SLICE_MERGE_GAP = 3
 AUTOMATIC_FULL_FILE_MAX_LINES = 200
+AUTOMATIC_FULL_UPGRADE_MAX_TOKENS = 512
 AUTOMATIC_CONTEXT_SOFT_RATIO = 0.30
 AUTOMATIC_SLICE_MAX_RANGES = 3
 AUTOMATIC_MAP_MAX_SYMBOLS = 12
@@ -359,11 +359,6 @@ def compile_context_capsule(
         git_text = ""
 
     candidate_by_path = {item.path: item for item in retrieval.candidates}
-    planned_by_id = (
-        {}
-        if retrieval.evidence_plan is None
-        else {item.candidate_id: item for item in retrieval.evidence_plan.items}
-    )
     working_material: list[CapsuleMaterial] = []
     for path in working:
         candidate = candidate_by_path.get(path)
@@ -405,75 +400,100 @@ def compile_context_capsule(
         + max(allocations["diff_metadata"] - selected_estimator.count(git_text), 0)
     )
     evidence_tokens = 0
-    remaining = [
+    plan_fallback = False
+    if retrieval.evidence_plan is not None:
+        planned_material = _materialize_validated_plan(
+            state,
+            capsule,
+            retrieval.evidence_plan.items,
+            {item.candidate_id: item for item in retrieval.candidates},
+            {item.path for item in working_material},
+            budget,
+            selected_estimator,
+            token_limit=automatic_limit,
+            evidence_limit=evidence_limit,
+        )
+        if planned_material is None:
+            plan_fallback = True
+            interpretations.append(
+                "Evidence plan was not fully materializable; deterministic "
+                "complementary selection replaced the entire plan."
+            )
+        else:
+            evidence_material.extend(planned_material)
+            evidence_tokens = sum(item.token_count for item in evidence_material)
+            capsule = capsule.model_copy(
+                update={"task_context": tuple(evidence_material)}
+            )
+
+    eligible_candidates = [
         candidate
         for candidate in retrieval.candidates
-        if candidate.path not in set(working)
-        and _is_automatic_candidate(candidate)
-        and (not planned_by_id or candidate.candidate_id in planned_by_id)
+        if candidate.path not in set(working) and _is_automatic_candidate(candidate)
     ][:8]
-    covered: set[str] = set()
-    while remaining:
-        selected_candidates = tuple(
-            candidate_by_path[item.path]
-            for item in evidence_material
-            if item.path in candidate_by_path
-        )
-        choices: list[
-            tuple[float, int, float, str, CandidateCard, CapsuleMaterial]
-        ] = []
-        for candidate in remaining:
-            gain = _coverage_keys(candidate) - covered
-            if not gain:
-                continue
-            plan_item = planned_by_id.get(candidate.candidate_id)
-            material = _planned_materialize(state, candidate, plan_item)
-            if material is None:
-                continue
-            if evidence_tokens + material.token_count > evidence_limit and (
-                evidence_material or not allow_indivisible_automatic_upgrade
-            ):
-                continue
-            ratio = _utility(
-                candidate, RepresentationMode.MAP, selected_candidates
-            ) / max(material.token_count, 1)
-            choices.append(
-                (
-                    ratio,
-                    _exact_group_rank(candidate.exact_group),
-                    candidate.score,
-                    candidate.path,
-                    candidate,
-                    material,
+    if retrieval.evidence_plan is None or plan_fallback:
+        remaining = list(eligible_candidates)
+        covered: set[str] = set()
+        while remaining:
+            selected_candidates = tuple(
+                candidate_by_path[item.path]
+                for item in evidence_material
+                if item.path in candidate_by_path
+            )
+            choices: list[
+                tuple[float, int, float, str, CandidateCard, CapsuleMaterial]
+            ] = []
+            for candidate in remaining:
+                gain = _coverage_keys(candidate) - covered
+                if not gain:
+                    continue
+                material = _planned_materialize(state, candidate, None)
+                if material is None:
+                    continue
+                if evidence_tokens + material.token_count > evidence_limit and (
+                    evidence_material or not allow_indivisible_automatic_upgrade
+                ):
+                    continue
+                ratio = _utility(
+                    candidate, RepresentationMode.MAP, selected_candidates
+                ) / max(material.token_count, 1)
+                choices.append(
+                    (
+                        ratio,
+                        _exact_group_rank(candidate.exact_group),
+                        candidate.score,
+                        candidate.path,
+                        candidate,
+                        material,
+                    )
                 )
-            )
-        added = False
-        for _, _, _, _, candidate, material in sorted(
-            choices,
-            key=lambda item: (item[1], -item[0], -item[2], item[3]),
-        ):
-            proposed = capsule.model_copy(
-                update={"task_context": tuple((*evidence_material, material))}
-            )
-            if _fits(
-                proposed,
-                budget,
-                selected_estimator,
-                token_limit=automatic_limit,
-            ) or (
-                not evidence_material
-                and allow_indivisible_automatic_upgrade
-                and _fits(proposed, budget, selected_estimator)
+            added = False
+            for _, _, _, _, candidate, material in sorted(
+                choices,
+                key=lambda item: (item[1], -item[0], -item[2], item[3]),
             ):
-                evidence_material.append(material)
-                evidence_tokens += material.token_count
-                covered.update(_coverage_keys(candidate))
-                remaining.remove(candidate)
-                capsule = proposed
-                added = True
+                proposed = capsule.model_copy(
+                    update={"task_context": tuple((*evidence_material, material))}
+                )
+                if _fits(
+                    proposed,
+                    budget,
+                    selected_estimator,
+                    token_limit=automatic_limit,
+                ) or (
+                    not evidence_material
+                    and allow_indivisible_automatic_upgrade
+                    and _fits(proposed, budget, selected_estimator)
+                ):
+                    evidence_material.append(material)
+                    evidence_tokens += material.token_count
+                    covered.update(_coverage_keys(candidate))
+                    remaining.remove(candidate)
+                    capsule = proposed
+                    added = True
+                    break
+            if not added:
                 break
-        if not added:
-            break
     capsule = capsule.model_copy(update={"task_context": tuple(evidence_material)})
 
     if not explicit_material:
@@ -487,7 +507,7 @@ def compile_context_capsule(
         )
         capsule = capsule.model_copy(update={"repository_map": compact_map})
 
-    if retrieval.evidence_plan is None:
+    if retrieval.evidence_plan is None or plan_fallback:
         capsule = _apply_greedy_upgrades(
             state,
             capsule,
@@ -498,8 +518,8 @@ def compile_context_capsule(
             token_limit=automatic_limit,
             allow_indivisible_upgrade=allow_indivisible_automatic_upgrade,
         )
-    rationales = list(capsule.interpretations)
-    if retrieval.evidence_plan is not None:
+    rationales = list(dict.fromkeys((*capsule.interpretations, *interpretations)))
+    if retrieval.evidence_plan is not None and not plan_fallback:
         if retrieval.evidence_plan.interpretation:
             rationales.append(
                 "Evidence planner interpretation: "
@@ -509,6 +529,11 @@ def compile_context_capsule(
             rationales.append(
                 "Evidence planner marked supplied candidates insufficient."
             )
+    if not evidence_material and not working_material:
+        rationales.append(
+            "Task context is insufficient because retrieval produced no "
+            "materializable task evidence."
+        )
     for candidate in retrieval.candidates:
         if candidate.suggested_representation is not None:
             rationales.append(
@@ -650,7 +675,10 @@ def _representation_gain(
         return 1.0 if candidate.evidence_ranges else 0.0
     if proposed == RepresentationMode.FULL:
         slice_cost = candidate.estimated_cost.slice
-        compact_full = slice_cost is None or candidate.estimated_cost.full <= slice_cost
+        compact_full = (
+            candidate.estimated_cost.full <= AUTOMATIC_FULL_UPGRADE_MAX_TOKENS
+            and (slice_cost is None or candidate.estimated_cost.full <= slice_cost)
+        )
         return 1.0 if compact_full and current != RepresentationMode.FULL else 0.0
     return 0.0
 
@@ -664,11 +692,70 @@ def _planned_materialize(
         return _materialize(
             state, candidate.path, RepresentationMode.MAP, candidate, ()
         )
+    options = _planned_materializations(state, candidate, plan)
+    return options[0] if options else None
+
+
+def _materialize_validated_plan(
+    state: _CompilerState,
+    capsule: ContextCapsule,
+    plan: tuple[PlannedEvidence, ...],
+    candidates: dict[str, CandidateCard],
+    materialized_working_paths: set[str],
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+    *,
+    token_limit: int,
+    evidence_limit: int,
+) -> tuple[CapsuleMaterial, ...] | None:
+    """Materialize every planner item in order or reject the entire plan."""
+
+    if not plan:
+        return () if not candidates else None
+    selected: list[CapsuleMaterial] = []
+    selected_tokens = 0
+    for item in plan:
+        candidate = candidates.get(item.candidate_id)
+        if (
+            candidate is None
+            or candidate.path != item.path
+            or candidate.source_sha256 != item.source_sha256
+            or not _is_automatic_candidate(candidate)
+        ):
+            return None
+        if candidate.path in materialized_working_paths:
+            continue
+        accepted = None
+        for material in _planned_materializations(state, candidate, item):
+            if selected_tokens + material.token_count > evidence_limit:
+                continue
+            proposed = capsule.model_copy(
+                update={"task_context": tuple((*selected, material))}
+            )
+            if _fits(proposed, budget, estimator, token_limit=token_limit):
+                accepted = material
+                break
+        if accepted is None:
+            return None
+        selected.append(accepted)
+        selected_tokens += accepted.token_count
+    return tuple(selected)
+
+
+def _planned_materializations(
+    state: _CompilerState,
+    candidate: CandidateCard,
+    plan: PlannedEvidence,
+) -> tuple[CapsuleMaterial, ...]:
+    """Return valid requested representation followed by safe downgrades."""
+
     selected = {
         item.evidence_id: item
         for item in candidate.evidence_ranges
         if item.evidence_id is not None
     }
+    if any(evidence_id not in selected for evidence_id in plan.evidence_ids):
+        return ()
     evidence_ids = tuple(
         evidence_id for evidence_id in plan.evidence_ids if evidence_id in selected
     )
@@ -687,7 +774,10 @@ def _planned_materialize(
         ),
         RepresentationMode.MAP: (RepresentationMode.MAP,),
     }[requested_mode]
+    materials: list[CapsuleMaterial] = []
     for mode in fallback_modes:
+        if mode == RepresentationMode.SLICE and not ranges:
+            continue
         material = _materialize(
             state,
             candidate.path,
@@ -696,9 +786,11 @@ def _planned_materialize(
             ranges if mode == RepresentationMode.SLICE else (),
             evidence_ids,
         )
-        if material is not None:
-            return material
-    return None
+        if material is not None and all(
+            existing.representation != material.representation for existing in materials
+        ):
+            materials.append(material)
+    return tuple(materials)
 
 
 def _coverage_keys(candidate: CandidateCard) -> set[str]:
@@ -712,7 +804,6 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
             for kind in item.relationship_kinds
             for provenance in item.provenance
         ),
-        f"role:{_candidate_role(candidate.path)}",
     }
     if candidate.exact_group != "approximate":
         keys.add(f"exact:{candidate.exact_group}")
@@ -721,10 +812,6 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
     if "working-set" in candidate.provenance:
         keys.add(f"working:{candidate.path}")
     return keys
-
-
-def _candidate_role(path: str) -> str:
-    return FILE_POLICY_REGISTRY.candidate_role(path)
 
 
 def _automatic_slice_ranges(
