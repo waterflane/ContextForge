@@ -811,6 +811,68 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     assert result.evidence_plan.diagnostics.rounds == 2
 
 
+def test_agentic_planner_shrinks_each_round_to_provider_context(tmp_path: Path) -> None:
+    for index in range(20):
+        _write(
+            tmp_path,
+            f"module_{index:02d}/service.py",
+            f"def service_{index:02d}():\n    return {index}\n",
+        )
+    report = _build(tmp_path)
+    observed_candidate_counts: list[int] = []
+    observed_module_counts: list[int] = []
+
+    def respond(request: object, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        observed_candidate_counts.append(len(facts["candidates"]))
+        observed_module_counts.append(len(facts["modules"]))
+        candidate = facts["candidates"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="retrieval-tight-context",
+            context_window=3_000,
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=respond,
+    )
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "service",
+            manifest=report.manifest,
+            provider=provider,
+            planning_mode="auto",
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert observed_candidate_counts
+    assert 0 < observed_candidate_counts[0] < 20
+    assert 0 <= observed_module_counts[0] < 20
+
+
 def test_agentic_planner_rejects_unsupplied_graph_target(tmp_path: Path) -> None:
     _write(tmp_path, "service.py", "def serve():\n    return None\n")
     report = _build(tmp_path)

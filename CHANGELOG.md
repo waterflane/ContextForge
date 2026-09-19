@@ -61,6 +61,9 @@ and Python distribution versions follow PEP 440.
 - Enforced source-spanning planner previews, session-wide round/action/token
   ceilings, strict whole-plan fallback, model-order materialization, and safe
   `FULL → SLICE → MAP` downgrade without weakening freshness or hard budgets.
+- Counted response schemas embedded by plain-JSON providers in preflight and
+  bounded every agentic round against the provider's complete context window,
+  shrinking candidates, module inventory, and previews before dispatch.
 - Corrected paired efficiency measurement to compare Capsule input with the
   ordinary full required/working-file payload rather than the hand-selected
   oracle, while preserving the oracle and blinded judge as quality gates.

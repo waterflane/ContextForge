@@ -30,6 +30,7 @@ from contextforge.models import (
     ModelRequest,
     StructuredResponseError,
     UntrustedSource,
+    estimate_request_context,
 )
 
 RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
@@ -1443,56 +1444,61 @@ async def _plan_evidence(
     for round_index in range(round_limit):
         candidates = _planner_pool_order(pool, priority_ids)
         previews = _planner_previews(repository_root, candidates)
-        active_request = _planner_request(
-            result,
-            candidates,
-            previews,
-            modules=modules,
-            action_history=tuple(action_history),
-            round_number=round_index + 1,
-            max_rounds=max_rounds,
-            max_actions_per_round=max_actions_per_round,
-            max_pool_candidates=max_pool_candidates,
-            max_total_input_tokens=max_total_input_tokens,
-            must_finalize=(
-                provider_calls >= PLANNING_MAX_PROVIDER_CALLS - 1
-                or round_index + 1 >= round_limit
-            ),
-            max_output_tokens=max_output_tokens,
-            max_files=max_files,
-            max_ranges_per_file=max_ranges_per_file,
-            automatic_full_paths=automatic_full_paths,
-            repair=round_index > 0 and not action_history,
-            legacy_alias=legacy_alias,
+        active_modules = dict(modules)
+        must_finalize = (
+            provider_calls >= PLANNING_MAX_PROVIDER_CALLS - 1
+            or round_index + 1 >= round_limit
         )
-        while candidates and _request_tokens(active_request) > max_input_tokens:
-            candidates = candidates[:-1]
-            previews = _planner_previews(repository_root, candidates)
-            active_request = _planner_request(
+
+        def build_active_request(
+            current_candidates: tuple[CandidateCard, ...],
+            current_previews: dict[str, UntrustedSource],
+            current_modules: dict[str, tuple[str, ...]],
+            *,
+            current_round: int = round_index,
+            current_must_finalize: bool = must_finalize,
+        ) -> ModelRequest:
+            return _planner_request(
                 result,
-                candidates,
-                previews,
-                modules=modules,
+                current_candidates,
+                current_previews,
+                modules=current_modules,
                 action_history=tuple(action_history),
-                round_number=round_index + 1,
+                round_number=current_round + 1,
                 max_rounds=max_rounds,
                 max_actions_per_round=max_actions_per_round,
                 max_pool_candidates=max_pool_candidates,
                 max_total_input_tokens=max_total_input_tokens,
-                must_finalize=(
-                    provider_calls >= PLANNING_MAX_PROVIDER_CALLS - 1
-                    or round_index + 1 >= round_limit
-                ),
+                must_finalize=current_must_finalize,
                 max_output_tokens=max_output_tokens,
                 max_files=max_files,
                 max_ranges_per_file=max_ranges_per_file,
                 automatic_full_paths=automatic_full_paths,
-                repair=round_index > 0 and not action_history,
+                repair=current_round > 0 and not action_history,
                 legacy_alias=legacy_alias,
             )
+
+        active_request = build_active_request(candidates, previews, active_modules)
+        while not _planner_request_within_budget(
+            active_request, provider, max_input_tokens=max_input_tokens
+        ):
+            if len(candidates) > 1:
+                candidates = candidates[:-1]
+                previews = _planner_previews(repository_root, candidates)
+            elif active_modules:
+                retained = len(active_modules) // 2
+                active_modules = dict(tuple(active_modules.items())[:retained])
+            elif previews:
+                previews = {}
+            else:
+                break
+            active_request = build_active_request(candidates, previews, active_modules)
         request_tokens = _request_tokens(active_request)
         if (
             not candidates
+            or not _planner_request_within_budget(
+                active_request, provider, max_input_tokens=max_input_tokens
+            )
             or input_tokens + request_tokens > max_total_input_tokens
             or provider_calls >= PLANNING_MAX_PROVIDER_CALLS
         ):
@@ -1627,7 +1633,7 @@ async def _plan_evidence(
                         manifest=manifest,
                         index=index,
                         graph=graph,
-                        modules=modules,
+                        modules=active_modules,
                         task=result.task,
                         working_set=working_set,
                         diff_paths=diff_paths,
@@ -2142,6 +2148,29 @@ def _planner_compact_preview_block(lines: list[str], source_range: SourceRange) 
 def _request_tokens(request: ModelRequest) -> int:
     messages = request.messages(include_response_schema=True)
     return sum((len(message.content.encode("utf-8")) + 2) // 3 for message in messages)
+
+
+def _planner_request_fits_provider(
+    request: ModelRequest, provider: ModelProvider
+) -> bool:
+    """Apply the provider's complete context budget before any planner dispatch."""
+
+    return estimate_request_context(
+        request,
+        provider.configuration,
+        include_native_schema=request.schema_mode == "json_schema",
+    ).fits
+
+
+def _planner_request_within_budget(
+    request: ModelRequest,
+    provider: ModelProvider,
+    *,
+    max_input_tokens: int,
+) -> bool:
+    return _request_tokens(
+        request
+    ) <= max_input_tokens and _planner_request_fits_provider(request, provider)
 
 
 def _validate_plan_response(
