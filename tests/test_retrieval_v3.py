@@ -628,6 +628,52 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
     assert set(result.evidence_plan.items[0].evidence_ids) <= supplied
 
 
+def test_planner_does_not_advertise_full_for_large_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "large.py",
+        "def serve():\n    return 1\n"
+        + "".join(f"# filler {line}\n" for line in range(1, 220)),
+    )
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = facts["candidates"][0]
+        assert "full" not in candidate["available_representations"]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "serve",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.items[0].representation == "map"
+
+
 def test_agentic_planner_discovers_candidate_outside_initial_pool(
     tmp_path: Path,
 ) -> None:
@@ -720,6 +766,46 @@ def test_agentic_planner_rejects_unsupplied_graph_target(tmp_path: Path) -> None
     assert result.evidence_plan is None
     assert result.diagnostics == ("planner_unknown_action_target",)
     assert result.provider_calls == 1
+
+
+def test_planner_previews_sample_late_evidence_and_bound_large_declarations() -> None:
+    from contextforge.intelligence import retrieval as retrieval_module
+
+    evidence = tuple(
+        CandidateEvidenceRange(
+            path="large.py",
+            source_range=SourceRange(
+                start_line=line,
+                start_column=0,
+                end_line=line,
+                end_column=1,
+            ),
+            evidence_id=f"evidence-{line}",
+            strength="verified",
+        )
+        for line in range(1, 15)
+    )
+
+    ordered = retrieval_module._planner_evidence_order(evidence)
+    assert tuple(item.source_range.start_line for item in ordered[:8]) == (
+        1,
+        3,
+        5,
+        7,
+        8,
+        10,
+        12,
+        14,
+    )
+    preview = retrieval_module._planner_preview_block(
+        [f"line {line}" for line in range(1, 146)],
+        SourceRange(start_line=1, start_column=0, end_line=145, end_column=1),
+    )
+    assert "line 1" in preview
+    assert "line 73" in preview
+    assert "line 109" in preview
+    assert "line 145" in preview
+    assert len(preview.splitlines()) < 50
 
 
 def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> None:
