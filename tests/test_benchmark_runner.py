@@ -26,7 +26,16 @@ from contextforge.intelligence import (
     build_structural_index,
     initialize_index,
 )
-from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
+from contextforge.models import (
+    FakeModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ProviderCapabilities,
+    ProviderConfiguration,
+    ProviderDiagnostic,
+)
 from contextforge.repositories import scan_repository
 
 
@@ -145,6 +154,119 @@ def _task(task_id: str, repository_path: str, **values: Any) -> BenchmarkTask:
     }
     defaults.update(values)
     return BenchmarkTask(**defaults)
+
+
+def test_counting_provider_accounts_success_and_failure_paths() -> None:
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="counting",
+        retry_limit=0,
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="counting",
+        tasks=(_task("counting", "repository"),),
+    )
+    request = ModelRequest(
+        operation_id="counting-test",
+        purpose="counting-test",
+        system_instructions="Return the supplied manifest.",
+        analysis_task="Exercise benchmark provider accounting.",
+        trusted_code_map_facts={},
+        untrusted_sources=(),
+        response_model=BenchmarkManifest,
+    )
+
+    class StubProvider:
+        def __init__(self, result: ModelResponse | ModelProviderError) -> None:
+            self.configuration = configuration
+            self.result = result
+
+        @property
+        def provider_id(self) -> str:
+            return "fake"
+
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                structured_responses=True,
+                cancellation=True,
+                token_usage=True,
+                local=True,
+            )
+
+        async def complete_structured(
+            self,
+            request: ModelRequest,
+            *,
+            cancellation: asyncio.Event | None = None,
+        ) -> ModelResponse:
+            del request, cancellation
+            if isinstance(self.result, ModelProviderError):
+                raise self.result
+            return self.result
+
+        async def close(self) -> None:
+            return None
+
+    response = ModelResponse(
+        normalized_json=manifest.model_dump_json(),
+        value=manifest,
+        provider_id="fake",
+        model_id="counting",
+    )
+    success = benchmark_runner._CountingModelProvider(StubProvider(response))
+    assert success.provider_id == "fake"
+    assert success.capabilities().token_usage is True
+    assert asyncio.run(success.complete_structured(request)) is response
+    asyncio.run(success.close())
+    assert success.model_calls == 1
+    assert success.model_generations == 1
+    assert success.transport_attempts == 1
+    assert success.total_provider_http_calls == 1
+    assert success.input_tokens > 0
+    assert success.output_tokens > 0
+
+    diagnostic = ProviderDiagnostic(
+        provider_id="fake",
+        model_id="counting",
+        request_purpose="counting-test",
+        retry_count=0,
+        model_generations=1,
+        repair_generations=1,
+        provider_discovery_calls=1,
+        provider_capability_calls=2,
+        transport_attempts=2,
+        total_provider_http_calls=5,
+        total_provider_calls=5,
+        response_validation="invalid",
+        usage=ModelUsage(input_tokens=17, output_tokens=4),
+    )
+    failure_error = ModelProviderError("offline", diagnostic=diagnostic)
+    failure_error.add_http_accounting(
+        provider_discovery_calls=1,
+        provider_capability_calls=2,
+        transport_attempts=1,
+        total_provider_http_calls=4,
+    )
+    failure = benchmark_runner._CountingModelProvider(StubProvider(failure_error))
+    with pytest.raises(ModelProviderError, match="offline"):
+        asyncio.run(failure.complete_structured(request))
+    assert failure.model_generations == 1
+    assert failure.repair_generations == 1
+    assert failure.provider_discovery_calls == 1
+    assert failure.provider_capability_calls == 2
+    assert failure.transport_attempts == 2
+    assert failure.total_provider_http_calls == 5
+    assert failure.input_tokens == 17
+    assert failure.output_tokens == 4
+
+    bare_failure = benchmark_runner._CountingModelProvider(
+        StubProvider(ModelProviderError("bare"))
+    )
+    with pytest.raises(ModelProviderError, match="bare"):
+        asyncio.run(bare_failure.complete_structured(request))
+    assert bare_failure.input_tokens > 0
 
 
 def test_runner_records_discovery_metrics_and_evaluates_manifest(

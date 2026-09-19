@@ -401,7 +401,7 @@ def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> No
     assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
 
 
-def test_index_provider_failure_preserves_previous_active_generation(
+def test_index_provider_failure_keeps_new_structural_generation_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write(tmp_path, "app.py", "def run():\n    return 1\n")
@@ -432,7 +432,16 @@ def test_index_provider_failure_preserves_previous_active_generation(
     assert failed.exit_code == 1
     assert failed.stdout == ""
     assert "semantic analysis failed" in _plain(failed.stderr).lower()
-    assert load_manifest(tmp_path) == previous
+    current = load_manifest(tmp_path)
+    assert current.generation_id != previous.generation_id
+    assert current.generation_kind == "structural"
+    assert current.build.source_snapshot_digest == previous.build.source_snapshot_digest
+    assert current.build.previous_generation_id == previous.generation_id
+    assert current.artifacts.relationship_graph is not None
+    assert current.artifacts.structural_retrieval is not None
+    assert current.artifacts.orientation_map is not None
+    assert current.artifacts.semantic_retrieval is None
+    assert current.artifacts.architecture_map is None
 
 
 def test_index_rechecks_snapshot_before_atomic_publication(

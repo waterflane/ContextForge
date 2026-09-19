@@ -739,6 +739,78 @@ def test_agentic_planner_discovers_candidate_outside_initial_pool(
     assert result.provider_calls == 2
 
 
+def test_agentic_planner_combines_search_graph_and_map_expansion(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "helper.py", "def support():\n    return 'ready'\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from helper import support\n\ndef start():\n    return support()\n",
+    )
+    _write(tmp_path, "flow.py", "def hidden_flow():\n    return 'complete'\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            initial = facts["candidates"][0]
+            module = facts["modules"][0]
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "search", "query": "hidden_flow", "limit": 4},
+                        {
+                            "action": "graph",
+                            "candidate_id": initial["candidate_id"],
+                            "hops": 2,
+                        },
+                        {"action": "map", "module_id": module["module_id"]},
+                    ],
+                }
+            )
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "flow.py"
+        )
+        assert {item["action"] for item in facts["completed_actions"]} == {
+            "graph",
+            "map",
+        }
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "start",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.items[0].path == "flow.py"
+    assert result.evidence_plan.diagnostics.rounds == 2
+
+
 def test_agentic_planner_rejects_unsupplied_graph_target(tmp_path: Path) -> None:
     _write(tmp_path, "service.py", "def serve():\n    return None\n")
     report = _build(tmp_path)
@@ -765,6 +837,33 @@ def test_agentic_planner_rejects_unsupplied_graph_target(tmp_path: Path) -> None
 
     assert result.evidence_plan is None
     assert result.diagnostics == ("planner_unknown_action_target",)
+    assert result.provider_calls == 1
+
+
+def test_agentic_planner_rejects_unknown_module(tmp_path: Path) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return None\n")
+    report = _build(tmp_path)
+    provider = _provider(
+        lambda request, call: json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [{"action": "map", "module_id": "missing-module"}],
+            }
+        )
+    )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "serve",
+            manifest=report.manifest,
+            provider=provider,
+            planning_mode="auto",
+        )
+    )
+
+    assert result.evidence_plan is None
+    assert result.diagnostics == ("planner_unknown_module",)
     assert result.provider_calls == 1
 
 

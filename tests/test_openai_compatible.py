@@ -116,7 +116,7 @@ def test_offline_fixture_provider_covers_supported_analysis_contracts() -> None:
         },
     )
     assert semantic["synopsis"] == {
-        "text": "service repository file.",
+        "text": "src service",
         "evidence_ids": ["file"],
     }
     assert semantic["key_symbols"] == [{"evidence_id": "symbol:serve"}]
@@ -128,7 +128,7 @@ def test_offline_fixture_provider_covers_supported_analysis_contracts() -> None:
         },
     )
     assert semantic_without_file["synopsis"] == {
-        "text": "worker repository file.",
+        "text": "src worker",
         "evidence_ids": ["symbol:work"],
     }
 
