@@ -420,6 +420,7 @@ async def _run_index_v3_once(
                     task.oracle_ranges,
                     compiled,
                     counting_provider,
+                    ordinary_paths=_ordinary_context_paths(task, mode),
                 )
             candidates = tuple(
                 item
@@ -1210,6 +1211,24 @@ def _evaluate_budgets(
 
 def _limit(limit: int, actual: int) -> BenchmarkLimitEvaluation:
     return BenchmarkLimitEvaluation(limit=limit, actual=actual, passed=actual <= limit)
+
+
+def _ordinary_context_paths(
+    task: BenchmarkTask, mode: BenchmarkMode
+) -> tuple[str, ...]:
+    """Return complete required/working files an ordinary client would send."""
+
+    values = {
+        *_effective(task, mode, "include_paths"),
+        *_effective(task, mode, "required_files_all"),
+        *(
+            path
+            for group in _effective(task, mode, "required_files_any")
+            for path in group
+        ),
+        *(item.path for item in task.oracle_ranges),
+    }
+    return tuple(sorted(values, key=lambda value: (value.casefold(), value)))
 
 
 def _effective(task: BenchmarkTask, mode: BenchmarkMode, field: str) -> Any:

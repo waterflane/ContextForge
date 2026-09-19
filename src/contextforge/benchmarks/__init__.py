@@ -2,6 +2,7 @@
 
 from contextforge.benchmarks.answers import (
     render_oracle_context,
+    render_ordinary_context,
     run_paired_answer_regression,
 )
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
@@ -19,6 +20,7 @@ from contextforge.benchmarks.models import (
     BenchmarkExpectations,
     BenchmarkExpectedAssertion,
     BenchmarkFailure,
+    BenchmarkGroundednessEvaluation,
     BenchmarkIndexPrecondition,
     BenchmarkIntegerRange,
     BenchmarkLimitEvaluation,
@@ -52,6 +54,7 @@ __all__ = [
     "BenchmarkExpectationEvaluation",
     "BenchmarkExpectedAssertion",
     "BenchmarkFailure",
+    "BenchmarkGroundednessEvaluation",
     "BenchmarkIndexPrecondition",
     "BenchmarkIntegerRange",
     "BenchmarkLimitEvaluation",
@@ -70,6 +73,7 @@ __all__ = [
     "calculate_benchmark_metrics",
     "load_benchmark_manifest",
     "render_oracle_context",
+    "render_ordinary_context",
     "run_discovery_benchmark",
     "run_paired_answer_regression",
 ]

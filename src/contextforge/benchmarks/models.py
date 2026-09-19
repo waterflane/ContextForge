@@ -118,6 +118,7 @@ class BenchmarkAnswerCitation(BenchmarkModel):
 class BenchmarkAnswerEvaluation(BenchmarkModel):
     """Quality and token accounting for one downstream answer."""
 
+    answer: str = ""
     assertion_ids: tuple[str, ...] = ()
     citations: tuple[BenchmarkAnswerCitation, ...] = ()
     valid_citation_count: NonNegativeInt = 0
@@ -125,15 +126,40 @@ class BenchmarkAnswerEvaluation(BenchmarkModel):
     assertion_recall: Rate
     citation_validity: Rate
     input_tokens: NonNegativeInt = 0
+    estimated_input_tokens: NonNegativeInt = 0
+    provider_input_tokens: NonNegativeInt = 0
     output_tokens: NonNegativeInt = 0
+    provider_http_calls: NonNegativeInt = 0
     duration_ms: NonNegativeInt = 0
 
 
-class BenchmarkPairedAnswerEvaluation(BenchmarkModel):
-    """Same-model comparison of manual oracle and ContextForge context."""
+class BenchmarkGroundednessEvaluation(BenchmarkModel):
+    """Blinded majority judgment over one answer and its source evidence."""
 
+    votes: tuple[bool, bool, bool]
+    passed: bool
+    unsupported_claims: tuple[str, ...] = ()
+    input_tokens: NonNegativeInt = 0
+    estimated_input_tokens: NonNegativeInt = 0
+    provider_input_tokens: NonNegativeInt = 0
+    output_tokens: NonNegativeInt = 0
+    provider_http_calls: NonNegativeInt = 0
+    duration_ms: NonNegativeInt = 0
+
+    @model_validator(mode="after")
+    def validate_majority(self) -> BenchmarkGroundednessEvaluation:
+        if self.passed != (sum(self.votes) >= 2):
+            raise ValueError("groundedness result must equal the three-vote majority")
+        return self
+
+
+class BenchmarkPairedAnswerEvaluation(BenchmarkModel):
+    """Same-model ordinary, manual-oracle, and ContextForge comparison."""
+
+    ordinary: BenchmarkAnswerEvaluation | None = None
     oracle: BenchmarkAnswerEvaluation
     contextforge: BenchmarkAnswerEvaluation
+    contextforge_groundedness: BenchmarkGroundednessEvaluation | None = None
     input_token_reduction: float = Field(allow_inf_nan=False)
     quality_not_lower: bool
 
@@ -651,6 +677,7 @@ __all__ = [
     "BenchmarkAnyFileExpectation",
     "BenchmarkAnswerCitation",
     "BenchmarkAnswerEvaluation",
+    "BenchmarkGroundednessEvaluation",
     "BenchmarkBudgetEvaluation",
     "BenchmarkCohortMetrics",
     "BenchmarkConfidenceSummary",
