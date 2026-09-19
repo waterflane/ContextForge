@@ -30,7 +30,7 @@ commands.
 > [!IMPORTANT]
 > ContextForge is pre-alpha software. The current development branch introduces
 > Index v3, grounded Semantic Cards, BM25/graph retrieval, Context Capsule v2,
-> and Bridge 2.1. Discovery benchmarking is experimental and its results should
+> and Bridge 2.2. Discovery benchmarking is experimental and its results should
 > be reviewed alongside the recorded provider, model, configuration, and source
 > snapshot.
 
@@ -62,7 +62,8 @@ flowchart LR
     R["Source identity"] --> C["CodeMaps"]
     C --> G["relationship graph"]
     G --> I["BM25 + graph retrieval"]
-    I --> P["MAP / SUMMARY / SLICE / FULL"]
+    I --> E["bounded evidence plan"]
+    E --> P["MAP / SUMMARY / SLICE / FULL"]
     P --> X["Context Capsule v2"]
 ```
 
@@ -196,7 +197,7 @@ mutating operations.
 | `contextforge diagnostics config [PATH]` | Explain effective configuration | Read-only |
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
-| `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1.0–2.1 | V1 read-only; V2 may atomically mutate only the index |
+| `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1.0–2.2 | V1 read-only; V2 may atomically mutate only the index |
 | `contextforge benchmark discovery PATH` | Run legacy or Index v3 Capsule benchmark pipelines | Source stays unchanged; temporary/index state may be used |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
@@ -270,6 +271,14 @@ and current-diff membership are retained in each CandidateCard's provenance.
 Automatic compilation requires an exact, lexical/grounded, graph, diff, or
 Working Set signal; centrality alone is not sufficient.
 
+In model-assisted mode the provider may use at most three bounded rounds of
+`search`, `symbol`, `graph`, and `map` actions before `finalize`. Actions only
+expand verified ContextForge candidates and evidence; they cannot invent paths,
+symbols, ranges, or source facts. Use `--planning-rounds N` to lower the project
+ceiling for one command. Invalid, stale, incomplete, or over-budget plans are
+discarded as a whole in `auto` mode and replaced by deterministic complementary
+selection.
+
 `--legacy-discovery` retains the former model-assisted discovery flow during
 deprecation. Its modes remain:
 
@@ -308,6 +317,7 @@ contextforge context suggest . \
   --task "Trace configuration precedence" \
   --working-file src/contextforge/project_config.py \
   --planning auto \
+  --planning-rounds 3 \
   --format markdown
 
 contextforge context create . \
@@ -366,6 +376,13 @@ the command produced a complete benchmark report containing at least one task,
 expectation, or budget failure. Do not discard stdout or the requested output
 file when handling that code. Every run remains bounded by manifest limits,
 provider retry limits, operation timeouts, and the configured context window.
+For Index v3 answer regressions, the ordinary baseline is the complete set of
+required/working files a client would otherwise send, while the manual range
+oracle is used only as a quality reference. The ContextForge and oracle answers
+use identical model settings and citation schemas. Three blinded groundedness
+votes check the ContextForge answer against only its materialized ranges.
+Offline indexing, planner, final-answer, judge, estimated-input, provider-input,
+HTTP-call, and latency costs are reported separately.
 
 ## Output formats and streams
 

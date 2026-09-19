@@ -170,7 +170,9 @@ available architecture/conventions/features maps with typed grounded claims and
 provenance-bearing relationships. `search` returns
 RetrievalResult v3; Bridge 2.1 retains its boolean `rerank` switch. Bridge 2.2
 adds `planning_mode=off|auto|required` and advertises the Evidence Plan schema.
-`symbol` searches verified CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
+Model-assisted planning uses project-configured bounded `search`, `symbol`,
+`graph`, and `map` rounds; the wire cannot supply invented candidates or raise
+those ceilings. `symbol` searches verified CodeMap declarations. `compile` accepts Working Set files/ranges, explicit full
 files, optional diff text, and context/history/response/safety budgets, then
 returns a Context Capsule v2 and stable prompt.
 

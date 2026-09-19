@@ -20,9 +20,18 @@ The structural generation becomes active before model enrichment. If
 enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
-Resolver/analyzer identities changed with this revision (resolver 6, Python 4,
-polyglot 7, Semantic Card analyzer 6, prompt `semantic-card-v3.3`). Rebuild/update does
-not reuse older CodeMaps or semantic cache entries under those contracts.
+Resolver/analyzer identities changed with this revision (fallback 4, resolver
+7, Python 5, polyglot 8, Semantic Card analyzer 7, prompt
+`semantic-card-v3.4`). Rebuild/update does not reuse older CodeMaps or semantic
+cache entries under those contracts. Polyglot analysis now includes Kotlin
+`.kt` and `.kts` declarations, imports, calls, and references.
+
+A no-op update reuses unchanged records and keeps the active generation ID.
+Unchanged parse-error records are also reused as failed/partial evidence;
+`--force-reanalyze` explicitly retries their extraction. A corrupt active
+generation is reported as `corrupt` with `rebuild_required` rather than making
+`index status` crash. Recover it with `index build`; old immutable generations
+remain until explicit `index clean`.
 
 ## CLI behavior
 
@@ -65,6 +74,14 @@ stops when its Evidence Plan is covered; it is not padded to that size.
 Explicit Working Set material, requested ranges, pinned FULL files, and required
 Git material may exceed the soft ceiling but never the hard budget. Planner
 representation suggestions are advisory and cannot bypass those rules.
+
+Model-assisted planning may use up to three bounded `search`, `symbol`, `graph`,
+or `map` rounds before finalization. `--planning-rounds` may lower that ceiling.
+The candidate pool and every returned ID remain ContextForge-controlled. In
+`auto`, one invalid or unmaterializable planned item causes the entire plan to
+fall back to deterministic complementary selection. In `required`, the same
+condition is a typed error. Bridge 2.1 continues to map its boolean `rerank`
+field to this behavior; Bridge 2.2 exposes `planning_mode` directly.
 
 Package, Capsule, and prompt files created inside the repository are recorded
 in `.contextforge/generated-artifacts.json`. An unchanged registered artifact
@@ -117,3 +134,7 @@ available for the deprecation period.
 Benchmark manifests remain schema 1. The additive task field `pipeline`
 defaults to `legacy_discovery`; set it to `index_v3_capsule` to measure cold
 build, warm retrieval, and isolated incremental update through Capsule v2.
+For paired answer evaluation, complete required/working files form the ordinary
+token baseline; manual oracle ranges are only the quality reference. Three
+blinded groundedness votes validate ContextForge answers against materialized
+ranges, and phase-specific model tokens, HTTP calls, and latency stay separate.

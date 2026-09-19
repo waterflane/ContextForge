@@ -226,9 +226,12 @@ The main task fields have these roles:
   an isolated controlled change plus incremental update/retrieve/compile for
   `hybrid`.
 - Optional canonical `answer_assertions` and `oracle_ranges` enable a paired
-  same-model answer regression. The runner validates every answer citation
-  against the actual oracle or materialized Capsule source range and reports
-  offline-index, query-planner, and final-answer tokens separately.
+  same-model answer regression. Complete required/working files form the
+  ordinary-client token baseline; manual oracle ranges are used only for the
+  quality reference. The runner validates every answer citation against the
+  actual oracle or materialized Capsule source range, obtains three blinded
+  groundedness votes over the materialized ContextForge source, and reports
+  offline-index, query-planner, final-answer, and judge costs separately.
 - `include_paths` and `exclude_paths` constrain discovery with exact snapshot
   paths.
 - `required_files_all` requires every listed file. Each `required_files_any`

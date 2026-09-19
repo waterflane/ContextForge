@@ -33,15 +33,16 @@ retrieval, and is rejected by `index update`. Run `index build` to create v3;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Resolver version 6, Python analyzer version 4, and polyglot analyzer version 7
-extract imports, calls, and non-call references for Python plus JavaScript,
-TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby. Exact relative paths and
+Fallback analyzer version 4, resolver version 7, Python analyzer version 5,
+and polyglot analyzer version 8 extract imports, calls, and non-call references
+for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
+and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
 best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 
-Semantic Card analyzer version 6 (`semantic-card-v3.3`) uses one full request
+Semantic Card analyzer version 7 (`semantic-card-v3.4`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of
 overlap. Evidence is constrained to the active chunk and may address verified
 import, call, reference, or config facts. Every primary and scheduler-owned
@@ -78,16 +79,30 @@ Only `verified` and `best-effort-structural` edges contribute graph proximity.
 cannot be the sole relevance signal.
 
 A `CandidateCard` includes source identity, synopsis, matched concepts and
-symbols, evidence ranges, graph neighbors, provenance, freshness, and estimated
-MAP/SUMMARY/SLICE/FULL costs. Default discovery performs no provider call. If a
-`ContextPlanningMode` is `off`, `auto`, or `required`. The default project
-configuration is `auto`: a configured provider may make one closed-schema
-request and at most one scheduler-owned repair. It may only discard/reorder up
-to 32 supplied candidates, select supplied evidence IDs, choose one of the four
-representations, and report sufficiency. The request is capped at 8 selected
-files, 8 ranges per file, 8192 input tokens, and 768 output tokens. `auto`
-falls back deterministically; `required` fails if a validated plan cannot be
-obtained. Legacy `rerank=true/false` remains a compatibility alias.
+symbols, evidence ranges, graph neighbors, provenance, freshness, and only the
+MAP/SUMMARY/SLICE/FULL representations that can actually be materialized.
+Default discovery performs no provider call. `ContextPlanningMode` is `off`,
+`auto`, or `required`; the default project configuration is `auto`.
+
+The configured provider may use at most three rounds and four closed actions
+per round: `search(query)`, `symbol(identifier)`, `graph(candidate_id)`, and
+`map(module_id)`, followed by `finalize`. Each action can only expand the
+verified pool; the model cannot create paths, symbols, ranges, evidence IDs, or
+source claims. The pool is capped at 64 candidates, each request at 8192 input
+and 768 output tokens, and the session at 24,576 input and 2304 output tokens.
+Unsupported `json_schema`, malformed JSON, and repair consume the same three
+HTTP-call ceiling. Capability caching avoids retrying a structured mode already
+known to be unsupported.
+
+The prompt exposes source-spanning representative evidence first, then compact
+previews of remaining evidence, so one large declaration cannot hide later
+facts. A final plan may select at most 8 files and 8 evidence ranges per file.
+Every ID, source identity, relevance signal, representation, and range is
+validated locally. `auto` replaces any materially invalid or incompletely
+materializable plan as a whole with deterministic complementary selection;
+`required` raises a typed planning error. Diagnostics record actual rounds,
+HTTP calls, token counts, and fallback reason. Legacy `rerank=true/false`
+remains a compatibility alias.
 
 The normative wire schema is
 [`retrieval-result-v3.schema.json`](../schemas/retrieval-result-v3.schema.json).
@@ -128,6 +143,15 @@ evidence strength, facet coverage, graph utility, and duplicate
 ranges/concepts. Source SHA is rechecked before materialization. No source range
 or section is cut mid-way to satisfy a budget.
 
+Validated planned items are materialized in model order and bypass the
+deterministic duplicate-role filter. An unavailable representation is downgraded
+only through `FULL → SLICE → MAP`; automatic FULL is never advertised for a
+file over 200 lines. If any planned item is stale, missing, over the soft
+ceiling after downgrade, or cannot be materialized, the complete model plan is
+discarded and deterministic complementary selection is used. A plan cannot
+remain `sufficient` after losing an item, and a non-empty retrieval result
+cannot silently compile to empty task material.
+
 The stable prompt root is `<contextforge schema_version="2">` with separate
 snapshot, verified repository map, Working Set, task context, and Git sections.
 Model selection rationale is labeled interpretation and never merged into
@@ -152,9 +176,20 @@ warm retrieve/compile, and isolated incremental update/retrieve/compile for
 fresh/indexed/hybrid modes. Results account for materialized ranges/tokens,
 grounded and dropped card claims, and provider-reported transport/HTTP calls.
 Optional `answer_assertions` plus real `oracle_ranges` run a paired downstream
-answer regression with the same provider settings. Indexing, evidence planning,
-and final-answer tokens are reported separately; every returned citation must
-fit inside a materialized SLICE/FULL or oracle source range.
+answer regression with the same provider settings. The ordinary-client
+baseline contains the complete required and Working Set files and is used for
+token-efficiency comparison. The manually selected oracle ranges are used only
+as the answer-quality reference. ContextForge and oracle answers share the same
+task, response schema, temperature, and provider. Each answer returns assertion
+IDs and citations; citations must fit inside an actual materialized Capsule or
+oracle source range.
+
+Three blinded groundedness-judge calls compare the ContextForge answer only
+with its materialized source and use majority agreement. The report separates
+offline indexing, evidence planning, final-answer, and judge tokens, latency,
+logical generations, and HTTP calls. It records both conservative estimated
+input and provider-reported input instead of hiding provider truncation or
+repair traffic.
 
 ## Public surface
 

@@ -16,9 +16,9 @@ and Python distribution versions follow PEP 440.
 - Added sparse grounded Semantic Cards with code/documentation/config/test
   profiles, item-level validation, one bounded repair, deterministic fallback,
   priority scheduling, and a path-neutral content-addressed cache.
-- Added persisted exact/BM25/graph retrieval with CandidateCards, optional
-  closed-schema evidence planning, Working Set and diff boosts, and deterministic
-  fallback on every provider failure.
+- Added persisted exact/BM25/graph retrieval with CandidateCards, bounded
+  agentic `search`/`symbol`/`graph`/`map` evidence planning, Working Set and diff
+  boosts, and deterministic fallback on every provider or plan failure.
 - Added TokenEstimator, ContextBudget, MAP/SUMMARY/SLICE/FULL representations,
   Context Capsule v2, and stable `<contextforge schema_version="2">` prompts.
 - Added public Python map/retrieval/compiler APIs, `contextforge map`, Capsule v2
@@ -31,8 +31,9 @@ and Python distribution versions follow PEP 440.
   OrientationMap/RepositoryMap schemas, CLI `map --kind`, and the additive
   benchmark `index_v3_capsule` pipeline with grounded/dropped-claim metrics.
 - Added `off|auto|required` model-assisted Evidence Plans, Bridge 2.2 planning
-  negotiation, and paired same-model answer regressions with range-validated
-  citations and phase-separated token accounting.
+  negotiation, and paired same-model answer regressions with an ordinary
+  full-file baseline, range-validated citations, three-vote blinded
+  groundedness judging, and phase-separated token accounting.
 
 ### Changed
 
@@ -49,11 +50,20 @@ and Python distribution versions follow PEP 440.
 - Repository orientation, architecture, conventions, and feature maps are now
   deterministic aggregations of graph, CodeMaps, and grounded cards, without
   separate repository-wide model calls.
-- Semantic enrichment now uses analyzer 6 / `semantic-card-v3.3`, declaration-
+- Semantic enrichment now uses analyzer 7 / `semantic-card-v3.4`, declaration-
   aware one-to-four chunk planning, full-request/schema token accounting, one
   scheduler-owned repair authority, and lexical anchors for ranking prose.
 
 ### Fixed
+
+- Stabilized config-key digests, parse-error reuse, and no-op updates; added
+  Kotlin structural extraction and compact bounded occurrence/card evidence.
+- Enforced source-spanning planner previews, session-wide round/action/token
+  ceilings, strict whole-plan fallback, model-order materialization, and safe
+  `FULL → SLICE → MAP` downgrade without weakening freshness or hard budgets.
+- Corrected paired efficiency measurement to compare Capsule input with the
+  ordinary full required/working-file payload rather than the hand-selected
+  oracle, while preserving the oracle and blinded judge as quality gates.
 
 - Added verified non-call reference edges, module-level environment-key facts,
   scoped config-consumer projections, and centrality metrics that exclude both
@@ -74,7 +84,8 @@ and Python distribution versions follow PEP 440.
   not enter later index updates.
 - Serialized generated-artifact registry updates with a bounded, ownership-
   checked stale-recoverable lock so concurrent writers do not lose entries.
-- Completed ten-language import/call/reference extraction, ambiguity-aware
+- Completed twelve-language Python/Tree-sitter import/call/reference extraction,
+  ambiguity-aware
   provenance, and key-digest-scoped config-consumer relationships without
   storing configuration values.
 - Sharded graph and retrieval records into digest-bound 4 MiB artifacts,

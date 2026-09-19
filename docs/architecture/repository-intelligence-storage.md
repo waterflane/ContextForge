@@ -2,26 +2,34 @@
 
 ## Declaration extraction and coverage
 
-Polyglot analyzer version 5 supports named object methods, enum/module methods,
-JS/TS callable class fields and parenthesized initializers, ambient TS functions,
-C/C++ prototypes, generic Rust impl owners, and C# file-scoped namespaces.
+Fallback analyzer version 4, Python analyzer version 5, and declarative
+polyglot analyzer version 8 cover Python, JavaScript, TypeScript, Java, Kotlin,
+C#, Go, Rust, C, C++, PHP, and Ruby. Registry capture rules describe
+declarations, imports, calls, and references and map captures to `SymbolKind`;
+they replace a central language-specific conditional chain. The analyzers also
+support named object methods, enum/module methods, JS/TS callable class fields
+and parenthesized initializers, ambient TS functions, C/C++ prototypes, generic
+Rust impl owners, and C# file-scoped namespaces.
 Contained method IDs must refer to actual callable children of their owner.
 Anonymous returned objects retain lexical ancestry without turning their
 enclosing function into a type or object owner.
 
 Parser/validation failures are isolated per file as a `parse_error` CodeMap
 with an `extractor_error` diagnostic and no claimed declarations. The manifest
-record is complete as a stored diagnostic, not as successful extraction; such
-records are always retried. Source-read/freshness and publication failures still
-abort. Old analyzer records are not reused on rebuild; old generations remain
-readable and publication remains atomic.
+record is complete as a stored diagnostic, not as successful extraction.
+Digest-matched parse errors are reused on normal update and retried only after
+the source/analyzer changes or with `--force-reanalyze`. Source-read/freshness
+and publication failures still abort. Old analyzer records are not reused on
+rebuild; old generations remain readable and publication remains atomic. A
+no-op update does not publish a replacement generation.
 
 `parsed` means syntactically parsed, not exhaustive coverage of a language.
 Recognized declarations without a supported name produce a partial diagnostic.
-Call/import capability is separate: current Python static extraction is
-supported, current polyglot extraction is unsupported for those relationships,
-and unknown/old analyzers have unknown coverage. Mixed repositories report
-partial coverage; zero observed calls never proves absence of dynamic calls.
+Exact relative paths and unambiguous snapshot targets produce verified static
+relationships. Package and convention resolution is best-effort structural;
+ambiguous occurrences stay unresolved and are represented only by bounded
+counts/positional postings. Zero observed calls never proves absence of dynamic
+calls.
 
 ## Implemented boundary
 
@@ -54,10 +62,14 @@ The layout follows the approved immutable-generation design:
       manifest.json                   # complete IndexManifest
       files/*.facts.json              # source identity + deterministic CodeMaps
       files/*.interpretation.json     # sparse grounded Semantic Cards
-      relationships.jsonl             # canonical structural edge records
-      relationship-graph.json         # graph metrics and projections
-      retrieval-structural.json       # structural BM25 inputs/postings
-      retrieval-semantic.json         # enriched BM25 inputs/postings
+      relationship-graph.json          # digest-bound graph shard manifest
+      graph/nodes-*.jsonl              # graph node shards, each <= 4 MiB
+      graph/edges-*.jsonl              # resolved relationship shards
+      graph/metrics-*.jsonl            # deterministic file metrics
+      graph/file-projection-*.jsonl    # compact retrieval/compiler projection
+      retrieval-structural.json        # structural shard manifest
+      retrieval-semantic.json          # enriched shard manifest
+      retrieval/*.jsonl                # exact/BM25/positional documents
       orientation.json                # full structural orientation map
       architecture.json               # deterministic enriched map
       conventions.json                # deterministic enriched map
@@ -67,6 +79,13 @@ The layout follows the approved immutable-generation design:
   contexts/                           # generated saved context packages
   runs/                               # generated operational diagnostics
 ```
+
+The per-file CodeMaps are authoritative for symbol and relationship facts;
+generation-level `symbols.jsonl` and `relationships.jsonl` duplicates are not
+written. `load_relationship_graph()` reconstructs the public graph from shards,
+while retrieval and compilation load only the compact file-level projection.
+Every shard is capped at 4 MiB; the record-size guard applies to one record, not
+to the repository as a whole.
 
 `initialize_index()` writes the approved default `config.toml` only if it is
 missing. It never replaces an existing configuration. From that point the file

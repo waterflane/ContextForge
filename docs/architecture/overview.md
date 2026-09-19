@@ -116,4 +116,4 @@ exact-symbol and dependency-aware discovery, bounded failure policies, JSONL
 progress, provider circuit breaking, and opt-in Bridge 2 tracked index jobs.
 The current development line replaces the v2 index/retrieval path with Index
 v3, grounded cards, deterministic maps, persisted BM25/graph retrieval,
-Context Capsule v2, and Bridge 2.1.
+Context Capsule v2, bounded agentic Evidence Plans, and Bridge 2.2.

@@ -4,6 +4,7 @@ Semantic enrichment in Index v3 is optional, sparse, and evidence-bound. It
 does not replace CodeMaps, source identity, or graph facts. The structural
 generation is published before enrichment starts and remains usable if the
 provider fails, the operation times out, or the caller cancels enrichment.
+The current cache identity is analyzer 7 with prompt `semantic-card-v3.4`.
 
 ## Card contract
 
@@ -65,18 +66,26 @@ provider timeout is independent of the operation timeout. A provider response
 may never expand the selected file set, evidence table, source ranges, or
 request budget.
 
-A file uses one request when its complete bounded prompt fits. Otherwise the
-UTF-8/declaration-aware planner emits at most four chunks with eight source
-lines of overlap. Evidence IDs are scoped to the current chunk and also cover
+A request reserves room for source before adding compact facts and relationship
+candidates. A file uses one request when its complete source-first prompt fits.
+Otherwise the UTF-8/declaration-aware planner emits at most four chunks with
+eight source lines of overlap. Evidence IDs are scoped to the current chunk and also cover
 verified import, call, reference, and config facts. An uncovered tail or
 invalid chunk makes the surviving card partial.
+
+Root evidence, key symbols, and resolved facts are bounded independently: a
+card has at most 32 evidence records, at most 12 key symbols, and a 128 KiB
+serialized limit. Partial cards store their actual source coverage; their
+synopsis is not represented or ranked as a whole-file description.
 
 Token accounting covers the entire `ModelRequest`, including its response
 schema and protocol wrapper. Every primary and scheduler-owned repair consumes
 one shared request slot; without a slot no repair is sent. Provider-level JSON
 repair is disabled for Semantic Cards, leaving exactly one repair authority.
-Ranking claims require both valid evidence and a lexical/identifier anchor in
-that evidence. Requests enumerate the exact `allowed_evidence_ids`; transport
+Ranking claims require an exact identifier anchor or two meaningful lexical
+anchors in cited source. Speculative `likely`/`probably`/`may` prose is retained
+only as interpretation and does not enter ranking. Requests enumerate the exact
+`allowed_evidence_ids`; transport
 container IDs are explicitly non-evidence so compatible providers cannot
 silently substitute them. Safe diagnostics include a typed dropped-item count
 for benchmark accounting without retaining rejected prose.

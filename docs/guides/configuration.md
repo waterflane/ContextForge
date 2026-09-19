@@ -93,14 +93,23 @@ context_planning_max_files = 8
 context_planning_max_ranges_per_file = 8
 context_planning_max_input_tokens = 8192
 context_planning_max_output_tokens = 768
+context_planning_max_rounds = 3
+context_planning_max_total_input_tokens = 24576
+context_planning_max_actions_per_round = 4
+context_planning_max_pool_candidates = 64
 context_planning_request_timeout_seconds = 60
 ```
 
 The model receives only supplied CandidateCards, compact verified maps/routes,
-grounded synopsis, and bounded previews around known evidence. It cannot invent
+grounded synopsis, and source-spanning bounded previews around known evidence.
+It may request `search`, `symbol`, `graph`, or `map` expansion for at most three
+rounds before finalizing supplied candidate/evidence IDs. It cannot invent
 paths, ranges, symbols, or claims. `auto` falls back deterministically after an
-invalid result, unsupported `json_schema`, timeout, or provider failure;
-`required` surfaces the failure. One locally controlled repair is the maximum.
+invalid result, unsupported `json_schema`, timeout, provider failure, or any
+plan item that cannot be materialized; `required` surfaces a typed failure.
+Plain JSON fallback and repair share the same total HTTP-call and session-token
+ceilings. CLI `--planning-rounds` may lower the configured round count for one
+operation.
 
 Bridge timeouts are intentionally independent: request `timeout_ms` is client
 wait time, `request_timeout` is one provider attempt, and `operation_timeout`

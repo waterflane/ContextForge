@@ -61,7 +61,9 @@ model-file, and chunk ceilings are hard limits. `--working-file` (also
 `--planning auto|off|required` controls bounded model-assisted evidence
 planning. `off` guarantees zero query-time provider calls, `auto` falls back to
 deterministic planning, and `required` reports failure if no validated plan is
-available. `--rerank/--no-rerank` remain deprecated compatibility aliases.
+available. `--planning-rounds` lowers the configured maximum of three bounded
+action/finalize rounds for one command. `--rerank/--no-rerank` remain deprecated
+compatibility aliases.
 
 Successful build/update summaries read the v3 manifest artifacts and report
 `orientation`, `architecture`, `conventions`, and `features` as `current`.
