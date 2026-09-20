@@ -226,14 +226,14 @@ def test_unshadowed_builtins_are_not_unresolved(
     ("files", "target", "expected"),
     [
         ({"work.py": "def target(): return 1\n"}, "work.py", "supported"),
-        ({"work.ts": "function target() { return 1; }"}, "work.ts", "unsupported"),
+        ({"work.ts": "function target() { return 1; }"}, "work.ts", "supported"),
         (
             {
                 "work.ts": "function target() { return 1; }",
                 "other.py": "def run(): return 1\n",
             },
             "work.ts",
-            "partial",
+            "supported",
         ),
         (
             {
@@ -241,7 +241,7 @@ def test_unshadowed_builtins_are_not_unresolved(
                 "Caller.kt": "fun run() = target()\n",
             },
             "work.py",
-            "partial",
+            "supported",
         ),
     ],
 )
@@ -631,7 +631,7 @@ def test_unsupported_source_languages_are_counted_in_repository_coverage(
         tmp_path,
         {
             "work.py": "def target(): return 1\n",
-            "Caller.kt": "fun run() = target()\n",
+            "Caller.swift": "func run() -> Int { target() }\n",
             "README.md": "target is documented here\n",
         },
     )

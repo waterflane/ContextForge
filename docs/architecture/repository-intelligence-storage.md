@@ -2,26 +2,34 @@
 
 ## Declaration extraction and coverage
 
-Polyglot analyzer version 4 supports named object methods, enum/module methods,
-JS/TS callable class fields and parenthesized initializers, ambient TS functions,
-C/C++ prototypes, generic Rust impl owners, and C# file-scoped namespaces.
+Fallback analyzer version 4, Python analyzer version 5, and declarative
+polyglot analyzer version 8 cover Python, JavaScript, TypeScript, Java, Kotlin,
+C#, Go, Rust, C, C++, PHP, and Ruby. Registry capture rules describe
+declarations, imports, calls, and references and map captures to `SymbolKind`;
+they replace a central language-specific conditional chain. The analyzers also
+support named object methods, enum/module methods, JS/TS callable class fields
+and parenthesized initializers, ambient TS functions, C/C++ prototypes, generic
+Rust impl owners, and C# file-scoped namespaces.
 Contained method IDs must refer to actual callable children of their owner.
 Anonymous returned objects retain lexical ancestry without turning their
 enclosing function into a type or object owner.
 
 Parser/validation failures are isolated per file as a `parse_error` CodeMap
 with an `extractor_error` diagnostic and no claimed declarations. The manifest
-record is complete as a stored diagnostic, not as successful extraction; such
-records are always retried. Source-read/freshness and publication failures still
-abort. Old analyzer records are not reused on rebuild; old generations remain
-readable and publication remains atomic.
+record is complete as a stored diagnostic, not as successful extraction.
+Digest-matched parse errors are reused on normal update and retried only after
+the source/analyzer changes or with `--force-reanalyze`. Source-read/freshness
+and publication failures still abort. Old analyzer records are not reused on
+rebuild; old generations remain readable and publication remains atomic. A
+no-op update does not publish a replacement generation.
 
 `parsed` means syntactically parsed, not exhaustive coverage of a language.
 Recognized declarations without a supported name produce a partial diagnostic.
-Call/import capability is separate: current Python static extraction is
-supported, current polyglot extraction is unsupported for those relationships,
-and unknown/old analyzers have unknown coverage. Mixed repositories report
-partial coverage; zero observed calls never proves absence of dynamic calls.
+Exact relative paths and unambiguous snapshot targets produce verified static
+relationships. Package and convention resolution is best-effort structural;
+ambiguous occurrences stay unresolved and are represented only by bounded
+counts/positional postings. Zero observed calls never proves absence of dynamic
+calls.
 
 ## Implemented boundary
 
@@ -33,13 +41,11 @@ relationship resolution, incremental invalidation, atomic staged records,
 immutable generations, an atomic active pointer, bounded single-writer locking,
 recovery, cleanup, and scanner protection.
 
-The semantic builders may call the approved provider adapter for bounded file,
-symbol, and hierarchical repository analysis. `*.interpretation.json`,
-`architecture.json`, and `features.json` are model interpretations; source and
-CodeMap facts remain authoritative. `overview.json` is a deterministic CodeMap
-projection. This boundary still does not perform task-specific discovery,
-context selection, final prompt compilation, CLI orchestration, or MCP. See
-[Repository architecture and feature maps](repository-maps.md).
+The semantic-card builder may call the approved provider adapter for bounded
+file analysis. Grounded cards remain interpretations; source, CodeMaps, and
+structural graph edges remain authoritative. Repository maps are deterministic
+aggregations and task retrieval/Context Capsule compilation use pinned public
+APIs. See [Index v3 retrieval and Context Capsule compiler](index-v3-context-compiler.md).
 
 ## Ownership and layout
 
@@ -54,15 +60,32 @@ The layout follows the approved immutable-generation design:
     staging/<run-id>/                 # resumable, not visible to readers
     generations/<generation-id>/
       manifest.json                   # complete IndexManifest
-      files/                          # per-file records
-      symbols.jsonl
-      relationships.jsonl
-      overview.json
-      architecture.json
-      features.json
+      files/*.facts.json              # source identity + deterministic CodeMaps
+      files/*.interpretation.json     # sparse grounded Semantic Cards
+      relationship-graph.json          # digest-bound graph shard manifest
+      graph/nodes-*.jsonl              # graph node shards, each <= 4 MiB
+      graph/edges-*.jsonl              # resolved relationship shards
+      graph/metrics-*.jsonl            # deterministic file metrics
+      graph/file-projection-*.jsonl    # compact retrieval/compiler projection
+      retrieval-structural.json        # structural shard manifest
+      retrieval-semantic.json          # enriched shard manifest
+      retrieval/*.jsonl                # exact/BM25/positional documents
+      orientation.json                # full structural orientation map
+      architecture.json               # deterministic enriched map
+      conventions.json                # deterministic enriched map
+      features.json                   # deterministic enriched map
+    cache/semantic/<prefix>/<key>.json # path-neutral validated model payloads
+  generated-artifacts.json            # digest-bound output registry
   contexts/                           # generated saved context packages
   runs/                               # generated operational diagnostics
 ```
+
+The per-file CodeMaps are authoritative for symbol and relationship facts;
+generation-level `symbols.jsonl` and `relationships.jsonl` duplicates are not
+written. `load_relationship_graph()` reconstructs the public graph from shards,
+while retrieval and compilation load only the compact file-level projection.
+Every shard is capped at 4 MiB; the record-size guard applies to one record, not
+to the repository as a whole.
 
 `initialize_index()` writes the approved default `config.toml` only if it is
 missing. It never replaces an existing configuration. From that point the file
@@ -73,6 +96,14 @@ The scanner treats `.contextforge/` as one non-negatable protected root. The
 user-owned configuration remains readable by the configuration loader and is
 preserved by cleanup, but no file under `.contextforge/` can enter structural,
 generic, or rich semantic analysis.
+
+Package, Capsule, and prompt files written elsewhere inside the repository are
+registered with their portable path, artifact kind, and SHA-256. The scanner
+skips a registry entry only while the file digest matches. A user edit makes
+the path ordinary source on the next scan. A missing or corrupt registry fails
+open, outputs outside the repository are never registered, and neither filename
+nor content matching is used. This mechanism does not modify `.gitignore` or
+`.contextforgeignore`.
 
 ## Public API
 
@@ -101,15 +132,17 @@ Mutation APIs require an active `IndexWriteLock`. Readers do not take the lock.
 `load_index_record()` accepts a caller-pinned manifest so a multi-record reader
 does not need to reopen the active pointer between reads.
 
-## Manifest schema version 2
+## Manifest schema version 3
 
-New index pointers, manifests, records, CodeMaps and semantic records use v2.
-The separate legacy loader permits read-only v1 inspection and preserves its
-original digest. Legacy records are stale and are never reused in a v2 build.
-Build/update publishes only a consistent generation. The application workflow
-keeps intermediate structural, semantic and map generations private until the
-final atomic pointer switch; a failure leaves the previous pointer untouched.
-Old generations are not deleted by migration.
+New index pointers, manifests, records, CodeMaps, graph records, retrieval
+postings, maps, and Semantic Cards use v3. A v2 index is recognized by status
+only and reports `rebuild_required`; retrieval refuses it and `index update`
+requires a fresh `index build`. Semantic v2 data is not migrated. Old immutable
+generations are not deleted automatically.
+
+Publication has two transactions in one writer-lock lifetime. The structural
+generation becomes active first. Enrichment then publishes a second generation
+or leaves the structural one active on failure, timeout, or cancellation.
 
 Persisted models are frozen Pydantic models with unknown fields forbidden.
 Canonical manifest JSON is UTF-8, sorted-key compact JSON with LF termination.
@@ -136,7 +169,7 @@ except the self-referential `generation_id` field. File-record content is bound
 through each record's SHA-256. API keys, bearer tokens, headers, and credential
 objects are not fields in any persisted schema and unknown fields are rejected.
 
-## CodeMap schema version 2
+## CodeMap schema version 3
 
 CodeMaps also retain bounded deterministic `source_regions` and
 `source_regions_truncated`, including when no model is configured. These are
@@ -152,8 +185,10 @@ source position. Their qualified names append every lexical parent, for example
 `pkg.module.Class.method.nested`; duplicate same-name declarations retain the
 same qualified name and receive distinct deterministic ordinal-based IDs.
 
-Python signatures and annotations are exact canonical source slices. Calls are
-observed syntax facts. A call is `internal` only for an unambiguous local
+Python signatures and annotations are exact canonical source slices. Calls and
+non-call value/type/imported-symbol references are observed separately;
+declarations, imports, and call targets do not duplicate reference facts. A
+call or reference is `internal` only for an unambiguous local
 lexical name or resolved import alias in the applicable lexical scope. Parameter
 or local rebinding, cross-function imports, inexact dotted module prefixes, and
 attributes of imported objects remain `unresolved`. Absolute imports absent
@@ -232,7 +267,8 @@ an active lock or relying on flaky elapsed-time thresholds.
 
 - The CLI orchestrates build, update, status, and policy-bounded cleanup for a
   single repository root. Full multi-root workspaces remain deferred.
-- Python provides declarations plus conservative call/import relationships.
+- Python provides declarations plus conservative call/import/reference and
+  environment-configuration relationships.
   JavaScript, TypeScript, Java, C#, Go, Rust, C, C++, PHP, and Ruby provide
   verified Tree-sitter declarations; their relationship extraction remains
   explicitly unsupported. Other selectable text files receive file-level

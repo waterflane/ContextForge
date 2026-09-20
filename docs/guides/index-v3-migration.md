@@ -1,0 +1,140 @@
+# Migrating to Index v3 and Context Capsule v2
+
+## Index rebuild
+
+Index v2 is not used by v3 retrieval. `contextforge index status PATH` recognizes
+it and reports `rebuild_required`. `contextforge index update PATH` rejects it;
+run a full build instead:
+
+```bash
+contextforge index build PATH --provider none
+# or bounded enrichment
+contextforge index build PATH --semantic-scope priority
+```
+
+The build creates a new immutable v3 generation. It does not migrate v2
+semantics and does not delete old generations. Only explicit
+`contextforge index clean PATH` removes generated index data.
+
+The structural generation becomes active before model enrichment. If
+enrichment fails, status may be partial but `map`, deterministic search, symbol
+lookup, and compilation against structural evidence remain usable.
+
+Resolver/analyzer identities changed with this revision (fallback 4, resolver
+7, Python 5, polyglot 8, Semantic Card analyzer 7, prompt
+`semantic-card-v3.4`). Rebuild/update does not reuse older CodeMaps or semantic
+cache entries under those contracts. Polyglot analysis now includes Kotlin
+`.kt` and `.kts` declarations, imports, calls, and references.
+
+A no-op update reuses unchanged records and keeps the active generation ID.
+Unchanged parse-error records are also reused as failed/partial evidence;
+`--force-reanalyze` explicitly retries their extraction. A corrupt active
+generation is reported as `corrupt` with `rebuild_required` rather than making
+`index status` crash. Recover it with `index build`; old immutable generations
+remain until explicit `index clean`.
+
+## CLI behavior
+
+With an active v3 index:
+
+- `context suggest --task ...` returns RetrievalResult/CandidateCards v3;
+- task-based `context create --task ...` returns Context Capsule v2;
+- manual `context create` without a task remains ContextPackage v1; and
+- `context inspect`/`context review` accept both artifact generations.
+
+`contextforge map PATH` remains the orientation-map default. Use `--kind
+architecture`, `--kind conventions`, `--kind features`, or `--kind all` for
+the enriched typed maps. JSON for the default stays the raw OrientationMap;
+`--kind all --format json` returns `orientation` plus `repository_maps`.
+
+Use `--legacy-discovery` and `--legacy-handoff` during migration if a consumer
+still expects `FinalContextSelection` or `TaskHandoff`. Remove those flags after
+the consumer accepts CandidateCards and Capsule v2.
+
+## Budget migration
+
+Capsule creation requires an explicit or configured model context window.
+Account for prior conversation and expected response separately:
+
+```bash
+contextforge context create PATH --task "..." \
+  --context-tokens 32768 \
+  --history-tokens 6000 \
+  --response-tokens 4096 \
+  --safety-margin-tokens 1024
+```
+
+`--working-file` influences retrieval and reserves Working Set context.
+`--working-lines PATH:START-END` requests exact source ranges. `--full-file`
+allows FULL for an explicitly pinned file; otherwise automatic FULL applies
+only to files of at most 200 lines and only when it fits.
+
+Automatic task evidence has a soft ceiling of 30% of the available budget and
+stops when its Evidence Plan is covered; it is not padded to that size.
+Explicit Working Set material, requested ranges, pinned FULL files, and required
+Git material may exceed the soft ceiling but never the hard budget. Planner
+representation suggestions are advisory and cannot bypass those rules.
+
+Model-assisted planning may use up to three bounded `search`, `symbol`, `graph`,
+or `map` rounds before finalization. `--planning-rounds` may lower that ceiling.
+The candidate pool and every returned ID remain ContextForge-controlled. In
+`auto`, one invalid or unmaterializable planned item causes the entire plan to
+fall back to deterministic complementary selection. In `required`, the same
+condition is a typed error. Bridge 2.1 continues to map its boolean `rerank`
+field to this behavior; Bridge 2.2 exposes `planning_mode` directly.
+
+Package, Capsule, and prompt files created inside the repository are recorded
+in `.contextforge/generated-artifacts.json`. An unchanged registered artifact
+is omitted from later scans and updates; editing it changes the digest and makes
+it ordinary source again. No ignore-file migration is required.
+Concurrent registry writers are serialized by the internal bounded
+`.contextforge/generated-artifacts.lock`; stale ownership is recovered safely.
+
+## Integration migration
+
+Bridge clients may keep negotiating 1.0, 1.1, or 2.0 unchanged. Negotiate 2.1
+to use `map`, `search`, `symbol`, and `compile`, semantic scheduler options, and
+`operation_timeout`. Continue correlating a timed-out index job by its
+`operation_id`; client `timeout_ms` no longer cancels that job.
+
+MCP clients should refresh `tools/list` and accept the four new read-only tools.
+Development HTTP clients may use `/v1/map`, `/v1/search`, `/v1/symbol`, and
+`/v1/compile`. No new interface grants source-write, shell, or Git-mutation
+authority.
+
+Python callers can migrate incrementally:
+
+```python
+from contextforge import (
+    ContextBudget,
+    compile_context_capsule,
+    load_orientation_map,
+    retrieve_context_candidates,
+)
+
+
+async def build_capsule(root, task):
+    retrieval = await retrieve_context_candidates(root, task)
+    return compile_context_capsule(
+        root,
+        task,
+        retrieval,
+        budget=ContextBudget(
+            context_window_tokens=32768,
+            history_tokens=6000,
+            response_tokens=4096,
+            safety_margin_tokens=1024,
+        ),
+    )
+```
+
+Legacy `ContextPackage`, `TaskHandoff`, and `compile_prompt` APIs remain
+available for the deprecation period.
+
+Benchmark manifests remain schema 1. The additive task field `pipeline`
+defaults to `legacy_discovery`; set it to `index_v3_capsule` to measure cold
+build, warm retrieval, and isolated incremental update through Capsule v2.
+For paired answer evaluation, complete required/working files form the ordinary
+token baseline; manual oracle ranges are only the quality reference. Three
+blinded groundedness votes validate ContextForge answers against materialized
+ranges, and phase-specific model tokens, HTTP calls, and latency stay separate.

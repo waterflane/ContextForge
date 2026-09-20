@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Literal
 
 from tree_sitter import Language, Node, Parser
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
+    CallReference,
     FileCodeMap,
+    ImportRecord,
     ParserDiagnostic,
+    ReferenceOccurrence,
     SourceRange,
     SymbolKind,
     SymbolRecord,
@@ -23,7 +28,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="4",
+    analyzer_version="8",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -35,6 +40,7 @@ SUPPORTED_POLYGLOT_LANGUAGES = (
     "Go",
     "Java",
     "JavaScript",
+    "Kotlin",
     "PHP",
     "Ruby",
     "Rust",
@@ -48,6 +54,7 @@ _GRAMMARS: dict[str, tuple[str, str]] = {
     "Go": ("tree_sitter_go", "language"),
     "Java": ("tree_sitter_java", "language"),
     "JavaScript": ("tree_sitter_javascript", "language"),
+    "Kotlin": ("tree_sitter_kotlin", "language"),
     "PHP": ("tree_sitter_php", "language_php"),
     "Ruby": ("tree_sitter_ruby", "language"),
     "Rust": ("tree_sitter_rust", "language"),
@@ -81,6 +88,13 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
         "interface_declaration": SymbolKind.INTERFACE,
         "method_declaration": SymbolKind.METHOD,
         "record_declaration": SymbolKind.STRUCT,
+    },
+    "Kotlin": {
+        "class_declaration": SymbolKind.CLASS,
+        "function_declaration": SymbolKind.FUNCTION,
+        "object_declaration": SymbolKind.CLASS,
+        "secondary_constructor": SymbolKind.CONSTRUCTOR,
+        "type_alias": SymbolKind.TYPE_ALIAS,
     },
     "C#": {
         "class_declaration": SymbolKind.CLASS,
@@ -139,6 +153,20 @@ _KINDS: dict[str, dict[str, SymbolKind]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class StructuralCaptureRules:
+    """Declarative Tree-sitter captures for one supported language."""
+
+    grammar_module: str
+    grammar_function: str
+    declarations: Mapping[str, SymbolKind]
+    import_captures: frozenset[str]
+    call_captures: frozenset[str]
+    reference_captures: frozenset[str]
+    binding_captures: frozenset[str]
+    module_executable: bool = False
+
+
 @dataclass(slots=True)
 class _Draft:
     node: Node
@@ -170,9 +198,10 @@ def extract_polyglot_code_map(
     source = selected.blocks[0].text
     source_bytes = source.encode("utf-8")
     language_name = project_file.language or ""
+    rules = STRUCTURAL_CAPTURE_RULES[language_name]
     parser = Parser(_language(language_name, project_file.path))
     tree = parser.parse(source_bytes)
-    diagnostics = _diagnostics(tree.root_node)
+    diagnostics = _diagnostics(tree.root_node, selected.source_line_count)
     drafts: list[_Draft] = []
     omitted: list[ParserDiagnostic] = []
 
@@ -180,12 +209,12 @@ def extract_polyglot_code_map(
         next_parent = parent_index
         declaration_node: Node | None = None
         prototype_name: Node | None = None
-        verified = not node.has_error
+        verified = _declaration_node_is_verified(node, language_name)
         ancestor = node.parent
         while verified and ancestor is not None:
             verified = not ancestor.is_error and not ancestor.is_missing
             ancestor = ancestor.parent
-        kind = _KINDS.get(language_name, {}).get(node.type)
+        kind = rules.declarations.get(node.type)
         if language_name in {"C", "C++"} and node.type == "function_declarator":
             prototype_name, declaration_node = _c_prototype(node)
             if prototype_name is not None and declaration_node is not None:
@@ -206,7 +235,11 @@ def extract_polyglot_code_map(
                     "struct_type": SymbolKind.STRUCT,
                     "interface_type": SymbolKind.INTERFACE,
                 }.get(target_type.type, kind)
-        binding = _binding(node, language_name, source_bytes)
+        binding = (
+            _binding(node, language_name, source_bytes)
+            if node.type in rules.binding_captures
+            else None
+        )
         if binding is not None and verified:
             binding_name, kind, callable_node = binding
             next_parent = len(drafts)
@@ -376,6 +409,12 @@ def extract_polyglot_code_map(
                 visibility=_visibility(draft.node, source_bytes),
             )
         )
+    imports = _extract_imports(source, project_file.path, language_name)
+    symbols = list(
+        _attach_occurrences(
+            tree.root_node, tuple(symbols), imports, source_bytes, rules
+        )
+    )
     return FileCodeMap(
         path=project_file.path,
         source_sha256=project_file.sha256,
@@ -384,6 +423,8 @@ def extract_polyglot_code_map(
         analyzer=POLYGLOT_ANALYZER,
         parse_status="partial" if diagnostics or omitted else "parsed",
         line_count=selected.source_line_count,
+        module_has_executable_code=_module_has_executable_code(tree.root_node, rules),
+        imports=imports,
         symbols=tuple(symbols),
         diagnostics=tuple(
             sorted(
@@ -396,6 +437,403 @@ def extract_polyglot_code_map(
             )
         ),
     )
+
+
+_IMPORT_ANCESTORS = {
+    "import",
+    "import_declaration",
+    "import_spec",
+    "import_statement",
+    "include_directive",
+    "namespace_use_clause",
+    "namespace_use_declaration",
+    "preproc_include",
+    "require_relative",
+    "use_declaration",
+    "using_directive",
+}
+_CALL_NODES = {
+    "call",
+    "call_expression",
+    "function_call_expression",
+    "invocation_expression",
+    "member_call_expression",
+    "method_invocation",
+    "scoped_call_expression",
+}
+_IDENTIFIER_NODES = {
+    "constant",
+    "field_identifier",
+    "identifier",
+    "name",
+    "namespace_identifier",
+    "property_identifier",
+    "scoped_identifier",
+    "type_identifier",
+}
+
+_BINDING_CAPTURES: dict[str, frozenset[str]] = {
+    "JavaScript": frozenset(
+        {"variable_declarator", "public_field_definition", "field_definition"}
+    ),
+    "TypeScript": frozenset(
+        {"variable_declarator", "public_field_definition", "field_definition"}
+    ),
+    "Rust": frozenset({"const_item", "static_item"}),
+    "Java": frozenset({"variable_declarator"}),
+    "Kotlin": frozenset({"property_declaration"}),
+    "C#": frozenset({"variable_declarator"}),
+    "Go": frozenset({"var_spec", "const_spec"}),
+    "C": frozenset({"init_declarator", "identifier", "field_identifier"}),
+    "C++": frozenset({"init_declarator", "identifier", "field_identifier"}),
+    "PHP": frozenset({"const_element", "property_element"}),
+    "Ruby": frozenset({"assignment"}),
+}
+
+STRUCTURAL_CAPTURE_RULES: Mapping[str, StructuralCaptureRules] = {
+    language: StructuralCaptureRules(
+        grammar_module=grammar[0],
+        grammar_function=grammar[1],
+        declarations=_KINDS[language],
+        import_captures=frozenset(_IMPORT_ANCESTORS),
+        call_captures=frozenset(_CALL_NODES),
+        reference_captures=frozenset(_IDENTIFIER_NODES),
+        binding_captures=_BINDING_CAPTURES[language],
+        module_executable=language in {"JavaScript", "TypeScript"},
+    )
+    for language, grammar in _GRAMMARS.items()
+}
+
+
+def _extract_imports(source: str, path: str, language: str) -> tuple[ImportRecord, ...]:
+    values: list[ImportRecord] = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        for module, imported, alias, observed, start, end in _import_specs(
+            line, language
+        ):
+            source_range = SourceRange(
+                start_line=line_number,
+                start_column=start,
+                end_line=line_number,
+                end_column=end,
+            )
+            values.append(
+                ImportRecord(
+                    import_id=stable_fact_id(
+                        "import",
+                        path,
+                        module,
+                        imported,
+                        alias,
+                        line_number,
+                        start,
+                    ),
+                    module=module,
+                    imported_name=imported,
+                    alias=alias,
+                    observed_text=observed[:1_000],
+                    source_range=source_range,
+                )
+            )
+    unique = {item.import_id: item for item in values}
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.module or "",
+                item.imported_name or "",
+                item.alias or "",
+            ),
+        )
+    )
+
+
+def _import_specs(
+    line: str, language: str
+) -> tuple[tuple[str, str | None, str | None, str, int, int], ...]:
+    stripped = line.strip()
+    results: list[tuple[str, str | None, str | None, str, int, int]] = []
+
+    def add(
+        module: str,
+        imported: str | None = None,
+        alias: str | None = None,
+        observed: str | None = None,
+    ) -> None:
+        clean = module.strip().strip("\"'")
+        if not clean:
+            return
+        start = max(line.find(module), 0)
+        results.append((clean, imported, alias, observed or stripped, start, len(line)))
+
+    if language in {"JavaScript", "TypeScript"}:
+        from_match = re.search(
+            r"\b(?:import|export)\s+(.+?)\s+from\s+['\"]([^'\"]+)['\"]",
+            line,
+        )
+        if from_match:
+            bindings, module = from_match.groups()
+            named = re.search(r"\{([^}]*)\}", bindings)
+            if named:
+                for item in named.group(1).split(","):
+                    parts = re.split(r"\s+as\s+", item.strip())
+                    if parts and parts[0]:
+                        add(
+                            module,
+                            parts[0],
+                            parts[1] if len(parts) == 2 else None,
+                        )
+            else:
+                star = re.search(r"\*\s+as\s+(\w+)", bindings)
+                add(module, alias=star.group(1) if star else None)
+        require_matches = tuple(
+            re.finditer(r"\brequire\s*\(\s*['\"]([^'\"]+)['\"]", line)
+        )
+        for require_match in require_matches:
+            add(require_match.group(1))
+        if from_match is None and not require_matches:
+            side_effect = re.search(r"\bimport\s*['\"]([^'\"]+)['\"]", line)
+            if side_effect:
+                add(side_effect.group(1))
+    elif language == "Go":
+        match = re.search(r"(?:^|\s)([A-Za-z_]\w*\s+)?['\"]([^'\"]+)['\"]", line)
+        if match and (stripped.startswith("import") or stripped.startswith(('"', "'"))):
+            add(match.group(2), alias=(match.group(1) or "").strip() or None)
+    elif language == "Rust":
+        match = re.search(r"\b(?:use|mod)\s+([A-Za-z_][\w:]*)", line)
+        if match:
+            parts = match.group(1).split("::")
+            add(
+                "::".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None
+            )
+    elif language in {"Java", "C#", "Kotlin"}:
+        keyword = "import" if language in {"Java", "Kotlin"} else "using"
+        match = re.search(rf"\b{keyword}\s+(?:static\s+)?([A-Za-z_][\w.]*)", line)
+        if match:
+            parts = match.group(1).split(".")
+            add(".".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None)
+    elif language in {"C", "C++"}:
+        match = re.search(r"#\s*include\s*([<\"])([^>\"]+)[>\"]", line)
+        if match:
+            add(match.group(2))
+    elif language == "PHP":
+        match = re.search(r"\buse\s+([A-Za-z_\\][\w\\]*)", line)
+        if match:
+            parts = match.group(1).split("\\")
+            add(
+                "\\".join(parts[:-1]) or parts[0], parts[-1] if len(parts) > 1 else None
+            )
+        for match in re.finditer(
+            r"\b(?:require|require_once|include|include_once)\s*\(?\s*['\"]([^'\"]+)",
+            line,
+        ):
+            add(match.group(1))
+    elif language == "Ruby":
+        match = re.search(r"\brequire(_relative)?\s*\(?\s*['\"]([^'\"]+)", line)
+        if match:
+            module = ("./" if match.group(1) else "") + match.group(2)
+            add(module)
+    return tuple(results)
+
+
+def _attach_occurrences(
+    root: Node,
+    symbols: tuple[SymbolRecord, ...],
+    imports: tuple[ImportRecord, ...],
+    source: bytes,
+    rules: StructuralCaptureRules,
+) -> tuple[SymbolRecord, ...]:
+    del imports
+    calls: dict[str, list[CallReference]] = {item.symbol_id: [] for item in symbols}
+    references: dict[str, list[ReferenceOccurrence]] = {
+        item.symbol_id: [] for item in symbols
+    }
+    declaration_ranges = {
+        (
+            item.declaration_range.start_line,
+            item.declaration_range.start_column,
+        )
+        for item in symbols
+    }
+    call_target_ranges: list[SourceRange] = []
+
+    def owner(node: Node) -> SymbolRecord | None:
+        region = _range(node)
+        candidates = [
+            item
+            for item in symbols
+            if _contains_range(item.body_range or item.declaration_range, region)
+        ]
+        return min(
+            candidates,
+            key=lambda item: (
+                (item.body_range or item.declaration_range).end_line
+                - (item.body_range or item.declaration_range).start_line,
+                item.qualified_name,
+            ),
+            default=None,
+        )
+
+    def in_import(node: Node) -> bool:
+        current: Node | None = node
+        while current is not None:
+            if current.type in rules.import_captures:
+                return True
+            current = current.parent
+        return False
+
+    def visit_calls(node: Node) -> None:
+        if node.type in rules.call_captures and not node.has_error:
+            target = (
+                node.child_by_field_name("function")
+                or node.child_by_field_name("name")
+                or node.child_by_field_name("method")
+                or next(iter(node.named_children), None)
+            )
+            selected_owner = owner(node)
+            if target is not None and selected_owner is not None:
+                observed = _text(source, target).strip()
+                if observed and len(observed) <= 500:
+                    region = _range(target)
+                    call_target_ranges.append(region)
+                    calls[selected_owner.symbol_id].append(
+                        CallReference(
+                            observed_name=observed,
+                            source_range=region,
+                            detection_method="polyglot_ast_call",
+                        )
+                    )
+        for child in node.named_children:
+            visit_calls(child)
+
+    def visit_references(node: Node) -> None:
+        if (
+            node.type in rules.reference_captures
+            and not node.has_error
+            and not in_import(node)
+        ):
+            selected_owner = owner(node)
+            region = _range(node)
+            if (
+                selected_owner is not None
+                and not any(
+                    target.start_line <= region.start_line
+                    and region.end_line <= target.end_line
+                    and (
+                        target.start_line != region.start_line
+                        or target.start_column <= region.start_column
+                    )
+                    and (
+                        target.end_line != region.end_line
+                        or region.end_column <= target.end_column
+                    )
+                    for target in call_target_ranges
+                )
+                and (region.start_line, region.start_column) not in declaration_ranges
+                and not _is_declaration_name(node)
+            ):
+                observed = _text(source, node).strip()
+                if observed and len(observed) <= 500:
+                    references[selected_owner.symbol_id].append(
+                        ReferenceOccurrence(
+                            observed_name=observed,
+                            source_range=region,
+                            detection_method="polyglot_ast_reference",
+                        )
+                    )
+        for child in node.named_children:
+            visit_references(child)
+
+    visit_calls(root)
+    visit_references(root)
+    return tuple(
+        item.model_copy(
+            update={
+                "direct_calls": tuple(
+                    sorted(
+                        {
+                            (
+                                call.source_range.start_line,
+                                call.source_range.start_column,
+                                call.observed_name,
+                            ): call
+                            for call in calls[item.symbol_id]
+                        }.values(),
+                        key=lambda call: (
+                            call.source_range.start_line,
+                            call.source_range.start_column,
+                            call.observed_name,
+                        ),
+                    )
+                ),
+                "direct_references": tuple(
+                    sorted(
+                        {
+                            (
+                                reference.source_range.start_line,
+                                reference.source_range.start_column,
+                                reference.observed_name,
+                            ): reference
+                            for reference in references[item.symbol_id]
+                        }.values(),
+                        key=lambda reference: (
+                            reference.source_range.start_line,
+                            reference.source_range.start_column,
+                            reference.observed_name,
+                        ),
+                    )
+                ),
+            }
+        )
+        for item in symbols
+    )
+
+
+def _is_declaration_name(node: Node) -> bool:
+    parent = node.parent
+    if parent is None:
+        return False
+    return parent.child_by_field_name("name") == node and parent.type not in {
+        "attribute",
+        "field_expression",
+        "member_access_expression",
+        "member_expression",
+        "qualified_name",
+        "scoped_identifier",
+    }
+
+
+def _contains_range(container: SourceRange, nested: SourceRange) -> bool:
+    start = (container.start_line, container.start_column)
+    end = (container.end_line, container.end_column)
+    nested_start = (nested.start_line, nested.start_column)
+    nested_end = (nested.end_line, nested.end_column)
+    return start <= nested_start and nested_end <= end
+
+
+def _declaration_node_is_verified(node: Node, language: str) -> bool:
+    """Reject malformed declarations while tolerating Kotlin virtual semicolons."""
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.is_error:
+            return False
+        if current.is_missing and not (
+            language == "Kotlin" and current.type == "_class_member_semi"
+        ):
+            return False
+        stack.extend(current.children)
+    return True
+
+
+def _module_has_executable_code(root: Node, rules: StructuralCaptureRules) -> bool:
+    if not rules.module_executable:
+        return False
+    allowed = {"comment", "empty_statement", "export_statement", "import_statement"}
+    return any(child.type not in allowed for child in root.named_children)
 
 
 def _binding(
@@ -459,6 +897,45 @@ def _binding(
                 else b"const" in header.split()
             )
             return name, SymbolKind.CONSTANT if constant else SymbolKind.VARIABLE, None
+    if language == "Kotlin" and node.type == "property_declaration":
+        variable = next(
+            (
+                child
+                for child in node.named_children
+                if child.type == "variable_declaration"
+            ),
+            None,
+        )
+        name = (
+            None
+            if variable is None
+            else next(
+                (
+                    child
+                    for child in variable.named_children
+                    if child.type == "identifier"
+                ),
+                None,
+            )
+        )
+        if name is not None:
+            callable_node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "lambda_literal"
+                ),
+                None,
+            )
+            return (
+                name,
+                SymbolKind.FUNCTION
+                if callable_node is not None
+                else SymbolKind.CONSTANT
+                if "const" in _modifier_words(node, source)
+                else SymbolKind.VARIABLE,
+                callable_node,
+            )
     if language == "Go" and node.type in {"var_spec", "const_spec"}:
         name = node.child_by_field_name("name")
         if name is not None:
@@ -542,7 +1019,9 @@ def _method_owner(node: Node, language: str, source: bytes) -> str | None:
 
 
 def _language(language_name: str, path: str) -> Language:
-    module_name, function_name = _GRAMMARS[language_name]
+    rules = STRUCTURAL_CAPTURE_RULES[language_name]
+    module_name = rules.grammar_module
+    function_name = rules.grammar_function
     if language_name == "TypeScript" and path.casefold().endswith(".tsx"):
         function_name = "language_tsx"
     capsule = getattr(import_module(module_name), function_name)()
@@ -663,7 +1142,7 @@ def _modifier_words(node: Node, source: bytes) -> set[str]:
     return words
 
 
-def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
+def _diagnostics(root: Node, line_count: int) -> tuple[ParserDiagnostic, ...]:
     result: list[ParserDiagnostic] = []
     stack = [root]
     while stack and len(result) < 20:
@@ -674,7 +1153,7 @@ def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
                     code="tree_sitter_parse_error",
                     message=f"Tree-sitter reported {node.type!r} syntax",
                     severity="error",
-                    range=_range(node),
+                    range=_bounded_range(node, line_count),
                 )
             )
         stack.extend(reversed(node.named_children))
@@ -689,8 +1168,23 @@ def _diagnostics(root: Node) -> tuple[ParserDiagnostic, ...]:
     )
 
 
+def _bounded_range(node: Node, line_count: int) -> SourceRange:
+    source_range = _range(node)
+    maximum = max(line_count, 1)
+    start_line = min(source_range.start_line, maximum)
+    end_line = min(max(source_range.end_line, start_line), maximum)
+    return SourceRange(
+        start_line=start_line,
+        start_column=source_range.start_column if start_line < maximum else 0,
+        end_line=end_line,
+        end_column=source_range.end_column if end_line < maximum else 0,
+    )
+
+
 __all__ = [
     "POLYGLOT_ANALYZER",
+    "STRUCTURAL_CAPTURE_RULES",
+    "StructuralCaptureRules",
     "SUPPORTED_POLYGLOT_LANGUAGES",
     "extract_polyglot_code_map",
 ]

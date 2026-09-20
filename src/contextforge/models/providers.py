@@ -1044,7 +1044,10 @@ def estimate_request_context(
 ) -> RequestContextBudget:
     """Conservatively account for messages, schema, output, wrappers, and reserve."""
 
-    messages = request.messages(include_response_schema=False)
+    # Native schema modes transmit the contract out-of-band. JSON-object and
+    # plain-JSON modes embed the same contract in the user message, so excluding
+    # it here would undercount the exact payload sent to compatible providers.
+    messages = request.messages(include_response_schema=not include_native_schema)
     system_tokens = _estimate_tokens(len(messages[0].content.encode("utf-8")))
     total_user_tokens = _estimate_tokens(len(messages[1].content.encode("utf-8")))
     source_tokens = sum(

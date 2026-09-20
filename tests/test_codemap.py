@@ -17,6 +17,7 @@ from contextforge.intelligence import (
     FileCodeMap,
     ImportRecord,
     ParserDiagnostic,
+    ReferenceOccurrence,
     RelationshipTarget,
     SourceRange,
     SymbolKind,
@@ -171,6 +172,82 @@ def public() -> None:
     assert calls["run_helper"].target_file_path == "pkg/impl.py"
     assert calls["library.call"].resolution == "unresolved"
     assert calls["dynamic"].resolution == "unresolved"
+
+
+def test_value_type_and_imported_references_are_verified_without_call_duplicates(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(
+        tmp_path,
+        "pkg/targets.py",
+        "VALUE = 7\n\nclass Service:\n    pass\n",
+    )
+    _write(
+        tmp_path,
+        "pkg/app.py",
+        """from .targets import Service, VALUE as imported_value
+LOCAL = 2
+
+def consume(service: Service) -> int:
+    return imported_value + LOCAL
+
+def invoke() -> int:
+    return consume(Service())
+""",
+    )
+
+    maps = extract_code_maps(scan_repository(tmp_path))
+    app = next(item for item in maps if item.path == "pkg/app.py")
+    consume = next(item for item in app.symbols if item.name == "consume")
+    invoke = next(item for item in app.symbols if item.name == "invoke")
+    references = {item.observed_name: item for item in consume.direct_references}
+
+    assert references["Service"].resolution == "internal"
+    assert references["Service"].target_file_path == "pkg/targets.py"
+    assert references["imported_value"].resolution == "internal"
+    assert references["imported_value"].target_file_path == "pkg/targets.py"
+    assert references["LOCAL"].resolution == "internal"
+    assert references["LOCAL"].target_file_path == "pkg/app.py"
+    assert {item.observed_name for item in invoke.direct_calls} == {
+        "Service",
+        "consume",
+    }
+    assert not {item.observed_name for item in invoke.direct_references} & {
+        "Service",
+        "consume",
+    }
+    graph_references = [
+        item
+        for item in app.relationships
+        if item.kind == "reference" and item.target.resolution == "internal"
+    ]
+    assert {item.observed_text for item in graph_references} >= {
+        "Service",
+        "imported_value",
+        "LOCAL",
+    }
+
+
+def test_module_level_environment_reads_are_configuration_facts(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "settings.py",
+        """import os
+API_URL = os.getenv("API_URL")
+MODE = os.environ.get("APP_MODE", "safe")
+TOKEN = os.environ["APP_TOKEN"]
+""",
+    )
+
+    code_map = _map(tmp_path, "settings.py")
+    keys = {symbol.name: symbol.configuration_keys for symbol in code_map.symbols}
+
+    assert keys["API_URL"] == ("API_URL",)
+    assert keys["MODE"] == ("APP_MODE",)
+    assert keys["TOKEN"] == ("APP_TOKEN",)
 
 
 def test_syntax_error_is_diagnostic_without_fabricated_symbols(tmp_path: Path) -> None:
@@ -436,6 +513,12 @@ def test_codemap_models_reject_false_resolution_and_noncanonical_shapes() -> Non
             source_range=source_range,
             resolution="unresolved",
             target_symbol_id="symbol:claimed",
+        )
+    with pytest.raises(ValidationError, match="require a symbol"):
+        ReferenceOccurrence(
+            observed_name="value",
+            source_range=source_range,
+            resolution="internal",
         )
     with pytest.raises(ValidationError, match="require a target file"):
         ImportRecord(

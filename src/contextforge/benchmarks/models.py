@@ -50,6 +50,13 @@ class BenchmarkMode(StrEnum):
     HYBRID = "hybrid"
 
 
+class BenchmarkPipeline(StrEnum):
+    """Context selection pipeline exercised by a benchmark task."""
+
+    LEGACY_DISCOVERY = "legacy_discovery"
+    INDEX_V3_CAPSULE = "index_v3_capsule"
+
+
 class BenchmarkIndexPrecondition(BenchmarkModel):
     """Required source/index state for an indexed benchmark task."""
 
@@ -63,6 +70,107 @@ class BenchmarkIndexPrecondition(BenchmarkModel):
                 "isolated-stale requires drift_path and clean forbids drift_path"
             )
         return self
+
+
+class BenchmarkSourceRange(BenchmarkModel):
+    """One one-based inclusive repository source range."""
+
+    path: RepositoryRelativePath
+    start_line: PositiveInt
+    end_line: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_order(self) -> BenchmarkSourceRange:
+        if self.end_line < self.start_line:
+            raise ValueError("source range end must not precede its start")
+        return self
+
+
+class BenchmarkExpectedAssertion(BenchmarkModel):
+    """One answer fact whose support is compared across paired contexts."""
+
+    assertion_id: str = Field(
+        min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
+    description: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return _validate_text(value, label="assertion description")
+
+
+class BenchmarkAnswerCitation(BenchmarkModel):
+    """One answer citation validated against a materialized source range."""
+
+    assertion_id: str
+    path: RepositoryRelativePath
+    start_line: PositiveInt
+    end_line: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_order(self) -> BenchmarkAnswerCitation:
+        if self.end_line < self.start_line:
+            raise ValueError("citation end must not precede its start")
+        return self
+
+
+class BenchmarkAnswerEvaluation(BenchmarkModel):
+    """Quality and token accounting for one downstream answer."""
+
+    answer: str = ""
+    assertion_ids: tuple[str, ...] = ()
+    citations: tuple[BenchmarkAnswerCitation, ...] = ()
+    valid_citation_count: NonNegativeInt = 0
+    invalid_citation_count: NonNegativeInt = 0
+    assertion_recall: Rate
+    citation_validity: Rate
+    input_tokens: NonNegativeInt = 0
+    estimated_input_tokens: NonNegativeInt = 0
+    provider_input_tokens: NonNegativeInt = 0
+    output_tokens: NonNegativeInt = 0
+    provider_http_calls: NonNegativeInt = 0
+    duration_ms: NonNegativeInt = 0
+
+
+class BenchmarkGroundednessEvaluation(BenchmarkModel):
+    """Blinded majority judgment over one answer and its source evidence."""
+
+    votes: tuple[bool, bool, bool]
+    passed: bool
+    unsupported_claims: tuple[str, ...] = ()
+    input_tokens: NonNegativeInt = 0
+    estimated_input_tokens: NonNegativeInt = 0
+    provider_input_tokens: NonNegativeInt = 0
+    output_tokens: NonNegativeInt = 0
+    provider_http_calls: NonNegativeInt = 0
+    duration_ms: NonNegativeInt = 0
+
+    @model_validator(mode="after")
+    def validate_majority(self) -> BenchmarkGroundednessEvaluation:
+        if self.passed != (sum(self.votes) >= 2):
+            raise ValueError("groundedness result must equal the three-vote majority")
+        return self
+
+
+class BenchmarkPairedAnswerEvaluation(BenchmarkModel):
+    """Same-model ordinary, manual-oracle, and ContextForge comparison."""
+
+    ordinary: BenchmarkAnswerEvaluation | None = None
+    oracle: BenchmarkAnswerEvaluation
+    contextforge: BenchmarkAnswerEvaluation
+    contextforge_groundedness: BenchmarkGroundednessEvaluation | None = None
+    input_token_reduction: float = Field(allow_inf_nan=False)
+    quality_not_lower: bool
+
+
+class BenchmarkRangeCoverage(BenchmarkModel):
+    """Observed coverage for one required source range."""
+
+    required_range: BenchmarkSourceRange
+    covered_lines: NonNegativeInt
+    required_lines: PositiveInt
+    passed: bool
 
 
 def _validate_text(value: str, *, label: str) -> str:
@@ -101,7 +209,9 @@ class BenchmarkExpectations(BenchmarkModel):
         tuple[Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...]
         | None
     ) = None
+    optional_files: tuple[RepositoryRelativePath, ...] | None = None
     forbidden_files: tuple[RepositoryRelativePath, ...] | None = None
+    required_ranges: tuple[BenchmarkSourceRange, ...] | None = None
     expected_facets: tuple[ExpectedFacet, ...] | None = None
     max_selected_files: NonNegativeInt | None = None
     max_files_read: NonNegativeInt | None = None
@@ -114,6 +224,7 @@ class BenchmarkExpectations(BenchmarkModel):
         "include_paths",
         "exclude_paths",
         "required_files_all",
+        "optional_files",
         "forbidden_files",
     )
     @classmethod
@@ -143,6 +254,26 @@ class BenchmarkExpectations(BenchmarkModel):
             raise ValueError("required_files_any groups must be sorted and unique")
         return groups
 
+    @field_validator("required_ranges")
+    @classmethod
+    def validate_required_ranges(
+        cls,
+        value: tuple[BenchmarkSourceRange, ...] | None,
+        info: ValidationInfo,
+    ) -> tuple[BenchmarkSourceRange, ...] | None:
+        if value is None:
+            return None
+        keys = tuple((item.path, item.start_line, item.end_line) for item in value)
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("required_ranges must be sorted and unique")
+        _reject_contextforge_state(tuple(item.path for item in value), info)
+        previous_by_path: dict[str, int] = {}
+        for item in value:
+            if item.start_line <= previous_by_path.get(item.path, 0):
+                raise ValueError("required_ranges for one path must not overlap")
+            previous_by_path[item.path] = item.end_line
+        return value
+
     @field_validator("expected_facets")
     @classmethod
     def validate_facets(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
@@ -168,11 +299,17 @@ class BenchmarkExpectations(BenchmarkModel):
         required = set(self.required_files_all or ()) | {
             path for group in self.required_files_any or () for path in group
         }
+        required.update(item.path for item in self.required_ranges or ())
+        optional = set(self.optional_files or ())
         forbidden = set(self.forbidden_files or ())
         if included & excluded:
             raise ValueError("include_paths and exclude_paths must not overlap")
         if required & forbidden:
             raise ValueError("required and forbidden files must not overlap")
+        if optional & (required | forbidden):
+            raise ValueError(
+                "optional files must not overlap required or forbidden files"
+            )
         return self
 
 
@@ -190,6 +327,10 @@ class BenchmarkTask(BenchmarkExpectations):
     task_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
     repository_path: RepositoryRelativePath
     task: str = Field(min_length=1, max_length=20_000)
+    answer_assertions: tuple[BenchmarkExpectedAssertion, ...] = ()
+    oracle_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    dataset_split: Literal["none", "tuning", "holdout"] = "none"
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     modes: tuple[BenchmarkMode, ...] = Field(min_length=1)
     repeat_count: PositiveInt = 1
     include_paths: tuple[RepositoryRelativePath, ...] = ()
@@ -198,7 +339,9 @@ class BenchmarkTask(BenchmarkExpectations):
     required_files_any: tuple[
         Annotated[tuple[RepositoryRelativePath, ...], Field(min_length=1)], ...
     ] = ()
+    optional_files: tuple[RepositoryRelativePath, ...] = ()
     forbidden_files: tuple[RepositoryRelativePath, ...] = ()
+    required_ranges: tuple[BenchmarkSourceRange, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
     max_selected_files: NonNegativeInt
     max_files_read: NonNegativeInt
@@ -222,6 +365,21 @@ class BenchmarkTask(BenchmarkExpectations):
     def validate_task_text(cls, value: str) -> str:
         return _validate_text(value, label="task")
 
+    @field_validator("oracle_ranges")
+    @classmethod
+    def validate_oracle_ranges(
+        cls, value: tuple[BenchmarkSourceRange, ...]
+    ) -> tuple[BenchmarkSourceRange, ...]:
+        keys = tuple((item.path, item.start_line, item.end_line) for item in value)
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("oracle_ranges must be sorted and unique")
+        previous_by_path: dict[str, int] = {}
+        for item in value:
+            if item.start_line <= previous_by_path.get(item.path, 0):
+                raise ValueError("oracle_ranges for one path must not overlap")
+            previous_by_path[item.path] = item.end_line
+        return value
+
     @field_validator("modes", mode="before")
     @classmethod
     def parse_modes(cls, value: object) -> object:
@@ -230,6 +388,11 @@ class BenchmarkTask(BenchmarkExpectations):
                 BenchmarkMode(item) if isinstance(item, str) else item for item in value
             )
         return value
+
+    @field_validator("pipeline", mode="before")
+    @classmethod
+    def parse_pipeline(cls, value: object) -> object:
+        return BenchmarkPipeline(value) if isinstance(value, str) else value
 
     @field_validator("modes")
     @classmethod
@@ -255,6 +418,13 @@ class BenchmarkTask(BenchmarkExpectations):
         ):
             raise ValueError(
                 "index_precondition requires an indexed or hybrid task mode"
+            )
+        assertion_ids = tuple(item.assertion_id for item in self.answer_assertions)
+        if assertion_ids != tuple(sorted(set(assertion_ids))):
+            raise ValueError("answer assertions must use canonical unique IDs")
+        if bool(self.answer_assertions) != bool(self.oracle_ranges):
+            raise ValueError(
+                "answer_assertions and oracle_ranges must be configured together"
             )
         return self
 
@@ -310,11 +480,18 @@ class BenchmarkExpectationEvaluation(BenchmarkModel):
     matched_required_files: tuple[RepositoryRelativePath, ...] = ()
     missing_required_files: tuple[RepositoryRelativePath, ...] = ()
     any_file_groups: tuple[BenchmarkAnyFileExpectation, ...] = ()
+    optional_files: tuple[RepositoryRelativePath, ...] = ()
+    relevant_selected_files: tuple[RepositoryRelativePath, ...] = ()
+    irrelevant_selected_files: tuple[RepositoryRelativePath, ...] = ()
     forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     selected_forbidden_files: tuple[RepositoryRelativePath, ...] = ()
     expected_facets: tuple[ExpectedFacet, ...] = ()
     covered_expected_facets: tuple[ExpectedFacet, ...] = ()
     missing_expected_facets: tuple[ExpectedFacet, ...] = ()
+    required_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    range_coverage: tuple[BenchmarkRangeCoverage, ...] = ()
+    selected_line_count: NonNegativeInt = 0
+    useful_line_count: NonNegativeInt = 0
     unexpected_warnings: tuple[WarningCode, ...] = ()
     missing_required_warnings: tuple[WarningCode, ...] = ()
     passed: bool
@@ -351,6 +528,7 @@ class BenchmarkRunResult(BenchmarkModel):
 
     task_id: str
     repository_path: RepositoryRelativePath
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     mode: BenchmarkMode
     repetition: PositiveInt
     status: Literal["complete", "failed", "cancelled"]
@@ -367,9 +545,24 @@ class BenchmarkRunResult(BenchmarkModel):
     provider_counters: BenchmarkProviderCounters
     confidence: ConfidenceValue | None = None
     warnings: tuple[CompletenessWarning, ...] = ()
-    provenance: Literal["model", "deterministic_fallback"] | None = None
+    provenance: (
+        Literal["model", "deterministic_fallback", "index_v3_deterministic"] | None
+    ) = None
     fallback_used: bool = False
     context_bytes: NonNegativeInt = 0
+    selected_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    selected_tokens: NonNegativeInt = 0
+    useful_tokens: NonNegativeInt = 0
+    semantic_claims: NonNegativeInt = 0
+    ungrounded_claims: NonNegativeInt = 0
+    grounded_claims: NonNegativeInt = 0
+    dropped_claims: NonNegativeInt = 0
+    index_input_tokens: NonNegativeInt = 0
+    index_output_tokens: NonNegativeInt = 0
+    planning_input_tokens: NonNegativeInt = 0
+    planning_output_tokens: NonNegativeInt = 0
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
+    latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation
     budgets: BenchmarkBudgetEvaluation
     failure: BenchmarkFailure | None = None
@@ -419,6 +612,7 @@ class BenchmarkCohortMetrics(BenchmarkModel):
 
     task_id: str
     repository_path: RepositoryRelativePath
+    pipeline: BenchmarkPipeline = BenchmarkPipeline.LEGACY_DISCOVERY
     mode: BenchmarkMode
     source_snapshot_digest: Sha256 | None
     index_generation_id: Sha256 | None
@@ -435,6 +629,14 @@ class BenchmarkCohortMetrics(BenchmarkModel):
     exact_selected_file_match_rate: Rate | None = None
     exact_ordered_match_rate: Rate | None = None
     required_file_recall: Rate | None = None
+    file_precision: Rate | None = None
+    precision_at_5: Rate | None = None
+    file_recall: Rate | None = None
+    range_precision: Rate | None = None
+    token_precision: Rate | None = None
+    ungrounded_claim_rate: Rate | None = None
+    grounded_claim_rate: Rate | None = None
+    dropped_claim_rate: Rate | None = None
     forbidden_file_selection_rate: Rate | None = None
     expected_facet_coverage_rate: Rate | None = None
     pairwise_jaccard: tuple[BenchmarkPairwiseJaccard, ...] = ()
@@ -443,8 +645,14 @@ class BenchmarkCohortMetrics(BenchmarkModel):
     fallback_rate: Rate | None = None
     confidence: BenchmarkConfidenceSummary | None = None
     duration: BenchmarkDurationSummary | None = None
+    cold_latency: BenchmarkDurationSummary | None = None
+    warm_latency: BenchmarkDurationSummary | None = None
+    incremental_latency: BenchmarkDurationSummary | None = None
     files_read_range: BenchmarkIntegerRange | None = None
     model_call_range: BenchmarkIntegerRange | None = None
+    provider_call_range: BenchmarkIntegerRange | None = None
+    selected_token_range: BenchmarkIntegerRange | None = None
+    useful_token_range: BenchmarkIntegerRange | None = None
 
 
 class BenchmarkResult(BenchmarkModel):
@@ -467,6 +675,9 @@ def load_benchmark_manifest(path: str | Path) -> BenchmarkManifest:
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkAnyFileExpectation",
+    "BenchmarkAnswerCitation",
+    "BenchmarkAnswerEvaluation",
+    "BenchmarkGroundednessEvaluation",
     "BenchmarkBudgetEvaluation",
     "BenchmarkCohortMetrics",
     "BenchmarkConfidenceSummary",
@@ -474,6 +685,7 @@ __all__ = [
     "BenchmarkDurationSummary",
     "BenchmarkExpectations",
     "BenchmarkExpectationEvaluation",
+    "BenchmarkExpectedAssertion",
     "BenchmarkFailure",
     "BenchmarkIntegerRange",
     "BenchmarkIndexPrecondition",
@@ -483,8 +695,12 @@ __all__ = [
     "BenchmarkModeOverrides",
     "BenchmarkProviderCounters",
     "BenchmarkPairwiseJaccard",
+    "BenchmarkPairedAnswerEvaluation",
+    "BenchmarkPipeline",
+    "BenchmarkRangeCoverage",
     "BenchmarkResult",
     "BenchmarkRunResult",
+    "BenchmarkSourceRange",
     "BenchmarkTask",
     "load_benchmark_manifest",
 ]

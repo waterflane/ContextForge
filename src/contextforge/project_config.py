@@ -93,6 +93,36 @@ class ProjectModelSettings(_ConfigModel):
     concurrency_limit: int = 2
     retry_limit: int = 2
     semantic_max_output_tokens: int = Field(default=1024, ge=96, le=32_768, strict=True)
+    semantic_scope: Literal["priority", "all", "none"] = "priority"
+    semantic_max_model_files: int = Field(default=64, ge=1, le=100_000, strict=True)
+    semantic_max_requests: int = Field(default=96, ge=1, le=100_000, strict=True)
+    semantic_max_input_tokens: int = Field(
+        default=256_000, ge=1, le=100_000_000, strict=True
+    )
+    semantic_max_chunks_per_file: int = Field(default=4, ge=1, le=4, strict=True)
+    context_planning_mode: Literal["off", "auto", "required"] = "auto"
+    context_planning_max_candidates: int = Field(default=32, ge=1, le=32, strict=True)
+    context_planning_max_files: int = Field(default=8, ge=1, le=8, strict=True)
+    context_planning_max_ranges_per_file: int = Field(
+        default=8, ge=1, le=8, strict=True
+    )
+    context_planning_max_input_tokens: int = Field(
+        default=8_192, ge=512, le=100_000, strict=True
+    )
+    context_planning_max_output_tokens: int = Field(
+        default=768, ge=64, le=32_768, strict=True
+    )
+    context_planning_max_rounds: int = Field(default=3, ge=1, le=3, strict=True)
+    context_planning_max_total_input_tokens: int = Field(
+        default=24_576, ge=512, le=300_000, strict=True
+    )
+    context_planning_max_actions_per_round: int = Field(
+        default=4, ge=1, le=4, strict=True
+    )
+    context_planning_max_pool_candidates: int = Field(
+        default=64, ge=1, le=64, strict=True
+    )
+    context_planning_request_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     reasoning_effort: Literal["off", "low", "medium", "high", "provider_default"] = (
         "off"
     )
@@ -647,6 +677,55 @@ def _fixture_response(request: ModelRequest, call_index: int) -> str:
         return json.dumps({"schema_version": 1, "actions": actions})
     if purpose == "task-refinement":
         return json.dumps({"schema_version": 1})
+    if purpose in {"semantic-card", "semantic-card-repair"}:
+        evidence = request.trusted_code_map_facts.get("evidence", [])
+        evidence_ids = [
+            item["evidence_id"]
+            for item in evidence
+            if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
+        ]
+        root_evidence = "file" if "file" in evidence_ids else evidence_ids[0]
+        symbol_evidence = [
+            evidence_id
+            for evidence_id in evidence_ids
+            if evidence_id.startswith("symbol:")
+        ][:12]
+        verified_symbols = request.trusted_code_map_facts.get("verified_symbols", [])
+        first_symbol = (
+            verified_symbols[0]
+            if isinstance(verified_symbols, list)
+            and verified_symbols
+            and isinstance(verified_symbols[0], dict)
+            else None
+        )
+        path = str(request.trusted_code_map_facts.get("path", "repository-file"))
+        stem = Path(path).stem
+        concept = (
+            str(first_symbol.get("name", stem))
+            if first_symbol is not None
+            else f"{Path(path).parent.name or 'source'} {stem}"
+        )
+        claim_evidence = (
+            str(first_symbol.get("evidence_id", root_evidence))
+            if first_symbol is not None
+            else root_evidence
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": concept,
+                    "evidence_ids": [claim_evidence],
+                },
+                "concepts": [{"text": concept, "evidence_ids": [claim_evidence]}],
+                "responsibilities": [],
+                "key_symbols": [
+                    {"evidence_id": evidence_id} for evidence_id in symbol_evidence
+                ],
+                "side_effects": [],
+                "profile_facts": {},
+            }
+        )
     if purpose == "file-semantics":
         analyzer_kind = request.metadata.get("analyzer_kind")
         category = request.trusted_code_map_facts.get("file_category")

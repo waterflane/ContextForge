@@ -24,10 +24,14 @@ from contextforge.application import (
     inspect_repository_index,
 )
 from contextforge.context import (
+    ContextBudget,
+    ContextCompilerError,
+    ContextFreshnessError,
     ContextLimitError,
     ContextReaderError,
     FileChangedError,
     InvalidLineRangeError,
+    compile_context_capsule,
 )
 from contextforge.core.validation import validate_portable_relative_path
 from contextforge.discovery import (
@@ -54,17 +58,24 @@ from contextforge.intelligence import (
     INDEX_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
     RECORD_SCHEMA_VERSION,
+    REPOSITORY_MAP_KINDS,
     GlobalMapAnalysisError,
     IndexLockError,
+    IndexManifest,
     IndexStorageError,
+    RetrievalResult,
     SemanticAnalysisError,
     SemanticFailureLimitError,
     SemanticProviderCircuitError,
+    SourceRange,
     calculate_source_snapshot_digest,
     canonical_json_bytes,
     load_file_code_map,
     load_file_semantic_analysis,
     load_manifest,
+    load_orientation_map,
+    load_repository_map_v3,
+    retrieve_context_candidates,
 )
 from contextforge.models import (
     ModelProvider,
@@ -74,7 +85,7 @@ from contextforge.models import (
     classify_retry,
     provider_error_details,
 )
-from contextforge.progress import PROGRESS_SCHEMA_VERSION, ProgressEvent
+from contextforge.progress import PROGRESS_SCHEMA_VERSION, ProgressEvent, ProgressStatus
 from contextforge.project_config import (
     ProjectConfigError,
     create_model_provider,
@@ -86,16 +97,22 @@ from contextforge.repositories import ProjectSnapshot, ScanOptions, scan_reposit
 from .models import (
     BridgeSelectionItem,
     CancelParams,
+    CompileParams,
+    CompileV22Params,
     DiscoverParams,
     ExpandParams,
     ExpansionOperation,
     HelloParams,
     IndexParams,
+    MapParams,
     PackageParams,
     ReadParams,
+    SearchParams,
+    SearchV22Params,
     ShutdownParams,
     SnapshotParams,
     StatusParams,
+    SymbolParams,
 )
 from .protocol import BRIDGE_PROTOCOL_VERSION, SUPPORTED_BRIDGE_PROTOCOL_VERSIONS
 
@@ -133,6 +150,10 @@ _METHOD_MODELS: dict[str, type[BaseModel]] = {
     "status": StatusParams,
     "snapshot": SnapshotParams,
     "index": IndexParams,
+    "map": MapParams,
+    "search": SearchV22Params,
+    "symbol": SymbolParams,
+    "compile": CompileV22Params,
     "discover": DiscoverParams,
     "expand": ExpandParams,
     "read": ReadParams,
@@ -199,7 +220,7 @@ class _SerializedWriter:
 
 
 class _ProgressPublisher:
-    """Serialize one bounded progress stream with coalesced producer bursts."""
+    """Serialize bounded telemetry without coupling it to job cancellation."""
 
     def __init__(
         self,
@@ -227,31 +248,50 @@ class _ProgressPublisher:
             maxsize=capacity
         )
         self._backpressure_timeout_seconds = backpressure_timeout_seconds
-        self._pending_event: ProgressEvent | None = None
-        self._pending_task: asyncio.Task[None] | None = None
-        self._overflowed = False
+        self.coalesced_event_count = 0
+        self.dropped_event_count = 0
+        self._terminal_queued = False
         self._closed = False
         self._task = asyncio.create_task(self._run())
 
     def observe(self, event: ProgressEvent) -> None:
         self.last_event = event
-        if self._closed or self._overflowed or self._cancellation.is_set():
+        if self._closed:
             return
+        if self._terminal_queued:
+            self.dropped_event_count += 1
+            return
+        if event.status is not ProgressStatus.RUNNING:
+            self._terminal_queued = True
+            while True:
+                try:
+                    queued = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._queue.task_done()
+                if queued is not None:
+                    self.coalesced_event_count += 1
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
-            # Progress events are cumulative snapshots. Keep only the newest event
-            # while one bounded enqueue waits for the writer. This distinguishes a
-            # synchronous producer burst from a client that is actually not reading.
-            self._pending_event = event
-            if self._pending_task is None or self._pending_task.done():
-                self._pending_task = asyncio.create_task(self._enqueue_pending())
+            # Progress snapshots are cumulative. Replace an older queued snapshot
+            # with the newest state; telemetry pressure must never cancel index work.
+            try:
+                removed = self._queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - same-loop defensive race
+                self.dropped_event_count += 1
+                return
+            self._queue.task_done()
+            if removed is not None:
+                self.coalesced_event_count += 1
+            try:
+                self._queue.put_nowait(event)
+            except asyncio.QueueFull:  # pragma: no cover - same-loop defensive race
+                self.dropped_event_count += 1
 
     async def close(self, *, check_overflow: bool = True) -> None:
         if not self._closed:
             self._closed = True
-            if self._pending_task is not None:
-                await self._pending_task
             if not self._task.done():
                 stopper = asyncio.create_task(self._queue.put(None))
                 try:
@@ -265,23 +305,8 @@ class _ProgressPublisher:
                         stopper.cancel()
                     await asyncio.gather(stopper, return_exceptions=True)
         await self._task
-        if check_overflow and self._overflowed:
-            raise BridgeFault(
-                INDEX_BUILD_FAILED,
-                "INDEX_BUILD_FAILED",
-                "The client did not consume index progress quickly enough.",
-                data={
-                    "error_code": "progress_backpressure",
-                    "phase": (
-                        "initialize"
-                        if self.last_event is None
-                        else self.last_event.phase_id
-                    ),
-                    "reason": "The Bridge progress delivery queue reached its limit.",
-                    "retryable": True,
-                    "operation_id": self._operation_id,
-                },
-            )
+        # Retained for Bridge 2.0 call-site compatibility. Overflow is telemetry-only.
+        _ = check_overflow
 
     async def _run(self) -> None:
         while True:
@@ -289,7 +314,10 @@ class _ProgressPublisher:
             try:
                 if event is None:
                     return
-                if not self._cancellation.is_set():
+                if (
+                    not self._cancellation.is_set()
+                    or event.status is not ProgressStatus.RUNNING
+                ):
                     await self._writer.write(
                         {
                             "jsonrpc": JSONRPC_VERSION,
@@ -302,43 +330,6 @@ class _ProgressPublisher:
                     )
             finally:
                 self._queue.task_done()
-
-    async def _enqueue_pending(self) -> None:
-        try:
-            while self._pending_event is not None and not self._overflowed:
-                event = self._pending_event
-                self._pending_event = None
-                put_task = asyncio.create_task(self._queue.put(event))
-                cancellation_task = asyncio.create_task(self._cancellation.wait())
-                done: set[asyncio.Task[Any]] = set()
-                try:
-                    done, _ = await asyncio.wait(
-                        {put_task, cancellation_task},
-                        timeout=self._backpressure_timeout_seconds,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                finally:
-                    for task in (put_task, cancellation_task):
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(
-                        put_task, cancellation_task, return_exceptions=True
-                    )
-                if cancellation_task in done:
-                    return
-                if put_task not in done:
-                    self._overflowed = True
-                    self._cancellation.set()
-                    return
-                put_task.result()
-        finally:
-            self._pending_task = None
-            if (
-                self._pending_event is not None
-                and not self._overflowed
-                and not self._cancellation.is_set()
-            ):
-                self._pending_task = asyncio.create_task(self._enqueue_pending())
 
 
 class _BoundedDiagnostics:
@@ -383,6 +374,7 @@ class BridgeServer:
             OrderedDict()
         )
         self._active: dict[tuple[str, str | int], _ActiveRequest] = {}
+        self._background_requests: dict[tuple[str, str | int], _ActiveRequest] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._writer: _SerializedWriter | None = None
         self._diagnostics = _BoundedDiagnostics(None)
@@ -433,7 +425,8 @@ class BridgeServer:
 
         self._shutting_down = True
         current = asyncio.current_task()
-        for request in tuple(self._active.values()):
+        requests = (*self._active.values(), *self._background_requests.values())
+        for request in requests:
             if request.task is not current:
                 request.cancellation.set()
 
@@ -494,16 +487,32 @@ class BridgeServer:
         for key, request in tuple(self._active.items()):
             if request.task in tasks:
                 self._active.pop(key, None)
+        for key, request in tuple(self._background_requests.items()):
+            if request.task in tasks:
+                self._background_requests.pop(key, None)
         self._background_tasks.difference_update(tasks)
 
-    def _track_background_task(self, task: asyncio.Task[Any]) -> None:
+    def _track_background_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        request_id: str | int,
+        cancellation: asyncio.Event,
+    ) -> None:
         """Retain timed-out index cleanup until its writer lock is released."""
 
         self._background_tasks.add(task)
+        self._background_requests[_id_key(request_id)] = _ActiveRequest(
+            cancellation=cancellation,
+            task=task,
+        )
         task.add_done_callback(self._finish_background_task)
 
     def _finish_background_task(self, task: asyncio.Task[Any]) -> None:
         self._background_tasks.discard(task)
+        for key, request in tuple(self._background_requests.items()):
+            if request.task is task:
+                self._background_requests.pop(key, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -552,7 +561,7 @@ class BridgeServer:
 
         assert request_id is not None
         key = _id_key(request_id)
-        if key in self._active:
+        if key in self._active or key in self._background_requests:
             await self._write_error(
                 request_id,
                 BridgeFault(
@@ -582,7 +591,8 @@ class BridgeServer:
             if request_id is not None:
                 await self._write_validation_error(request_id, exc)
             return
-        active = self._active.get(_id_key(params.id))
+        key = _id_key(params.id)
+        active = self._active.get(key) or self._background_requests.get(key)
         if active is not None:
             active.cancellation.set()
         if request_id is not None:
@@ -644,16 +654,26 @@ class BridgeServer:
                 if operation_task in done:
                     result = operation_task.result()
                 else:
-                    cancellation.set()
                     if method == "index":
-                        self._track_background_task(operation_task)
+                        self._track_background_task(
+                            operation_task,
+                            request_id=request_id,
+                            cancellation=cancellation,
+                        )
+                        timeout_data: dict[str, Any] | None = {
+                            "operation_id": _index_operation_id(request_id),
+                            "job_continues": True,
+                        }
                     else:
+                        cancellation.set()
                         operation_task.cancel()
                         await asyncio.gather(operation_task, return_exceptions=True)
+                        timeout_data = None
                     raise BridgeFault(
                         REQUEST_TIMEOUT,
                         "REQUEST_TIMEOUT",
                         "The request exceeded its caller-supplied timeout.",
+                        data=timeout_data,
                     ) from None
             if cancellation.is_set():
                 raise asyncio.CancelledError
@@ -671,7 +691,11 @@ class BridgeServer:
             )
         except BridgeFault as exc:
             await self._write_error(request_id, exc)
-        except (DiscoveryPreparationMismatchError, FileChangedError):
+        except (
+            DiscoveryPreparationMismatchError,
+            FileChangedError,
+            ContextFreshnessError,
+        ):
             await self._write_error(
                 request_id,
                 BridgeFault(
@@ -687,6 +711,24 @@ class BridgeServer:
                     INVALID_PARAMS,
                     "RESOURCE_LIMIT_EXCEEDED",
                     "The requested source excerpt exceeds an effective limit.",
+                ),
+            )
+        except ContextCompilerError:
+            await self._write_error(
+                request_id,
+                BridgeFault(
+                    INVALID_PARAMS,
+                    "CONTEXT_COMPILATION_REJECTED",
+                    "The Context Capsule request could not be compiled.",
+                ),
+            )
+        except IndexStorageError:
+            await self._write_error(
+                request_id,
+                BridgeFault(
+                    INDEX_STORAGE_FAILURE,
+                    "INDEX_STORAGE_FAILURE",
+                    "The pinned repository index could not be read.",
                 ),
             )
         except (ContextReaderError, InvalidLineRangeError):
@@ -736,15 +778,40 @@ class BridgeServer:
         if method == "snapshot":
             return await self._snapshot(cancellation)
         if method == "index":
-            if self._protocol_version != "2.0":
+            if self._protocol_version not in {"2.0", "2.1", "2.2"}:
                 raise BridgeFault(
                     METHOD_NOT_FOUND,
                     "METHOD_NOT_FOUND",
                     "The requested method is not supported by this protocol version.",
                 )
-            return await self._index(
-                request_id, _require_type(raw, IndexParams), cancellation
-            )
+            index_params = _require_type(raw, IndexParams)
+            v21_fields = {
+                "semantic_scope",
+                "semantic_max_requests",
+                "semantic_max_input_tokens",
+                "semantic_max_chunks_per_file",
+            }
+            if self._protocol_version == "2.0" and (
+                index_params.model_fields_set & v21_fields
+            ):
+                raise BridgeFault(
+                    INVALID_PARAMS,
+                    "INVALID_PARAMS",
+                    "Bridge 2.0 does not accept Bridge 2.1 semantic scheduler fields.",
+                )
+            return await self._index(request_id, index_params, cancellation)
+        if method == "map":
+            self._require_bridge_v21()
+            return await self._map(_require_type(raw, MapParams), cancellation)
+        if method == "search":
+            self._require_bridge_v21()
+            return await self._search(_require_type(raw, SearchParams), cancellation)
+        if method == "symbol":
+            self._require_bridge_v21()
+            return await self._symbol(_require_type(raw, SymbolParams), cancellation)
+        if method == "compile":
+            self._require_bridge_v21()
+            return await self._compile(_require_type(raw, CompileParams), cancellation)
         if method == "discover":
             return await self._discover(
                 _require_type(raw, DiscoverParams), cancellation
@@ -765,7 +832,9 @@ class BridgeServer:
         )
 
     def _hello(self) -> dict[str, Any]:
-        bridge_v2 = self._protocol_version == "2.0"
+        bridge_v2 = self._protocol_version in {"2.0", "2.1", "2.2"}
+        bridge_v21 = self._protocol_version in {"2.1", "2.2"}
+        bridge_v22 = self._protocol_version == "2.2"
         return {
             "protocol_version": self._protocol_version or BRIDGE_PROTOCOL_VERSION,
             "supported_protocol_versions": list(SUPPORTED_BRIDGE_PROTOCOL_VERSIONS),
@@ -776,6 +845,7 @@ class BridgeServer:
                     "status",
                     "snapshot",
                     *(["index"] if bridge_v2 else []),
+                    *(["map", "search", "symbol", "compile"] if bridge_v21 else []),
                     "discover",
                     "expand",
                     "read",
@@ -789,7 +859,8 @@ class BridgeServer:
                 "concurrent_requests": True,
                 "serialized_responses": True,
                 "max_message_bytes": MAX_JSONRPC_MESSAGE_BYTES,
-                "expansion_candidates": self._protocol_version in {"1.1", "2.0"},
+                "expansion_candidates": self._protocol_version
+                in {"1.1", "2.0", "2.1", "2.2"},
                 "tracked_index_jobs": bridge_v2,
                 "progress_notifications": bridge_v2,
                 "schemas": {
@@ -810,6 +881,20 @@ class BridgeServer:
                         "readable": [1, 2, PROGRESS_SCHEMA_VERSION],
                     },
                     "context_package": {"current": 1, "readable": [1]},
+                    **(
+                        {
+                            "semantic_card": {"current": 3, "readable": [3]},
+                            "retrieval": {"current": 3, "readable": [3]},
+                            "context_capsule": {"current": 2, "readable": [2]},
+                            **(
+                                {"evidence_plan": {"current": 1, "readable": [1]}}
+                                if bridge_v22
+                                else {}
+                            ),
+                        }
+                        if bridge_v21
+                        else {}
+                    ),
                 },
             },
             "workspace": {
@@ -877,9 +962,11 @@ class BridgeServer:
                     "features": report.feature_status,
                 },
                 "lock_status": report.lock_status,
+                "status": report.status,
+                "rebuild_required": report.rebuild_required,
             },
         }
-        if self._protocol_version in {"1.1", "2.0"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1", "2.2"}:
             result["index"]["coverage"] = await asyncio.to_thread(self._index_coverage)
         return result
 
@@ -899,19 +986,268 @@ class BridgeServer:
         }
         return response
 
+    def _require_bridge_v21(self) -> None:
+        if self._protocol_version not in {"2.1", "2.2"}:
+            raise BridgeFault(
+                METHOD_NOT_FOUND,
+                "METHOD_NOT_FOUND",
+                "The requested method is not supported by this protocol version.",
+            )
+
+    async def _v21_manifest(
+        self, expected_snapshot_digest: str, cancellation: asyncio.Event
+    ) -> IndexManifest:
+        await self._verified_snapshot(expected_snapshot_digest, cancellation)
+        manifest = await asyncio.to_thread(load_manifest, self.workspace)
+        if manifest.build.source_snapshot_digest != expected_snapshot_digest:
+            raise BridgeFault(
+                SOURCE_IDENTITY_CHANGED,
+                "SOURCE_IDENTITY_CHANGED",
+                "The active index is not current for the expected snapshot.",
+            )
+        return manifest
+
+    async def _map(
+        self, params: MapParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        orientation = await asyncio.to_thread(
+            load_orientation_map, self.workspace, manifest=manifest
+        )
+        return {
+            "generation_id": manifest.generation_id,
+            "orientation": orientation.model_dump(mode="json"),
+            "repository_maps": {
+                kind: (
+                    await asyncio.to_thread(
+                        load_repository_map_v3,
+                        self.workspace,
+                        kind,
+                        manifest=manifest,
+                    )
+                ).model_dump(mode="json")
+                for kind in REPOSITORY_MAP_KINDS
+                if getattr(manifest.artifacts, f"{kind}_map") is not None
+            },
+        }
+
+    async def _retrieve_v21(
+        self,
+        params: SearchParams,
+        manifest: IndexManifest,
+        cancellation: asyncio.Event,
+    ) -> RetrievalResult:
+        provider: ModelProvider | None = None
+        try:
+            if self._protocol_version == "2.1":
+                if "planning_mode" in params.model_fields_set:
+                    raise BridgeFault(
+                        INVALID_PARAMS,
+                        "INVALID_PARAMS",
+                        "Bridge 2.1 does not accept planning_mode.",
+                    )
+                planning_mode = "auto" if params.rerank else "off"
+                project = None
+            else:
+                project = load_project_configuration(self.workspace)
+                planning_mode = getattr(params, "planning_mode", None) or (
+                    "auto"
+                    if params.rerank
+                    else "off"
+                    if "rerank" in params.model_fields_set
+                    else project.models.context_planning_mode
+                )
+            if planning_mode != "off":
+                project = project or load_project_configuration(self.workspace)
+                configuration = resolve_provider_configuration(
+                    project,
+                    provider=params.provider,
+                    model=params.model,
+                    base_url=params.base_url,
+                    timeout_seconds=params.request_timeout,
+                )
+                if configuration is None and planning_mode == "required":
+                    raise BridgeFault(
+                        INVALID_PARAMS,
+                        "PROVIDER_REQUIRED",
+                        "Required evidence planning needs a configured provider.",
+                    )
+                if configuration is not None:
+                    provider = create_model_provider(configuration)
+            return await retrieve_context_candidates(
+                self.workspace,
+                params.task,
+                manifest=manifest,
+                working_set=params.working_files,
+                diff_paths=params.diff_paths,
+                limit=params.limit,
+                provider=provider,
+                rerank=params.rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=(
+                    32
+                    if project is None
+                    else project.models.context_planning_max_candidates
+                ),
+                planning_max_files=(
+                    8 if project is None else project.models.context_planning_max_files
+                ),
+                planning_max_ranges_per_file=(
+                    8
+                    if project is None
+                    else project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    8_192
+                    if project is None
+                    else project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    768
+                    if project is None
+                    else project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=(
+                    3 if project is None else project.models.context_planning_max_rounds
+                ),
+                planning_max_total_input_tokens=(
+                    24_576
+                    if project is None
+                    else project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    4
+                    if project is None
+                    else project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    64
+                    if project is None
+                    else project.models.context_planning_max_pool_candidates
+                ),
+                planning_request_timeout_seconds=(
+                    60.0
+                    if project is None
+                    else project.models.context_planning_request_timeout_seconds
+                ),
+                cancellation=cancellation,
+            )
+        finally:
+            if provider is not None:
+                with suppress(ModelProviderError):
+                    await provider.close()
+
+    async def _search(
+        self, params: SearchParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        result = await self._retrieve_v21(params, manifest, cancellation)
+        return result.model_dump(mode="json")
+
+    async def _symbol(
+        self, params: SymbolParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        query = params.query.strip().casefold()
+        matches: list[tuple[int, str, dict[str, Any]]] = []
+        for state in manifest.files:
+            code_map = await asyncio.to_thread(
+                load_file_code_map, self.workspace, state.path, manifest=manifest
+            )
+            for symbol in code_map.symbols:
+                name = symbol.name.casefold()
+                qualified = symbol.qualified_name.casefold()
+                if query not in {name, qualified} and query not in qualified:
+                    continue
+                exact_rank = 0 if query == qualified else 1 if query == name else 2
+                matches.append(
+                    (
+                        exact_rank,
+                        symbol.qualified_name.casefold(),
+                        {
+                            "path": state.path,
+                            **symbol.model_dump(mode="json"),
+                        },
+                    )
+                )
+            if cancellation.is_set():
+                raise asyncio.CancelledError
+        ordered = [
+            item[2]
+            for item in sorted(matches, key=lambda value: (value[0], value[1]))[
+                : params.limit
+            ]
+        ]
+        return {
+            "generation_id": manifest.generation_id,
+            "query": params.query,
+            "symbols": ordered,
+        }
+
+    async def _compile(
+        self, params: CompileParams, cancellation: asyncio.Event
+    ) -> dict[str, Any]:
+        manifest = await self._v21_manifest(
+            params.expected_snapshot_digest, cancellation
+        )
+        working = tuple(
+            sorted(
+                {
+                    *params.working_files,
+                    *(item.path for item in params.working_lines),
+                    *params.pinned_full_files,
+                }
+            )
+        )
+        search_params = params.model_copy(update={"working_files": working})
+        retrieval = await self._retrieve_v21(search_params, manifest, cancellation)
+        ranges: dict[str, list[SourceRange]] = {}
+        for item in params.working_lines:
+            ranges.setdefault(item.path, []).append(
+                SourceRange(
+                    start_line=item.start_line,
+                    start_column=0,
+                    end_line=item.end_line,
+                    end_column=0,
+                )
+            )
+        compiled = await asyncio.to_thread(
+            compile_context_capsule,
+            self.workspace,
+            params.task,
+            retrieval,
+            budget=ContextBudget(
+                context_window_tokens=params.context_window_tokens,
+                history_tokens=params.history_tokens,
+                response_tokens=params.response_tokens,
+                safety_margin_tokens=params.safety_margin_tokens,
+            ),
+            manifest=manifest,
+            working_files=working,
+            working_lines={
+                path: tuple(sorted(values, key=lambda item: item.start_line))
+                for path, values in ranges.items()
+            },
+            pinned_full_files=params.pinned_full_files,
+            git_diff=params.git_diff,
+        )
+        return compiled.model_dump(mode="json")
+
     async def _index(
         self,
         request_id: str | int,
         params: IndexParams,
         cancellation: asyncio.Event,
     ) -> dict[str, Any]:
-        operation_id = (
-            "bridge-index-"
-            + hashlib.sha256(
-                f"{type(request_id).__name__}:{request_id}".encode()
-            ).hexdigest()[:24]
-        )
+        operation_id = _index_operation_id(request_id)
         provider: ModelProvider | None = None
+        build_task: asyncio.Task[Any] | None = None
         publisher = _ProgressPublisher(
             self._require_writer(), request_id, cancellation, operation_id
         )
@@ -960,29 +1296,75 @@ class BridgeServer:
                     else params.concurrency
                 )
             )
-            report = await build_repository_index(
-                self.workspace,
-                provider=provider,
-                provider_configuration=configuration,
-                update_only=params.action == "update",
-                concurrency=concurrency,
-                fail_on_error=params.fail_on_error,
-                fail_fast=params.fail_fast,
-                max_failures=params.max_failures,
-                force_reanalyze=params.force_reanalyze,
-                max_files=params.max_files,
-                semantic_max_output_tokens=(
-                    project.models.semantic_max_output_tokens
-                    if params.max_output_tokens is None
-                    else params.max_output_tokens
-                ),
-                recover_stale_lock=params.recover_stale_lock,
-                confirm_unknown_lock=params.confirm_unknown_lock,
-                progress=publisher.observe,
-                operation_id=operation_id,
-                cancellation=cancellation,
-                expected_snapshot_digest=params.expected_snapshot_digest,
+            build_task = asyncio.create_task(
+                build_repository_index(
+                    self.workspace,
+                    provider=provider,
+                    provider_configuration=configuration,
+                    update_only=params.action == "update",
+                    concurrency=concurrency,
+                    fail_on_error=params.fail_on_error,
+                    fail_fast=params.fail_fast,
+                    max_failures=params.max_failures,
+                    force_reanalyze=params.force_reanalyze,
+                    max_files=(
+                        project.models.semantic_max_model_files
+                        if params.max_files is None
+                        else params.max_files
+                    ),
+                    semantic_scope=(
+                        project.models.semantic_scope
+                        if params.semantic_scope is None
+                        else params.semantic_scope
+                    ),
+                    semantic_max_requests=(
+                        project.models.semantic_max_requests
+                        if params.semantic_max_requests is None
+                        else params.semantic_max_requests
+                    ),
+                    semantic_max_input_tokens=(
+                        project.models.semantic_max_input_tokens
+                        if params.semantic_max_input_tokens is None
+                        else params.semantic_max_input_tokens
+                    ),
+                    semantic_max_chunks_per_file=(
+                        project.models.semantic_max_chunks_per_file
+                        if params.semantic_max_chunks_per_file is None
+                        else params.semantic_max_chunks_per_file
+                    ),
+                    semantic_max_output_tokens=(
+                        project.models.semantic_max_output_tokens
+                        if params.max_output_tokens is None
+                        else params.max_output_tokens
+                    ),
+                    recover_stale_lock=params.recover_stale_lock,
+                    confirm_unknown_lock=params.confirm_unknown_lock,
+                    progress=publisher.observe,
+                    operation_id=operation_id,
+                    cancellation=cancellation,
+                    expected_snapshot_digest=params.expected_snapshot_digest,
+                )
             )
+            if params.operation_timeout is None:
+                report = await build_task
+            else:
+                done, _ = await asyncio.wait(
+                    {build_task}, timeout=params.operation_timeout
+                )
+                if build_task not in done:
+                    cancellation.set()
+                    build_task.cancel()
+                    await asyncio.gather(build_task, return_exceptions=True)
+                    raise BridgeFault(
+                        REQUEST_TIMEOUT,
+                        "OPERATION_TIMEOUT",
+                        "The index job exceeded its operation timeout.",
+                        data={
+                            "operation_id": operation_id,
+                            "operation_timeout": params.operation_timeout,
+                        },
+                    )
+                report = build_task.result()
             await publisher.close()
             self._snapshot_digest = report.manifest.build.source_snapshot_digest
             self._preparations.clear()
@@ -995,6 +1377,9 @@ class BridgeServer:
                 "statistics": report.manifest.statistics.model_dump(mode="json"),
             }
         except asyncio.CancelledError:
+            if build_task is not None and not build_task.done():
+                build_task.cancel()
+                await asyncio.gather(build_task, return_exceptions=True)
             await publisher.close()
             raise
         except BridgeFault:
@@ -1089,7 +1474,7 @@ class BridgeServer:
             "made_progress": result.made_progress,
             "budget_usage": result.budget_usage.model_dump(mode="json"),
         }
-        if self._protocol_version in {"1.1", "2.0"}:
+        if self._protocol_version in {"1.1", "2.0", "2.1", "2.2"}:
             response["candidates"] = self._register_expansion_candidates(
                 snapshot, preparation, params.operation, result.data
             )
@@ -1588,6 +1973,11 @@ def _valid_rpc_id(value: object) -> bool:
 
 def _id_key(value: str | int) -> tuple[str, str | int]:
     return ("string", value) if isinstance(value, str) else ("integer", value)
+
+
+def _index_operation_id(request_id: str | int) -> str:
+    identity = f"{type(request_id).__name__}:{request_id}".encode()
+    return "bridge-index-" + hashlib.sha256(identity).hexdigest()[:24]
 
 
 def _workspace_identity(root: Path) -> str:

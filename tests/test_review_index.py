@@ -73,7 +73,7 @@ def test_review_declarations(
     )
 
 
-def test_failed_extractor_is_isolated_and_retried(
+def test_failed_extractor_is_isolated_reused_and_explicitly_retried(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,11 +98,38 @@ def test_failed_extractor_is_isolated_and_retried(
     assert result.code_maps[0].symbols == ()
     assert result.code_maps[1].symbols
     monkeypatch.setitem(extractors._EXTRACTORS, "TypeScript", original)
+    with acquire_index_lock(tmp_path, "reuse") as lock:
+        reused = build_structural_index(snapshot, lock)
+    assert reused.manifest.generation_id == result.manifest.generation_id
+    assert reused.extracted_paths == ()
+    assert reused.reused_paths == ("bad.ts", "good.ts")
+    assert reused.code_maps[0].parse_status == "parse_error"
+
     with acquire_index_lock(tmp_path, "retry") as lock:
-        retried = build_structural_index(snapshot, lock)
-    assert retried.extracted_paths == ("bad.ts",)
-    assert retried.reused_paths == ("good.ts",)
+        retried = build_structural_index(snapshot, lock, force_reanalyze=True)
+    assert retried.extracted_paths == ("bad.ts", "good.ts")
+    assert retried.reused_paths == ()
+    assert retried.manifest.generation_id != result.manifest.generation_id
     assert all(item.record_status == "complete" for item in retried.manifest.files)
+
+
+@pytest.mark.parametrize(
+    ("name", "source"),
+    [
+        ("settings.json", '{"ServiceUrl": "x", "serviceurl": "y"}\n'),
+        ("settings.toml", 'ServiceUrl = "x"\nserviceurl = "y"\n'),
+        ("settings.yaml", "ServiceUrl: x\nserviceurl: y\n"),
+    ],
+)
+def test_fallback_configuration_digests_deduplicate_casefold_collisions(
+    tmp_path: Path, name: str, source: str
+) -> None:
+    (tmp_path / name).write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+
+    assert len(code_map.configuration_key_digests) == 1
 
 
 def test_anonymous_returned_object_does_not_make_callable_a_method_owner(

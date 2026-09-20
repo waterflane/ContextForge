@@ -57,3 +57,60 @@ Structured-response repair precedence is CLI `--json-repair-attempts`,
 `CONTEXTFORGE_JSON_REPAIR_ATTEMPTS`, `config.local.toml`, `config.toml`, then
 the built-in default of five. Values are clamped to 0–10; zero keeps validation
 and deterministic normalization but disables model-assisted repair.
+
+## Index v3 semantic scheduler
+
+Project model settings may bound sparse Semantic Card enrichment independently
+of provider retry and transport limits:
+
+```toml
+[models]
+semantic_scope = "priority"
+semantic_max_model_files = 64
+semantic_max_requests = 96
+semantic_max_input_tokens = 256000
+semantic_max_chunks_per_file = 4
+```
+
+`priority` is the default and orders changed/added files, entrypoints, public
+APIs, the top 10% centrality tier (at least one), important docs/config, related
+tests, then stable structural score. `all` considers every eligible file within
+the same hard ceilings. If a tier exceeds a ceiling, deterministic structural
+score selects within it. `none` publishes the usable structural generation
+without model calls. CLI options of the same names with hyphens override the
+project values for one build/update.
+
+## Evidence planner
+
+Task-based CLI, MCP, and development HTTP operations use the project planner
+policy. Low-level Python calls without a provider remain deterministic.
+
+```toml
+[models]
+context_planning_mode = "auto" # off | auto | required
+context_planning_max_candidates = 32
+context_planning_max_files = 8
+context_planning_max_ranges_per_file = 8
+context_planning_max_input_tokens = 8192
+context_planning_max_output_tokens = 768
+context_planning_max_rounds = 3
+context_planning_max_total_input_tokens = 24576
+context_planning_max_actions_per_round = 4
+context_planning_max_pool_candidates = 64
+context_planning_request_timeout_seconds = 60
+```
+
+The model receives only supplied CandidateCards, compact verified maps/routes,
+grounded synopsis, and source-spanning bounded previews around known evidence.
+It may request `search`, `symbol`, `graph`, or `map` expansion for at most three
+rounds before finalizing supplied candidate/evidence IDs. It cannot invent
+paths, ranges, symbols, or claims. `auto` falls back deterministically after an
+invalid result, unsupported `json_schema`, timeout, provider failure, or any
+plan item that cannot be materialized; `required` surfaces a typed failure.
+Plain JSON fallback and repair share the same total HTTP-call and session-token
+ceilings. CLI `--planning-rounds` may lower the configured round count for one
+operation.
+
+Bridge timeouts are intentionally independent: request `timeout_ms` is client
+wait time, `request_timeout` is one provider attempt, and `operation_timeout`
+is the entire tracked index job. A client timeout does not cancel the job.

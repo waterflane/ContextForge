@@ -340,6 +340,23 @@ def test_context_preflight_blocks_oversized_request_and_larger_window_permits_it
     assert large.call_count == 1
 
 
+def test_plain_json_context_budget_counts_embedded_response_schema() -> None:
+    request = replace(_request(), schema_mode="plain_json")
+    configuration = _configuration().model_copy(update={"context_window": 8_192})
+
+    native = estimate_request_context(
+        request, configuration, include_native_schema=True
+    )
+    embedded = estimate_request_context(
+        request, configuration, include_native_schema=False
+    )
+
+    assert native.schema_overhead_tokens > 0
+    assert embedded.schema_overhead_tokens == 0
+    assert embedded.estimated_input_tokens > native.estimated_input_tokens
+    assert embedded.estimated_total_tokens != native.estimated_total_tokens
+
+
 def test_structured_repair_retry_changes_the_payload_once() -> None:
     tasks: list[str] = []
 

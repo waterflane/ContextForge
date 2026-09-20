@@ -30,12 +30,58 @@ ctxf --log-component budget -vv context suggest . --task "Fix indexing"
 JSON logs are JSON Lines on stderr; they do not modify `--format json` stdout.
 Pretty redirected output has no ANSI cursor controls.
 
-Discovery commands follow the same separation. `context suggest` defaults to
-text and supports `--format text|markdown|json`; `benchmark discovery` uses the
-same three result formats. Without `--output`, stdout contains only the selected
-result while progress and logs use stderr. See
+Context retrieval follows the same separation. `context suggest` defaults to
+Index v3 CandidateCards and supports `--format text|markdown|json`;
+`benchmark discovery` uses the same three result formats. Without `--output`,
+stdout contains only the selected result while progress and logs use stderr. See
 [Discovery output and benchmarks](discovery.md) for the canonical-result,
 renderer, benchmark, warning, counter, and repeatability contracts.
+
+## Index v3 and Context Capsule commands
+
+```bash
+contextforge index build . --provider none --semantic-scope none
+contextforge index update . --semantic-scope priority \
+  --semantic-max-requests 96 --semantic-max-input-tokens 256000 \
+  --semantic-max-chunks-per-file 4
+contextforge map . --format json
+contextforge map . --kind all --format json
+contextforge context suggest . --task "Trace startup" --working-file src/app.py
+contextforge context create . --task "Trace startup" \
+  --working-lines src/app.py:1-80 --context-tokens 32768 \
+  --history-tokens 4000 --response-tokens 4096 --planning auto \
+  --format json --output capsule.json --prompt-output prompt.xml
+```
+
+Semantic scope is `priority`, `all`, or `none`; request, estimated-input-token,
+model-file, and chunk ceilings are hard limits. `--working-file` (also
+`--include` for suggestion) gives retrieval a Working Set boost.
+`--working-lines` also requests exact compiler material.
+`--full-file` is the only way to force FULL for files over 200 lines.
+`--planning auto|off|required` controls bounded model-assisted evidence
+planning. `off` guarantees zero query-time provider calls, `auto` falls back to
+deterministic planning, and `required` reports failure if no validated plan is
+available. `--planning-rounds` lowers the configured maximum of three bounded
+action/finalize rounds for one command. `--rerank/--no-rerank` remain deprecated
+compatibility aliases.
+
+Successful build/update summaries read the v3 manifest artifacts and report
+`orientation`, `architecture`, `conventions`, and `features` as `current`.
+In-repository package, Capsule, and prompt outputs are registered by digest so
+an unchanged generated artifact does not enter the next scan. If the user edits
+it, it is indexed normally; outputs outside the repository are not registered.
+Registry updates use a separate bounded internal lock with ownership and stale
+lock checks, so concurrent artifact writers cannot lose one another's entries.
+
+`map` defaults to the complete structural orientation artifact. `--kind
+architecture|conventions|features` renders one enriched typed map, while
+`--kind all` returns all available pinned maps. The orientation-only JSON shape
+is unchanged for existing clients.
+
+Manual `context create` without `--task` still emits ContextPackage v1.
+`--legacy-discovery` and `--legacy-handoff` retain the deprecated task-based
+flows. `context inspect` and `context review` accept both legacy JSON artifacts
+and Context Capsule v2.
 
 ## Local bridge
 
@@ -43,13 +89,14 @@ renderer, benchmark, warning, counter, and repeatability contracts.
 contextforge bridge --stdio --workspace /path/to/repository
 ```
 
-`--stdio` is required in protocol v1. The bridge reads one UTF-8 JSON-RPC 2.0
+`--stdio` is required. The bridge reads one UTF-8 JSON-RPC 2.0
 request per stdin line and writes one response per stdout line. Stdout is
 protocol-only; bounded diagnostics use stderr. The client must negotiate
-protocol `1.0` with `hello` before repository requests. The workspace is fixed
-for the process lifetime and all bridge capabilities are model-free and
-read-only. See the [bridge v1 guide](bridge.md) for the method, cancellation,
-snapshot, security, and shutdown contracts.
+`1.0`, `1.1`, `2.0`, or `2.1` with `hello` before repository requests. The
+workspace is fixed for the process lifetime. Bridge 2 may mutate only its index;
+Bridge 2.1 map/search/symbol/compile operations are read-only. See the
+[bridge guide](bridge.md) for method, timeout, cancellation, snapshot, security,
+and shutdown contracts.
 
 ## Read-only diagnostics
 

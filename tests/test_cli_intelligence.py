@@ -10,6 +10,7 @@ from typer.testing import CliRunner, Result
 import contextforge.application as application_module
 import contextforge.cli.context_commands as context_cli
 import contextforge.cli.intelligence_commands as index_cli
+import contextforge.cli.main as main_cli
 from contextforge.application import (
     IndexSourceChangedError,
     build_repository_index,
@@ -27,9 +28,11 @@ from contextforge.discovery import (
 )
 from contextforge.discovery.renderers import DiscoveryResultFormat
 from contextforge.intelligence import (
+    CandidateGraphNeighbor,
     IndexManifestNotFoundError,
     calculate_source_snapshot_digest,
     load_manifest,
+    retrieve_context_candidates,
 )
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 from contextforge.progress import ProgressEvent, ProgressStatus
@@ -90,6 +93,10 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
 
     assert built.exit_code == 0, built.output
     assert "Status: complete" in _plain(built.stdout)
+    assert (
+        "Repository maps: orientation=current, architecture=current, "
+        "conventions=current, features=current"
+    ) in _plain(built.stdout)
     first = load_manifest(tmp_path)
     assert all(
         item.semantic_status
@@ -121,10 +128,7 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert status.stderr == ""
     payload = json.loads(status.stdout)
     assert payload["indexed_files"] == 2
-    assert payload["stale_files"] == [
-        "app.py",
-        "new.py",
-    ]
+    assert payload["stale_files"] == ["app.py", "new.py"]
     assert payload["provider_id"] == "fake"
     assert payload["global_maps"] == {
         "architecture": "current",
@@ -143,6 +147,195 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     assert config.read_bytes() == before
     with pytest.raises(IndexManifestNotFoundError):
         load_manifest(tmp_path)
+
+
+def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(value: int) -> int:\n    return value + 1\n",
+    )
+    built = _invoke(
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "none",
+        "--semantic-scope",
+        "none",
+        "--semantic-max-requests",
+        "2",
+        "--semantic-max-input-tokens",
+        "1000",
+        "--semantic-max-chunks-per-file",
+        "1",
+    )
+    assert built.exit_code == 0, built.output
+
+    mapped = _invoke("map", str(tmp_path), "--format", "json")
+    mapped_all = _invoke("map", str(tmp_path), "--format", "json", "--kind", "all")
+    mapped_architecture = _invoke(
+        "map", str(tmp_path), "--format", "json", "--kind", "architecture"
+    )
+    mapped_text = _invoke("map", str(tmp_path))
+    mapped_all_text = _invoke("map", str(tmp_path), "--kind", "all")
+    mapped_architecture_text = _invoke("map", str(tmp_path), "--kind", "architecture")
+    suggested = _invoke(
+        "context",
+        "suggest",
+        str(tmp_path),
+        "--task",
+        "run",
+        "--working-file",
+        "app.py",
+        "--planning",
+        "off",
+        "--format",
+        "json",
+    )
+    capsule_path = tmp_path / "capsule.json"
+    created = _invoke(
+        "context",
+        "create",
+        str(tmp_path),
+        "--task",
+        "change run",
+        "--working-lines",
+        "app.py:1-2",
+        "--context-tokens",
+        "2000",
+        "--response-tokens",
+        "200",
+        "--safety-margin-tokens",
+        "100",
+        "--format",
+        "json",
+        "--output",
+        str(capsule_path),
+        "--prompt-output",
+        str(tmp_path / "capsule.xml"),
+    )
+    reviewed = _invoke("context", "review", str(capsule_path))
+
+    assert (
+        mapped.exit_code == mapped_all.exit_code == mapped_architecture.exit_code == 0
+    )
+    assert (
+        mapped_text.exit_code
+        == mapped_all_text.exit_code
+        == mapped_architecture_text.exit_code
+        == 0
+    )
+    assert suggested.exit_code == created.exit_code == 0
+    assert reviewed.exit_code == 0
+    assert json.loads(mapped.stdout)["files"][0]["path"] == "app.py"
+    all_maps = json.loads(mapped_all.stdout)
+    assert set(all_maps["repository_maps"]) == {
+        "architecture",
+        "conventions",
+        "features",
+    }
+    assert json.loads(mapped_architecture.stdout)["map_kind"] == "architecture"
+    assert "ContextForge repository map" in mapped_text.stdout
+    assert "app.py | Python" in mapped_text.stdout
+    assert "Enriched repository maps:" in mapped_all_text.stdout
+    assert "architecture: entries=" in mapped_all_text.stdout
+    assert "ContextForge architecture repository map" in mapped_architecture_text.stdout
+    assert "claims=" in mapped_architecture_text.stdout
+    retrieval = json.loads(suggested.stdout)
+    assert retrieval["schema_version"] == 3
+    assert retrieval["provider_calls"] == 0
+    capsule = json.loads(capsule_path.read_text(encoding="utf-8"))
+    assert capsule["schema_version"] == 2
+    assert capsule["working_set"][0]["path"] == "app.py"
+    assert "Capsule schema: 2" in reviewed.stdout
+    assert '<contextforge schema_version="2">' in (tmp_path / "capsule.xml").read_text(
+        encoding="utf-8"
+    )
+
+    updated = _invoke("index", "update", str(tmp_path), "--provider", "none")
+    assert updated.exit_code == 0, updated.output
+    assert tuple(item.path for item in load_manifest(tmp_path).files) == ("app.py",)
+
+    capsule_path.write_text('{"edited":true}\n', encoding="utf-8")
+    changed_output = _invoke("index", "update", str(tmp_path), "--provider", "none")
+    assert changed_output.exit_code == 0, changed_output.output
+    assert tuple(item.path for item in load_manifest(tmp_path).files) == (
+        "app.py",
+        "capsule.json",
+    )
+
+
+def test_map_reports_missing_index_as_cli_error(tmp_path: Path) -> None:
+    result = _invoke("map", str(tmp_path), "--kind", "architecture")
+
+    assert result.exit_code == 1
+    assert "no active repository index is published" in result.stderr
+
+
+def test_map_reports_absent_enriched_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    without_architecture = report.manifest.model_copy(
+        update={
+            "artifacts": report.manifest.artifacts.model_copy(
+                update={"architecture_map": None}
+            )
+        }
+    )
+    monkeypatch.setattr(main_cli, "load_manifest", lambda path: without_architecture)
+
+    json_result = _invoke(
+        "map", str(tmp_path), "--kind", "architecture", "--format", "json"
+    )
+    text_result = _invoke("map", str(tmp_path), "--kind", "architecture")
+
+    assert json_result.exit_code == text_result.exit_code == 1
+    assert "architecture repository map is absent" in json_result.stderr
+    assert "architecture repository map is absent" in text_result.stderr
+
+
+def test_retrieval_cli_renderer_explains_grounding_and_graph(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return helper()\n")
+    _write(tmp_path, "helper.py", "def helper():\n    return 1\n")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, "run", manifest=report.manifest)
+    )
+    candidate = retrieval.candidates[0]
+    candidate = candidate.model_copy(
+        update={
+            "matched_concepts": ("execution",),
+            "graph_neighbors": (
+                CandidateGraphNeighbor(
+                    path="helper.py",
+                    distance=1,
+                    relationship_kinds=("call",),
+                    provenance=("verified",),
+                ),
+            ),
+        }
+    )
+    explained = context_cli._render_retrieval_result(
+        retrieval.model_copy(
+            update={"candidates": (candidate,), "diagnostics": ("fallback",)}
+        ),
+        output_format=context_cli.SuggestFormat.markdown,
+        explain=True,
+    )
+
+    assert explained.startswith("# ContextForge retrieval candidates")
+    assert "symbols:" in explained
+    assert "concepts: execution" in explained
+    assert "evidence:" in explained
+    assert "graph: helper.py" in explained
+    assert "Diagnostics:\n  fallback" in explained
 
 
 def test_index_update_requires_existing_index_and_status_handles_missing(
@@ -208,7 +401,7 @@ def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> No
     assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
 
 
-def test_index_provider_failure_preserves_previous_active_generation(
+def test_index_provider_failure_keeps_new_structural_generation_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write(tmp_path, "app.py", "def run():\n    return 1\n")
@@ -239,7 +432,16 @@ def test_index_provider_failure_preserves_previous_active_generation(
     assert failed.exit_code == 1
     assert failed.stdout == ""
     assert "semantic analysis failed" in _plain(failed.stderr).lower()
-    assert load_manifest(tmp_path) == previous
+    current = load_manifest(tmp_path)
+    assert current.generation_id != previous.generation_id
+    assert current.generation_kind == "structural"
+    assert current.build.source_snapshot_digest == previous.build.source_snapshot_digest
+    assert current.build.previous_generation_id == previous.generation_id
+    assert current.artifacts.relationship_graph is not None
+    assert current.artifacts.structural_retrieval is not None
+    assert current.artifacts.orientation_map is not None
+    assert current.artifacts.semantic_retrieval is None
+    assert current.artifacts.architecture_map is None
 
 
 def test_index_rechecks_snapshot_before_atomic_publication(
@@ -392,6 +594,7 @@ def test_progress_never_suppresses_stderr_and_preserves_json_stdout(
         "Review VALUE",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--progress",
@@ -430,7 +633,7 @@ def test_index_jsonl_progress_is_a_clean_schema_three_stream(tmp_path: Path) -> 
     assert events[-1].status is ProgressStatus.COMPLETED
     assert events[-1].metadata["generation_id"] == load_manifest(tmp_path).generation_id
     assert events[-1].metadata["snapshot_digest"]
-    assert events[-1].metadata["index_schema"] == 2
+    assert events[-1].metadata["index_schema"] == 3
     assert events[-1].metadata["partial"] is False
     assert "\x1b[" not in result.stdout
     assert "Status:" not in result.stdout
@@ -464,6 +667,7 @@ def _invoke_focused_suggestion(tmp_path: Path, *arguments: str) -> Result:
         "Review run",
         "--provider",
         "fake",
+        "--legacy-discovery",
         *arguments,
     )
 
@@ -822,6 +1026,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -835,6 +1040,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -848,6 +1054,7 @@ def test_suggest_invalid_mode_overwrite_refusal_and_force(tmp_path: Path) -> Non
         "x",
         "--provider",
         "fake",
+        "--legacy-discovery",
         "--format",
         "json",
         "--output",
@@ -1053,6 +1260,7 @@ index_generations = 2
         "x",
         "--config",
         str(config),
+        "--legacy-discovery",
         "--format",
         "json",
     )

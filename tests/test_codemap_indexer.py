@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,10 @@ from contextforge.intelligence import (
     initialize_index,
     load_file_code_map,
     load_manifest,
+    load_relationship_graph,
 )
+from contextforge.intelligence.graph import project_relationship_graph
+from contextforge.intelligence.indexer import load_relationship_graph_projection
 from contextforge.repositories import scan_repository
 
 
@@ -45,8 +49,27 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
     )
     expected = next(item for item in first.code_maps if item.path == "src/app.py")
     assert loaded == expected
-    assert (first.generation_path / "symbols.jsonl").read_bytes().endswith(b"\n")
-    assert (first.generation_path / "relationships.jsonl").read_bytes().endswith(b"\n")
+    assert not (first.generation_path / "symbols.jsonl").exists()
+    assert not (first.generation_path / "relationships.jsonl").exists()
+    assert load_relationship_graph(tmp_path) == load_relationship_graph(
+        tmp_path, manifest=first.manifest
+    )
+    assert load_relationship_graph_projection(
+        tmp_path, manifest=first.manifest
+    ) == project_relationship_graph(load_relationship_graph(tmp_path))
+    graph_shards = tuple((first.generation_path / "graph").glob("*.jsonl"))
+    assert graph_shards
+    assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in graph_shards)
+    retrieval_shards = tuple((first.generation_path / "retrieval").glob("*.jsonl"))
+    assert retrieval_shards
+    assert all(path.stat().st_size <= 4 * 1024 * 1024 for path in retrieval_shards)
+    retrieval_header = json.loads(
+        (first.generation_path / "retrieval-structural.json").read_text("utf-8")
+    )
+    assert retrieval_header["record_kind"] == "retrieval_posting_shards"
+    assert sum(
+        item["record_count"] for item in retrieval_header["document_shards"]
+    ) == len(first.code_maps)
 
 
 def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) -> None:
@@ -68,6 +91,26 @@ def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) ->
     assert load_file_code_map(tmp_path, "b.py").source_sha256 != (
         next(item for item in first.code_maps if item.path == "b.py").source_sha256
     )
+
+
+def test_repeated_unresolved_occurrences_are_compact_not_graph_relationships(
+    tmp_path: Path,
+) -> None:
+    initialize_index(tmp_path)
+    calls = "".join("    missing()\n" for _ in range(20))
+    _write(tmp_path, "app.py", f"def run():\n{calls}")
+    snapshot = scan_repository(tmp_path)
+
+    with acquire_index_lock(tmp_path, "compact") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    code_map = result.code_maps[0]
+    run = code_map.symbols[0]
+    assert len(run.direct_calls) == 8
+    assert code_map.occurrence_counts[0].identifier == "missing"
+    assert code_map.occurrence_counts[0].total_count == 20
+    assert code_map.occurrence_counts[0].retained_count == 8
+    assert not [item for item in code_map.relationships if item.kind == "call"]
 
 
 def test_cached_record_does_not_bypass_stale_snapshot_detection(tmp_path: Path) -> None:

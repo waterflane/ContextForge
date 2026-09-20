@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from typing import Literal
 
 from contextforge.intelligence.models import (
     AnalyzerIdentity,
+    GenerationArtifacts,
     IndexBuildState,
     IndexedFileState,
     IndexManifest,
@@ -72,6 +74,8 @@ def build_index_manifest(
     structural_analyzers: Iterable[AnalyzerIdentity] = (),
     semantic_analyzers: Iterable[AnalyzerIdentity] = (),
     schema_versions: SchemaVersionMetadata | None = None,
+    generation_kind: Literal["structural", "enriched"] = "structural",
+    artifacts: GenerationArtifacts | None = None,
 ) -> IndexManifest:
     """Create a closed, sorted, content-addressed complete manifest."""
 
@@ -79,6 +83,7 @@ def build_index_manifest(
     structural = _canonical_analyzers(structural_analyzers)
     semantic = _canonical_analyzers(semantic_analyzers)
     versions = schema_versions or SchemaVersionMetadata()
+    generation_artifacts = artifacts or GenerationArtifacts()
     statistics = calculate_index_statistics(canonical_files)
     draft = IndexManifest(
         schema_versions=versions,
@@ -88,6 +93,8 @@ def build_index_manifest(
         statistics=statistics,
         structural_analyzers=structural,
         semantic_analyzers=semantic,
+        generation_kind=generation_kind,
+        artifacts=generation_artifacts,
     )
     return IndexManifest(
         schema_versions=versions,
@@ -97,6 +104,8 @@ def build_index_manifest(
         statistics=statistics,
         structural_analyzers=structural,
         semantic_analyzers=semantic,
+        generation_kind=generation_kind,
+        artifacts=generation_artifacts,
     )
 
 

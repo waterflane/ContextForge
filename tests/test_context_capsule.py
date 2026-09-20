@@ -1,0 +1,1039 @@
+import asyncio
+from pathlib import Path
+from typing import cast
+
+import pytest
+from pydantic import ValidationError
+
+from contextforge.application import IndexBuildReport, build_repository_index
+from contextforge.context import (
+    CapsuleMaterial,
+    CapsuleRange,
+    CompiledContextCapsule,
+    ConservativeTokenEstimator,
+    ContextBudget,
+    ContextBudgetError,
+    ContextCapsule,
+    ContextFreshnessError,
+    RepresentationMode,
+    compile_context_capsule,
+)
+from contextforge.intelligence import (
+    ContextPlanningMode,
+    EvidencePlan,
+    GroundedClaim,
+    PlannedEvidence,
+    PlanningDiagnostics,
+    RetrievalResult,
+    SourceRange,
+    load_file_code_map,
+    load_semantic_card,
+    retrieve_context_candidates,
+)
+
+
+def _write(root: Path, path: str, content: str) -> None:
+    destination = root.joinpath(*path.split("/"))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(content, encoding="utf-8", newline="")
+
+
+def _build(root: Path) -> IndexBuildReport:
+    return asyncio.run(
+        build_repository_index(
+            root,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+
+
+def _retrieve(root: Path, report: IndexBuildReport, task: str) -> RetrievalResult:
+    return asyncio.run(
+        retrieve_context_candidates(
+            root,
+            task,
+            manifest=report.manifest,
+        )
+    )
+
+
+def _budget(tokens: int) -> ContextBudget:
+    return ContextBudget(context_window_tokens=tokens)
+
+
+def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def greet(name: str) -> str:\n    return f'<hello>{name}</hello>'\n",
+    )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "change greet")
+
+    first = compile_context_capsule(
+        tmp_path, "change <greet>", retrieval, budget=_budget(4_000)
+    )
+    second = compile_context_capsule(
+        tmp_path, "change <greet>", retrieval, budget=_budget(4_000)
+    )
+
+    assert first == second
+    assert first.capsule.schema_version == 2
+    assert first.capsule.task_context[0].representation == RepresentationMode.FULL
+    assert "&lt;greet&gt;" in first.prompt
+    assert "&lt;hello&gt;" in first.prompt
+    assert first.prompt.startswith('<contextforge schema_version="2">')
+    assert '<usage_rules provenance="contextforge-verified">' in first.prompt
+    assert "verify indexed structure, not source contents" in first.prompt
+    assert "exact lines are present" in first.prompt
+    assert "evidence-linked interpretation" in first.prompt
+    assert "report it as unknown" in first.prompt
+    assert first.prompt.endswith("</contextforge>\n")
+    assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
+
+
+def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "service.py",
+        "def handle_request(value: str) -> str:\n    return value.upper()\n",
+    )
+    _write(tmp_path, "noise.py", "def unrelated():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "change handle_request")
+    candidate = retrieval.candidates[0]
+    evidence_id = candidate.evidence_ranges[0].evidence_id
+    assert evidence_id is not None
+    planned = retrieval.model_copy(
+        update={
+            "evidence_plan": EvidencePlan(
+                source_snapshot_digest=retrieval.source_snapshot_digest,
+                items=(
+                    PlannedEvidence(
+                        candidate_id=candidate.candidate_id,
+                        path=candidate.path,
+                        source_sha256=candidate.source_sha256,
+                        evidence_ids=(evidence_id,),
+                        representation="slice",
+                    ),
+                ),
+                sufficiency="sufficient",
+                diagnostics=PlanningDiagnostics(
+                    mode=ContextPlanningMode.AUTO, status="planned"
+                ),
+            )
+        }
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "change handle_request",
+        planned,
+        budget=_budget(8_000),
+    )
+
+    assert len(compiled.capsule.task_context) == 1
+    material = compiled.capsule.task_context[0]
+    assert material.path == "service.py"
+    assert material.representation == RepresentationMode.SLICE
+    assert material.evidence_ids == (evidence_id,)
+    assert f'evidence_ids="{evidence_id}"' in compiled.prompt
+
+
+def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
+    _write(tmp_path, "alpha.py", "def shared_alpha():\n    return 1\n")
+    _write(tmp_path, "beta.py", "def shared_beta():\n    return 2\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "shared")
+    by_path = {item.path: item for item in retrieval.candidates}
+    ordered = (by_path["beta.py"], by_path["alpha.py"])
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=tuple(
+            PlannedEvidence(
+                candidate_id=item.candidate_id,
+                path=item.path,
+                source_sha256=item.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            )
+            for item in ordered
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review shared implementations",
+        retrieval.model_copy(update={"candidates": ordered, "evidence_plan": plan}),
+        budget=_budget(4_000),
+    )
+
+    assert tuple(item.path for item in compiled.capsule.task_context) == (
+        "beta.py",
+        "alpha.py",
+    )
+
+
+def test_compiler_replaces_entire_stale_plan_with_deterministic_selection(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "serve")
+    candidate = retrieval.candidates[0]
+    stale_plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id="candidate-not-present",
+                path="missing.py",
+                source_sha256="f" * 64,
+                evidence_ids=(),
+                representation="full",
+            ),
+        ),
+        sufficiency="sufficient",
+        interpretation="Use a missing file.",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "serve",
+        retrieval.model_copy(update={"evidence_plan": stale_plan}),
+        budget=_budget(4_000),
+    )
+
+    assert tuple(item.path for item in compiled.capsule.task_context) == (
+        candidate.path,
+    )
+    assert any(
+        "replaced the entire plan" in value
+        for value in compiled.capsule.interpretations
+    )
+    assert all(
+        "Use a missing file" not in value for value in compiled.capsule.interpretations
+    )
+
+
+def test_compiler_replaces_empty_plan_when_retrieval_has_candidates(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "serve")
+    empty_plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "serve",
+        retrieval.model_copy(update={"evidence_plan": empty_plan}),
+        budget=_budget(4_000),
+    )
+
+    assert compiled.capsule.task_context
+    assert compiled.capsule.task_context[0].path == "service.py"
+    assert any(
+        "replaced the entire plan" in value
+        for value in compiled.capsule.interpretations
+    )
+
+
+def test_planned_full_large_file_downgrades_to_selected_slice(tmp_path: Path) -> None:
+    source = (
+        "def process(value: int) -> int:\n"
+        + "".join(f"    value += {line}\n" for line in range(1, 221))
+        + "    return value\n"
+    )
+    _write(tmp_path, "large.py", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "process")
+    candidate = retrieval.candidates[0]
+    evidence_id = candidate.evidence_ranges[0].evidence_id
+    assert evidence_id is not None
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(evidence_id,),
+                representation="full",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "process",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
+    )
+
+    material = compiled.capsule.task_context[0]
+    assert material.representation == RepresentationMode.SLICE
+    assert material.evidence_ids == (evidence_id,)
+    assert material.token_count < candidate.estimated_cost.full
+
+
+def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(f"plain line {index}" for index in range(120)) + "\n"
+    _write(tmp_path, "large.txt", source)
+    report = _build(tmp_path)
+    retrieval = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "large.txt",
+            manifest=report.structural.manifest,
+        )
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect large.txt",
+        retrieval,
+        budget=_budget(550),
+        manifest=report.structural.manifest,
+    )
+
+    material = compiled.capsule.task_context[0]
+    assert material.representation == RepresentationMode.MAP
+    assert "plain line 119" not in material.content
+    assert compiled.token_count <= 550
+
+
+def test_grounded_summary_upgrades_when_source_modes_do_not_fit(tmp_path: Path) -> None:
+    source = "\n".join(f"configuration line {index}" for index in range(260)) + "\n"
+    _write(tmp_path, "settings.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "documentation configuration")
+
+    compiled = compile_context_capsule(
+        tmp_path, "documentation configuration", retrieval, budget=_budget(800)
+    )
+
+    material = next(
+        item for item in compiled.capsule.task_context if item.path == "settings.txt"
+    )
+    assert material.representation == RepresentationMode.SUMMARY
+    assert material.provenance == (
+        "verified-structure",
+        "grounded-semantic-card",
+    )
+    assert "synopsis:" in material.content
+
+
+def test_working_ranges_expand_context_and_merge_nearby_blocks(tmp_path: Path) -> None:
+    source = "".join(f"line {index}\n" for index in range(1, 221))
+    _write(tmp_path, "notes.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "notes")
+    requested: dict[str, tuple[SourceRange, ...]] = {
+        "notes.txt": (
+            SourceRange(start_line=10, start_column=0, end_line=10, end_column=1),
+            SourceRange(start_line=18, start_column=0, end_line=18, end_column=1),
+        )
+    }
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect notes",
+        retrieval,
+        budget=_budget(1_200),
+        working_files=("notes.txt",),
+        working_lines=requested,
+    )
+
+    material = compiled.capsule.working_set[0]
+    assert material.representation == RepresentationMode.SLICE
+    assert material.ranges == (CapsuleRange(start_line=5, end_line=23),)
+    assert material.content.startswith("notes.txt:5-23\nline 5\n")
+    assert material.content.endswith("line 23\n")
+    assert "line 24" not in material.content
+
+
+def test_large_full_file_requires_explicit_pin(tmp_path: Path) -> None:
+    source = "".join(f"line {index}\n" for index in range(1, 221))
+    _write(tmp_path, "large.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "large")
+
+    automatic = compile_context_capsule(
+        tmp_path,
+        "inspect large",
+        retrieval,
+        budget=_budget(10_000),
+        working_files=("large.txt",),
+    )
+    pinned = compile_context_capsule(
+        tmp_path,
+        "inspect large",
+        retrieval,
+        budget=_budget(10_000),
+        working_files=("large.txt",),
+        pinned_full_files=("large.txt",),
+    )
+
+    assert automatic.capsule.working_set[0].representation != RepresentationMode.FULL
+    assert pinned.capsule.working_set[0].representation == RepresentationMode.FULL
+    assert pinned.capsule.working_set[0].content == source
+
+
+def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
+    tmp_path: Path,
+) -> None:
+    body = "".join(
+        (
+            "    target_marker = target_step(value)\n"
+            if line == 60
+            else f"    padding_{line} = value + {line}\n"
+        )
+        for line in range(1, 151)
+    )
+    _write(
+        tmp_path,
+        "large_service.py",
+        "def target_step(value: int) -> int:\n    return value + 60\n\n"
+        f"def process_value(value: int) -> int:\n{body}    return target_marker\n",
+    )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "process_value target_step")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "explain process_value target_step",
+        retrieval,
+        budget=_budget(10_000),
+    )
+
+    material = compiled.capsule.task_context[0]
+    assert material.representation == RepresentationMode.SLICE
+    assert "def process_value" in material.content
+    assert "target_marker = target_step(value)" in material.content
+    assert "padding_120" not in material.content
+    assert material.token_count < 800
+
+
+def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "service.py",
+        "def handle_request(value: str) -> str:\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from service import handle_request\n\ndef start():\n"
+        "    return handle_request('ready')\n",
+    )
+    _write(tmp_path, "unrelated.py", "def unrelated():\n    return 1\n")
+    report = _build(tmp_path)
+
+    centrality_only = _retrieve(tmp_path, report, "words absent from repository")
+    empty = compile_context_capsule(
+        tmp_path,
+        "words absent from repository",
+        centrality_only,
+        budget=_budget(4_000),
+    )
+    assert empty.capsule.task_context == ()
+
+    graph_result = _retrieve(tmp_path, report, "handle_request")
+    graph_compiled = compile_context_capsule(
+        tmp_path, "handle_request", graph_result, budget=_budget(6_000)
+    )
+    assert {item.path for item in graph_compiled.capsule.task_context} >= {
+        "service.py",
+        "app.py",
+    }
+
+    diff_result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "words absent from repository",
+            manifest=report.manifest,
+            diff_paths=("unrelated.py",),
+        )
+    )
+    diff_compiled = compile_context_capsule(
+        tmp_path,
+        "words absent from repository",
+        diff_result,
+        budget=_budget(4_000),
+    )
+    assert {item.path for item in diff_compiled.capsule.task_context} == {
+        "unrelated.py"
+    }
+
+
+def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> None:
+    for index in range(10):
+        body = "".join(
+            f"    value_{line} = 'common evidence {line:03d}'\n"
+            for line in range(1, 121)
+        )
+        _write(
+            tmp_path,
+            f"module_{index}.py",
+            f"def common_{index}():\n{body}    return value_120\n",
+        )
+    long_source = "".join(
+        f"explicit line {line:03d} with deliberately substantial payload text\n"
+        for line in range(1, 241)
+    )
+    _write(tmp_path, "large.txt", long_source)
+    report = _build(tmp_path)
+    automatic_retrieval = _retrieve(tmp_path, report, "common evidence")
+
+    automatic = compile_context_capsule(
+        tmp_path,
+        "common evidence",
+        automatic_retrieval,
+        budget=_budget(10_000),
+    )
+    assert automatic.token_count <= 3_000
+    assert sum(automatic.capsule.allocations.values()) <= 3_000
+
+    pinned_retrieval = _retrieve(tmp_path, report, "large.txt")
+    explicit = compile_context_capsule(
+        tmp_path,
+        "inspect large.txt",
+        pinned_retrieval,
+        budget=_budget(10_000),
+        pinned_full_files=("large.txt",),
+    )
+    assert explicit.capsule.working_set[0].representation == RepresentationMode.FULL
+    assert explicit.token_count > 3_000
+    assert explicit.token_count <= 10_000
+
+
+def test_complementary_maps_are_seeded_before_representation_upgrades(
+    tmp_path: Path,
+) -> None:
+    for name in ("alpha", "beta", "gamma"):
+        body = "".join(f"    {name}_{line} = {line}\n" for line in range(1, 121))
+        _write(
+            tmp_path,
+            f"{name}.py",
+            f"def {name}_flow():\n{body}    return {name}_120\n",
+        )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "flow")
+    concepts = {"alpha.py": "ingest", "beta.py": "validate", "gamma.py": "persist"}
+    candidates = tuple(
+        item.model_copy(
+            update={
+                "exact_group": "approximate",
+                "score": 1.0,
+                "bm25_score": 1.0,
+                "matched_concepts": (concepts[item.path],),
+            }
+        )
+        for item in retrieval.candidates
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review flow",
+        retrieval.model_copy(update={"candidates": candidates}),
+        budget=_budget(3_000),
+    )
+
+    assert {item.path for item in compiled.capsule.task_context} == {
+        "alpha.py",
+        "beta.py",
+        "gamma.py",
+    }
+    assert compiled.token_count <= 900
+
+
+def test_deterministic_fallback_stops_after_duplicate_identifier_coverage(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def serve(value: str) -> str:\n    return value\n")
+    for index in range(6):
+        _write(
+            tmp_path,
+            f"client_{index}.py",
+            "from service import serve\n\n"
+            f"def client_{index}(value: str) -> str:\n    return serve(value)\n",
+        )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "explain serve")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "explain serve",
+        retrieval,
+        budget=_budget(20_000),
+    )
+
+    selected = {item.path for item in compiled.capsule.task_context}
+    assert "service.py" in selected
+    assert len(selected) <= 2
+    assert compiled.token_count < 2_000
+
+
+def test_marginal_utility_penalizes_duplicate_candidate_coverage(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import capsule as capsule_module
+
+    _write(tmp_path, "alpha.py", "def alpha():\n    return 1\n")
+    _write(tmp_path, "beta.py", "def beta():\n    return 2\n")
+    report = _build(tmp_path)
+    candidates = _retrieve(tmp_path, report, "alpha beta").candidates
+    alpha = next(item for item in candidates if item.path == "alpha.py").model_copy(
+        update={"matched_concepts": ("shared concept",)}
+    )
+    beta_duplicate = next(
+        item for item in candidates if item.path == "beta.py"
+    ).model_copy(update={"matched_concepts": ("shared concept",)})
+    beta_distinct = beta_duplicate.model_copy(
+        update={"matched_concepts": ("distinct concept",)}
+    )
+
+    duplicate_utility = capsule_module._utility(
+        alpha, RepresentationMode.MAP, (beta_duplicate,)
+    )
+    distinct_utility = capsule_module._utility(
+        alpha, RepresentationMode.MAP, (beta_distinct,)
+    )
+
+    assert duplicate_utility < distinct_utility
+
+
+def test_representation_suggestion_bonus_cannot_bypass_full_rule(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import capsule as capsule_module
+
+    source = "".join(f"line {line}\n" for line in range(1, 221))
+    _write(tmp_path, "large.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "large.txt")
+    candidate = retrieval.candidates[0]
+    suggested = candidate.model_copy(update={"suggested_representation": "full"})
+
+    base_utility = capsule_module._utility(candidate, RepresentationMode.FULL)
+    suggested_utility = capsule_module._utility(suggested, RepresentationMode.FULL)
+    assert suggested_utility == pytest.approx(base_utility * 1.10)
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect large.txt",
+        retrieval.model_copy(update={"candidates": (suggested,)}),
+        budget=_budget(10_000),
+    )
+    assert compiled.capsule.task_context[0].representation != RepresentationMode.FULL
+
+
+def test_working_full_falls_back_to_map_and_is_not_selected_twice(
+    tmp_path: Path,
+) -> None:
+    source = "".join(f"line {index}\n" for index in range(1, 221))
+    _write(tmp_path, "large.txt", source)
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "large")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect large",
+        retrieval,
+        budget=_budget(600),
+        working_files=("large.txt",),
+        pinned_full_files=("large.txt",),
+    )
+
+    assert compiled.capsule.working_set[0].representation != RepresentationMode.FULL
+    assert compiled.capsule.task_context == ()
+    assert [item.path for item in compiled.capsule.working_set].count("large.txt") == 1
+
+
+def test_source_change_after_retrieval_is_rejected(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "run")
+    _write(tmp_path, "app.py", "def run():\n    return 2\n")
+
+    with pytest.raises(ContextFreshnessError, match="source changed"):
+        compile_context_capsule(
+            tmp_path, "change run", retrieval, budget=_budget(2_000)
+        )
+
+
+def test_git_section_is_omitted_whole_when_its_allocation_is_too_small(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "app")
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect app",
+        retrieval,
+        budget=_budget(1_000),
+        git_diff="diff --git a/app.py b/app.py\n" + "+changed\n" * 200,
+    )
+
+    assert compiled.capsule.git_context == ""
+    assert compiled.capsule.interpretations == (
+        "Git diff omitted because its complete section exceeded budget.",
+    )
+    assert "+changed" not in compiled.prompt
+
+
+def test_budget_deductions_and_exact_estimator_are_hard_limits(tmp_path: Path) -> None:
+    class CharacterEstimator:
+        estimator_id = "characters-v1"
+
+        def count(self, text: str) -> int:
+            return len(text)
+
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "app")
+    budget = ContextBudget(
+        context_window_tokens=2_000,
+        history_tokens=200,
+        response_tokens=300,
+        safety_margin_tokens=100,
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "inspect app",
+        retrieval,
+        budget=budget,
+        estimator=CharacterEstimator(),
+    )
+
+    assert budget.available_tokens == 1_400
+    assert compiled.estimator_id == "characters-v1"
+    assert compiled.token_count == len(compiled.prompt)
+    assert compiled.token_count <= budget.available_tokens
+
+
+def test_model_representation_rationale_stays_in_interpretation_section(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "run")
+    candidate = retrieval.candidates[0].model_copy(
+        update={"suggested_representation": "slice"}
+    )
+    reranked = retrieval.model_copy(update={"candidates": (candidate,)})
+
+    compiled = compile_context_capsule(
+        tmp_path, "change run", reranked, budget=_budget(2_000)
+    )
+
+    assert "(interpretation)" in compiled.capsule.interpretations[0]
+    assert "<interpretations>" in compiled.prompt
+    assert "suggestion" not in compiled.capsule.repository_map
+
+
+def test_over_budget_model_rationale_is_removed_as_one_section(tmp_path: Path) -> None:
+    class InterpretationPenaltyEstimator:
+        estimator_id = "interpretation-penalty-v1"
+
+        def count(self, text: str) -> int:
+            penalty = 1_000 if "<interpretation>" in text else 0
+            return (len(text.encode("utf-8")) + 2) // 3 + penalty
+
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "run")
+    candidate = retrieval.candidates[0].model_copy(
+        update={"suggested_representation": "slice"}
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "change run",
+        retrieval.model_copy(update={"candidates": (candidate,)}),
+        budget=_budget(1_200),
+        estimator=InterpretationPenaltyEstimator(),
+    )
+
+    assert compiled.capsule.interpretations == ()
+    assert "<interpretation>" not in compiled.prompt
+    assert compiled.token_count <= 1_200
+
+
+def test_capsule_models_reject_invalid_ranges_duplicates_and_empty_budget() -> None:
+    with pytest.raises(ValidationError, match="no available tokens"):
+        ContextBudget(context_window_tokens=100, history_tokens=100)
+    with pytest.raises(ValueError, match="negative"):
+        _budget(100).initial_allocations(-1)
+    with pytest.raises(ValidationError, match="must not precede"):
+        CapsuleRange(start_line=2, end_line=1)
+    material = CapsuleMaterial(
+        path="app.py",
+        source_sha256="0" * 64,
+        representation=RepresentationMode.MAP,
+        content="app.py",
+        relevance=1.0,
+        provenance=("verified-structure",),
+        token_count=2,
+    )
+    payload = {
+        "task": "task",
+        "snapshot": {
+            "generation_id": "0" * 64,
+            "source_snapshot_digest": "0" * 64,
+            "generation_kind": "structural",
+            "index_schema_version": 3,
+        },
+        "repository_map": "",
+        "working_set": [material.model_dump(mode="json")],
+        "task_context": [material.model_dump(mode="json")],
+        "allocations": {
+            "diff_metadata": 0,
+            "orientation": 0,
+            "task_evidence": 0,
+            "working_set": 0,
+        },
+        "estimator_id": "test",
+        "token_count": 0,
+    }
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        ContextCapsule.model_validate(payload)
+    with pytest.raises(ValidationError, match="only slice material"):
+        CapsuleMaterial.model_validate(
+            {
+                **material.model_dump(mode="json"),
+                "ranges": [{"start_line": 1, "end_line": 1}],
+            }
+        )
+
+
+def test_too_small_budget_rejects_indivisible_envelope(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "VALUE = 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "app")
+
+    with pytest.raises(ContextBudgetError, match="capsule envelope"):
+        compile_context_capsule(tmp_path, "inspect app", retrieval, budget=_budget(1))
+
+
+def test_default_estimator_counts_utf8_bytes_conservatively() -> None:
+    estimator = ConservativeTokenEstimator()
+    assert estimator.estimator_id == "utf8-bytes-ceil-div-3-v1"
+    assert estimator.count("abc") == 1
+    assert estimator.count("аб") == 2
+
+
+def test_compiler_rejects_unpinned_inputs_and_invalid_selection(tmp_path: Path) -> None:
+    class EmptyEstimator:
+        estimator_id = ""
+
+        def count(self, text: str) -> int:
+            return len(text)
+
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "run")
+
+    with pytest.raises(TypeError, match="RetrievalResult"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            cast(RetrievalResult, object()),
+            budget=_budget(2_000),
+        )
+    old_manifest = report.manifest.model_copy(update={"schema_version": 2})
+    with pytest.raises(Exception, match="Index v3"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            retrieval,
+            budget=_budget(2_000),
+            manifest=old_manifest,
+        )
+    stale_retrieval = retrieval.model_copy(update={"generation_id": "f" * 64})
+    with pytest.raises(ContextFreshnessError, match="not pinned"):
+        compile_context_capsule(tmp_path, "run", stale_retrieval, budget=_budget(2_000))
+    with pytest.raises(ValueError, match="estimator_id"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            retrieval,
+            budget=_budget(2_000),
+            estimator=EmptyEstimator(),
+        )
+    ranges: dict[str, tuple[SourceRange, ...]] = {
+        "app.py": (SourceRange(start_line=1, start_column=0, end_line=1, end_column=1),)
+    }
+    with pytest.raises(ValueError, match="matching working file"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            retrieval,
+            budget=_budget(2_000),
+            working_lines=ranges,
+        )
+    with pytest.raises(ValueError, match="belong to the generation"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            retrieval,
+            budget=_budget(2_000),
+            working_files=("missing.py",),
+        )
+    with pytest.raises(ValueError, match="unique and canonical"):
+        compile_context_capsule(
+            tmp_path,
+            "run",
+            retrieval,
+            budget=_budget(2_000),
+            working_files=("app.py", "app.py"),
+        )
+
+
+def test_candidate_hash_must_match_pinned_codemap(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def run():\n    return 1\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "run")
+    stale_candidate = retrieval.candidates[0].model_copy(
+        update={"source_sha256": "f" * 64}
+    )
+    stale = retrieval.model_copy(update={"candidates": (stale_candidate,)})
+
+    with pytest.raises(ContextFreshnessError, match="candidate source identity"):
+        compile_context_capsule(tmp_path, "run", stale, budget=_budget(2_000))
+
+
+def test_orientation_hierarchy_and_git_context_object_helpers(tmp_path: Path) -> None:
+    from contextforge.context import capsule as capsule_module
+    from contextforge.intelligence import load_orientation_map
+
+    class Diff:
+        text = "complete diff"
+
+    _write(tmp_path, "src/a.py", "A = 1\n")
+    _write(tmp_path, "src/b.py", "B = 2\n")
+    report = _build(tmp_path)
+    orientation = load_orientation_map(tmp_path, manifest=report.manifest)
+    estimator = ConservativeTokenEstimator()
+
+    hierarchy = capsule_module._render_orientation(orientation, 30, estimator)
+    assert "module src" in hierarchy
+    assert capsule_module._render_orientation(orientation, 0, estimator) == ""
+    assert capsule_module._git_text(Diff()) == "complete diff"
+    with pytest.raises(TypeError, match="GitDiffContext-like"):
+        capsule_module._git_text(object())
+
+
+def test_summary_profile_facts_and_slice_declaration_expansion(tmp_path: Path) -> None:
+    from contextforge.context import capsule as capsule_module
+
+    _write(
+        tmp_path,
+        "app.py",
+        "header = 1\n\ndef run(value: int) -> int:\n    changed = value + 1\n"
+        "    return changed\n\nfooter = 2\n",
+    )
+    report = _build(tmp_path)
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    evidence_id = next(iter(card.evidence)).evidence_id
+    enriched = card.model_copy(
+        update={
+            "profile_facts": {
+                "apis": (
+                    GroundedClaim(text="run is callable", evidence_ids=(evidence_id,)),
+                )
+            }
+        }
+    )
+    assert "apis: run is callable" in capsule_module._summary_content(enriched)
+
+    code_map = load_file_code_map(tmp_path, "app.py", manifest=report.manifest)
+    ranges = capsule_module._slice_ranges(
+        (
+            SourceRange(
+                start_line=4,
+                start_column=0,
+                end_line=4,
+                end_column=1,
+            ),
+        ),
+        code_map,
+        7,
+    )
+    assert ranges == (CapsuleRange(start_line=1, end_line=7),)
+
+
+def test_capsule_metadata_and_range_order_validation() -> None:
+    material = CapsuleMaterial(
+        path="app.py",
+        source_sha256="0" * 64,
+        representation=RepresentationMode.SLICE,
+        content="slice",
+        ranges=(
+            CapsuleRange(start_line=1, end_line=2),
+            CapsuleRange(start_line=4, end_line=5),
+        ),
+        relevance=1.0,
+        provenance=("verified-source-ranges",),
+        token_count=2,
+    )
+    payload = material.model_dump(mode="json")
+    payload["ranges"] = [
+        {"start_line": 2, "end_line": 3},
+        {"start_line": 3, "end_line": 4},
+    ]
+    with pytest.raises(ValidationError, match="sorted and disjoint"):
+        CapsuleMaterial.model_validate(payload)
+
+    capsule_payload = {
+        "task": "task",
+        "snapshot": {
+            "generation_id": "0" * 64,
+            "source_snapshot_digest": "0" * 64,
+            "generation_kind": "structural",
+            "index_schema_version": 3,
+        },
+        "repository_map": "",
+        "allocations": {"z": 0, "a": 0},
+        "estimator_id": "test",
+        "token_count": 0,
+    }
+    with pytest.raises(ValidationError, match="allocations must be canonical"):
+        ContextCapsule.model_validate(capsule_payload)
+    capsule_payload["allocations"] = {"a": 0, "z": 0}
+    capsule = ContextCapsule.model_validate(capsule_payload)
+    with pytest.raises(ValidationError, match="metadata is inconsistent"):
+        CompiledContextCapsule(
+            capsule=capsule,
+            prompt="prompt",
+            token_count=1,
+            estimator_id="other",
+        )
+    with pytest.raises(ValidationError, match="bounded non-empty"):
+        ContextCapsule.model_validate({**capsule_payload, "task": "\x00"})

@@ -1140,7 +1140,7 @@ class DiscoverySession:
                         semantics[state.path] = load_file_semantic_analysis(
                             self.snapshot.root, state.path, manifest=manifest
                         )
-                    except IndexManifestReadError:
+                    except (IndexManifestReadError, ValueError):
                         warnings.append(
                             CompletenessWarning(
                                 code="semantic-record-unavailable",

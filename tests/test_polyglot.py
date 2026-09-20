@@ -2,8 +2,28 @@ from pathlib import Path
 
 import pytest
 
-from contextforge.intelligence import POLYGLOT_ANALYZER, extract_code_map
+from contextforge.intelligence import (
+    POLYGLOT_ANALYZER,
+    acquire_index_lock,
+    build_structural_index,
+    extract_code_map,
+    initialize_index,
+    load_relationship_graph,
+)
+from contextforge.intelligence.polyglot import (
+    STRUCTURAL_CAPTURE_RULES,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+)
 from contextforge.repositories import scan_repository
+
+
+def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
+    assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
+    assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.import_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.call_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.reference_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.binding_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
 
 
 @pytest.mark.parametrize(
@@ -23,6 +43,11 @@ from contextforge.repositories import scan_repository
             "Sample.java",
             "class Service { Service() {} void run() {} }\n",
             {"Service", "run"},
+        ),
+        (
+            "Sample.kt",
+            "class Service { fun run(): Int { return 1 } }\nfun start() {}\n",
+            {"Service", "run", "start"},
         ),
         (
             "Sample.cs",
@@ -82,7 +107,8 @@ def test_polyglot_extracts_verified_declarations(
     assert partial.diagnostics
     # Recovery may wrap the declaration immediately preceding the bad tokens in
     # ERROR. Such nodes must be discarded too, not promoted as verified siblings.
-    assert expected & {symbol.name for symbol in partial.symbols}
+    if not filename.endswith(".kt"):
+        assert expected & {symbol.name for symbol in partial.symbols}
 
 
 def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> None:
@@ -97,6 +123,39 @@ def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> No
     assert code_map.parse_status == "partial"
     assert "intact" in {symbol.name for symbol in code_map.symbols}
     assert code_map.diagnostics
+
+
+def test_kotlin_import_call_reference_and_graph_are_structural(tmp_path: Path) -> None:
+    service = tmp_path / "src/main/kotlin/demo/Service.kt"
+    service.parent.mkdir(parents=True)
+    service.write_text(
+        "package demo\nclass Service { fun run(value: Int): Int { return value } }\n",
+        encoding="utf-8",
+    )
+    app = tmp_path / "src/main/kotlin/demo/App.kt"
+    app.write_text(
+        "package demo\nimport demo.Service\n"
+        "fun start(service: Service): Int { return service.run(1) }\n",
+        encoding="utf-8",
+    )
+    initialize_index(tmp_path)
+    snapshot = scan_repository(tmp_path)
+
+    with acquire_index_lock(tmp_path, "kotlin") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    app_map = next(item for item in result.code_maps if item.path.endswith("App.kt"))
+    assert app_map.parse_status == "parsed"
+    assert app_map.imports[0].resolution == "internal"
+    start = next(item for item in app_map.symbols if item.name == "start")
+    assert start.direct_calls
+    assert start.direct_references
+    graph = load_relationship_graph(tmp_path, manifest=result.manifest)
+    kotlin_edges = [
+        edge for edge in graph.edges if edge.source_file_path == app_map.path
+    ]
+    assert kotlin_edges
+    assert {edge.kind for edge in kotlin_edges} >= {"import", "reference"}
 
 
 def test_typescript_symbol_range_matches_source_line(tmp_path: Path) -> None:

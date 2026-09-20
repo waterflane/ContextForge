@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from contextforge.benchmarks.models import (
     BenchmarkCohortMetrics,
+    BenchmarkDurationSummary,
     BenchmarkIntegerRange,
     BenchmarkResult,
     BenchmarkRunResult,
@@ -98,11 +99,11 @@ def render_benchmark_markdown(result: BenchmarkResult) -> str:
         "",
         "## Task and mode summaries",
         "",
-        "| Task | Mode | Complete | Total | Stability |",
-        "|---|---:|---:|---:|---|",
+        "| Task | Pipeline | Mode | Complete | Total | Stability |",
+        "|---|---|---:|---:|---:|---|",
     ]
     lines.extend(
-        f"| `{metric.task_id}` | {metric.mode.value} | "
+        f"| `{metric.task_id}` | {metric.pipeline.value} | {metric.mode.value} | "
         f"{metric.complete_run_count} | {metric.total_run_count} | "
         f"{metric.stability_kind} |"
         for metric in result.metrics
@@ -112,13 +113,14 @@ def render_benchmark_markdown(result: BenchmarkResult) -> str:
             "",
             "### Runs",
             "",
-            "| Task | Mode | Repeat | Status | Benchmark expectations | "
+            "| Task | Pipeline | Mode | Repeat | Status | Benchmark expectations | "
             "Discovery confidence |",
-            "|---|---:|---:|---|---|---:|",
+            "|---|---|---:|---:|---|---|---:|",
         )
     )
     lines.extend(
-        f"| `{run.task_id}` | {run.mode.value} | {run.repetition} | "
+        f"| `{run.task_id}` | {run.pipeline.value} | {run.mode.value} | "
+        f"{run.repetition} | "
         f"{run.status} | {_expectation_outcome(run)} | {_rate(run.confidence)} |"
         for run in result.runs
     )
@@ -150,8 +152,14 @@ def _quality_lines(
     metrics: tuple[BenchmarkCohortMetrics, ...], prefix: str
 ) -> tuple[str, ...]:
     return tuple(
-        f"{prefix}{_label(metric)}: required recall "
-        f"{_rate(metric.required_file_recall)}; forbidden selection "
+        f"{prefix}{_label(metric)}: file precision/recall "
+        f"{_rate(metric.file_precision)}/{_rate(metric.file_recall)}; "
+        f"precision@5 {_rate(metric.precision_at_5)}; "
+        f"range precision {_rate(metric.range_precision)}; token precision "
+        f"{_rate(metric.token_precision)}; ungrounded claims "
+        f"{_rate(metric.ungrounded_claim_rate)}; grounded/dropped claims "
+        f"{_rate(metric.grounded_claim_rate)}/"
+        f"{_rate(metric.dropped_claim_rate)}; forbidden selection "
         f"{_rate(metric.forbidden_file_selection_rate)}; facet coverage "
         f"{_rate(metric.expected_facet_coverage_rate)}"
         for metric in metrics
@@ -195,9 +203,21 @@ def _performance_lines(
         lines.append(
             f"{prefix}{_label(metric)}: duration {duration_text}; files read "
             f"{_range(metric.files_read_range)}; model calls "
-            f"{_range(metric.model_call_range)}"
+            f"{_range(metric.model_call_range)}; provider calls "
+            f"{_range(metric.provider_call_range)}; selected/useful tokens "
+            f"{_range(metric.selected_token_range)}/"
+            f"{_range(metric.useful_token_range)}; "
+            f"cold/warm/incremental latency {_duration_mean(metric.cold_latency)}/"
+            f"{_duration_mean(metric.warm_latency)}/"
+            f"{_duration_mean(metric.incremental_latency)}"
         )
     return tuple(lines) or (f"{prefix}(none)",)
+
+
+def _duration_mean(value: BenchmarkDurationSummary | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value.mean_ms:.1f} ms"
 
 
 def _run_warning_groups(
@@ -366,6 +386,7 @@ def _cohort_runs(
         for run in result.runs
         if run.task_id == metric.task_id
         and run.repository_path == metric.repository_path
+        and run.pipeline == metric.pipeline
         and run.mode == metric.mode
         and run.source_snapshot_digest == metric.source_snapshot_digest
         and run.index_generation_id == metric.index_generation_id
@@ -374,7 +395,7 @@ def _cohort_runs(
 
 
 def _label(metric: BenchmarkCohortMetrics) -> str:
-    return f"{metric.task_id} [{metric.mode.value}]"
+    return f"{metric.task_id} [{metric.pipeline.value}/{metric.mode.value}]"
 
 
 def _rate(value: float | None) -> str:

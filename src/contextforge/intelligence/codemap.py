@@ -18,8 +18,8 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-CODEMAP_SCHEMA_VERSION: Literal[2] = 2
-RESOLVER_VERSION = "2"
+CODEMAP_SCHEMA_VERSION: Literal[3] = 3
+RESOLVER_VERSION = "7"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -141,6 +141,54 @@ class CallReference(IndexModel):
         return self
 
 
+class ReferenceOccurrence(IndexModel):
+    """Observed value or type use with conservative snapshot resolution."""
+
+    observed_name: str
+    source_range: SourceRange
+    resolution: Resolution = "unresolved"
+    target_symbol_id: str | None = None
+    target_file_path: str | None = None
+    detection_method: str = "python_ast_reference"
+
+    @field_validator("target_file_path")
+    @classmethod
+    def validate_target_path(cls, value: str | None) -> str | None:
+        return value if value is None else validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> ReferenceOccurrence:
+        if self.resolution == "internal" and self.target_symbol_id is None:
+            raise ValueError("internal reference targets require a symbol ID")
+        if self.resolution != "internal" and (
+            self.target_symbol_id is not None or self.target_file_path is not None
+        ):
+            raise ValueError("non-internal references cannot claim an internal target")
+        return self
+
+
+class StructuralOccurrenceCount(IndexModel):
+    """Count source occurrences omitted after bounded positional retention."""
+
+    identifier: str
+    fact_kind: Literal["call", "reference"]
+    total_count: PositiveInt
+    retained_count: Annotated[int, Field(ge=1, le=8, strict=True)]
+
+    @field_validator("identifier")
+    @classmethod
+    def validate_identifier(cls, value: str) -> str:
+        if not value or len(value) > 500 or "\x00" in value:
+            raise ValueError("occurrence identifier must be bounded text")
+        return value
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> StructuralOccurrenceCount:
+        if self.total_count <= self.retained_count:
+            raise ValueError("occurrence counts describe only omitted positions")
+        return self
+
+
 class ImportRecord(IndexModel):
     """One alias from an import statement, without importing the module."""
 
@@ -215,6 +263,7 @@ class RelationshipRecord(IndexModel):
         "import",
         "contains",
         "call",
+        "reference",
         "export",
         "tests",
         "tested_by",
@@ -237,7 +286,7 @@ class RelationshipRecord(IndexModel):
 class SymbolRecord(IndexModel):
     """Verified declaration and directly contained syntax facts."""
 
-    schema_version: Literal[1, 2] = RECORD_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = RECORD_SCHEMA_VERSION
     record_kind: Literal["verified_symbol"] = "verified_symbol"
     symbol_id: str
     name: str
@@ -255,6 +304,7 @@ class SymbolRecord(IndexModel):
     base_classes: tuple[str, ...] = ()
     contained_methods: tuple[str, ...] = ()
     direct_calls: tuple[CallReference, ...] = ()
+    direct_references: tuple[ReferenceOccurrence, ...] = ()
     raised_exceptions: tuple[str, ...] = ()
     configuration_keys: tuple[str, ...] = ()
     visibility: Visibility = "unknown"
@@ -306,6 +356,13 @@ class SymbolRecord(IndexModel):
             set(call_keys)
         ):
             raise ValueError("direct calls must be unique and canonical")
+        reference_keys = tuple(
+            _reference_order(item) for item in self.direct_references
+        )
+        if reference_keys != tuple(sorted(reference_keys)) or len(
+            reference_keys
+        ) != len(set(reference_keys)):
+            raise ValueError("direct references must be unique and canonical")
         return self
 
     @property
@@ -318,7 +375,7 @@ class SymbolRecord(IndexModel):
 class FileCodeMap(IndexModel):
     """Complete model-free structural projection for one snapshot file."""
 
-    schema_version: Literal[1, 2] = CODEMAP_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = CODEMAP_SCHEMA_VERSION
     record_kind: Literal["verified_file_codemap"] = "verified_file_codemap"
     path: str
     source_sha256: Sha256
@@ -327,13 +384,16 @@ class FileCodeMap(IndexModel):
     analyzer: AnalyzerIdentity
     parse_status: ParseStatus
     line_count: NonNegativeInt
+    module_has_executable_code: bool = False
     source_regions: tuple[SourceRange, ...] = ()
     source_regions_truncated: bool = False
     module_docstring: str | None = None
     imports: tuple[ImportRecord, ...] = ()
     exports: tuple[ExportRecord, ...] = ()
     top_level_constants: tuple[str, ...] = ()
+    configuration_key_digests: tuple[Sha256, ...] = ()
     symbols: tuple[SymbolRecord, ...] = ()
+    occurrence_counts: tuple[StructuralOccurrenceCount, ...] = ()
     relationships: tuple[RelationshipRecord, ...] = ()
     diagnostics: tuple[ParserDiagnostic, ...] = ()
 
@@ -375,10 +435,28 @@ class FileCodeMap(IndexModel):
                     and call.target_symbol_id not in known
                 ):
                     raise ValueError("local call target is absent from the CodeMap")
+            for reference in symbol.direct_references:
+                if (
+                    reference.target_file_path == self.path
+                    and reference.target_symbol_id not in known
+                ):
+                    raise ValueError(
+                        "local reference target is absent from the CodeMap"
+                    )
         if tuple(self.top_level_constants) != tuple(
             sorted(set(self.top_level_constants))
         ):
             raise ValueError("top-level constants must be unique and canonical")
+        if self.configuration_key_digests != tuple(
+            sorted(set(self.configuration_key_digests))
+        ):
+            raise ValueError("configuration key digests must be unique and canonical")
+        occurrence_keys = tuple(
+            (item.identifier.casefold(), item.identifier, item.fact_kind)
+            for item in self.occurrence_counts
+        )
+        if occurrence_keys != tuple(sorted(set(occurrence_keys))):
+            raise ValueError("occurrence counts must be unique and canonical")
         key_groups = (
             (tuple(_import_order(item) for item in self.imports), "imports"),
             (tuple(_export_order(item) for item in self.exports), "exports"),
@@ -431,6 +509,7 @@ class FileCodeMap(IndexModel):
                 raise ValueError("source range exceeds the canonical source line count")
         if self.parse_status in {"unsupported", "parse_error"} and (
             self.module_docstring is not None
+            or self.module_has_executable_code
             or self.imports
             or self.exports
             or self.top_level_constants
@@ -446,6 +525,15 @@ def stable_fact_id(prefix: str, *parts: object) -> str:
 
     encoded = canonical_json_bytes([prefix, *parts])
     return f"{prefix}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def configuration_key_digest(value: str) -> str:
+    """Hash a normalized configuration key without persisting its value."""
+
+    normalized = value.strip().casefold()
+    if not normalized or len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError("configuration key must be bounded non-empty text")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def serialize_code_map(code_map: FileCodeMap) -> bytes:
@@ -524,6 +612,10 @@ def _call_order(value: CallReference) -> tuple[object, ...]:
     return (*_range_key(value.source_range), value.observed_name)
 
 
+def _reference_order(value: ReferenceOccurrence) -> tuple[object, ...]:
+    return (*_range_key(value.source_range), value.observed_name)
+
+
 def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
     ranges: list[SourceRange] = []
     ranges.extend(item.source_range for item in code_map.imports)
@@ -536,6 +628,7 @@ def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
             ranges.append(symbol.body_range)
         ranges.extend(item.source_range for item in symbol.decorators)
         ranges.extend(item.source_range for item in symbol.direct_calls)
+        ranges.extend(item.source_range for item in symbol.direct_references)
     return tuple(ranges)
 
 
@@ -548,12 +641,15 @@ __all__ = [
     "CODEMAP_SCHEMA_VERSION",
     "RESOLVER_VERSION",
     "CallReference",
+    "configuration_key_digest",
     "DecoratorRecord",
     "ExportRecord",
     "FileCodeMap",
     "ImportRecord",
     "ParameterRecord",
     "ParserDiagnostic",
+    "ReferenceOccurrence",
+    "StructuralOccurrenceCount",
     "RelationshipRecord",
     "RelationshipTarget",
     "SourceRange",

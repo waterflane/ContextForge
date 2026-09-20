@@ -19,9 +19,15 @@ from contextforge.bridge import MAX_JSONRPC_MESSAGE_BYTES, BridgeServer
 from contextforge.bridge.models import (
     BridgeSelectionItem,
     CancelParams,
+    CompileParams,
+    CompileV22Params,
     DiscoverParams,
     IndexParams,
+    MapParams,
     ReadParams,
+    SearchParams,
+    SearchV22Params,
+    SymbolParams,
 )
 from contextforge.intelligence import (
     GlobalMapAnalysisError,
@@ -69,6 +75,64 @@ def test_bridge_protocol_schema_is_closed_and_matches_v1() -> None:
     assert v2["$defs"]["progressNotification"]["properties"]["method"] == {
         "const": "$/progress"
     }
+
+    v21 = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v2.1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert v21["$defs"]["helloRequest"]["properties"]["params"]["properties"][
+        "protocol_version"
+    ] == {"const": "2.1"}
+    index_properties = v21["$defs"]["indexRequest"]["properties"]["params"][
+        "properties"
+    ]
+    assert "operation_timeout" in index_properties
+    assert index_properties["semantic_scope"]["enum"] == ["priority", "all", "none"]
+    assert {
+        v21["$defs"][name]["properties"]["method"]["const"]
+        for name in (
+            "mapRequestObject",
+            "searchRequestObject",
+            "symbolRequest",
+            "compileRequest",
+        )
+    } == {"map", "search", "symbol", "compile"}
+    assert set(index_properties) == set(IndexParams.model_fields)
+    assert set(v21["$defs"]["pinnedParams"]["properties"]) == set(
+        MapParams.model_fields
+    )
+    search_properties = v21["$defs"]["searchParams"]["properties"]
+    assert set(search_properties) == set(SearchParams.model_fields)
+    symbol_properties = {
+        **v21["$defs"]["pinnedParams"]["properties"],
+        **v21["$defs"]["symbolRequest"]["properties"]["params"]["allOf"][1][
+            "properties"
+        ],
+    }
+    assert set(symbol_properties) == set(SymbolParams.model_fields)
+    compile_properties = {
+        **search_properties,
+        **v21["$defs"]["compileParams"]["allOf"][1]["properties"],
+    }
+    assert set(compile_properties) == set(CompileParams.model_fields)
+
+    v22 = json.loads(
+        (root / "docs/schemas/contextforge-bridge-v2.2.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert v22["$defs"]["helloRequest"]["properties"]["params"]["properties"][
+        "protocol_version"
+    ] == {"const": "2.2"}
+    assert set(v22["$defs"]["searchParams"]["properties"]) == set(
+        SearchV22Params.model_fields
+    )
+    v22_compile = {
+        **v22["$defs"]["searchParams"]["properties"],
+        **v22["$defs"]["compileParams"]["allOf"][1]["properties"],
+    }
+    assert set(v22_compile) == set(CompileV22Params.model_fields)
 
 
 def test_bridge_status_reports_structural_index_coverage(tmp_path: Path) -> None:
@@ -228,21 +292,23 @@ def test_bridge_progress_publisher_coalesces_synchronous_bursts() -> None:
         await publisher.close()
 
         assert not cancellation.is_set()
-        assert len(writer.frames) == 2
-        assert writer.frames[0]["params"]["event"]["sequence"] == 0
+        assert publisher.coalesced_event_count > 0
+        assert publisher.dropped_event_count == 0
+        assert len(writer.frames) == 1
         assert writer.frames[-1]["params"]["event"]["sequence"] == 299
 
     asyncio.run(exercise())
 
 
-def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
+def test_bridge_progress_publisher_prioritizes_terminal_during_backpressure() -> None:
     class BlockedWriter:
         def __init__(self) -> None:
             self.started = asyncio.Event()
             self.release = asyncio.Event()
+            self.frames: list[dict[str, Any]] = []
 
         async def write(self, frame: dict[str, Any]) -> None:
-            del frame
+            self.frames.append(frame)
             self.started.set()
             await self.release.wait()
 
@@ -263,15 +329,18 @@ def test_bridge_progress_publisher_detects_sustained_backpressure() -> None:
         reporter.report("scan", "first", percentage=1)
         await asyncio.wait_for(writer.started.wait(), timeout=1)
         reporter.report("scan", "second", percentage=2)
-        reporter.report("scan", "third", percentage=3)
+        late_running = reporter.report("scan", "third", percentage=3)
+        reporter.complete()
+        publisher.observe(late_running)
 
-        await asyncio.wait_for(cancellation.wait(), timeout=1)
+        assert not cancellation.is_set()
         writer.release.set()
-        with pytest.raises(bridge_module.BridgeFault) as raised:
-            await publisher.close()
+        await asyncio.wait_for(publisher.close(), timeout=1)
 
-        assert raised.value.typed_code == "INDEX_BUILD_FAILED"
-        assert raised.value.data["error_code"] == "progress_backpressure"
+        assert not cancellation.is_set()
+        assert publisher.coalesced_event_count >= 2
+        assert publisher.dropped_event_count == 1
+        assert writer.frames[-1]["params"]["event"]["status"] == "completed"
 
     asyncio.run(exercise())
 
@@ -348,6 +417,8 @@ def test_bridge_handshake_protocol_purity_and_shutdown(tmp_path: Path) -> None:
             "1.0",
             "1.1",
             "2.0",
+            "2.1",
+            "2.2",
         ]
         assert hello["result"]["capabilities"]["model_free_discovery"] is True
         assert hello["result"]["policy"]["source_writes"] is False
@@ -387,7 +458,7 @@ def test_bridge_requires_compatible_protocol_negotiation(tmp_path: Path) -> None
         assert incompatible["error"]["data"] == {
             "code": "INCOMPATIBLE_PROTOCOL_VERSION",
             "requested_protocol_version": "3.0",
-            "supported_protocol_versions": ["1.0", "1.1", "2.0"],
+            "supported_protocol_versions": ["1.0", "1.1", "2.0", "2.1", "2.2"],
         }
 
         harness.input.send(_request("compatible", "hello", {"protocol_version": "1.0"}))
@@ -441,9 +512,9 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
         assert capabilities["tracked_index_jobs"] is True
         assert capabilities["progress_notifications"] is True
         assert capabilities["schemas"] == {
-            "index": {"current": 2, "readable": [1, 2]},
-            "manifest": {"current": 2, "readable": [1, 2]},
-            "record": {"current": 2, "readable": [1, 2]},
+            "index": {"current": 3, "readable": [1, 3]},
+            "manifest": {"current": 3, "readable": [1, 3]},
+            "record": {"current": 3, "readable": [1, 3]},
             "progress": {"current": 3, "readable": [1, 2, 3]},
             "context_package": {"current": 1, "readable": [1]},
         }
@@ -466,7 +537,7 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
             response = await asyncio.to_thread(harness.output.wait_for_id, request_id)
             assert response["result"]["action"] == action
             assert response["result"]["snapshot_digest"] == digest
-            assert response["result"]["index_schema"] == 2
+            assert response["result"]["index_schema"] == 3
             assert response["result"]["partial"] is False
             progress = [
                 frame
@@ -484,6 +555,73 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
                 events[-1].metadata["generation_id"]
                 == response["result"]["generation_id"]
             )
+        await harness.close()
+
+    asyncio.run(exercise())
+
+
+def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def run(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
+    )
+    asyncio.run(
+        application_module.build_repository_index(
+            tmp_path, provider=None, provider_configuration=None
+        )
+    )
+
+    async def exercise() -> None:
+        harness = _Harness(tmp_path)
+        await harness.start(negotiated=False)
+        harness.input.send(_request("hello", "hello", {"protocol_version": "2.1"}))
+        hello = (await harness.response(1))[-1]["result"]
+        assert {"map", "search", "symbol", "compile"} <= set(
+            hello["capabilities"]["methods"]
+        )
+        assert hello["capabilities"]["schemas"]["context_capsule"]["current"] == 2
+        digest = await _snapshot(harness, 2)
+
+        common = {"expected_snapshot_digest": digest}
+        harness.input.send(_request("map", "map", common))
+        mapped = await asyncio.to_thread(harness.output.wait_for_id, "map")
+        assert mapped["result"]["orientation"]["files"][0]["path"] == "app.py"
+        assert set(mapped["result"]["repository_maps"]) == {
+            "architecture",
+            "conventions",
+            "features",
+        }
+
+        harness.input.send(
+            _request("search", "search", {**common, "task": "run", "limit": 5})
+        )
+        searched = await asyncio.to_thread(harness.output.wait_for_id, "search")
+        assert searched["result"]["candidates"][0]["path"] == "app.py"
+        assert searched["result"]["provider_calls"] == 0
+
+        harness.input.send(_request("symbol", "symbol", {**common, "query": "run"}))
+        symbols = await asyncio.to_thread(harness.output.wait_for_id, "symbol")
+        assert symbols["result"]["symbols"][0]["name"] == "run"
+
+        harness.input.send(
+            _request(
+                "compile",
+                "compile",
+                {
+                    **common,
+                    "task": "change run",
+                    "working_files": ["app.py"],
+                    "context_window_tokens": 2_000,
+                    "response_tokens": 200,
+                    "safety_margin_tokens": 100,
+                },
+            )
+        )
+        compiled = await asyncio.to_thread(harness.output.wait_for_id, "compile")
+        assert compiled["result"]["capsule"]["schema_version"] == 2
+        assert compiled["result"]["token_count"] <= 1_700
+        assert '<contextforge schema_version="2">' in compiled["result"]["prompt"]
         await harness.close()
 
     asyncio.run(exercise())
@@ -581,36 +719,33 @@ def test_bridge_v2_rechecks_expected_snapshot_inside_index_workflow(
     asyncio.run(exercise())
 
 
-def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
+def test_bridge_v2_index_timeout_detaches_worker_and_preserves_lock(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    cancellation_seen = threading.Event()
+    worker_started = threading.Event()
     release_worker = threading.Event()
     lock_was_active = False
+    cancellation_was_set = False
+    original_build_structural_index = cast(
+        Any, vars(application_module)["build_structural_index"]
+    )
 
-    def wait_for_cancellation(
+    def wait_for_release(
         snapshot: object,
         lock: Any,
         **kwargs: object,
-    ) -> None:
-        del snapshot
-        nonlocal lock_was_active
+    ) -> object:
+        nonlocal lock_was_active, cancellation_was_set
         cancellation = cast(asyncio.Event, kwargs["cancellation"])
-        deadline = time.monotonic() + 5
-        while not cancellation.is_set():
-            if time.monotonic() >= deadline:
-                raise AssertionError("index timeout did not signal cancellation")
-            time.sleep(0.001)
         lock_was_active = lock.active and lock.layout.lock.is_file()
-        cancellation_seen.set()
+        worker_started.set()
         if not release_worker.wait(timeout=5):
             raise AssertionError("test did not release the timed-out index worker")
-        raise asyncio.CancelledError
+        cancellation_was_set = cancellation.is_set()
+        return original_build_structural_index(snapshot, lock, **kwargs)
 
-    monkeypatch.setattr(
-        application_module, "build_structural_index", wait_for_cancellation
-    )
+    monkeypatch.setattr(application_module, "build_structural_index", wait_for_release)
 
     async def exercise() -> None:
         harness = _Harness(tmp_path)
@@ -634,11 +769,14 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
         response = await asyncio.to_thread(harness.output.wait_for_id, "index-timeout")
         elapsed = time.monotonic() - started_at
         assert response["error"]["data"]["code"] == "REQUEST_TIMEOUT"
-        assert await asyncio.to_thread(cancellation_seen.wait, 1)
+        assert response["error"]["data"]["job_continues"] is True
+        assert response["error"]["data"]["operation_id"].startswith("bridge-index-")
+        assert await asyncio.to_thread(worker_started.wait, 1)
         assert lock_was_active is True
         assert elapsed < 0.5
         assert (tmp_path / ".contextforge" / "index" / "lock.json").is_file()
         assert len(harness.server._background_tasks) == 1
+        assert len(harness.server._background_requests) == 1
         release_worker.set()
         deadline = time.monotonic() + 5
         while harness.server._background_tasks:
@@ -646,16 +784,8 @@ def test_bridge_v2_index_timeout_signals_worker_before_lock_release(
                 raise AssertionError("timed-out index cleanup did not finish")
             await asyncio.sleep(0.01)
         assert not (tmp_path / ".contextforge" / "index" / "lock.json").exists()
-        frames = [json.loads(chunk) for chunk in harness.output.chunks]
-        timeout_position = next(
-            index
-            for index, frame in enumerate(frames)
-            if frame.get("id") == "index-timeout"
-        )
-        assert all(
-            frame.get("method") != "$/progress"
-            for frame in frames[timeout_position + 1 :]
-        )
+        assert cancellation_was_set is False
+        assert not harness.server._background_requests
         assert harness.stderr.getvalue() == ""
         await harness.close()
 

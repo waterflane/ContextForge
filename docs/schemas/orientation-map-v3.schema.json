@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/orientation-map-v3.schema.json",
+  "title": "ContextForge Orientation Map v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_kind", "source_snapshot_digest", "files", "modules"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "record_kind": { "const": "orientation_map" },
+    "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+    "modules": { "type": "array", "items": { "$ref": "#/$defs/module" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "type": "string", "minLength": 1, "pattern": "^(?!/|.*\\\\|.*(?:^|/)\\.\\.(?:/|$)).+$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "module", "language", "line_count", "symbol_count", "import_count", "centrality", "is_entrypoint", "is_test"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "module": { "type": "string" },
+        "language": { "type": ["string", "null"] },
+        "line_count": { "type": "integer", "minimum": 0 },
+        "symbol_count": { "type": "integer", "minimum": 0 },
+        "import_count": { "type": "integer", "minimum": 0 },
+        "centrality": { "type": "number", "minimum": 0 },
+        "is_entrypoint": { "type": "boolean" },
+        "is_test": { "type": "boolean" }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "files", "centrality"],
+      "properties": {
+        "module": { "type": "string" },
+        "files": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/path" } },
+        "centrality": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

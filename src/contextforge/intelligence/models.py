@@ -15,9 +15,9 @@ from contextforge.core.validation import (
     validate_portable_relative_path as validate_portable_relative_path,
 )
 
-INDEX_SCHEMA_VERSION: Literal[2] = 2
-MANIFEST_SCHEMA_VERSION: Literal[2] = 2
-RECORD_SCHEMA_VERSION: Literal[2] = 2
+INDEX_SCHEMA_VERSION: Literal[3] = 3
+MANIFEST_SCHEMA_VERSION: Literal[3] = 3
+RECORD_SCHEMA_VERSION: Literal[3] = 3
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -202,6 +202,30 @@ class IndexBuildState(IndexModel):
     previous_generation_id: Sha256 | None = None
 
 
+class ArtifactReference(IndexModel):
+    """Digest-bound location of one generation-level artifact."""
+
+    location: str
+    sha256: Sha256
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, value: str) -> str:
+        return validate_portable_relative_path(value)
+
+
+class GenerationArtifacts(IndexModel):
+    """Separated structural, semantic, retrieval, and repository-map records."""
+
+    relationship_graph: ArtifactReference | None = None
+    structural_retrieval: ArtifactReference | None = None
+    semantic_retrieval: ArtifactReference | None = None
+    orientation_map: ArtifactReference | None = None
+    architecture_map: ArtifactReference | None = None
+    conventions_map: ArtifactReference | None = None
+    features_map: ArtifactReference | None = None
+
+
 class IndexStatistics(IndexModel):
     """Deterministic counts derived from the canonical file states."""
 
@@ -228,7 +252,7 @@ class IndexStatistics(IndexModel):
 class IndexManifest(IndexModel):
     """Complete immutable generation manifest."""
 
-    schema_version: Literal[1, 2] = MANIFEST_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = MANIFEST_SCHEMA_VERSION
     schema_versions: SchemaVersionMetadata = Field(
         default_factory=SchemaVersionMetadata
     )
@@ -238,6 +262,8 @@ class IndexManifest(IndexModel):
     statistics: IndexStatistics
     structural_analyzers: tuple[AnalyzerIdentity, ...] = ()
     semantic_analyzers: tuple[AnalyzerIdentity, ...] = ()
+    generation_kind: Literal["structural", "enriched"] = "structural"
+    artifacts: GenerationArtifacts = Field(default_factory=GenerationArtifacts)
 
     @model_validator(mode="after")
     def validate_canonical_content(self) -> IndexManifest:
@@ -258,7 +284,7 @@ class IndexManifest(IndexModel):
 class ActiveIndexPointer(IndexModel):
     """Small atomic root document that selects one immutable generation."""
 
-    schema_version: Literal[1, 2] = INDEX_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = INDEX_SCHEMA_VERSION
     generation_id: Sha256
     generation_manifest: str
     source_snapshot_digest: Sha256
@@ -290,6 +316,7 @@ class IndexStatus(IndexModel):
     unchanged_files: tuple[str, ...] = ()
     deleted_files: tuple[str, ...] = ()
     stale_analysis: tuple[str, ...] = ()
+    rebuild_required: bool = False
 
     @field_validator(
         "added_files",

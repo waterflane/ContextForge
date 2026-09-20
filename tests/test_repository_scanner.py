@@ -1,14 +1,24 @@
 import hashlib
+import json
 import os
 import stat
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Never, Protocol
 
 import pytest
 
+import contextforge.repositories.generated as generated_module
 import contextforge.repositories.scanner as scanner_module
-from contextforge.repositories import ScanOptions, scan_repository
+from contextforge.repositories import (
+    GeneratedArtifactRegistryError,
+    ScanOptions,
+    load_generated_artifact_digests,
+    register_generated_artifact,
+    scan_repository,
+)
 from contextforge.repositories.files import FileInspection
 from contextforge.repositories.files import inspect_file as file_inspector
 
@@ -687,3 +697,276 @@ def test_root_directory_read_failure_is_not_silently_swallowed(
 
     with pytest.raises(PermissionError, match="cannot list root"):
         scan_repository(tmp_path)
+
+
+def test_generated_artifact_registry_is_digest_bound_and_corruption_is_safe(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    (root / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    artifact = root / "capsule.json"
+    artifact.write_text('{"schema_version":2}\n', encoding="utf-8")
+    lookalike = root / "user-capsule.json"
+    lookalike.write_text('{"schema_version":2}\n', encoding="utf-8")
+
+    assert register_generated_artifact(root, artifact, kind="capsule") is True
+    registered = scan_repository(root)
+    assert _paths(registered.files) == ["source.py", "user-capsule.json"]
+
+    artifact.write_text('{"schema_version":2,"edited":true}\n', encoding="utf-8")
+    edited = scan_repository(root)
+    assert _paths(edited.files) == [
+        "capsule.json",
+        "source.py",
+        "user-capsule.json",
+    ]
+
+    assert register_generated_artifact(root, artifact, kind="capsule") is True
+    registry = root / ".contextforge" / "generated-artifacts.json"
+    registry.write_text("not-json", encoding="utf-8")
+    corrupt = scan_repository(root)
+    assert "capsule.json" in _paths(corrupt.files)
+
+    outside = tmp_path / "outside.xml"
+    outside.write_text("<contextforge />\n", encoding="utf-8")
+    assert register_generated_artifact(root, outside, kind="prompt") is False
+
+
+def test_generated_artifact_registry_serializes_concurrent_writers(
+    tmp_path: Path,
+) -> None:
+    artifacts = []
+    for index in range(16):
+        artifact = tmp_path / f"artifact-{index}.json"
+        artifact.write_text(f'{{"index":{index}}}\n', encoding="utf-8")
+        artifacts.append(artifact)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        registered = tuple(
+            executor.map(
+                lambda path: register_generated_artifact(
+                    tmp_path, path, kind="capsule"
+                ),
+                artifacts,
+            )
+        )
+
+    assert all(registered)
+    assert set(load_generated_artifact_digests(tmp_path)) == {
+        item.name for item in artifacts
+    }
+    assert not (tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH).exists()
+
+
+def test_generated_artifact_registry_recovers_stale_lock(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+    lock.parent.mkdir()
+    lock.write_text(
+        json.dumps(
+            {
+                "created_at": time.time()
+                - generated_module.REGISTRY_LOCK_STALE_SECONDS
+                - 1,
+                "owner_id": "abandoned",
+                "pid": 1,
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_time = time.time() - generated_module.REGISTRY_LOCK_STALE_SECONDS - 1
+    os.utime(lock, (stale_time, stale_time))
+
+    assert register_generated_artifact(tmp_path, artifact, kind="capsule") is True
+    assert not lock.exists()
+    assert set(load_generated_artifact_digests(tmp_path)) == {"artifact.json"}
+
+
+def test_generated_artifact_registry_lock_wait_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+    lock.parent.mkdir()
+    lock.write_text(
+        json.dumps(
+            {
+                "created_at": time.time(),
+                "owner_id": "active",
+                "pid": os.getpid(),
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generated_module, "REGISTRY_LOCK_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(generated_module, "REGISTRY_LOCK_POLL_SECONDS", 0.001)
+
+    with pytest.raises(GeneratedArtifactRegistryError, match="timed out acquiring"):
+        register_generated_artifact(tmp_path, artifact, kind="capsule")
+
+    assert lock.exists()
+
+
+def test_generated_artifact_registry_does_not_release_another_owner(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".contextforge"
+    state.mkdir()
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+
+    with (
+        pytest.raises(GeneratedArtifactRegistryError, match="ownership was lost"),
+        generated_module._registry_write_lock(tmp_path),
+    ):
+        lock.write_text(
+            json.dumps(
+                {
+                    "created_at": time.time(),
+                    "owner_id": "replacement",
+                    "pid": os.getpid(),
+                    "schema_version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert lock.exists()
+
+
+def test_generated_artifact_registry_rejects_invalid_output_kinds_and_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    artifact = root / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="kind is unsupported"):
+        register_generated_artifact(root, artifact, kind="unknown")  # type: ignore[arg-type]
+    with pytest.raises(GeneratedArtifactRegistryError, match="not a regular file"):
+        register_generated_artifact(root, root, kind="package")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"x" * (generated_module.MAX_REGISTRY_BYTES + 1),
+        b"[]",
+        b'{"schema_version":2,"artifacts":[]}',
+        b'{"schema_version":1,"artifacts":{}}',
+        b'{"schema_version":1,"artifacts":[[]]}',
+        b'{"schema_version":1,"artifacts":[{"kind":"capsule","path":"../escape","sha256":"'
+        + (b"0" * 64)
+        + b'"}]}',
+    ],
+    ids=[
+        "oversized",
+        "non-object",
+        "wrong-version",
+        "non-list-artifacts",
+        "non-object-entry",
+        "unsafe-path",
+    ],
+)
+def test_generated_artifact_registry_fails_open_for_invalid_shapes(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    registry = tmp_path / ".contextforge" / "generated-artifacts.json"
+    registry.parent.mkdir()
+    registry.write_bytes(payload)
+
+    assert load_generated_artifact_digests(tmp_path) == {}
+
+
+def test_generated_artifact_registry_wraps_atomic_write_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.xml"
+    artifact.write_text("<contextforge />\n", encoding="utf-8")
+
+    def fail_replace(source: Path, destination: Path) -> Never:
+        raise OSError(f"cannot replace {source.name} with {destination.name}")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(
+        GeneratedArtifactRegistryError,
+        match="unable to update generated artifact registry",
+    ):
+        register_generated_artifact(tmp_path, artifact, kind="prompt")
+
+    assert not tuple((tmp_path / ".contextforge").glob("*.tmp"))
+
+
+def test_generated_artifact_registry_rejects_linked_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    original_is_symlink = Path.is_symlink
+
+    def report_artifact_link(path: Path) -> bool:
+        return path == artifact or original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", report_artifact_link)
+    with pytest.raises(GeneratedArtifactRegistryError, match="must not be a link"):
+        register_generated_artifact(tmp_path, artifact, kind="capsule")
+
+
+def test_generated_artifact_registry_rejects_nonportable_resolved_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        generated_module,
+        "_is_portable_relative_path",
+        lambda value: False,
+    )
+
+    assert register_generated_artifact(tmp_path, artifact, kind="capsule") is False
+
+
+def test_generated_artifact_registry_rejects_linked_state_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    state_directory = tmp_path / ".contextforge"
+    original_is_symlink = Path.is_symlink
+
+    def report_state_link(path: Path) -> bool:
+        return path == state_directory or original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", report_state_link)
+    with pytest.raises(GeneratedArtifactRegistryError, match="state path is linked"):
+        register_generated_artifact(tmp_path, artifact, kind="prompt")
+
+
+def test_generated_artifact_registry_fails_open_on_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / ".contextforge" / "generated-artifacts.json"
+    registry.parent.mkdir()
+    registry.write_text('{"schema_version":1,"artifacts":[]}', encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+
+    def fail_registry_read(path: Path) -> bytes:
+        if path == registry:
+            raise OSError("cannot read registry")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_registry_read)
+    assert load_generated_artifact_digests(tmp_path) == {}
+    assert generated_module._is_portable_relative_path("") is False

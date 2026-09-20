@@ -8,6 +8,7 @@ from typing import Annotated, BinaryIO, Never, cast
 import typer
 
 from contextforge._metadata import APP_NAME, __version__
+from contextforge.application import canonical_json
 from contextforge.bridge import run_stdio_bridge
 from contextforge.cli.benchmark_commands import benchmark_app
 from contextforge.cli.context_commands import context_app
@@ -28,6 +29,14 @@ from contextforge.context import (
     render_project_tree,
     render_project_tree_json,
     render_project_tree_markdown,
+)
+from contextforge.intelligence import (
+    REPOSITORY_MAP_KINDS,
+    IndexStorageError,
+    RepositoryMapKind,
+    load_manifest,
+    load_orientation_map,
+    load_repository_map_v3,
 )
 from contextforge.logging import (
     LogFormat,
@@ -61,6 +70,23 @@ class TreeFormat(StrEnum):
     text = "text"
     markdown = "markdown"
     json = "json"
+
+
+class MapFormat(StrEnum):
+    """Supported repository-orientation map representations."""
+
+    text = "text"
+    json = "json"
+
+
+class MapKind(StrEnum):
+    """Generation-pinned map artifact to render."""
+
+    orientation = "orientation"
+    architecture = "architecture"
+    conventions = "conventions"
+    features = "features"
+    all = "all"
 
 
 app = typer.Typer(
@@ -447,6 +473,115 @@ def tree(
         except OutputWriteError as exc:
             _exit_with_error(str(exc), code=1)
         typer.echo(f"Output written to {written_path}")
+
+
+@app.command("map")
+def repository_map(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Repository root with an active Index v3 generation."),
+    ] = Path("."),
+    output_format: Annotated[
+        MapFormat,
+        typer.Option("--format", help="Output representation.", case_sensitive=False),
+    ] = MapFormat.text,
+    kind: Annotated[
+        MapKind,
+        typer.Option("--kind", help="Map artifact to render.", case_sensitive=False),
+    ] = MapKind.orientation,
+) -> None:
+    """Render deterministic orientation or enriched repository maps."""
+
+    try:
+        manifest = load_manifest(path)
+        orientation = load_orientation_map(path, manifest=manifest)
+        repository_maps = {
+            map_kind: load_repository_map_v3(path, map_kind, manifest=manifest)
+            for map_kind in REPOSITORY_MAP_KINDS
+            if kind.value in {map_kind, "all"}
+            and getattr(manifest.artifacts, f"{map_kind}_map") is not None
+        }
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        IndexStorageError,
+        ValueError,
+    ) as exc:
+        _exit_with_error(str(exc), code=1)
+    if output_format is MapFormat.json:
+        if kind is MapKind.orientation:
+            payload: object = orientation.model_dump(mode="json")
+        elif kind is MapKind.all:
+            payload = {
+                "orientation": orientation.model_dump(mode="json"),
+                "repository_maps": {
+                    map_kind: value.model_dump(mode="json")
+                    for map_kind, value in repository_maps.items()
+                },
+            }
+        else:
+            selected = repository_maps.get(cast(RepositoryMapKind, kind.value))
+            if selected is None:
+                _exit_with_error(
+                    f"{kind.value} repository map is absent from the generation",
+                    code=1,
+                )
+            payload = selected.model_dump(mode="json")
+        typer.echo(canonical_json(payload), nl=False)
+        return
+    if kind not in {MapKind.orientation, MapKind.all}:
+        selected = repository_maps.get(cast(RepositoryMapKind, kind.value))
+        if selected is None:
+            _exit_with_error(
+                f"{kind.value} repository map is absent from the generation", code=1
+            )
+        lines = [
+            f"ContextForge {kind.value} repository map",
+            f"Snapshot: {selected.source_snapshot_digest}",
+            f"Entries: {len(selected.entries)}",
+            "",
+        ]
+        for entry in selected.entries:
+            lines.append(
+                f"[{entry.name}] files={len(entry.paths)} "
+                f"claims={len(entry.claims)} relationships={len(entry.relationships)}"
+            )
+            lines.extend(f"  {item}" for item in entry.paths)
+        typer.echo("\n".join(lines) + "\n", nl=False)
+        return
+    lines = [
+        "ContextForge repository map",
+        f"Snapshot: {orientation.source_snapshot_digest}",
+        f"Files: {len(orientation.files)}",
+        f"Modules: {len(orientation.modules)}",
+        "",
+    ]
+    for module in orientation.modules:
+        lines.append(f"[{module.module}] centrality={module.centrality:.6f}")
+        by_path = {item.path: item for item in orientation.files}
+        for file in module.files:
+            item = by_path[file]
+            markers = ",".join(
+                marker
+                for marker, enabled in (
+                    ("entrypoint", item.is_entrypoint),
+                    ("test", item.is_test),
+                )
+                if enabled
+            )
+            suffix = "" if not markers else f" ({markers})"
+            lines.append(
+                f"  {item.path} | {item.language or 'unknown'} | "
+                f"lines={item.line_count} symbols={item.symbol_count} "
+                f"centrality={item.centrality:.6f}{suffix}"
+            )
+    if kind is MapKind.all:
+        lines.extend(("", "Enriched repository maps:"))
+        lines.extend(
+            f"  {map_kind}: entries={len(value.entries)}"
+            for map_kind, value in repository_maps.items()
+        )
+    typer.echo("\n".join(lines) + "\n", nl=False)
 
 
 def _exit_with_error(message: str, *, code: int) -> Never:

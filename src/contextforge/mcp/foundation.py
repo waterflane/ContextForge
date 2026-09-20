@@ -12,11 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from contextforge.application import build_discovery_request
 from contextforge.context import (
+    ContextBudget,
     ContextBuildOptions,
+    ContextCompilerError,
     ContextSelection,
     LineRange,
     LineRangeRequest,
     build_context_package,
+    compile_context_capsule,
     inspect_context_package_json,
 )
 from contextforge.discovery import (
@@ -30,14 +33,22 @@ from contextforge.discovery import (
 )
 from contextforge.git import GitDiffRequest, collect_git_diff
 from contextforge.intelligence import (
+    REPOSITORY_MAP_KINDS,
     IndexManifest,
     IndexManifestNotFoundError,
     IndexManifestReadError,
+    SourceRange,
     load_architecture_map,
     load_feature_map,
+    load_file_code_map,
     load_manifest,
+    load_orientation_map,
+    load_relationship_graph,
+    load_repository_map_v3,
+    retrieve_context_candidates,
 )
 from contextforge.models import ModelProvider
+from contextforge.project_config import load_project_configuration
 from contextforge.repositories import ProjectSnapshot, scan_repository
 
 MCP_MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -86,6 +97,46 @@ class _InspectPackageInput(_ToolInput):
     package_json: str = Field(min_length=1, max_length=16 * 1024 * 1024)
 
 
+class _MapInput(_ToolInput):
+    include_graph: bool = False
+
+
+class _SearchInput(_ToolInput):
+    task: str = Field(min_length=1, max_length=20_000)
+    working_files: tuple[str, ...] = ()
+    diff_paths: tuple[str, ...] = ()
+    limit: int = Field(default=20, ge=1, le=1_000, strict=True)
+    rerank: bool = False
+    planning_mode: Literal["off", "auto", "required"] | None = None
+
+
+class _SymbolInput(_ToolInput):
+    query: str = Field(min_length=1, max_length=1_000)
+    limit: int = Field(default=50, ge=1, le=1_000, strict=True)
+
+
+class _CapsuleRange(_ToolInput):
+    path: str
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> _CapsuleRange:
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must not precede start_line")
+        return self
+
+
+class _CompileInput(_SearchInput):
+    working_lines: tuple[_CapsuleRange, ...] = ()
+    pinned_full_files: tuple[str, ...] = ()
+    context_window_tokens: int = Field(default=32_768, ge=1, strict=True)
+    history_tokens: int = Field(default=0, ge=0, strict=True)
+    response_tokens: int = Field(default=4_096, ge=0, strict=True)
+    safety_margin_tokens: int = Field(default=1_024, ge=0, strict=True)
+    git_diff: str | None = Field(default=None, max_length=2 * 1024 * 1024)
+
+
 _QUERY_TOOL_MAP = {
     "repository_overview": "get_repository_overview",
     "list_tree": "list_tree",
@@ -112,6 +163,10 @@ MCP_TOOL_SCHEMAS.update(
         "suggest_context": _SuggestInput.model_json_schema(),
         "build_context_package": _BuildPackageInput.model_json_schema(),
         "inspect_context_package": _InspectPackageInput.model_json_schema(),
+        "map": _MapInput.model_json_schema(),
+        "search": _SearchInput.model_json_schema(),
+        "symbol": _SymbolInput.model_json_schema(),
+        "compile": _CompileInput.model_json_schema(),
     }
 )
 
@@ -139,6 +194,10 @@ _TOOL_DESCRIPTIONS = {
     "inspect_context_package": (
         "Validate portable package JSON without repository access."
     ),
+    "map": "Return the pinned Index v3 orientation and optional relationship graph.",
+    "search": "Retrieve deterministic BM25/graph CandidateCards from Index v3.",
+    "symbol": "Find verified exact or qualified symbols in the pinned generation.",
+    "compile": "Compile a hard-budgeted Context Capsule v2 without writing source.",
 }
 
 
@@ -231,7 +290,8 @@ class ReadOnlyMCPFoundation:
                 "annotations": {
                     "readOnlyHint": True,
                     "destructiveHint": False,
-                    "idempotentHint": name not in {"suggest_context"},
+                    "idempotentHint": name
+                    not in {"suggest_context", "search", "compile"},
                     "openWorldHint": False,
                 },
             }
@@ -263,6 +323,14 @@ class ReadOnlyMCPFoundation:
             result = self._build_package(values)
         elif name == "inspect_context_package":
             result = self._inspect_package(values)
+        elif name == "map":
+            result = self._map(values)
+        elif name == "search":
+            result = await self._search(values)
+        elif name == "symbol":
+            result = self._symbol(values)
+        elif name == "compile":
+            result = await self._compile(values)
         else:
             raise ReadOnlyToolError("unknown_tool", "unknown read-only MCP tool")
         _require_result_limit(result)
@@ -307,10 +375,18 @@ class ReadOnlyMCPFoundation:
             if self._manifest is None:
                 raise ReadOnlyToolError("unavailable", "no pinned architecture map")
             try:
-                result = load_architecture_map(
-                    self.snapshot.root, manifest=self._manifest
+                result = (
+                    load_repository_map_v3(
+                        self.snapshot.root,
+                        "architecture",
+                        manifest=self._manifest,
+                    )
+                    if self._manifest.schema_version == 3
+                    else load_architecture_map(
+                        self.snapshot.root, manifest=self._manifest
+                    )
                 ).model_dump(mode="json")
-            except IndexManifestReadError as exc:
+            except (IndexManifestReadError, ValueError) as exc:
                 raise ReadOnlyToolError(
                     "unavailable", "no pinned architecture map"
                 ) from exc
@@ -318,10 +394,14 @@ class ReadOnlyMCPFoundation:
             if self._manifest is None:
                 raise ReadOnlyToolError("unavailable", "no pinned feature map")
             try:
-                result = load_feature_map(
-                    self.snapshot.root, manifest=self._manifest
+                result = (
+                    load_repository_map_v3(
+                        self.snapshot.root, "features", manifest=self._manifest
+                    )
+                    if self._manifest.schema_version == 3
+                    else load_feature_map(self.snapshot.root, manifest=self._manifest)
                 ).model_dump(mode="json")
-            except IndexManifestReadError as exc:
+            except (IndexManifestReadError, ValueError) as exc:
                 raise ReadOnlyToolError("unavailable", "no pinned feature map") from exc
         else:
             raise ReadOnlyToolError("not_found", "unknown MCP resource URI")
@@ -394,6 +474,220 @@ class ReadOnlyMCPFoundation:
             "package": package.model_dump(mode="json"),
             "inspection": inspection.model_dump(mode="json"),
         }
+
+    def _require_manifest(self) -> IndexManifest:
+        if self._manifest is None:
+            raise ReadOnlyToolError("unavailable", "no pinned Index v3 generation")
+        if self._manifest.schema_version != 3:
+            raise ReadOnlyToolError("unavailable", "pinned index requires a v3 rebuild")
+        return self._manifest
+
+    def _map(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = _MapInput.model_validate(arguments)
+            manifest = self._require_manifest()
+            result: dict[str, Any] = {
+                "generation_id": manifest.generation_id,
+                "orientation": load_orientation_map(
+                    self.snapshot.root, manifest=manifest
+                ).model_dump(mode="json"),
+                "repository_maps": {
+                    kind: load_repository_map_v3(
+                        self.snapshot.root, kind, manifest=manifest
+                    ).model_dump(mode="json")
+                    for kind in REPOSITORY_MAP_KINDS
+                    if getattr(manifest.artifacts, f"{kind}_map") is not None
+                },
+            }
+            if value.include_graph:
+                result["relationship_graph"] = load_relationship_graph(
+                    self.snapshot.root, manifest=manifest
+                ).model_dump(mode="json")
+            return result
+        except (ValidationError, ValueError, OSError) as exc:
+            raise ReadOnlyToolError("invalid_input", _safe_error(exc)) from exc
+
+    async def _search(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = _SearchInput.model_validate(arguments)
+            manifest = self._require_manifest()
+            project = load_project_configuration(self.snapshot.root)
+            planning_mode = _mcp_planning_mode(value)
+            if planning_mode == "required" and self.provider is None:
+                raise ReadOnlyToolError(
+                    "unavailable", "required planning needs a configured provider"
+                )
+            result = await retrieve_context_candidates(
+                self.snapshot.root,
+                value.task,
+                manifest=manifest,
+                working_set=value.working_files,
+                diff_paths=value.diff_paths,
+                limit=value.limit,
+                provider=self.provider,
+                rerank=value.rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=project.models.context_planning_max_rounds,
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
+            )
+            return result.model_dump(mode="json")
+        except ReadOnlyToolError:
+            raise
+        except (ValidationError, ValueError, OSError) as exc:
+            raise ReadOnlyToolError("invalid_input", _safe_error(exc)) from exc
+
+    def _symbol(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = _SymbolInput.model_validate(arguments)
+            manifest = self._require_manifest()
+            query = value.query.strip().casefold()
+            matches: list[tuple[int, str, str, dict[str, Any]]] = []
+            for state in manifest.files:
+                code_map = load_file_code_map(
+                    self.snapshot.root, state.path, manifest=manifest
+                )
+                for symbol in code_map.symbols:
+                    name = symbol.name.casefold()
+                    qualified = symbol.qualified_name.casefold()
+                    if query not in {name, qualified} and query not in qualified:
+                        continue
+                    rank = 0 if query == qualified else 1 if query == name else 2
+                    matches.append(
+                        (
+                            rank,
+                            qualified,
+                            state.path,
+                            {"path": state.path, **symbol.model_dump(mode="json")},
+                        )
+                    )
+            return {
+                "generation_id": manifest.generation_id,
+                "query": value.query,
+                "symbols": [
+                    item[3]
+                    for item in sorted(
+                        matches, key=lambda match: (match[0], match[1], match[2])
+                    )[: value.limit]
+                ],
+            }
+        except (ValidationError, ValueError, OSError) as exc:
+            raise ReadOnlyToolError("invalid_input", _safe_error(exc)) from exc
+
+    async def _compile(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = _CompileInput.model_validate(arguments)
+            manifest = self._require_manifest()
+            project = load_project_configuration(self.snapshot.root)
+            planning_mode = _mcp_planning_mode(value)
+            if planning_mode == "required" and self.provider is None:
+                raise ReadOnlyToolError(
+                    "unavailable", "required planning needs a configured provider"
+                )
+            working = tuple(
+                sorted(
+                    {
+                        *value.working_files,
+                        *(item.path for item in value.working_lines),
+                        *value.pinned_full_files,
+                    }
+                )
+            )
+            retrieval = await retrieve_context_candidates(
+                self.snapshot.root,
+                value.task,
+                manifest=manifest,
+                working_set=working,
+                diff_paths=value.diff_paths,
+                limit=value.limit,
+                provider=self.provider,
+                rerank=value.rerank,
+                planning_mode=planning_mode,
+                planning_max_candidates=project.models.context_planning_max_candidates,
+                planning_max_files=project.models.context_planning_max_files,
+                planning_max_ranges_per_file=(
+                    project.models.context_planning_max_ranges_per_file
+                ),
+                planning_max_input_tokens=(
+                    project.models.context_planning_max_input_tokens
+                ),
+                planning_max_output_tokens=(
+                    project.models.context_planning_max_output_tokens
+                ),
+                planning_max_rounds=project.models.context_planning_max_rounds,
+                planning_max_total_input_tokens=(
+                    project.models.context_planning_max_total_input_tokens
+                ),
+                planning_max_actions_per_round=(
+                    project.models.context_planning_max_actions_per_round
+                ),
+                planning_max_pool_candidates=(
+                    project.models.context_planning_max_pool_candidates
+                ),
+                planning_request_timeout_seconds=(
+                    project.models.context_planning_request_timeout_seconds
+                ),
+            )
+            ranges: dict[str, list[SourceRange]] = {}
+            for item in value.working_lines:
+                ranges.setdefault(item.path, []).append(
+                    SourceRange(
+                        start_line=item.start_line,
+                        start_column=0,
+                        end_line=item.end_line,
+                        end_column=0,
+                    )
+                )
+            compiled = compile_context_capsule(
+                self.snapshot.root,
+                value.task,
+                retrieval,
+                budget=ContextBudget(
+                    context_window_tokens=value.context_window_tokens,
+                    history_tokens=value.history_tokens,
+                    response_tokens=value.response_tokens,
+                    safety_margin_tokens=value.safety_margin_tokens,
+                ),
+                manifest=manifest,
+                working_files=working,
+                working_lines={key: tuple(items) for key, items in ranges.items()},
+                pinned_full_files=value.pinned_full_files,
+                git_diff=value.git_diff,
+            )
+            return compiled.model_dump(mode="json")
+        except ReadOnlyToolError:
+            raise
+        except (ContextCompilerError, ValidationError, ValueError, OSError) as exc:
+            raise ReadOnlyToolError("invalid_input", _safe_error(exc)) from exc
+
+
+def _mcp_planning_mode(value: _SearchInput) -> Literal["off", "auto", "required"]:
+    if value.planning_mode is not None:
+        return value.planning_mode
+    if "rerank" in value.model_fields_set:
+        return "auto" if value.rerank else "off"
+    return "auto"
 
 
 def _require_result_limit(result: dict[str, Any]) -> None:

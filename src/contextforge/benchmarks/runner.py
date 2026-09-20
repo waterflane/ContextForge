@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -10,10 +11,18 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from contextforge.application import build_discovery_request, suggest_repository_context
+from pydantic_core import to_jsonable_python
+
+from contextforge.application import (
+    build_discovery_request,
+    build_repository_index,
+    suggest_repository_context,
+)
+from contextforge.benchmarks.answers import run_paired_answer_regression
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
 from contextforge.benchmarks.models import (
     BenchmarkAnyFileExpectation,
@@ -24,10 +33,21 @@ from contextforge.benchmarks.models import (
     BenchmarkLimitEvaluation,
     BenchmarkManifest,
     BenchmarkMode,
+    BenchmarkPairedAnswerEvaluation,
+    BenchmarkPipeline,
     BenchmarkProviderCounters,
+    BenchmarkRangeCoverage,
     BenchmarkResult,
     BenchmarkRunResult,
+    BenchmarkSourceRange,
     BenchmarkTask,
+)
+from contextforge.context import (
+    ConservativeTokenEstimator,
+    ContextBudget,
+    ContextCapsule,
+    RepresentationMode,
+    compile_context_capsule,
 )
 from contextforge.discovery import (
     DiscoveryCandidate,
@@ -36,12 +56,24 @@ from contextforge.discovery import (
     DiscoveryRunRecord,
 )
 from contextforge.intelligence import (
+    CandidateCard,
+    ContextPlanningMode,
+    IndexManifest,
     IndexManifestNotFoundError,
     IndexManifestReadError,
     calculate_source_snapshot_digest,
     load_manifest,
+    load_semantic_card,
+    retrieve_context_candidates,
 )
-from contextforge.models import ModelProvider
+from contextforge.models import (
+    ModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ProviderCapabilities,
+    ProviderConfiguration,
+)
 from contextforge.progress import ProgressEvent, ProgressObserver
 from contextforge.repositories import scan_repository
 
@@ -63,6 +95,102 @@ class _RunMetrics:
             self.files_considered = max(self.files_considered, value)
         if self.progress is not None:
             self.progress(event)
+
+
+class _CountingModelProvider:
+    """Retain actual safe provider accounting without changing provider behavior."""
+
+    def __init__(self, provider: ModelProvider) -> None:
+        self._provider = provider
+        self.configuration: ProviderConfiguration = provider.configuration
+        self.model_calls = 0
+        self.model_generations = 0
+        self.repair_generations = 0
+        self.provider_discovery_calls = 0
+        self.provider_capability_calls = 0
+        self.transport_attempts = 0
+        self.total_provider_http_calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider.provider_id
+
+    def capabilities(self) -> ProviderCapabilities:
+        return self._provider.capabilities()
+
+    async def complete_structured(
+        self,
+        request: ModelRequest,
+        *,
+        cancellation: asyncio.Event | None = None,
+    ) -> ModelResponse:
+        self.model_calls += 1
+        estimated_input = sum(
+            (len(message.content.encode("utf-8")) + 2) // 3
+            for message in request.messages(include_response_schema=True)
+        )
+        try:
+            response = await self._provider.complete_structured(
+                request, cancellation=cancellation
+            )
+        except ModelProviderError as exc:
+            self.provider_discovery_calls += exc.provider_discovery_calls
+            self.provider_capability_calls += exc.provider_capability_calls
+            self.transport_attempts += exc.transport_attempts
+            self.total_provider_http_calls += exc.total_provider_http_calls
+            if exc.diagnostic is not None:
+                self.model_generations += exc.diagnostic.model_generations
+                self.repair_generations += exc.diagnostic.repair_generations
+                if exc.diagnostic.usage is not None:
+                    self.input_tokens += exc.diagnostic.usage.input_tokens or 0
+                    self.output_tokens += exc.diagnostic.usage.output_tokens or 0
+                else:
+                    self.input_tokens += estimated_input
+            else:
+                self.input_tokens += estimated_input
+            raise
+        diagnostic = response.diagnostic
+        if diagnostic is None:
+            self.model_generations += 1
+            self.transport_attempts += 1
+            self.total_provider_http_calls += 1
+        else:
+            self.model_generations += diagnostic.model_generations
+            self.repair_generations += diagnostic.repair_generations
+            self.provider_discovery_calls += diagnostic.provider_discovery_calls
+            self.provider_capability_calls += diagnostic.provider_capability_calls
+            self.transport_attempts += diagnostic.transport_attempts
+            self.total_provider_http_calls += diagnostic.total_provider_http_calls
+        usage = response.usage
+        if usage is None:
+            self.input_tokens += estimated_input
+            self.output_tokens += (
+                len(response.normalized_json.encode("utf-8")) + 2
+            ) // 3
+        else:
+            self.input_tokens += usage.input_tokens or estimated_input
+            self.output_tokens += usage.output_tokens or 0
+        return response
+
+    async def close(self) -> None:
+        """The benchmark borrows the caller-owned provider and never closes it."""
+
+        return None
+
+
+@dataclass(frozen=True)
+class _SelectionMeasurements:
+    selected_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    selected_line_count: int = 0
+    useful_line_count: int = 0
+    selected_tokens: int = 0
+    useful_tokens: int = 0
+    semantic_claims: int = 0
+    ungrounded_claims: int = 0
+    grounded_claims: int = 0
+    dropped_claims: int = 0
 
 
 async def run_discovery_benchmark(
@@ -112,12 +240,23 @@ async def _run_once(
     clock: Callable[[], float],
     progress: ProgressObserver | None,
 ) -> BenchmarkRunResult:
+    if task.pipeline is BenchmarkPipeline.INDEX_V3_CAPSULE:
+        return await _run_index_v3_once(
+            root,
+            task,
+            mode,
+            repetition,
+            provider,
+            clock=clock,
+            progress=progress,
+        )
     metrics = _RunMetrics(progress)
     started = clock()
     run_record: DiscoveryRunRecord | None = None
     failure: BenchmarkFailure | None = None
     configuration_digest: str | None = None
     expectations_evaluated = True
+    measurements = _SelectionMeasurements()
     try:
         request = build_discovery_request(
             task=task.task,
@@ -135,6 +274,13 @@ async def _run_once(
                 request,
                 progress=metrics.observe,
                 persist_diagnostics=False,
+            )
+            measurements = _measure_selection(
+                prepared,
+                ()
+                if run_record.final_selection is None
+                else run_record.final_selection.selected,
+                _effective(task, mode, "required_ranges"),
             )
     except _BenchmarkPreconditionError as exc:
         expectations_evaluated = False
@@ -159,7 +305,250 @@ async def _run_once(
         metrics.files_considered,
         duration_ms,
         configuration_digest,
+        measurements,
         expectations_evaluated=expectations_evaluated,
+    )
+
+
+async def _run_index_v3_once(
+    root: Path,
+    task: BenchmarkTask,
+    mode: BenchmarkMode,
+    repetition: int,
+    provider: ModelProvider,
+    *,
+    clock: Callable[[], float],
+    progress: ProgressObserver | None,
+) -> BenchmarkRunResult:
+    """Exercise build/update, persisted retrieval, and Capsule v2 materialization."""
+
+    outer_started = clock()
+    operation_started = outer_started
+    failure: BenchmarkFailure | None = None
+    expectations_evaluated = True
+    configuration_digest: str | None = None
+    selected_files: tuple[str, ...] = ()
+    files_considered = 0
+    files_read = 0
+    context_bytes = 0
+    source_snapshot_digest: str | None = None
+    generation_id: str | None = None
+    candidates: tuple[CandidateCard, ...] = ()
+    measurements = _SelectionMeasurements()
+    counters = BenchmarkProviderCounters()
+    index_input_tokens = 0
+    index_output_tokens = 0
+    planning_input_tokens = 0
+    planning_output_tokens = 0
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
+    try:
+        request = build_discovery_request(
+            task=task.task,
+            mode=mode.value,
+            includes=_effective(task, mode, "include_paths"),
+            excludes=_effective(task, mode, "exclude_paths"),
+        )
+        configuration_digest = _configuration_digest(task, mode, provider, request)
+        repository = root.joinpath(*task.repository_path.split("/")).resolve()
+        repository.relative_to(root)
+        with _prepared_index_v3_repository(repository, task, mode) as prepared:
+            operation_started = clock()
+            counting_provider = _CountingModelProvider(provider)
+            semantic_requests = 0
+            semantic_repairs = 0
+            diff_paths: tuple[str, ...] = ()
+            if mode is BenchmarkMode.FRESH:
+                report = await build_repository_index(
+                    prepared,
+                    provider=counting_provider,
+                    provider_configuration=provider.configuration,
+                    progress=progress,
+                )
+                manifest = report.manifest
+                if report.semantic is not None:
+                    semantic_requests, semantic_repairs = _semantic_request_counts(
+                        report.semantic
+                    )
+            elif mode is BenchmarkMode.HYBRID:
+                diff_paths = (_controlled_change_path(prepared, task, mode),)
+                report = await build_repository_index(
+                    prepared,
+                    provider=counting_provider,
+                    provider_configuration=provider.configuration,
+                    update_only=True,
+                    progress=progress,
+                )
+                manifest = report.manifest
+                if report.semantic is not None:
+                    semantic_requests, semantic_repairs = _semantic_request_counts(
+                        report.semantic
+                    )
+            else:
+                manifest = load_manifest(prepared)
+            index_input_tokens = counting_provider.input_tokens
+            index_output_tokens = counting_provider.output_tokens
+            retrieval = await retrieve_context_candidates(
+                prepared,
+                task.task,
+                manifest=manifest,
+                diff_paths=diff_paths,
+                provider=counting_provider,
+                planning_mode=ContextPlanningMode.AUTO,
+            )
+            planning_input_tokens = max(
+                counting_provider.input_tokens - index_input_tokens, 0
+            )
+            planning_output_tokens = max(
+                counting_provider.output_tokens - index_output_tokens, 0
+            )
+            compiled = compile_context_capsule(
+                prepared,
+                task.task,
+                retrieval,
+                manifest=manifest,
+                budget=ContextBudget(
+                    context_window_tokens=32_768,
+                    response_tokens=4_096,
+                    safety_margin_tokens=1_024,
+                ),
+            )
+            if task.answer_assertions:
+                paired_answer = await run_paired_answer_regression(
+                    prepared,
+                    task.task,
+                    task.answer_assertions,
+                    task.oracle_ranges,
+                    compiled,
+                    counting_provider,
+                    ordinary_paths=_ordinary_context_paths(task, mode),
+                )
+            candidates = tuple(
+                item
+                for item in retrieval.candidates
+                if item.path
+                in {
+                    material.path
+                    for material in (
+                        *compiled.capsule.working_set,
+                        *compiled.capsule.task_context,
+                    )
+                }
+            )
+            selected_files = tuple(
+                material.path
+                for material in (
+                    *compiled.capsule.working_set,
+                    *compiled.capsule.task_context,
+                )
+            )
+            files_considered = len(retrieval.candidates)
+            files_read = sum(
+                material.representation
+                in {RepresentationMode.SLICE, RepresentationMode.FULL}
+                for material in (
+                    *compiled.capsule.working_set,
+                    *compiled.capsule.task_context,
+                )
+            )
+            context_bytes = len(compiled.prompt.encode("utf-8"))
+            source_snapshot_digest = manifest.build.source_snapshot_digest
+            generation_id = manifest.generation_id
+            measurements = _measure_capsule(
+                prepared,
+                compiled.capsule,
+                candidates,
+                _effective(task, mode, "required_ranges"),
+                manifest=manifest,
+            )
+            request_calls = max(
+                counting_provider.model_calls,
+                semantic_requests + retrieval.provider_calls,
+            )
+            counters = BenchmarkProviderCounters(
+                model_calls=request_calls,
+                model_generations=max(
+                    counting_provider.model_generations - semantic_repairs, 0
+                ),
+                repair_generations=(
+                    counting_provider.repair_generations + semantic_repairs
+                ),
+                auxiliary_provider_calls=(
+                    counting_provider.provider_discovery_calls
+                    + counting_provider.provider_capability_calls
+                    + retrieval.provider_calls
+                ),
+                provider_discovery_calls=counting_provider.provider_discovery_calls,
+                provider_capability_calls=counting_provider.provider_capability_calls,
+                transport_attempts=counting_provider.transport_attempts,
+                total_provider_http_calls=(counting_provider.total_provider_http_calls),
+            )
+    except _BenchmarkPreconditionError as exc:
+        expectations_evaluated = False
+        failure = _failure("benchmark_precondition_failed", exc)
+    except Exception as exc:
+        failure = _failure("application_error", exc)
+    duration_ms = max(0, round((clock() - operation_started) * 1_000))
+    expectations = (
+        _evaluate_expectations(
+            task,
+            mode,
+            selected_files,
+            candidates,
+            (),
+            measurements,
+        )
+        if expectations_evaluated
+        else _unevaluated_expectations(task, mode)
+    )
+    budgets = _evaluate_budgets(
+        task,
+        mode,
+        selected_files=len(selected_files),
+        files_read=files_read,
+        counters=counters,
+    )
+    status: Literal["complete", "failed"] = "failed" if failure else "complete"
+    return BenchmarkRunResult(
+        task_id=task.task_id,
+        repository_path=task.repository_path,
+        pipeline=task.pipeline,
+        mode=mode,
+        repetition=repetition,
+        status=status,
+        passed=(
+            status == "complete"
+            and expectations.passed
+            and budgets.passed
+            and (paired_answer is None or paired_answer.quality_not_lower)
+        ),
+        duration_ms=duration_ms,
+        selected_files=selected_files,
+        files_considered=max(files_considered, len(selected_files)),
+        files_read=files_read,
+        source_snapshot_digest=source_snapshot_digest,
+        index_generation_id=generation_id,
+        effective_configuration_digest=configuration_digest,
+        provider_id=provider.provider_id,
+        model_id=provider.configuration.model_id,
+        provider_counters=counters,
+        provenance="index_v3_deterministic",
+        context_bytes=context_bytes,
+        selected_ranges=measurements.selected_ranges,
+        selected_tokens=measurements.selected_tokens,
+        useful_tokens=measurements.useful_tokens,
+        semantic_claims=measurements.semantic_claims,
+        ungrounded_claims=measurements.ungrounded_claims,
+        grounded_claims=measurements.grounded_claims,
+        dropped_claims=measurements.dropped_claims,
+        index_input_tokens=index_input_tokens,
+        index_output_tokens=index_output_tokens,
+        planning_input_tokens=planning_input_tokens,
+        planning_output_tokens=planning_output_tokens,
+        paired_answer=paired_answer,
+        latency_kind=_latency_kind(mode),
+        expectations=expectations,
+        budgets=budgets,
+        failure=failure,
     )
 
 
@@ -173,6 +562,7 @@ def _build_result(
     files_considered: int,
     duration_ms: int,
     configuration_digest: str | None,
+    measurements: _SelectionMeasurements,
     *,
     expectations_evaluated: bool = True,
 ) -> BenchmarkRunResult:
@@ -212,6 +602,7 @@ def _build_result(
             selected_files,
             candidates,
             tuple(item.code for item in warnings),
+            measurements,
         )
         if expectations_evaluated
         else _unevaluated_expectations(task, mode)
@@ -233,6 +624,7 @@ def _build_result(
     return BenchmarkRunResult(
         task_id=task.task_id,
         repository_path=task.repository_path,
+        pipeline=task.pipeline,
         mode=mode,
         repetition=repetition,
         status=status,
@@ -254,10 +646,289 @@ def _build_result(
             selection is not None and selection.provenance == "deterministic_fallback"
         ),
         context_bytes=0 if usage is None else usage.context_bytes,
+        selected_ranges=measurements.selected_ranges,
+        selected_tokens=measurements.selected_tokens,
+        useful_tokens=measurements.useful_tokens,
+        semantic_claims=measurements.semantic_claims,
+        ungrounded_claims=measurements.ungrounded_claims,
+        grounded_claims=(measurements.semantic_claims - measurements.ungrounded_claims),
+        dropped_claims=measurements.ungrounded_claims,
+        latency_kind=_latency_kind(mode),
         expectations=expectations,
         budgets=budgets,
         failure=failure,
     )
+
+
+def _latency_kind(
+    mode: BenchmarkMode,
+) -> Literal["cold", "warm", "incremental"]:
+    if mode is BenchmarkMode.FRESH:
+        return "cold"
+    if mode is BenchmarkMode.INDEXED:
+        return "warm"
+    return "incremental"
+
+
+def _measure_selection(
+    repository: Path,
+    candidates: tuple[DiscoveryCandidate, ...],
+    required_ranges: tuple[BenchmarkSourceRange, ...],
+) -> _SelectionMeasurements:
+    """Measure selected source against declared useful ranges without model calls."""
+
+    estimator = ConservativeTokenEstimator()
+    selected: list[BenchmarkSourceRange] = []
+    selected_chunks: list[str] = []
+    useful_chunks: list[str] = []
+    semantic_claims = len(candidates)
+    ungrounded_claims = sum(not item.reason.evidence for item in candidates)
+    required_by_path: dict[str, list[BenchmarkSourceRange]] = {}
+    for item in required_ranges:
+        required_by_path.setdefault(item.path, []).append(item)
+
+    for candidate in candidates:
+        if candidate.path is None or candidate.kind not in {
+            "full_file",
+            "line_ranges",
+            "related_test",
+        }:
+            continue
+        try:
+            text = repository.joinpath(*candidate.path.split("/")).read_text(
+                encoding="utf-8"
+            )
+        except (OSError, UnicodeError):
+            continue
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            continue
+        ranges = (
+            tuple((item.start_line, item.end_line) for item in candidate.ranges)
+            if candidate.kind == "line_ranges"
+            else ((1, len(lines)),)
+        )
+        for start_line, end_line in ranges:
+            start = max(1, start_line)
+            end = min(len(lines), end_line)
+            if end < start:
+                continue
+            selected.append(
+                BenchmarkSourceRange(
+                    path=candidate.path,
+                    start_line=start,
+                    end_line=end,
+                )
+            )
+            selected_chunks.append("".join(lines[start - 1 : end]))
+            for required in required_by_path.get(candidate.path, ()):
+                overlap_start = max(start, required.start_line)
+                overlap_end = min(end, required.end_line)
+                if overlap_end >= overlap_start:
+                    useful_chunks.append(
+                        "".join(lines[overlap_start - 1 : overlap_end])
+                    )
+
+    canonical = tuple(
+        sorted(selected, key=lambda item: (item.path, item.start_line, item.end_line))
+    )
+    return _SelectionMeasurements(
+        selected_ranges=canonical,
+        selected_line_count=sum(
+            item.end_line - item.start_line + 1 for item in canonical
+        ),
+        useful_line_count=sum(
+            chunk.count("\n") + (not chunk.endswith("\n")) for chunk in useful_chunks
+        ),
+        selected_tokens=estimator.count("".join(selected_chunks)),
+        useful_tokens=estimator.count("".join(useful_chunks)),
+        semantic_claims=semantic_claims,
+        ungrounded_claims=ungrounded_claims,
+    )
+
+
+def _measure_capsule(
+    repository: Path,
+    capsule: ContextCapsule,
+    candidates: tuple[CandidateCard, ...],
+    required_ranges: tuple[BenchmarkSourceRange, ...],
+    *,
+    manifest: IndexManifest,
+) -> _SelectionMeasurements:
+    """Measure only material actually present in a compiled Capsule v2."""
+
+    estimator = ConservativeTokenEstimator()
+    materials = (*capsule.working_set, *capsule.task_context)
+    selected: list[BenchmarkSourceRange] = []
+    useful_chunks: list[str] = []
+    required_by_path: dict[str, list[BenchmarkSourceRange]] = {}
+    for item in required_ranges:
+        required_by_path.setdefault(item.path, []).append(item)
+    for material in materials:
+        if material.representation is RepresentationMode.SLICE:
+            ranges = tuple((item.start_line, item.end_line) for item in material.ranges)
+        elif material.representation is RepresentationMode.FULL:
+            try:
+                text = repository.joinpath(*material.path.split("/")).read_text(
+                    encoding="utf-8"
+                )
+            except (OSError, UnicodeError):
+                continue
+            line_count = len(text.splitlines())
+            if line_count == 0:
+                continue
+            ranges = ((1, line_count),)
+        else:
+            continue
+        try:
+            source = repository.joinpath(*material.path.split("/")).read_text(
+                encoding="utf-8"
+            )
+        except (OSError, UnicodeError):
+            continue
+        lines = source.splitlines(keepends=True)
+        for start_line, end_line in ranges:
+            selected.append(
+                BenchmarkSourceRange(
+                    path=material.path,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+            )
+            for required in required_by_path.get(material.path, ()):
+                overlap_start = max(start_line, required.start_line)
+                overlap_end = min(end_line, required.end_line)
+                if overlap_end >= overlap_start:
+                    useful_chunks.append(
+                        "".join(lines[overlap_start - 1 : overlap_end])
+                    )
+    grounded_claims = 0
+    dropped_claims = 0
+    for candidate in candidates:
+        try:
+            card = load_semantic_card(repository, candidate.path, manifest=manifest)
+        except (OSError, ValueError):
+            continue
+        grounded_claims += 1 + len(card.concepts) + len(card.responsibilities)
+        grounded_claims += len(card.side_effects) + sum(
+            len(values) for values in card.profile_facts.values()
+        )
+        dropped_claims += sum(item.dropped_items for item in card.diagnostics)
+    canonical = tuple(
+        sorted(selected, key=lambda item: (item.path, item.start_line, item.end_line))
+    )
+    return _SelectionMeasurements(
+        selected_ranges=canonical,
+        selected_line_count=sum(
+            item.end_line - item.start_line + 1 for item in canonical
+        ),
+        useful_line_count=sum(
+            chunk.count("\n") + (not chunk.endswith("\n")) for chunk in useful_chunks
+        ),
+        selected_tokens=sum(item.token_count for item in materials),
+        useful_tokens=estimator.count("".join(useful_chunks)),
+        semantic_claims=grounded_claims + dropped_claims,
+        ungrounded_claims=dropped_claims,
+        grounded_claims=grounded_claims,
+        dropped_claims=dropped_claims,
+    )
+
+
+def _semantic_request_counts(value: object) -> tuple[int, int]:
+    requests = getattr(value, "request_count", 0)
+    repairs = getattr(value, "repair_count", 0)
+    return (
+        requests if type(requests) is int and requests >= 0 else 0,
+        repairs if type(repairs) is int and repairs >= 0 else 0,
+    )
+
+
+@contextmanager
+def _prepared_index_v3_repository(
+    repository: Path,
+    task: BenchmarkTask,
+    mode: BenchmarkMode,
+) -> Iterator[Path]:
+    if mode is BenchmarkMode.INDEXED:
+        _require_v3_index(repository)
+        _require_index_drift(repository, ())
+        yield repository
+        return
+    snapshot = scan_repository(repository)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="contextforge-index-v3-benchmark-"
+        ) as temporary:
+            isolated = Path(temporary) / "repository"
+            for source_file in snapshot.files:
+                source = repository.joinpath(*source_file.path.split("/"))
+                destination = isolated.joinpath(*source_file.path.split("/"))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            if mode is BenchmarkMode.HYBRID:
+                _require_v3_index(repository)
+                _require_index_drift(repository, ())
+                shutil.copytree(
+                    repository / ".contextforge" / "index",
+                    isolated / ".contextforge" / "index",
+                )
+            yield isolated
+    except _BenchmarkPreconditionError:
+        raise
+    except OSError as exc:
+        raise _BenchmarkPreconditionError(
+            f"Index v3 benchmark fixture preparation failed: {exc}"
+        ) from exc
+
+
+def _require_v3_index(repository: Path) -> None:
+    try:
+        manifest = load_manifest(repository)
+    except (IndexManifestNotFoundError, IndexManifestReadError, OSError) as exc:
+        raise _BenchmarkPreconditionError(
+            "Index v3 benchmark requires an existing generation."
+        ) from exc
+    if manifest.schema_version != 3:
+        raise _BenchmarkPreconditionError(
+            "Index v3 benchmark cannot use an older generation."
+        )
+
+
+def _controlled_change_path(
+    repository: Path,
+    task: BenchmarkTask,
+    mode: BenchmarkMode,
+) -> str:
+    snapshot = scan_repository(repository)
+    available = {item.path for item in snapshot.files}
+    preferred = tuple(
+        dict.fromkeys(
+            (
+                *(item.path for item in _effective(task, mode, "required_ranges")),
+                *_effective(task, mode, "required_files_all"),
+                *_effective(task, mode, "include_paths"),
+                *sorted(available),
+            )
+        )
+    )
+    try:
+        selected_path = next(item for item in preferred if item in available)
+    except StopIteration as exc:
+        raise _BenchmarkPreconditionError(
+            "hybrid Index v3 benchmark has no source file to change"
+        ) from exc
+    if not isinstance(selected_path, str):
+        raise _BenchmarkPreconditionError(
+            "hybrid Index v3 benchmark selected an invalid source path"
+        )
+    target = repository.joinpath(*selected_path.split("/"))
+    try:
+        target.write_bytes(target.read_bytes() + b"\n")
+    except OSError as exc:
+        raise _BenchmarkPreconditionError(
+            "hybrid Index v3 benchmark could not create controlled source drift"
+        ) from exc
+    return selected_path
 
 
 @contextmanager
@@ -362,14 +1033,25 @@ def _unevaluated_expectations(
 ) -> BenchmarkExpectationEvaluation:
     """Retain configured expectations without reporting discovery misses."""
 
+    required_ranges = _effective(task, mode, "required_ranges")
+    required_files = tuple(
+        sorted(
+            {
+                *_effective(task, mode, "required_files_all"),
+                *(item.path for item in required_ranges),
+            }
+        )
+    )
     return BenchmarkExpectationEvaluation(
-        required_files=_effective(task, mode, "required_files_all"),
+        required_files=required_files,
         any_file_groups=tuple(
             BenchmarkAnyFileExpectation(files=group, matched_files=(), passed=True)
             for group in _effective(task, mode, "required_files_any")
         ),
+        optional_files=_effective(task, mode, "optional_files"),
         forbidden_files=_effective(task, mode, "forbidden_files"),
         expected_facets=_effective(task, mode, "expected_facets"),
+        required_ranges=required_ranges,
         passed=True,
     )
 
@@ -378,12 +1060,22 @@ def _evaluate_expectations(
     task: BenchmarkTask,
     mode: BenchmarkMode,
     selected_files: tuple[str, ...],
-    candidates: tuple[DiscoveryCandidate, ...],
+    candidates: tuple[DiscoveryCandidate | CandidateCard, ...],
     warning_codes: tuple[str, ...],
+    measurements: _SelectionMeasurements,
 ) -> BenchmarkExpectationEvaluation:
     selected = set(selected_files)
-    required = _effective(task, mode, "required_files_all")
+    required_ranges = _effective(task, mode, "required_ranges")
+    required = tuple(
+        sorted(
+            {
+                *_effective(task, mode, "required_files_all"),
+                *(item.path for item in required_ranges),
+            }
+        )
+    )
     groups = _effective(task, mode, "required_files_any")
+    optional = _effective(task, mode, "optional_files")
     forbidden = _effective(task, mode, "forbidden_files")
     allowed_warnings = set(_effective(task, mode, "allowed_warnings"))
     required_warnings = set(_effective(task, mode, "required_warnings"))
@@ -399,6 +1091,23 @@ def _evaluate_expectations(
     matched_required = tuple(path for path in required if path in selected)
     missing_required = tuple(path for path in required if path not in selected)
     selected_forbidden = tuple(path for path in forbidden if path in selected)
+    relevant = (
+        set(required) | set(optional) | {path for group in groups for path in group}
+    )
+    relevant_selected = tuple(path for path in selected_files if path in relevant)
+    irrelevant_selected = tuple(path for path in selected_files if path not in relevant)
+    range_coverage = tuple(
+        BenchmarkRangeCoverage(
+            required_range=required_range,
+            covered_lines=_covered_lines(required_range, measurements.selected_ranges),
+            required_lines=required_range.end_line - required_range.start_line + 1,
+            passed=(
+                _covered_lines(required_range, measurements.selected_ranges)
+                == required_range.end_line - required_range.start_line + 1
+            ),
+        )
+        for required_range in required_ranges
+    )
     expected_facets = _effective(task, mode, "expected_facets")
     covered_facets = tuple(
         facet for facet in expected_facets if _facet_covered(facet, candidates)
@@ -415,21 +1124,56 @@ def _evaluate_expectations(
         or missing_warnings
         or missing_facets
         or any(not group.passed for group in any_groups)
+        or any(not item.passed for item in range_coverage)
     )
     return BenchmarkExpectationEvaluation(
         required_files=required,
         matched_required_files=matched_required,
         missing_required_files=missing_required,
         any_file_groups=any_groups,
+        optional_files=optional,
+        relevant_selected_files=relevant_selected,
+        irrelevant_selected_files=irrelevant_selected,
         forbidden_files=forbidden,
         selected_forbidden_files=selected_forbidden,
         expected_facets=expected_facets,
         covered_expected_facets=covered_facets,
         missing_expected_facets=missing_facets,
+        required_ranges=required_ranges,
+        range_coverage=range_coverage,
+        selected_line_count=measurements.selected_line_count,
+        useful_line_count=measurements.useful_line_count,
         unexpected_warnings=unexpected_warnings,
         missing_required_warnings=missing_warnings,
         passed=passed,
     )
+
+
+def _covered_lines(
+    required: BenchmarkSourceRange,
+    selected: tuple[BenchmarkSourceRange, ...],
+) -> int:
+    intervals = [
+        (
+            max(required.start_line, item.start_line),
+            min(required.end_line, item.end_line),
+        )
+        for item in selected
+        if item.path == required.path
+        and item.end_line >= required.start_line
+        and item.start_line <= required.end_line
+    ]
+    if not intervals:
+        return 0
+    covered = 0
+    current_start, current_end = sorted(intervals)[0]
+    for start, end in sorted(intervals)[1:]:
+        if start <= current_end + 1:
+            current_end = max(current_end, end)
+        else:
+            covered += current_end - current_start + 1
+            current_start, current_end = start, end
+    return covered + current_end - current_start + 1
 
 
 def _evaluate_budgets(
@@ -469,6 +1213,24 @@ def _limit(limit: int, actual: int) -> BenchmarkLimitEvaluation:
     return BenchmarkLimitEvaluation(limit=limit, actual=actual, passed=actual <= limit)
 
 
+def _ordinary_context_paths(
+    task: BenchmarkTask, mode: BenchmarkMode
+) -> tuple[str, ...]:
+    """Return complete required/working files an ordinary client would send."""
+
+    values = {
+        *_effective(task, mode, "include_paths"),
+        *_effective(task, mode, "required_files_all"),
+        *(
+            path
+            for group in _effective(task, mode, "required_files_any")
+            for path in group
+        ),
+        *(item.path for item in task.oracle_ranges),
+    }
+    return tuple(sorted(values, key=lambda value: (value.casefold(), value)))
+
+
 def _effective(task: BenchmarkTask, mode: BenchmarkMode, field: str) -> Any:
     override = getattr(task.mode_overrides, mode.value)
     if override is not None and field in override.model_fields_set:
@@ -490,8 +1252,9 @@ def _configuration_digest(
     }
     encoded = json.dumps(
         {
-            "benchmark": expectations,
+            "benchmark": to_jsonable_python(expectations),
             "discovery_request": request.model_dump(mode="json"),
+            "pipeline": task.pipeline.value,
             "provider": provider.configuration.model_dump(mode="json"),
         },
         ensure_ascii=False,
@@ -504,16 +1267,25 @@ def _configuration_digest(
 
 def _facet_covered(
     facet: str,
-    candidates: tuple[DiscoveryCandidate, ...],
+    candidates: tuple[DiscoveryCandidate | CandidateCard, ...],
 ) -> bool:
     expected = _metric_tokens(facet)
     observed: set[str] = set()
     for candidate in candidates:
         observed.update(_metric_tokens(candidate.path or ""))
-        observed.update(_metric_tokens(candidate.reason.summary))
-        observed.update(_metric_tokens(candidate.reason.discovery_source))
-        for evidence in candidate.reason.evidence:
-            observed.update(_metric_tokens(evidence))
+        if isinstance(candidate, CandidateCard):
+            observed.update(_metric_tokens(candidate.synopsis))
+            for value in (
+                *candidate.matched_concepts,
+                *candidate.matched_symbols,
+                *candidate.provenance,
+            ):
+                observed.update(_metric_tokens(value))
+        else:
+            observed.update(_metric_tokens(candidate.reason.summary))
+            observed.update(_metric_tokens(candidate.reason.discovery_source))
+            for evidence in candidate.reason.evidence:
+                observed.update(_metric_tokens(evidence))
     return bool(expected) and expected <= observed
 
 

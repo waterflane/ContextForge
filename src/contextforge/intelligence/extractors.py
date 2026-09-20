@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from contextforge.context import (
+from contextforge.context.reader import (
     ContextReaderError,
     ReaderLimits,
     read_selected_text_file,
