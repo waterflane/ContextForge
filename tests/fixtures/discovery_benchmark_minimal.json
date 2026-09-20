@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "suite_name": "minimal-discovery",
+  "tasks": [
+    {
+      "task_id": "find-invalid-candidate-fixture",
+      "repository_path": "tests/fixtures",
+      "task": "Find the fixture containing an observed invalid candidate response.",
+      "modes": [
+        "fresh"
+      ],
+      "repeat_count": 1,
+      "required_files_all": [
+        "observed_invalid_candidate_response.json"
+      ],
+      "expected_facets": [
+        "invalid candidate response"
+      ],
+      "max_selected_files": 2,
+      "max_files_read": 4,
+      "max_model_generations": 2
+    }
+  ]
+}
