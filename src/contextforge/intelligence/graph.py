@@ -15,6 +15,7 @@ from contextforge.intelligence.codemap import (
     SymbolKind,
     configuration_key_digest,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.manifest import canonical_json_bytes
 from contextforge.intelligence.models import (
     ArtifactReference,
@@ -515,6 +516,7 @@ def _relationship_kind(kind: str) -> RelationshipKind:
 def _structural_provenance(detection_method: str) -> EdgeProvenance:
     if detection_method in {
         "python_test_path_convention",
+        "file_policy_test_naming_convention",
         "polyglot_package_resolution",
         "polyglot_convention_resolution",
         "polyglot_typescript_emitted_suffix_resolution",
@@ -703,11 +705,7 @@ def _is_entrypoint(path: str) -> bool:
 
 
 def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    name = pure.name.casefold()
-    return any(
-        part.casefold() in {"test", "tests", "spec", "specs"} for part in pure.parts
-    ) or name.startswith(("test_", "spec_"))
+    return FILE_POLICY_REGISTRY.is_test(path)
 
 
 def _is_config_path(path: str) -> bool:

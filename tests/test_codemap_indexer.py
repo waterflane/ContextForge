@@ -159,7 +159,7 @@ def test_source_and_test_relationships_are_bidirectional_and_explicit(
     )
     assert reference.target.resolution == "internal"
     assert reference.target.file_path == "src/pkg/service.py"
-    assert reference.detection_method == "python_resolved_test_call"
+    assert reference.detection_method == "python_unambiguous_import_alias"
 
 
 def test_test_path_convention_is_best_effort_and_records_its_basis(
@@ -178,7 +178,183 @@ def test_test_path_convention_is_best_effort_and_records_its_basis(
     relationship = next(item for item in test_map.relationships if item.kind == "tests")
 
     assert relationship.target.file_path == "service.py"
-    assert relationship.detection_method == "python_test_path_convention"
+    assert relationship.detection_method == "file_policy_test_naming_convention"
+
+
+@pytest.mark.parametrize(
+    ("source_path", "source", "test_path", "test_source"),
+    [
+        (
+            "src/service.js",
+            "export function serve() {}\n",
+            "tests/service.test.js",
+            (
+                'import { serve } from "../src/service.js"; '
+                'test("serve", () => serve());\n'
+            ),
+        ),
+        (
+            "src/service.ts",
+            "export function serve(): void {}\n",
+            "__tests__/service.spec.ts",
+            (
+                'import { serve } from "../src/service.js"; '
+                "function testServe() { serve(); }\n"
+            ),
+        ),
+        (
+            "src/main/kotlin/example/Service.kt",
+            "package example\nclass Service\n",
+            "src/test/kotlin/example/ServiceTest.kt",
+            "package example\nclass ServiceTest\n",
+        ),
+        (
+            "src/main/java/example/Service.java",
+            (
+                "package example; public class Service { public static void serve() "
+                "{} }\n"
+            ),
+            "src/test/java/example/ServiceTest.java",
+            (
+                "package example; import example.Service; public class ServiceTest { "
+                "void test() { Service.serve(); } }\n"
+            ),
+        ),
+        (
+            "src/Service.cs",
+            (
+                "namespace Example { public class Service { public static void Serve() "
+                "{} } }\n"
+            ),
+            "spec/ServiceTests.cs",
+            (
+                "namespace Example { public class ServiceTests { void Test() { "
+                "Service.Serve(); } } }\n"
+            ),
+        ),
+        (
+            "src/service.py",
+            "def serve() -> None:\n    pass\n",
+            "tests/test_service.py",
+            "from src.service import serve\n\ndef test_serve() -> None:\n    serve()\n",
+        ),
+    ],
+)
+def test_file_policy_links_polyglot_and_python_tests_to_sources(
+    tmp_path: Path,
+    source_path: str,
+    source: str,
+    test_path: str,
+    test_source: str,
+) -> None:
+    initialize_index(tmp_path)
+    _write(tmp_path, source_path, source)
+    _write(tmp_path, test_path, test_source)
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "test-policy") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    test_map = next(item for item in result.code_maps if item.path == test_path)
+    relationship = next(item for item in test_map.relationships if item.kind == "tests")
+
+    assert relationship.target.file_path == source_path
+    assert relationship.target.resolution == "internal"
+
+
+def test_file_policy_ignores_ambiguous_conventions(
+    tmp_path: Path,
+) -> None:
+    initialize_index(tmp_path)
+    _write(tmp_path, "alpha/service.py", "VALUE = 1\n")
+    _write(tmp_path, "beta/service.py", "VALUE = 2\n")
+    _write(tmp_path, "tests/test_service.py", "def test_placeholder():\n    pass\n")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "ambiguous-test") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    test_map = next(
+        item for item in result.code_maps if item.path == "tests/test_service.py"
+    )
+
+    assert not [item for item in test_map.relationships if item.kind == "tests"]
+
+
+def test_file_policy_links_colocated_typescript_test_by_unique_name(
+    tmp_path: Path,
+) -> None:
+    initialize_index(tmp_path)
+    _write(tmp_path, "src/widget.ts", "export function render(): void {}\n")
+    _write(tmp_path, "src/widget.test.ts", "function testRender() {}\n")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "colocated-test") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    test_map = next(
+        item for item in result.code_maps if item.path == "src/widget.test.ts"
+    )
+    relationship = next(item for item in test_map.relationships if item.kind == "tests")
+
+    assert relationship.target.file_path == "src/widget.ts"
+    assert relationship.detection_method == "file_policy_test_naming_convention"
+
+
+def test_file_policy_follows_passive_typescript_barrels(tmp_path: Path) -> None:
+    initialize_index(tmp_path)
+    _write(tmp_path, "src/service.ts", "export function serve(): void {}\n")
+    _write(
+        tmp_path,
+        "src/index.ts",
+        'export { serve } from "./service.js";\n',
+    )
+    _write(
+        tmp_path,
+        "tests/index.test.ts",
+        'import { serve } from "../src/index.js";\nfunction testIndex() { serve(); }\n',
+    )
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "barrel-test") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    test_map = next(
+        item for item in result.code_maps if item.path == "tests/index.test.ts"
+    )
+    targets = {
+        item.target.file_path for item in test_map.relationships if item.kind == "tests"
+    }
+
+    assert targets == {"src/index.ts", "src/service.ts"}
+
+
+def test_incremental_update_replaces_renamed_source_test_edges(tmp_path: Path) -> None:
+    initialize_index(tmp_path)
+    _write(tmp_path, "src/service.py", "def serve() -> None:\n    pass\n")
+    _write(tmp_path, "tests/test_service.py", "def test_service() -> None:\n    pass\n")
+    with acquire_index_lock(tmp_path, "initial-test-edge") as lock:
+        initial = build_structural_index(scan_repository(tmp_path), lock)
+    assert any(
+        item.kind == "tests" and item.target.file_path == "src/service.py"
+        for item in next(
+            map for map in initial.code_maps if map.path == "tests/test_service.py"
+        ).relationships
+    )
+
+    (tmp_path / "src/service.py").unlink()
+    (tmp_path / "tests/test_service.py").unlink()
+    _write(tmp_path, "src/renamed.py", "def renamed() -> None:\n    pass\n")
+    _write(tmp_path, "tests/test_renamed.py", "def test_renamed() -> None:\n    pass\n")
+    with acquire_index_lock(tmp_path, "renamed-test-edge") as lock:
+        updated = build_structural_index(scan_repository(tmp_path), lock)
+
+    all_targets = {
+        item.target.file_path
+        for code_map in updated.code_maps
+        for item in code_map.relationships
+        if item.kind in {"tests", "tested_by"}
+    }
+
+    assert "src/service.py" not in all_targets
+    assert "tests/test_service.py" not in all_targets
+    assert {"src/renamed.py", "tests/test_renamed.py"} <= all_targets
 
 
 def test_record_tampering_is_rejected_on_round_trip(tmp_path: Path) -> None:

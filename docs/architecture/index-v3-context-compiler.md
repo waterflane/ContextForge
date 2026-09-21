@@ -33,7 +33,7 @@ retrieval, and is rejected by `index update`. Run `index build` to create v3;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 8, Python analyzer version 5,
+Fallback analyzer version 4, resolver version 9, Python analyzer version 5,
 and polyglot analyzer version 9 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and

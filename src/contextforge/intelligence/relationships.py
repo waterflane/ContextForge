@@ -20,6 +20,7 @@ from contextforge.intelligence.codemap import (
     SymbolRecord,
     stable_fact_id,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 
 # TypeScript commonly writes source imports with the suffix that its emitted
 # JavaScript will have. These are the only source/emitted substitutions the
@@ -841,42 +842,70 @@ def _is_exact_polyglot_import(item: ImportRecord, language: str | None) -> bool:
 def _add_test_relationships(
     code_maps: tuple[FileCodeMap, ...],
 ) -> tuple[FileCodeMap, ...]:
+    """Link tests to resolved sources plus unambiguous naming fallbacks."""
+
     by_path = {item.path: item for item in code_maps}
     additions: dict[str, list[RelationshipRecord]] = {path: [] for path in by_path}
     implementation_by_basename: dict[str, list[str]] = {}
     for code_map in code_maps:
-        if not _is_test_path(code_map.path):
+        if not FILE_POLICY_REGISTRY.is_test(code_map.path):
             implementation_by_basename.setdefault(
                 PurePosixPath(code_map.path).name, []
             ).append(code_map.path)
 
     for test_map in code_maps:
-        if test_map.parse_status != "parsed" or not _is_test_path(test_map.path):
+        if test_map.parse_status != "parsed" or not FILE_POLICY_REGISTRY.is_test(
+            test_map.path
+        ):
             continue
         links: dict[str, tuple[SourceRange, str]] = {}
-        for item in test_map.imports:
+        for relationship in test_map.relationships:
             if (
-                item.resolution == "internal"
-                and item.target_file_path is not None
-                and not _is_test_path(item.target_file_path)
-                and by_path[item.target_file_path].parse_status == "parsed"
+                relationship.kind in {"import", "call", "reference"}
+                and relationship.target.resolution == "internal"
+                and relationship.target.file_path is not None
+                and not FILE_POLICY_REGISTRY.is_test(relationship.target.file_path)
+                and by_path[relationship.target.file_path].parse_status == "parsed"
             ):
-                links[item.target_file_path] = (
-                    item.source_range,
-                    "python_unambiguous_test_import",
+                target_path = relationship.target.file_path
+                links.setdefault(
+                    target_path,
+                    (relationship.source_range, relationship.detection_method),
                 )
-        conventional = _conventional_implementation_name(test_map.path)
-        candidates = (
-            implementation_by_basename.get(conventional, []) if conventional else []
-        )
-        if len(candidates) == 1 and by_path[candidates[0]].parse_status == "parsed":
-            links.setdefault(
-                candidates[0],
-                (
-                    SourceRange(start_line=1, start_column=0, end_line=1, end_column=0),
-                    "python_test_path_convention",
-                ),
-            )
+                if relationship.kind in {"call", "reference"}:
+                    additions[test_map.path].append(
+                        _relationship(
+                            kind="test_reference",
+                            source_path=test_map.path,
+                            source_symbol_id=relationship.source_symbol_id,
+                            source_range=relationship.source_range,
+                            observed_text=relationship.observed_text,
+                            target=relationship.target,
+                            method=relationship.detection_method,
+                        )
+                    )
+                for barrel_target in _resolved_barrel_targets(target_path, by_path):
+                    links.setdefault(
+                        barrel_target,
+                        (relationship.source_range, relationship.detection_method),
+                    )
+        candidates = {
+            target
+            for name in FILE_POLICY_REGISTRY.conventional_source_names(test_map.path)
+            for target in implementation_by_basename.get(name, ())
+        }
+        if len(candidates) == 1:
+            candidate = next(iter(candidates))
+            if by_path[candidate].parse_status == "parsed":
+                links.setdefault(
+                    candidate,
+                    (
+                        SourceRange(
+                            start_line=1, start_column=0, end_line=1, end_column=0
+                        ),
+                        "file_policy_test_naming_convention",
+                    ),
+                )
         for implementation_path, (source_range, method) in sorted(links.items()):
             additions[test_map.path].append(
                 _relationship(
@@ -906,27 +935,6 @@ def _add_test_relationships(
                     method=method,
                 )
             )
-        for relationship in test_map.relationships:
-            if (
-                relationship.kind != "call"
-                or relationship.target.resolution != "internal"
-            ):
-                continue
-            target_path = relationship.target.file_path
-            if target_path is None or _is_test_path(target_path):
-                continue
-            additions[test_map.path].append(
-                _relationship(
-                    kind="test_reference",
-                    source_path=test_map.path,
-                    source_symbol_id=relationship.source_symbol_id,
-                    source_range=relationship.source_range,
-                    observed_text=relationship.observed_text,
-                    target=relationship.target,
-                    method="python_resolved_test_call",
-                )
-            )
-
     results: list[FileCodeMap] = []
     for code_map in code_maps:
         combined = {
@@ -936,6 +944,28 @@ def _add_test_relationships(
         relationships = tuple(sorted(combined.values(), key=_relationship_key))
         results.append(code_map.model_copy(update={"relationships": relationships}))
     return tuple(results)
+
+
+def _resolved_barrel_targets(
+    target_path: str, by_path: dict[str, FileCodeMap]
+) -> tuple[str, ...]:
+    """Follow direct imports of a passive barrel without filesystem inference."""
+
+    target_map = by_path[target_path]
+    if not FILE_POLICY_REGISTRY.is_structural_barrel(target_map):
+        return ()
+    return tuple(
+        sorted(
+            {
+                item.target_file_path
+                for item in target_map.imports
+                if item.resolution == "internal"
+                and item.target_file_path is not None
+                and not FILE_POLICY_REGISTRY.is_test(item.target_file_path)
+                and by_path[item.target_file_path].parse_status == "parsed"
+            }
+        )
+    )
 
 
 def _relationship(
@@ -999,24 +1029,6 @@ def _containing_symbol(
             symbol.declaration_range.start_column,
         ),
     ).symbol_id
-
-
-def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    return (
-        "tests" in pure.parts
-        or pure.name.startswith("test_")
-        or pure.stem.endswith("_test")
-    )
-
-
-def _conventional_implementation_name(path: str) -> str | None:
-    name = PurePosixPath(path).name
-    if name.startswith("test_"):
-        return name[len("test_") :]
-    if name.endswith("_test.py"):
-        return f"{name[: -len('_test.py')]}.py"
-    return None
 
 
 def _range_key(value: SourceRange) -> tuple[int, int, int, int]:

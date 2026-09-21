@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import Field, field_validator, model_validator
 
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.graph import (
     EdgeProvenance,
     RelationshipGraph,
@@ -450,10 +451,7 @@ def _is_entrypoint(path: str) -> bool:
 
 
 def _is_test(path: str) -> bool:
-    pure = PurePosixPath(path)
-    return any(
-        part.casefold() in {"test", "tests", "spec", "specs"} for part in pure.parts
-    ) or pure.name.casefold().startswith(("test_", "spec_"))
+    return FILE_POLICY_REGISTRY.is_test(path)
 
 
 __all__ = [
