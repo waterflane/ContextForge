@@ -23,9 +23,11 @@ from contextforge.intelligence.models import IndexManifest, Sha256
 from contextforge.intelligence.retrieval import (
     CandidateCard,
     CandidateEvidenceRange,
+    CoverageLedger,
     ExactGroup,
     PlannedEvidence,
     RetrievalResult,
+    build_coverage_ledger,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
@@ -197,6 +199,7 @@ class CompiledContextCapsule(CapsuleModel):
     prompt: str
     token_count: NonNegativeInt
     estimator_id: str
+    coverage_ledger: CoverageLedger | None = None
 
     @model_validator(mode="after")
     def validate_metadata(self) -> CompiledContextCapsule:
@@ -559,11 +562,29 @@ def compile_context_capsule(
     if token_count > budget.available_tokens:
         raise ContextBudgetError("indivisible selected context exceeds the hard budget")
     capsule = capsule.model_copy(update={"token_count": token_count})
+    materialized_paths = {
+        item.path for item in (*capsule.working_set, *capsule.task_context)
+    }
+    materialized_ids = tuple(
+        item.candidate_id
+        for item in retrieval.candidates
+        if item.path in materialized_paths
+    )
+    planner_bindings = (
+        () if retrieval.evidence_plan is None else retrieval.evidence_plan.role_bindings
+    )
     return CompiledContextCapsule(
         capsule=capsule,
         prompt=prompt,
         token_count=token_count,
         estimator_id=selected_estimator.estimator_id,
+        coverage_ledger=build_coverage_ledger(
+            task,
+            retrieval.candidates,
+            selected_candidate_ids=materialized_ids,
+            stage="materialization",
+            planner_bindings=planner_bindings,
+        ),
     )
 
 

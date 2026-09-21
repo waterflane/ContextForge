@@ -628,6 +628,60 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
     assert set(result.evidence_plan.items[0].evidence_ids) <= supplied
 
 
+def test_evidence_planner_retains_only_supplied_role_bindings(tmp_path: Path) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = facts["candidates"][0]
+        role_ids = {item["role_id"] for item in facts["task_evidence_roles"]}
+        assert {"entrypoint", "implementation"} <= role_ids
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "selected": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                        "representation": "slice",
+                    }
+                ],
+                "role_bindings": [
+                    {
+                        "role_id": "entrypoint",
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                    },
+                    {
+                        "role_id": "unknown",
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                    },
+                ],
+                "sufficiency": "sufficient",
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review startup implementation.",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode=ContextPlanningMode.AUTO,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert [
+        (item.role_id, item.source) for item in result.evidence_plan.role_bindings
+    ] == [("entrypoint", "planner")]
+    assert result.coverage_ledger is not None
+    assert "entrypoint" in result.coverage_ledger.covered_role_ids
+
+
 def test_planner_does_not_advertise_full_for_large_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -809,6 +863,13 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     assert result.evidence_plan is not None
     assert result.evidence_plan.items[0].path == "flow.py"
     assert result.evidence_plan.diagnostics.rounds == 2
+    assert [item.stage for item in result.coverage_history] == [
+        "retrieval",
+        "action",
+        "action",
+        "action",
+        "plan",
+    ]
 
 
 def test_agentic_planner_shrinks_each_round_to_provider_context(tmp_path: Path) -> None:

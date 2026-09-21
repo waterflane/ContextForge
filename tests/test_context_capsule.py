@@ -80,6 +80,9 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
 
     assert first == second
     assert first.capsule.schema_version == 2
+    assert first.coverage_ledger is not None
+    assert first.coverage_ledger.stage == "materialization"
+    assert first.coverage_ledger.ranges
     assert first.capsule.task_context[0].representation == RepresentationMode.FULL
     assert "&lt;greet&gt;" in first.prompt
     assert "&lt;hello&gt;" in first.prompt
