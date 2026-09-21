@@ -2,8 +2,8 @@
 
 ## Declaration extraction and coverage
 
-Fallback analyzer version 4, Python analyzer version 5, and declarative
-polyglot analyzer version 9 cover Python, JavaScript, TypeScript, Java, Kotlin,
+Fallback analyzer version 4, Python analyzer version 6, and declarative
+polyglot analyzer version 10 cover Python, JavaScript, TypeScript, Java, Kotlin,
 C#, Go, Rust, C, C++, PHP, and Ruby. Registry capture rules describe
 declarations, imports, calls, and references and map captures to `SymbolKind`;
 they replace a central language-specific conditional chain. The analyzers also

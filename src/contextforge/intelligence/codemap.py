@@ -115,6 +115,13 @@ class ParameterRecord(IndexModel):
     default: str | None = None
 
 
+class CallbackArgument(IndexModel):
+    """A callable-shaped argument supplied to an observed call."""
+
+    observed_name: str
+    source_range: SourceRange
+
+
 class CallReference(IndexModel):
     """Observed call syntax with a deliberately conservative target status."""
 
@@ -124,6 +131,7 @@ class CallReference(IndexModel):
     target_symbol_id: str | None = None
     target_file_path: str | None = None
     detection_method: str = "python_ast_call"
+    callback_arguments: tuple[CallbackArgument, ...] = ()
 
     @field_validator("target_file_path")
     @classmethod
@@ -138,6 +146,12 @@ class CallReference(IndexModel):
             self.target_symbol_id is not None or self.target_file_path is not None
         ):
             raise ValueError("non-internal calls cannot claim an internal target")
+        keys = tuple(
+            (*_range_key(item.source_range), item.observed_name)
+            for item in self.callback_arguments
+        )
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("callback arguments must be unique and canonical")
         return self
 
 
@@ -609,7 +623,14 @@ def _decorator_order(value: DecoratorRecord) -> tuple[object, ...]:
 
 
 def _call_order(value: CallReference) -> tuple[object, ...]:
-    return (*_range_key(value.source_range), value.observed_name)
+    return (
+        *_range_key(value.source_range),
+        value.observed_name,
+        tuple(
+            (*_range_key(argument.source_range), argument.observed_name)
+            for argument in value.callback_arguments
+        ),
+    )
 
 
 def _reference_order(value: ReferenceOccurrence) -> tuple[object, ...]:
@@ -628,6 +649,11 @@ def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
             ranges.append(symbol.body_range)
         ranges.extend(item.source_range for item in symbol.decorators)
         ranges.extend(item.source_range for item in symbol.direct_calls)
+        ranges.extend(
+            argument.source_range
+            for item in symbol.direct_calls
+            for argument in item.callback_arguments
+        )
         ranges.extend(item.source_range for item in symbol.direct_references)
     return tuple(ranges)
 
@@ -640,6 +666,7 @@ def _validate_unique_ids(label: str, identifiers: tuple[str, ...]) -> None:
 __all__ = [
     "CODEMAP_SCHEMA_VERSION",
     "RESOLVER_VERSION",
+    "CallbackArgument",
     "CallReference",
     "configuration_key_digest",
     "DecoratorRecord",

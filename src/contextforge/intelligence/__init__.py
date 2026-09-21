@@ -23,6 +23,7 @@ from contextforge.intelligence.cards import (
 from contextforge.intelligence.codemap import (
     CODEMAP_SCHEMA_VERSION,
     RESOLVER_VERSION,
+    CallbackArgument,
     CallReference,
     DecoratorRecord,
     ExportRecord,
@@ -279,6 +280,7 @@ __all__ = [
     "AnalysisDiagnostic",
     "ArchitectureMap",
     "BehaviorDescription",
+    "CallbackArgument",
     "CallReference",
     "CoverageSummary",
     "DataFlow",

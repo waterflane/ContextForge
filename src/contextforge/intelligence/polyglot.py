@@ -12,6 +12,7 @@ from tree_sitter import Language, Node, Parser
 
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
+    CallbackArgument,
     CallReference,
     FileCodeMap,
     ImportRecord,
@@ -28,7 +29,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="9",
+    analyzer_version="10",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -703,6 +704,7 @@ def _attach_occurrences(
                             observed_name=observed,
                             source_range=region,
                             detection_method="polyglot_ast_call",
+                            callback_arguments=_callback_arguments(node, source),
                         )
                     )
         for child in node.named_children:
@@ -788,6 +790,53 @@ def _attach_occurrences(
             }
         )
         for item in symbols
+    )
+
+
+_CALLABLE_ARGUMENT = re.compile(
+    r"[$A-Za-z_][\w$]*(?:\s*(?:\.|::|->)\s*[$A-Za-z_][\w$]*)*\Z"
+)
+
+
+def _callback_arguments(node: Node, source: bytes) -> tuple[CallbackArgument, ...]:
+    """Capture direct callable arguments without recognizing framework APIs."""
+
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None:
+        return ()
+    values: list[CallbackArgument] = []
+    for argument in arguments.named_children:
+        candidate = (
+            argument.child_by_field_name("value")
+            or argument.child_by_field_name("expression")
+            or argument
+        )
+        observed = _text(source, candidate).strip()
+        if not _CALLABLE_ARGUMENT.fullmatch(observed):
+            continue
+        values.append(
+            CallbackArgument(observed_name=observed, source_range=_range(candidate))
+        )
+    return tuple(
+        sorted(
+            {
+                (
+                    item.source_range.start_line,
+                    item.source_range.start_column,
+                    item.source_range.end_line,
+                    item.source_range.end_column,
+                    item.observed_name,
+                ): item
+                for item in values
+            }.values(),
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.source_range.end_line,
+                item.source_range.end_column,
+                item.observed_name,
+            ),
+        )
     )
 
 

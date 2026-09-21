@@ -13,6 +13,7 @@ from typing import Literal, Protocol, cast
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     RESOLVER_VERSION,
+    CallbackArgument,
     CallReference,
     DecoratorRecord,
     ExportRecord,
@@ -33,7 +34,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="5",
+    analyzer_version="6",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -89,6 +90,7 @@ class _DirectFactVisitor(ast.NodeVisitor):
                 CallReference(
                     observed_name=name,
                     source_range=_node_range(node.func),
+                    callback_arguments=_callback_arguments(node),
                 )
             )
         self._record_call_configuration(node)
@@ -140,6 +142,26 @@ class _DirectFactVisitor(ast.NodeVisitor):
         key = _literal_string(node.args[0])
         if key is not None:
             self.configuration_keys.add(key)
+
+
+def _callback_arguments(node: ast.Call) -> tuple[CallbackArgument, ...]:
+    """Capture direct callable arguments without interpreting registration APIs."""
+
+    arguments = (*node.args, *(keyword.value for keyword in node.keywords))
+    values = [
+        CallbackArgument(observed_name=name, source_range=_node_range(argument))
+        for argument in arguments
+        if (name := _dotted_name(argument)) is not None
+    ]
+    return tuple(
+        sorted(
+            {
+                (*_range_tuple(item.source_range), item.observed_name): item
+                for item in values
+            }.values(),
+            key=lambda item: (*_range_tuple(item.source_range), item.observed_name),
+        )
+    )
 
 
 class _BoundNameVisitor(ast.NodeVisitor):

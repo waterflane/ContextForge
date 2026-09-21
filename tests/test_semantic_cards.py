@@ -137,10 +137,11 @@ def test_repository_maps_project_grounded_claims_and_enriched_graph(
         "source-test",
         "entrypoint-handler",
     }
-    assert {item.provenance for item in relationships} >= {
-        "verified",
-        "best-effort-structural",
-    }
+    handler_relationships = [
+        item for item in relationships if item.kind == "entrypoint-handler"
+    ]
+    assert handler_relationships
+    assert {item.provenance for item in handler_relationships} == {"verified"}
     assert any(
         claim.text == "request handling"
         and claim.provenance == "grounded-semantic-card"

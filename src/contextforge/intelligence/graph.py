@@ -13,6 +13,7 @@ from contextforge.intelligence.codemap import (
     FileCodeMap,
     SourceRange,
     SymbolKind,
+    SymbolRecord,
     configuration_key_digest,
 )
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
@@ -562,24 +563,192 @@ def _add_entrypoint_edges(
     nodes: dict[str, RelationshipGraphNode],
     edges: dict[str, RelationshipGraphEdge],
 ) -> None:
-    entrypoints = {item.path for item in code_maps if _is_entrypoint(item.path)}
-    for existing in tuple(edges.values()):
-        if existing.source_file_path not in entrypoints or existing.kind not in {
-            "import",
-            "call",
-        }:
+    """Project only structurally evidenced entrypoint-to-handler flows."""
+
+    by_path = {item.path: item for item in code_maps}
+    for code_map in code_maps:
+        if not _is_entrypoint(code_map.path):
             continue
-        edge = _edge(
-            "entrypoint-handler",
-            file_node_id(existing.source_file_path),
-            existing.target_node_id,
-            existing.source_file_path,
-            existing.source_range,
-            "best-effort-structural",
-            "entrypoint_import_or_call",
+        for target_path, source_range, method in _entrypoint_handler_candidates(
+            code_map, by_path
+        ):
+            edge = _edge(
+                "entrypoint-handler",
+                file_node_id(code_map.path),
+                file_node_id(target_path),
+                code_map.path,
+                source_range,
+                "verified",
+                method,
+            )
+            if edge.target_node_id in nodes:
+                edges[edge.edge_id] = edge
+
+
+_CALLABLE_SYMBOL_KINDS = frozenset(
+    {SymbolKind.FUNCTION, SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
+)
+
+
+def _entrypoint_handler_candidates(
+    code_map: FileCodeMap,
+    by_path: dict[str, FileCodeMap],
+) -> tuple[tuple[str, SourceRange, str], ...]:
+    """Return candidates backed by captured call shape or callable resolution."""
+
+    candidates: dict[
+        tuple[str, int, int, int, int, str], tuple[str, SourceRange, str]
+    ] = {}
+
+    def add(target_path: str, source_range: SourceRange, method: str) -> None:
+        candidates.setdefault(
+            (target_path, *_range_tuple(source_range), method),
+            (target_path, source_range, method),
         )
-        if edge.target_node_id in nodes:
-            edges[edge.edge_id] = edge
+
+    for symbol in code_map.symbols:
+        references = {
+            (
+                reference.observed_name,
+                _range_tuple(reference.source_range),
+            ): reference
+            for reference in symbol.direct_references
+            if reference.resolution == "internal"
+        }
+        for call in symbol.direct_calls:
+            for argument in call.callback_arguments:
+                reference = references.get(
+                    (argument.observed_name, _range_tuple(argument.source_range))
+                )
+                if reference is None or not _resolved_callable(reference, by_path):
+                    continue
+                assert reference.target_file_path is not None
+                add(
+                    reference.target_file_path,
+                    argument.source_range,
+                    "entrypoint_callback_argument",
+                )
+            if _resolved_exported_top_level_callable(call, by_path):
+                assert call.target_file_path is not None
+                add(
+                    call.target_file_path,
+                    call.source_range,
+                    "entrypoint_exported_callable",
+                )
+
+    if code_map.module_has_executable_code:
+        for item in code_map.imports:
+            if (
+                item.resolution != "internal"
+                or item.target_file_path is None
+                or item.imported_name is None
+                or _containing_symbol(code_map.symbols, item.source_range) is not None
+            ):
+                continue
+            target_map = by_path.get(item.target_file_path)
+            if target_map is None:
+                continue
+            matches = [
+                symbol
+                for symbol in target_map.symbols
+                if symbol.parent_symbol_id is None
+                and symbol.name == item.imported_name
+                and _is_exported_callable(symbol, target_map)
+            ]
+            if len(matches) == 1:
+                add(
+                    item.target_file_path,
+                    item.source_range,
+                    "entrypoint_bootstrap_import",
+                )
+    return tuple(
+        sorted(
+            candidates.values(),
+            key=lambda item: (
+                item[0],
+                *_range_tuple(item[1]),
+                item[2],
+            ),
+        )
+    )
+
+
+def _resolved_callable(occurrence: object, by_path: dict[str, FileCodeMap]) -> bool:
+    target_path = getattr(occurrence, "target_file_path", None)
+    target_symbol_id = getattr(occurrence, "target_symbol_id", None)
+    if target_path is None or target_symbol_id is None:
+        return False
+    target_map = by_path.get(target_path)
+    if target_map is None:
+        return False
+    return any(
+        symbol.symbol_id == target_symbol_id and symbol.kind in _CALLABLE_SYMBOL_KINDS
+        for symbol in target_map.symbols
+    )
+
+
+def _resolved_exported_top_level_callable(
+    occurrence: object, by_path: dict[str, FileCodeMap]
+) -> bool:
+    target_path = getattr(occurrence, "target_file_path", None)
+    target_symbol_id = getattr(occurrence, "target_symbol_id", None)
+    if target_path is None or target_symbol_id is None:
+        return False
+    target_map = by_path.get(target_path)
+    if target_map is None:
+        return False
+    return any(
+        symbol.symbol_id == target_symbol_id
+        and _is_exported_callable(symbol, target_map)
+        for symbol in target_map.symbols
+    )
+
+
+def _is_exported_callable(symbol: SymbolRecord, code_map: FileCodeMap) -> bool:
+    return (
+        symbol.parent_symbol_id is None
+        and symbol.kind in _CALLABLE_SYMBOL_KINDS
+        and (
+            symbol.visibility == "explicit_export"
+            or any(
+                item.target_symbol_id == symbol.symbol_id for item in code_map.exports
+            )
+        )
+    )
+
+
+def _containing_symbol(
+    symbols: tuple[SymbolRecord, ...], source_range: SourceRange
+) -> SymbolRecord | None:
+    candidates = [
+        symbol
+        for symbol in symbols
+        if symbol.body_range is not None
+        and _range_contains(symbol.body_range, source_range)
+    ]
+    return min(
+        candidates,
+        key=lambda symbol: (
+            (symbol.body_range or symbol.declaration_range).end_line
+            - (symbol.body_range or symbol.declaration_range).start_line,
+            symbol.qualified_name,
+        ),
+        default=None,
+    )
+
+
+def _range_contains(container: SourceRange, nested: SourceRange) -> bool:
+    return (container.start_line, container.start_column) <= (
+        nested.start_line,
+        nested.start_column,
+    ) and (nested.end_line, nested.end_column) <= (
+        container.end_line,
+        container.end_column,
+    )
+
+
+def _range_tuple(value: SourceRange) -> tuple[int, int, int, int]:
+    return (value.start_line, value.start_column, value.end_line, value.end_column)
 
 
 def _add_config_consumer_edges(
