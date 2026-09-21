@@ -27,6 +27,7 @@ LANGUAGES_BY_FILENAME: Final = MappingProxyType(
 LANGUAGES_BY_EXTENSION: Final = MappingProxyType(
     {
         ".c": "C",
+        ".cjs": "JavaScript",
         ".cc": "C++",
         ".cfg": "Configuration",
         ".cpp": "C++",
@@ -48,6 +49,8 @@ LANGUAGES_BY_EXTENSION: Final = MappingProxyType(
         ".kt": "Kotlin",
         ".kts": "Kotlin",
         ".md": "Markdown",
+        ".mjs": "JavaScript",
+        ".mts": "TypeScript",
         ".php": "PHP",
         ".ps1": "PowerShell",
         ".py": "Python",
@@ -59,6 +62,7 @@ LANGUAGES_BY_EXTENSION: Final = MappingProxyType(
         ".swift": "Swift",
         ".toml": "TOML",
         ".ts": "TypeScript",
+        ".cts": "TypeScript",
         ".tsx": "TypeScript",
         ".txt": "Text",
         ".xml": "XML",

@@ -1,4 +1,8 @@
 import asyncio
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -242,6 +246,211 @@ def test_ambiguous_polyglot_package_import_stays_unresolved(tmp_path: Path) -> N
     call = source_map.symbols[0].direct_calls[0]
     assert call.resolution == "unresolved"
     assert call.target_file_path is None
+
+
+@pytest.mark.parametrize(
+    ("emitted_suffix", "source_suffix"),
+    [
+        (".js", ".ts"),
+        (".jsx", ".tsx"),
+        (".mjs", ".mts"),
+        (".cjs", ".cts"),
+    ],
+)
+def test_typescript_relative_emitted_suffixes_resolve_to_declared_source_suffixes(
+    tmp_path: Path,
+    emitted_suffix: str,
+    source_suffix: str,
+) -> None:
+    target_path = f"ui/view{source_suffix}"
+    (tmp_path / "ui").mkdir()
+    (tmp_path / target_path).write_text(
+        "export function serve(): void {}\n", encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.ts").write_text(
+        f'import {{ serve }} from "../ui/view{emitted_suffix}";\n'
+        "function run(): void { serve(); const selected = serve; }\n",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+    maps = extract_code_maps(snapshot)
+    source_map = next(item for item in maps if item.path == "src/app.ts")
+    graph = build_relationship_graph(maps, calculate_source_snapshot_digest(snapshot))
+
+    assert source_map.imports[0].resolution == "internal"
+    assert source_map.imports[0].target_file_path == target_path
+    edges = [item for item in graph.edges if item.source_file_path == "src/app.ts"]
+    resolved_edges = [
+        item for item in edges if item.kind in {"import", "call", "reference"}
+    ]
+    assert {item.kind for item in resolved_edges} == {"import", "call", "reference"}
+    assert {item.detection_method for item in resolved_edges} == {
+        "polyglot_typescript_emitted_suffix_resolution"
+    }
+    assert {item.provenance for item in resolved_edges} == {"best-effort-structural"}
+
+
+def test_typescript_existing_javascript_file_beats_emitted_suffix_substitution(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.js").write_text(
+        "export function serve() {}\n", encoding="utf-8"
+    )
+    (tmp_path / "config.ts").write_text(
+        "export function serve(): void {}\n", encoding="utf-8"
+    )
+    (tmp_path / "app.ts").write_text(
+        'import { serve } from "./config.js";\nfunction run() { serve(); }\n',
+        encoding="utf-8",
+    )
+
+    snapshot = scan_repository(tmp_path)
+    maps = extract_code_maps(snapshot)
+    source_map = next(
+        item
+        for item in maps
+        if item.path == "app.ts"
+    )
+    graph = build_relationship_graph(maps, calculate_source_snapshot_digest(snapshot))
+
+    assert source_map.imports[0].resolution == "internal"
+    assert source_map.imports[0].target_file_path == "config.js"
+    import_edge = next(
+        item
+        for item in graph.edges
+        if item.kind == "import" and item.source_file_path == "app.ts"
+    )
+    assert import_edge.detection_method == "polyglot_snapshot_path_resolution"
+    assert import_edge.provenance == "verified"
+
+
+def test_ambiguous_typescript_emitted_suffix_substitution_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "view.ts").write_text(
+        "export function serve(): void {}\n", encoding="utf-8"
+    )
+    (tmp_path / "view.tsx").write_text(
+        "export function serve(): void {}\n", encoding="utf-8"
+    )
+    (tmp_path / "app.ts").write_text(
+        'import { serve } from "./view.js";\nfunction run() { serve(); }\n',
+        encoding="utf-8",
+    )
+
+    source_map = next(
+        item
+        for item in extract_code_maps(scan_repository(tmp_path))
+        if item.path == "app.ts"
+    )
+
+    assert source_map.imports[0].resolution == "unresolved"
+    assert source_map.imports[0].target_file_path is None
+
+
+def test_typescript_package_import_is_external_even_with_matching_basename(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "react.ts").write_text(
+        "export function useState(): void {}\n", encoding="utf-8"
+    )
+    (tmp_path / "app.ts").write_text(
+        'import { useState } from "react";\nfunction run() { useState(); }\n',
+        encoding="utf-8",
+    )
+
+    source_map = next(
+        item
+        for item in extract_code_maps(scan_repository(tmp_path))
+        if item.path == "app.ts"
+    )
+
+    assert source_map.imports[0].resolution == "external"
+    assert source_map.imports[0].target_file_path is None
+
+
+def test_dsh_style_emitted_imports_create_import_call_and_reference_edges(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "src/index-lifecycle.ts": "export function synchronizeIndex(): void {}\n",
+        "src/worker-manager.ts": "export function startWorker(): void {}\n",
+        "src/worker.ts": (
+            'import { synchronizeIndex } from "./index-lifecycle.js";\n'
+            'import { startWorker } from "./worker-manager.js";\n'
+            "export function run(): void {\n"
+            "  synchronizeIndex();\n"
+            "  startWorker();\n"
+            "  const selected = synchronizeIndex;\n"
+            "}\n"
+        ),
+    }
+    for path, source in files.items():
+        destination = tmp_path / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(source, encoding="utf-8")
+
+    snapshot = scan_repository(tmp_path)
+    graph = build_relationship_graph(
+        extract_code_maps(snapshot), calculate_source_snapshot_digest(snapshot)
+    )
+    edges = [item for item in graph.edges if item.source_file_path == "src/worker.ts"]
+    resolved_edges = [
+        item for item in edges if item.kind in {"import", "call", "reference"}
+    ]
+
+    assert {item.kind for item in resolved_edges} == {"import", "call", "reference"}
+    assert {item.provenance for item in resolved_edges} == {"best-effort-structural"}
+
+
+def test_typescript_emitted_import_pagerank_is_hash_seed_independent() -> None:
+    script = "\n".join(
+        (
+            "import json, tempfile",
+            "from pathlib import Path",
+            "from contextforge.intelligence import (",
+            "    build_relationship_graph, calculate_source_snapshot_digest,",
+            "    extract_code_maps,",
+            ")",
+            "from contextforge.repositories import scan_repository",
+            "with tempfile.TemporaryDirectory() as directory:",
+            "    root = Path(directory)",
+            "    (root / 'one.ts').write_text(",
+            "        'export function one(): void {}\\n', encoding='utf-8'",
+            "    )",
+            "    (root / 'two.ts').write_text(",
+            "        'export function two(): void {}\\n', encoding='utf-8'",
+            "    )",
+            "    source = (",
+            "        'import { one } from \\\"./one.js\\\";\\n'",
+            "        'import { two } from \\\"./two.js\\\";\\n'",
+            "        'function run() { one(); two(); }\\n'",
+            "    )",
+            "    (root / 'app.ts').write_text(source, encoding='utf-8')",
+            "    snapshot = scan_repository(root)",
+            "    maps = extract_code_maps(snapshot)",
+            "    graph = build_relationship_graph(",
+            "        maps, calculate_source_snapshot_digest(snapshot)",
+            "    )",
+            "    print(json.dumps(",
+            "        [(item.path, item.pagerank) for item in graph.file_metrics]",
+            "    ))",
+        )
+    )
+    outputs = []
+    for seed in ("1", "42", "random"):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        outputs.append(json.loads(result.stdout))
+
+    assert outputs[0] == outputs[1] == outputs[2]
 
 
 def test_conventional_source_test_edges_are_best_effort(tmp_path: Path) -> None:

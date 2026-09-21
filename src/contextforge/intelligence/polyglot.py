@@ -28,7 +28,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="8",
+    analyzer_version="9",
     analysis_prompt_version="none",
     response_schema_version=1,
 )

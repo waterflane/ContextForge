@@ -517,6 +517,7 @@ def _structural_provenance(detection_method: str) -> EdgeProvenance:
         "python_test_path_convention",
         "polyglot_package_resolution",
         "polyglot_convention_resolution",
+        "polyglot_typescript_emitted_suffix_resolution",
     }:
         return "best-effort-structural"
     return "verified"

@@ -21,6 +21,18 @@ from contextforge.intelligence.codemap import (
     stable_fact_id,
 )
 
+# TypeScript commonly writes source imports with the suffix that its emitted
+# JavaScript will have. These are the only source/emitted substitutions the
+# structural resolver is allowed to make. In particular, it must never strip
+# an arbitrary suffix and search by basename.
+_TYPESCRIPT_EMITTED_SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    ".cjs": (".cts",),
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts",),
+}
+_TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION = "polyglot_typescript_emitted_suffix_resolution"
+
 
 def resolve_relationships(
     code_maps: tuple[FileCodeMap, ...],
@@ -266,11 +278,17 @@ def _polyglot_import_candidates(
     if source_language in {"Java", "C#", "Kotlin"}:
         normalized = normalized.replace(".", "/")
     normalized = normalized.strip("/")
+    # TypeScript package specifiers are external. Only an explicit relative
+    # specifier can name a snapshot file or use the controlled emitted suffix
+    # substitutions below; this prevents basename resolution of packages.
+    if source_language == "TypeScript" and not relative:
+        return set()
     bases = [normalized]
     if item.imported_name:
         bases.append(f"{normalized}/{item.imported_name}".strip("/"))
     candidates: set[str] = set()
     exact: set[str] = set()
+    emitted: set[str] = set()
     for code_map in code_maps:
         if code_map.path == source_path:
             continue
@@ -284,11 +302,55 @@ def _polyglot_import_candidates(
             target = _normalize_posix(target)
             if target in variants:
                 exact.add(code_map.path)
+            elif _is_typescript_emitted_source_target(
+                module, source_language, relative, target, code_map.path
+            ):
+                emitted.add(code_map.path)
             elif not relative and any(
                 value == target or value.endswith(f"/{target}") for value in variants
             ):
                 candidates.add(code_map.path)
-    return exact or candidates
+    return exact or emitted or candidates
+
+
+def _is_typescript_emitted_source_target(
+    module: str,
+    source_language: str | None,
+    relative: bool,
+    target: str,
+    candidate_path: str,
+) -> bool:
+    """Match only one declared emitted suffix to its valid source suffixes."""
+
+    if source_language != "TypeScript" or not relative:
+        return False
+    emitted_suffix = PurePosixPath(module).suffix
+    source_suffixes = _TYPESCRIPT_EMITTED_SOURCE_SUFFIXES.get(emitted_suffix)
+    if source_suffixes is None:
+        return False
+    target_path = PurePosixPath(target)
+    return any(
+        target_path.with_suffix(source_suffix).as_posix() == candidate_path
+        for source_suffix in source_suffixes
+    )
+
+
+def _is_typescript_emitted_import(
+    item: ImportRecord, source_path: str, source_language: str | None
+) -> bool:
+    """Determine whether an already-resolved import used an emitted suffix."""
+
+    if item.target_file_path is None:
+        return False
+    module = item.module or ""
+    target = _normalize_posix((PurePosixPath(source_path).parent / module).as_posix())
+    return _is_typescript_emitted_source_target(
+        module,
+        source_language,
+        module.startswith("."),
+        target,
+        item.target_file_path,
+    )
 
 
 def _normalize_posix(value: str) -> str:
@@ -360,7 +422,7 @@ def _resolve_polyglot_occurrence(
                 ),
             }
         )
-    targets: set[tuple[str, str, bool]] = set()
+    targets: set[tuple[str, str, bool, bool]] = set()
     for item in imports:
         if item.resolution != "internal" or item.target_file_path is None:
             continue
@@ -377,19 +439,27 @@ def _resolve_polyglot_occurrence(
             package = not _is_exact_polyglot_import(
                 item, maps_by_path[source_path].language
             )
-            targets.add((item.target_file_path, matches[0].symbol_id, package))
-    identities = {(path, symbol_id) for path, symbol_id, _ in targets}
+            emitted_suffix = _is_typescript_emitted_import(
+                item, source_path, maps_by_path[source_path].language
+            )
+            targets.add(
+                (item.target_file_path, matches[0].symbol_id, package, emitted_suffix)
+            )
+    identities = {(path, symbol_id) for path, symbol_id, _, _ in targets}
     if len(identities) != 1:
         return occurrence
     target_path, target_id = next(iter(identities))
     package = any(value[2] for value in targets)
+    emitted_suffix = any(value[3] for value in targets)
     return occurrence.model_copy(
         update={
             "resolution": "internal",
             "target_file_path": target_path,
             "target_symbol_id": target_id,
             "detection_method": (
-                "polyglot_package_resolution"
+                _TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION
+                if emitted_suffix
+                else "polyglot_package_resolution"
                 if package
                 else (
                     "polyglot_unambiguous_import_call"
@@ -644,6 +714,11 @@ def _rebuild_resolved_relationships(
                     if prefix == "python" and item.resolution == "internal"
                     else "python_ast_import"
                     if prefix == "python"
+                    else _TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION
+                    if item.resolution == "internal"
+                    and _is_typescript_emitted_import(
+                        item, code_map.path, code_map.language
+                    )
                     else "polyglot_snapshot_path_resolution"
                     if item.resolution == "internal"
                     and _is_exact_polyglot_import(item, code_map.language)
