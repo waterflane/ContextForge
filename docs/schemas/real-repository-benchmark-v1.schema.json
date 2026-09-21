@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/real-repository-benchmark-v1.schema.json",
+  "title": "ContextForge real-repository benchmark report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "suite_name", "runs", "aggregates", "passed"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "suite_name": {"type": "string", "minLength": 1},
+    "passed": {"type": "boolean"},
+    "runs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/run"}
+    },
+    "aggregates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/aggregate"}
+    }
+  },
+  "$defs": {
+    "rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "repository_id", "mode", "status", "quality_gate_failed"],
+      "properties": {
+        "task_id": {"type": "string"}, "repository_id": {"type": "string"},
+        "mode": {"enum": ["deterministic", "planned"]},
+        "status": {"enum": ["complete", "skipped"]}, "skip_reason": {"type": ["string", "null"]},
+        "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
+        "token_savings": {"type": "number"}, "valid_token_savings": {"type": "number"},
+        "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
+        "latency_ms": {"type": "integer", "minimum": 0}, "plan_sufficient": {"type": ["boolean", "null"]},
+        "citation_validity": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "groundedness_majority": {"type": ["boolean", "null"]}, "quality_not_lower_than_oracle": {"type": ["boolean", "null"]},
+        "quality_gate_failed": {"type": "boolean"}
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "task_count", "completed_task_count", "skipped_task_count", "quality_gate_failed_count", "headline_token_savings"],
+      "properties": {
+        "mode": {"enum": ["deterministic", "planned"]}, "task_count": {"type": "integer", "minimum": 0},
+        "completed_task_count": {"type": "integer", "minimum": 0}, "skipped_task_count": {"type": "integer", "minimum": 0},
+        "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
+        "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
+        "mean_latency_ms": {"type": ["number", "null"], "minimum": 0}, "plan_sufficient_count": {"type": "integer", "minimum": 0}, "planned_task_count": {"type": "integer", "minimum": 0},
+        "citation_containment": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]}, "groundedness_majority_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "quality_gate_failed_count": {"type": "integer", "minimum": 0}, "headline_token_savings": {"type": "number"}
+      }
+    }
+  }
+}
