@@ -90,10 +90,17 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert "&lt;hello&gt;" in first.prompt
     assert first.prompt.startswith('<contextforge schema_version="2">')
     assert '<usage_rules provenance="contextforge-verified">' in first.prompt
-    assert "verify indexed structure, not source contents" in first.prompt
-    assert "exact lines are present" in first.prompt
+    assert first.capsule.compact_profile
+    assert "Repository maps verify indexed structure; quote or cite" in first.prompt
+    assert "exact lines in materialized SLICE or FULL" in first.prompt
     assert "evidence-linked interpretation" in first.prompt
     assert "report it as unknown" in first.prompt
+    from contextforge.context import capsule as capsule_module
+
+    ordinary = first.capsule.model_copy(update={"compact_profile": False})
+    assert first.token_count < ConservativeTokenEstimator().count(
+        capsule_module._render_capsule(ordinary)
+    )
     assert first.prompt.endswith("</contextforge>\n")
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
 
@@ -394,6 +401,32 @@ def test_startup_one_of_four_cannot_be_effectively_sufficient(tmp_path: Path) ->
         "configuration",
         "documentation",
     }
+
+
+def test_automatic_selection_covers_requested_roles_before_upgrades(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    _write(tmp_path, "config/settings.toml", "enabled = true\n")
+    _write(tmp_path, "docs/api.md", "# API\n")
+    report = _build(tmp_path)
+    task = "review startup implementation tests configuration documentation API"
+    compiled = compile_context_capsule(
+        tmp_path,
+        task,
+        _retrieve(tmp_path, report, task),
+        budget=_budget(8_000),
+    )
+
+    assert compiled.coverage_ledger is not None
+    assert {
+        "entrypoint",
+        "implementation",
+        "test",
+        "configuration",
+        "documentation",
+    } <= set(compiled.coverage_ledger.covered_role_ids)
 
 
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(

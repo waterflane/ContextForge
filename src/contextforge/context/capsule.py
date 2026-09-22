@@ -184,6 +184,7 @@ class ContextCapsule(CapsuleModel):
     task_context: tuple[CapsuleMaterial, ...] = ()
     git_context: str = ""
     interpretations: tuple[str, ...] = ()
+    compact_profile: bool = False
     allocations: dict[str, NonNegativeInt]
     estimator_id: str = Field(min_length=1, max_length=200)
     token_count: NonNegativeInt
@@ -500,68 +501,18 @@ def compile_context_capsule(
         if candidate.path not in set(working) and _is_automatic_candidate(candidate)
     ][:8]
     if retrieval.evidence_plan is None or plan_fallback:
-        remaining = list(eligible_candidates)
-        covered: set[str] = set()
-        while remaining:
-            selected_candidates = tuple(
-                candidate_by_path[item.path]
-                for item in evidence_material
-                if item.path in candidate_by_path
-            )
-            choices: list[
-                tuple[float, int, float, str, CandidateCard, CapsuleMaterial]
-            ] = []
-            for candidate in remaining:
-                gain = _coverage_keys(candidate) - covered
-                if not gain:
-                    continue
-                material = _planned_materialize(state, candidate, None)
-                if material is None:
-                    continue
-                if evidence_tokens + material.token_count > evidence_limit and (
-                    evidence_material or not allow_indivisible_automatic_upgrade
-                ):
-                    continue
-                ratio = _utility(
-                    candidate, RepresentationMode.MAP, selected_candidates
-                ) / max(material.token_count, 1)
-                choices.append(
-                    (
-                        ratio,
-                        _exact_group_rank(candidate.exact_group),
-                        candidate.score,
-                        candidate.path,
-                        candidate,
-                        material,
-                    )
-                )
-            added = False
-            for _, _, _, _, candidate, material in sorted(
-                choices,
-                key=lambda item: (item[1], -item[0], -item[2], item[3]),
-            ):
-                proposed = capsule.model_copy(
-                    update={"task_context": tuple((*evidence_material, material))}
-                )
-                if _fits(
-                    proposed,
-                    budget,
-                    selected_estimator,
-                    token_limit=automatic_limit,
-                ) or (
-                    not evidence_material
-                    and allow_indivisible_automatic_upgrade
-                    and _fits(proposed, budget, selected_estimator)
-                ):
-                    evidence_material.append(material)
-                    evidence_tokens += material.token_count
-                    covered.update(_coverage_keys(candidate))
-                    remaining.remove(candidate)
-                    capsule = proposed
-                    added = True
-                    break
-            if not added:
-                break
+        evidence_material, evidence_tokens, capsule = _select_automatic_evidence(
+            state,
+            task,
+            capsule,
+            retrieval.candidates,
+            eligible_candidates,
+            evidence_material,
+            evidence_tokens,
+            budget,
+            selected_estimator,
+            token_limit=automatic_limit,
+        )
     capsule = capsule.model_copy(update={"task_context": tuple(evidence_material)})
 
     if not explicit_material:
@@ -578,6 +529,7 @@ def compile_context_capsule(
     if retrieval.evidence_plan is None or plan_fallback:
         capsule = _apply_greedy_upgrades(
             state,
+            task,
             capsule,
             retrieval.candidates,
             lines,
@@ -610,6 +562,12 @@ def compile_context_capsule(
                 "(interpretation)."
             )
     capsule = capsule.model_copy(update={"interpretations": tuple(rationales)})
+    if not explicit_material:
+        compact = _compact_profile(capsule, orientation, retrieval.candidates)
+        if compact is not None and selected_estimator.count(
+            _render_capsule(compact)
+        ) < selected_estimator.count(_render_capsule(capsule)):
+            capsule = compact
     prompt = _render_capsule(capsule)
     token_count = selected_estimator.count(prompt)
     if (
@@ -786,8 +744,258 @@ def _compilation_sufficiency(
     )
 
 
+def _capsule_ledger(
+    task: str,
+    candidates: tuple[CandidateCard, ...],
+    capsule: ContextCapsule,
+) -> CoverageLedger:
+    """Build coverage from actual material identities, never from ranking order."""
+
+    paths = {item.path for item in (*capsule.working_set, *capsule.task_context)}
+    return build_coverage_ledger(
+        task,
+        candidates,
+        selected_candidate_ids=tuple(
+            item.candidate_id for item in candidates if item.path in paths
+        ),
+        stage="materialization",
+    )
+
+
+def _mandatory_role_ids(ledger: CoverageLedger) -> tuple[str, ...]:
+    kinds = {item.role_id: item.kind for item in ledger.roles}
+    return tuple(
+        role_id for role_id in ledger.missing_role_ids if kinds[role_id] != "unknown"
+    )
+
+
+def _automatic_material_options(
+    state: _CompilerState, candidate: CandidateCard
+) -> tuple[CapsuleMaterial, ...]:
+    """Return the cheapest verified map/slice choices for one candidate."""
+
+    options = [
+        material
+        for material in (
+            _materialize(state, candidate.path, RepresentationMode.MAP, candidate, ()),
+            _materialize(
+                state,
+                candidate.path,
+                RepresentationMode.SLICE,
+                candidate,
+                _automatic_slice_ranges(state, candidate),
+            ),
+        )
+        if material is not None
+    ]
+    return tuple(
+        sorted(
+            options,
+            key=lambda item: (item.token_count, _mode_rank(item.representation)),
+        )
+    )
+
+
+def _supplemental_coverage_keys(candidate: CandidateCard) -> set[str]:
+    """Only independent concepts and ranges belong to the second greedy pass."""
+
+    return {
+        *(f"concept:{value.casefold()}" for value in candidate.matched_concepts),
+        *(f"symbol:{value.casefold()}" for value in candidate.matched_symbols),
+        *(
+            (f"exact:{candidate.exact_group}",)
+            if candidate.exact_group != "approximate"
+            else ()
+        ),
+        *(
+            "range:"
+            f"{item.path}:{item.source_range.start_line}:{item.source_range.end_line}:"
+            f"{item.evidence_id or ''}"
+            for item in candidate.evidence_ranges
+        ),
+        *(
+            f"provenance:{value}"
+            for value in candidate.provenance
+            if value in {"current-diff", "working-set"}
+        ),
+        *(f"graph-endpoint:{item.path}" for item in candidate.graph_neighbors),
+        *(
+            f"graph-flow:{item.distance}:{kind}:{provenance}"
+            for item in candidate.graph_neighbors
+            for kind in item.relationship_kinds
+            for provenance in item.provenance
+        ),
+    }
+
+
+def _select_automatic_evidence(
+    state: _CompilerState,
+    task: str,
+    capsule: ContextCapsule,
+    candidates: tuple[CandidateCard, ...],
+    eligible: list[CandidateCard],
+    selected: list[CapsuleMaterial],
+    selected_tokens: int,
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+    *,
+    token_limit: int,
+) -> tuple[list[CapsuleMaterial], int, ContextCapsule]:
+    """Select coverage first, then independent detail, without evicting evidence.
+
+    The two phases deliberately use ledgers instead of score-only gains: a map is
+    selected for every still-coverable requested role and graph endpoint before
+    duplicate concepts, ranges, or source-detail upgrades compete for budget.
+    """
+
+    all_ledger = build_coverage_ledger(task, candidates, stage="retrieval")
+    remaining = list(eligible)
+
+    def current_ledger() -> CoverageLedger:
+        return _capsule_ledger(task, candidates, capsule)
+
+    def append_for(predicate: object) -> bool:
+        nonlocal capsule, selected_tokens
+        before = current_ledger()
+        choices: list[
+            tuple[int, int, int, float, str, CandidateCard, CapsuleMaterial]
+        ] = []
+        for candidate in remaining:
+            options = _automatic_material_options(state, candidate)
+            prospective = (
+                capsule.model_copy(
+                    update={"task_context": tuple((*selected, options[0]))}
+                )
+                if options
+                else None
+            )
+            if prospective is None:
+                continue
+            after = _capsule_ledger(task, candidates, prospective)
+            if not callable(predicate) or not predicate(before, after, candidate):
+                continue
+            for material in options:
+                proposed = capsule.model_copy(
+                    update={"task_context": tuple((*selected, material))}
+                )
+                fits_limit = _fits(proposed, budget, estimator, token_limit=token_limit)
+                fits_first_indivisible = not selected and _fits(
+                    proposed, budget, estimator
+                )
+                if not fits_limit and not fits_first_indivisible:
+                    continue
+                choices.append(
+                    (
+                        material.token_count,
+                        _mode_rank(material.representation),
+                        _exact_group_rank(candidate.exact_group),
+                        -candidate.score,
+                        candidate.path,
+                        candidate,
+                        material,
+                    )
+                )
+        if not choices:
+            return False
+        _, _, _, _, _, candidate, material = min(choices)
+        selected.append(material)
+        selected_tokens += material.token_count
+        remaining.remove(candidate)
+        capsule = capsule.model_copy(update={"task_context": tuple(selected)})
+        return True
+
+    # Mandatory roles and structural endpoints are unambiguously the first pass.
+    for role_id in _mandatory_role_ids(all_ledger):
+        while role_id not in set(current_ledger().covered_role_ids):
+            if not append_for(
+                lambda before, after, _candidate, expected=role_id: (
+                    expected
+                    in set(after.covered_role_ids) - set(before.covered_role_ids)
+                )
+            ):
+                break
+    for endpoint in all_ledger.covered_graph_endpoints:
+        while endpoint not in set(current_ledger().covered_graph_endpoints):
+            if not append_for(
+                lambda before, after, _candidate, expected=endpoint: (
+                    expected
+                    in set(after.covered_graph_endpoints)
+                    - set(before.covered_graph_endpoints)
+                )
+            ):
+                break
+
+    # Preserve one verified structural counterpart for a single-file exact
+    # result.  This is deliberately a graph relation, not a filename heuristic;
+    # mandatory endpoint coverage above remains responsible for wider flows.
+    selected_paths = {item.path for item in selected}
+    related_paths = {
+        neighbor.path
+        for candidate in candidates
+        if candidate.path in selected_paths
+        for neighbor in candidate.graph_neighbors
+    } | {
+        candidate.path
+        for candidate in candidates
+        if any(
+            neighbor.path in selected_paths for neighbor in candidate.graph_neighbors
+        )
+    }
+    if related_paths:
+        append_for(lambda _before, _after, candidate: candidate.path in related_paths)
+    if len(selected) == 1:
+        append_for(
+            lambda _before, _after, candidate: any(
+                value.startswith("graph-") for value in candidate.provenance
+            )
+        )
+
+    # Only after coverage is protected may unique concepts and ranges use space.
+    covered_supplemental = {
+        key
+        for item in selected
+        for candidate in candidates
+        if candidate.path == item.path
+        for key in _supplemental_coverage_keys(candidate)
+    }
+    while remaining:
+
+        def adds_detail(
+            _before: CoverageLedger, _after: CoverageLedger, candidate: CandidateCard
+        ) -> bool:
+            keys = _supplemental_coverage_keys(candidate)
+            identity = {key for key in keys if key.startswith(("concept:", "symbol:"))}
+            exact = {key for key in keys if key.startswith("exact:")}
+            covered_identity = {
+                key
+                for key in covered_supplemental
+                if key.startswith(("concept:", "symbol:"))
+            }
+            covered_exact = {
+                key for key in covered_supplemental if key.startswith("exact:")
+            }
+            # A range is supplemental only for a file without duplicate task
+            # identifiers. This makes range diversity real rather than a path
+            # based way to repeat the same evidence across callers.
+            return (
+                bool(identity - covered_identity)
+                or bool(exact - covered_exact)
+                or (not identity and bool(keys - covered_supplemental))
+            )
+
+        if not append_for(adds_detail):
+            break
+        latest = selected[-1]
+        selected_candidate = next(
+            candidate for candidate in candidates if candidate.path == latest.path
+        )
+        covered_supplemental.update(_supplemental_coverage_keys(selected_candidate))
+    return selected, selected_tokens, capsule
+
+
 def _apply_greedy_upgrades(
     state: _CompilerState,
+    task: str,
     capsule: ContextCapsule,
     candidates: tuple[CandidateCard, ...],
     working_lines: dict[str, tuple[SourceRange, ...]],
@@ -866,6 +1074,15 @@ def _apply_greedy_upgrades(
                     ),
                 }
             )
+            # An upgrade must be monotonic for verified coverage.  It normally
+            # replaces one material in place, but calculate from the ledger so
+            # later representation changes cannot silently evict last coverage.
+            before = _capsule_ledger(task, candidates, capsule)
+            after = _capsule_ledger(task, candidates, candidate_capsule)
+            if set(before.covered_role_ids) - set(after.covered_role_ids) or set(
+                before.covered_graph_endpoints
+            ) - set(after.covered_graph_endpoints):
+                continue
             if _fits(
                 candidate_capsule,
                 budget,
@@ -1451,6 +1668,50 @@ def _render_orientation(
     return "\n".join(lines)
 
 
+def _compact_repository_map(orientation: OrientationMap, path: str) -> str:
+    """Minimal verified envelope for a short exact-file capsule."""
+
+    selected = next((item for item in orientation.files if item.path == path), None)
+    if selected is None:
+        return f"selected-file {path}"
+    return (
+        f"selected-file {selected.path} | module={selected.module} | "
+        f"language={selected.language or 'unknown'} | lines={selected.line_count} | "
+        f"symbols={selected.symbol_count}"
+    )
+
+
+def _compact_profile(
+    capsule: ContextCapsule,
+    orientation: OrientationMap,
+    candidates: tuple[CandidateCard, ...],
+) -> ContextCapsule | None:
+    """Make a smaller exact-file envelope without weakening evidence rules."""
+
+    if (
+        capsule.working_set
+        or capsule.git_context
+        or len(capsule.task_context) != 1
+        or capsule.interpretations
+    ):
+        return None
+    material = capsule.task_context[0]
+    candidate = next((item for item in candidates if item.path == material.path), None)
+    if (
+        candidate is None
+        or candidate.exact_group == "approximate"
+        or material.representation
+        not in {RepresentationMode.SLICE, RepresentationMode.FULL}
+    ):
+        return None
+    return capsule.model_copy(
+        update={
+            "repository_map": _compact_repository_map(orientation, material.path),
+            "compact_profile": True,
+        }
+    )
+
+
 def _git_text(value: str | object | None) -> str:
     if value is None:
         return ""
@@ -1600,6 +1861,39 @@ def _fits(
 
 def _render_capsule(capsule: ContextCapsule) -> str:
     escape = html.escape
+    usage_rules = (
+        (
+            "    <rule>Repository maps verify indexed structure; quote or cite "
+            "source only from exact lines in materialized SLICE or FULL "
+            "sections.</rule>",
+            "    <rule>Grounded summaries are evidence-linked interpretation, "
+            "not source guarantees; report it as unknown when evidence does not "
+            "establish a claim.</rule>",
+        )
+        if capsule.compact_profile
+        else (
+            (
+                "    <rule>Repository maps verify indexed structure, not source "
+                "contents, behavior, or guarantees.</rule>"
+            ),
+            (
+                "    <rule>Quote or cite source only when its exact lines are present "
+                "in a materialized SLICE or FULL section.</rule>"
+            ),
+            (
+                "    <rule>Grounded summaries are evidence-linked interpretation, "
+                "not source text or a guarantee.</rule>"
+            ),
+            (
+                "    <rule>Interpretations are unverified selection rationale and "
+                "are separate from verified facts and source.</rule>"
+            ),
+            (
+                "    <rule>When supplied evidence does not establish a claim, "
+                "report it as unknown.</rule>"
+            ),
+        )
+    )
     lines = [
         '<contextforge schema_version="2">',
         (
@@ -1610,26 +1904,7 @@ def _render_capsule(capsule: ContextCapsule) -> str:
         ),
         f"  <task>{escape(capsule.task)}</task>",
         '  <usage_rules provenance="contextforge-verified">',
-        (
-            "    <rule>Repository maps verify indexed structure, not source "
-            "contents, behavior, or guarantees.</rule>"
-        ),
-        (
-            "    <rule>Quote or cite source only when its exact lines are present "
-            "in a materialized SLICE or FULL section.</rule>"
-        ),
-        (
-            "    <rule>Grounded summaries are evidence-linked interpretation, "
-            "not source text or a guarantee.</rule>"
-        ),
-        (
-            "    <rule>Interpretations are unverified selection rationale and "
-            "are separate from verified facts and source.</rule>"
-        ),
-        (
-            "    <rule>When supplied evidence does not establish a claim, "
-            "report it as unknown.</rule>"
-        ),
+        *usage_rules,
         "  </usage_rules>",
         "  <verified_repository_map>",
         escape(capsule.repository_map),
