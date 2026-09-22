@@ -793,7 +793,7 @@ def test_agentic_planner_discovers_candidate_outside_initial_pool(
     assert result.provider_calls == 2
 
 
-def test_agentic_planner_combines_search_graph_and_map_expansion(
+def test_agentic_planner_records_measured_search_expansion(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "helper.py", "def support():\n    return 'ready'\n")
@@ -808,19 +808,11 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     def respond(request: object, call: int) -> str:
         facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
         if call == 0:
-            initial = facts["candidates"][0]
-            module = facts["modules"][0]
             return json.dumps(
                 {
                     "schema_version": 1,
                     "actions": [
-                        {"action": "search", "query": "hidden_flow", "limit": 4},
-                        {
-                            "action": "graph",
-                            "candidate_id": initial["candidate_id"],
-                            "hops": 2,
-                        },
-                        {"action": "map", "module_id": module["module_id"]},
+                        {"action": "search", "query": "hidden_flow", "limit": 1},
                     ],
                 }
             )
@@ -828,9 +820,12 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
             item for item in facts["candidates"] if item["path"] == "flow.py"
         )
         assert {item["action"] for item in facts["completed_actions"]} == {
-            "graph",
-            "map",
+            "search",
         }
+        assert all(
+            item["coverage_delta"]["new_evidence_ids"]
+            for item in facts["completed_actions"]
+        )
         return json.dumps(
             {
                 "schema_version": 1,
@@ -866,10 +861,92 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     assert [item.stage for item in result.coverage_history] == [
         "retrieval",
         "action",
-        "action",
-        "action",
         "plan",
     ]
+
+
+def test_agentic_no_gain_action_finalizes_insufficient_without_another_call(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def service() -> None:\n    return None\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        assert call == 0
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        assert facts["coverage_ledger"]["missing_role_ids"] == ("unknown",)
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [{"action": "search", "query": "service", "limit": 1}],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "service",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.provider_calls == 1
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.evidence_plan.items == ()
+    assert result.diagnostics == ("planner_no_coverage_gain",)
+
+
+def test_agentic_sufficient_is_downgraded_when_a_mandatory_role_is_missing(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        assert call == 0
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "main.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review startup implementation tests.",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+
+    assert result.provider_calls == 1
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.coverage_ledger is not None
+    assert "test" in result.coverage_ledger.missing_role_ids
+    assert "planner_missing_mandatory_roles" in result.diagnostics
 
 
 def test_agentic_planner_shrinks_each_round_to_provider_context(tmp_path: Path) -> None:
