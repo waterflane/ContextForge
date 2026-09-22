@@ -19,7 +19,7 @@ from contextforge.intelligence import (
     RetrievalDocument,
     RetrievalField,
     RetrievalIndex,
-    RetrievalIndexShardManifest,
+    RetrievalSemanticOverlayManifest,
     SourceRange,
     build_retrieval_index,
     load_file_code_map,
@@ -1338,13 +1338,13 @@ def test_retrieval_cache_revalidates_digest_bound_shards(tmp_path: Path) -> None
         / "generations"
         / report.manifest.generation_id
     )
-    header = RetrievalIndexShardManifest.model_validate_json(
+    header = RetrievalSemanticOverlayManifest.model_validate_json(
         (generation / reference.location).read_bytes()
     )
     shard = generation / header.document_shards[0].artifact.location
     shard.write_bytes(shard.read_bytes() + b" ")
 
-    with pytest.raises(ValueError, match="shard digest"):
+    with pytest.raises(ValueError, match="rebuild_required"):
         load_retrieval_index(tmp_path, reference, manifest=report.manifest)
 
 

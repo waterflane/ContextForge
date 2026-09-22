@@ -673,7 +673,10 @@ async def build_semantic_card_index(
         code_maps, tuple(cards), structural.build.source_snapshot_digest
     )
     semantic_retrieval_digest = write_retrieval_index(
-        lock, "retrieval-semantic.json", semantic_retrieval
+        lock,
+        "retrieval-semantic.json",
+        semantic_retrieval,
+        base_structural_reference=structural.artifacts.structural_retrieval,
     )
     artifacts = structural.artifacts.model_copy(
         update={

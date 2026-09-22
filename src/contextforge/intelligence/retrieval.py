@@ -85,7 +85,10 @@ NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 _RetrievalCacheKey = tuple[str, str, str, str]
 _retrieval_cache: OrderedDict[
-    _RetrievalCacheKey, tuple[RetrievalIndexShardManifest, RetrievalIndex]
+    _RetrievalCacheKey,
+    tuple[
+        RetrievalIndexShardManifest | RetrievalSemanticOverlayManifest, RetrievalIndex
+    ],
 ] = OrderedDict()
 _retrieval_cache_lock = threading.Lock()
 
@@ -246,6 +249,31 @@ class RetrievalIndexShardManifest(IndexModel):
             ):
                 raise ValueError("exact identifier document ordinals are invalid")
         return self
+
+
+class RetrievalSemanticOverlayDocument(IndexModel):
+    """Semantic-only document delta over a structural retrieval document."""
+
+    path: str
+    semantic_quality: Literal["none", "complete", "partial", "deterministic"]
+    semantic_synopsis: str = ""
+    semantic_concepts: tuple[str, ...] = ()
+    semantic_claims: tuple[RetrievalSemanticClaim, ...] = ()
+    grounded_semantics: RetrievalField
+
+
+class RetrievalSemanticOverlayManifest(IndexModel):
+    """Digest-bound semantic delta that reuses structural postings verbatim."""
+
+    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    record_kind: Literal["retrieval_semantic_overlay"] = "retrieval_semantic_overlay"
+    source_snapshot_digest: Sha256
+    base_structural_sha256: Sha256
+    document_count: NonNegativeInt
+    document_shards: tuple[RetrievalDocumentShard, ...]
+    exact_identifier_documents: dict[str, tuple[NonNegativeInt, ...]]
+    document_frequencies: dict[str, dict[str, NonNegativeInt]]
+    average_field_lengths: dict[str, NonNegativeFloat]
 
 
 class CandidateEvidenceRange(IndexModel):
@@ -846,7 +874,13 @@ def _retrieval_semantic_claims(
     return tuple(values[key] for key in sorted(values))
 
 
-def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) -> str:
+def write_retrieval_index(
+    lock: object,
+    location: str,
+    index: RetrievalIndex,
+    *,
+    base_structural_reference: ArtifactReference | None = None,
+) -> str:
     """Persist retrieval documents in bounded shards and return the header digest."""
 
     from contextforge.intelligence.store import IndexWriteLock, write_index_record
@@ -856,6 +890,9 @@ def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) ->
     if location not in {"retrieval-structural.json", "retrieval-semantic.json"}:
         raise ValueError("unsupported retrieval index location")
     kind = "structural" if "structural" in location else "semantic"
+    overlay = (
+        location == "retrieval-semantic.json" and base_structural_reference is not None
+    )
     shards: list[RetrievalDocumentShard] = []
     pending: list[bytes] = []
     pending_size = 0
@@ -879,7 +916,21 @@ def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) ->
     from contextforge.intelligence.manifest import canonical_json_bytes
 
     for document in index.documents:
-        encoded = canonical_json_bytes(document.model_dump(mode="json"))
+        value: RetrievalDocument | RetrievalSemanticOverlayDocument = document
+        if overlay:
+            value = RetrievalSemanticOverlayDocument(
+                path=document.path,
+                semantic_quality=document.semantic_quality,
+                semantic_synopsis=document.semantic_synopsis,
+                semantic_concepts=document.semantic_concepts,
+                semantic_claims=document.semantic_claims,
+                grounded_semantics=next(
+                    item
+                    for item in document.fields
+                    if item.name == "grounded_semantics"
+                ),
+            )
+        encoded = canonical_json_bytes(value.model_dump(mode="json"))
         if len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
             raise ValueError("one retrieval document exceeds the shard limit")
         if pending and pending_size + len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
@@ -887,13 +938,22 @@ def write_retrieval_index(lock: object, location: str, index: RetrievalIndex) ->
         pending.append(encoded)
         pending_size += len(encoded)
     flush()
-    header = RetrievalIndexShardManifest(
+    header: RetrievalIndexShardManifest | RetrievalSemanticOverlayManifest
+    header_values = dict(
         source_snapshot_digest=index.source_snapshot_digest,
         document_count=index.document_count,
         document_shards=tuple(shards),
         exact_identifier_documents=index.exact_identifier_documents,
         document_frequencies=index.document_frequencies,
         average_field_lengths=index.average_field_lengths,
+    )
+    header = (
+        RetrievalSemanticOverlayManifest(
+            base_structural_sha256=base_structural_reference.sha256,
+            **header_values,
+        )
+        if overlay and base_structural_reference is not None
+        else RetrievalIndexShardManifest(**header_values)
     )
     return write_index_record(
         lock, location, canonical_json_bytes(header.model_dump(mode="json"))
@@ -925,11 +985,83 @@ def load_retrieval_index(
         cached = _retrieval_cache.get(cache_key)
         if cached is not None:
             _retrieval_cache.move_to_end(cache_key)
+    if cached is not None and isinstance(cached[0], RetrievalSemanticOverlayManifest):
+        for shard in cached[0].document_shards:
+            shard_content = load_generation_record(
+                repository_root, shard.artifact.location, manifest=manifest
+            )
+            if hashlib.sha256(shard_content).hexdigest() != shard.artifact.sha256:
+                raise ValueError("retrieval overlay is corrupt; rebuild_required")
+        return cached[1]
     if cached is None:
         try:
             header = RetrievalIndexShardManifest.model_validate_json(content)
         except ValueError:
-            return RetrievalIndex.model_validate_json(content)
+            try:
+                overlay = RetrievalSemanticOverlayManifest.model_validate_json(content)
+            except ValueError:
+                return RetrievalIndex.model_validate_json(content)
+            base_reference = manifest.artifacts.structural_retrieval
+            if (
+                base_reference is None
+                or base_reference.sha256 != overlay.base_structural_sha256
+            ):
+                raise ValueError(
+                    "retrieval overlay is corrupt; rebuild_required"
+                ) from None
+            base = load_retrieval_index(
+                repository_root, base_reference, manifest=manifest
+            )
+            documents: dict[str, RetrievalDocument] = {
+                item.path: item for item in base.documents
+            }
+            values: list[RetrievalSemanticOverlayDocument] = []
+            for shard in overlay.document_shards:
+                shard_content = load_generation_record(
+                    repository_root, shard.artifact.location, manifest=manifest
+                )
+                if hashlib.sha256(shard_content).hexdigest() != shard.artifact.sha256:
+                    raise ValueError(
+                        "retrieval overlay is corrupt; rebuild_required"
+                    ) from None
+                values.extend(
+                    RetrievalSemanticOverlayDocument.model_validate_json(line)
+                    for line in shard_content.splitlines()
+                    if line
+                )
+            if len(values) != overlay.document_count or {
+                item.path for item in values
+            } != set(documents):
+                raise ValueError(
+                    "retrieval overlay is corrupt; rebuild_required"
+                ) from None
+            index = RetrievalIndex(
+                source_snapshot_digest=overlay.source_snapshot_digest,
+                document_count=overlay.document_count,
+                documents=tuple(
+                    RetrievalDocument.model_validate(
+                        {
+                            **documents[item.path].model_dump(mode="json"),
+                            **item.model_dump(
+                                mode="json", exclude={"path", "grounded_semantics"}
+                            ),
+                            "fields": tuple(
+                                item.grounded_semantics
+                                if field.name == "grounded_semantics"
+                                else field
+                                for field in documents[item.path].fields
+                            ),
+                        }
+                    )
+                    for item in values
+                ),
+                exact_identifier_documents=overlay.exact_identifier_documents,
+                document_frequencies=overlay.document_frequencies,
+                average_field_lengths=overlay.average_field_lengths,
+            )
+            with _retrieval_cache_lock:
+                _retrieval_cache[cache_key] = (overlay, index)
+            return index
     else:
         header = cached[0]
     shard_contents: list[bytes] = []
@@ -987,7 +1119,10 @@ def retrieval_index_record_locations(
         try:
             header = RetrievalIndexShardManifest.model_validate_json(content)
         except ValueError:
-            continue
+            try:
+                header = RetrievalSemanticOverlayManifest.model_validate_json(content)
+            except ValueError:
+                continue
         locations.extend(item.artifact.location for item in header.document_shards)
     return tuple(locations)
 
@@ -3529,6 +3664,7 @@ __all__ = [
     "RetrievalIndex",
     "RetrievalDocumentShard",
     "RetrievalIndexShardManifest",
+    "RetrievalSemanticOverlayManifest",
     "RetrievalSemanticClaim",
     "RetrievalSemanticEvidence",
     "RetrievalResult",

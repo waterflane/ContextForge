@@ -1142,10 +1142,10 @@ def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[st
             value = json.loads(_read_bounded_bytes(header, MAX_RECORD_BYTES))
         except (OSError, ValueError, UnicodeError):
             continue
-        if (
-            not isinstance(value, dict)
-            or value.get("record_kind") != "retrieval_posting_shards"
-        ):
+        if not isinstance(value, dict) or value.get("record_kind") not in {
+            "retrieval_posting_shards",
+            "retrieval_semantic_overlay",
+        }:
             continue
         group = value.get("document_shards")
         if not isinstance(group, list):
