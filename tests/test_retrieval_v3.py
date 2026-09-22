@@ -865,6 +865,72 @@ def test_agentic_planner_records_measured_search_expansion(
     ]
 
 
+def test_agentic_planner_records_grounded_query_expansion(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def start():\n    return 'ready'\n")
+    _write(tmp_path, "flow.py", "def hidden_flow():\n    return 'complete'\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            vocabulary = facts["repository_vocabulary"]
+            assert "hidden_flow" in vocabulary["symbols"]
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "expand_query", "expressions": ["hidden_flow"]}
+                    ],
+                }
+            )
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "flow.py"
+        )
+        assert facts["completed_actions"][0]["expansions"] == (
+            {
+                "expression": "hidden_flow",
+                "result_candidate_ids": (candidate["candidate_id"],),
+            },
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "start",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.items[0].path == "flow.py"
+    assert (
+        result.evidence_plan.diagnostics.query_expansions[0].expression == "hidden_flow"
+    )
+    assert result.evidence_plan.diagnostics.query_expansions[0].result_candidate_ids
+
+
 def test_agentic_no_gain_action_finalizes_insufficient_without_another_call(
     tmp_path: Path,
 ) -> None:

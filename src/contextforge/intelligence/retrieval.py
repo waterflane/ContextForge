@@ -447,6 +447,13 @@ class PlannedEvidence(IndexModel):
         return validate_portable_relative_path(value)
 
 
+class QueryExpansionDiagnostic(IndexModel):
+    """One untrusted query expression and the closed IDs it discovered."""
+
+    expression: str = Field(min_length=1, max_length=180)
+    result_candidate_ids: tuple[str, ...] = Field(max_length=16)
+
+
 class PlanningDiagnostics(IndexModel):
     """Safe planner accounting with no model reasoning or source content."""
 
@@ -458,6 +465,9 @@ class PlanningDiagnostics(IndexModel):
     rounds: NonNegativeInt = 0
     dropped_candidates: NonNegativeInt = 0
     dropped_evidence_ids: NonNegativeInt = 0
+    query_expansions: tuple[QueryExpansionDiagnostic, ...] = Field(
+        default=(), max_length=24
+    )
     messages: tuple[str, ...] = ()
 
 
@@ -540,7 +550,7 @@ class _PlannerAction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["search", "symbol", "graph", "map", "finalize"]
+    action: Literal["search", "symbol", "graph", "map", "expand_query", "finalize"]
     query: str | None = Field(default=None, max_length=2_000)
     identifier: str | None = Field(default=None, max_length=500)
     candidate_id: str | None = Field(default=None, max_length=128)
@@ -550,6 +560,17 @@ class _PlannerAction(BaseModel):
     selected: tuple[_PlanItem, ...] = Field(default=(), max_length=PLANNING_MAX_FILES)
     sufficiency: Literal["sufficient", "insufficient"] | None = None
     interpretation: str | None = Field(default=None, max_length=2_000)
+    expressions: tuple[str, ...] = Field(default=(), max_length=8)
+
+    @field_validator("expressions")
+    @classmethod
+    def validate_expressions(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        expressions = tuple(item.strip() for item in value)
+        if any(not item or len(item) > 180 for item in expressions):
+            raise ValueError("expansion expressions must be short non-empty text")
+        if len(expressions) != len(set(expressions)):
+            raise ValueError("expansion expressions must be unique")
+        return expressions
 
     @model_validator(mode="after")
     def validate_action_arguments(self) -> _PlannerAction:
@@ -564,19 +585,40 @@ class _PlannerAction(BaseModel):
             "graph": "candidate_id",
             "map": "module_id",
         }
+        if self.action == "expand_query":
+            if (
+                populated
+                or not self.expressions
+                or self.selected
+                or self.sufficiency is not None
+            ):
+                raise ValueError("expand_query requires only expressions")
+            if self.limit is not None or self.hops is not None:
+                raise ValueError("expand_query does not accept limit or hops")
+            return self
         expected = required.get(self.action)
         if expected is not None:
             value = getattr(self, expected)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{self.action} requires non-empty {expected}")
-            if populated != {expected} or self.selected or self.sufficiency is not None:
+            if (
+                populated != {expected}
+                or self.expressions
+                or self.selected
+                or self.sufficiency is not None
+            ):
                 raise ValueError(f"{self.action} contains unrelated arguments")
             if self.action not in {"search", "symbol"} and self.limit is not None:
                 raise ValueError(f"{self.action} does not accept limit")
             if self.action != "graph" and self.hops is not None:
                 raise ValueError(f"{self.action} does not accept hops")
             return self
-        if populated or self.limit is not None or self.hops is not None:
+        if (
+            populated
+            or self.expressions
+            or self.limit is not None
+            or self.hops is not None
+        ):
             raise ValueError("finalize contains tool arguments")
         if not self.selected or self.sufficiency is None:
             raise ValueError("finalize requires selected evidence and sufficiency")
@@ -1623,6 +1665,7 @@ async def _plan_evidence(
     automatic_full_paths = {
         item.path for item in index.documents if item.line_count <= 200
     }
+    planner_vocabulary = _planner_vocabulary_from_index(index, modules)
     provider_calls = 0
     input_tokens = 0
     output_tokens = 0
@@ -1660,6 +1703,7 @@ async def _plan_evidence(
                 max_files=max_files,
                 max_ranges_per_file=max_ranges_per_file,
                 automatic_full_paths=automatic_full_paths,
+                repository_vocabulary=planner_vocabulary,
                 repair=current_round > 0 and not action_history,
                 legacy_alias=legacy_alias,
             )
@@ -1916,6 +1960,24 @@ async def _plan_evidence(
         )
         if validated is None:
             continue
+        expansions = tuple(
+            QueryExpansionDiagnostic(
+                expression=str(expansion["expression"]),
+                result_candidate_ids=tuple(expansion["result_candidate_ids"]),
+            )
+            for item in action_history
+            for expansion in cast(
+                tuple[dict[str, object], ...], item.get("expansions", ())
+            )
+        )[:24]
+        if expansions:
+            validated = validated.model_copy(
+                update={
+                    "diagnostics": validated.diagnostics.model_copy(
+                        update={"query_expansions": expansions}
+                    )
+                }
+            )
         planned_ids = {item.candidate_id for item in validated.items}
         ordered = [
             supplied[item.candidate_id].model_copy(
@@ -2013,6 +2075,7 @@ def _execute_planner_actions(
     history: list[dict[str, object]] = []
     action_ledgers: list[CoverageLedger] = []
     requires_complement = False
+    vocabulary = _repository_vocabulary(index, modules, task)
     for action in actions:
         before = build_coverage_ledger(task, tuple(pool.values()), stage="action")
         requested_limit = action.limit or 8
@@ -2036,6 +2099,47 @@ def _execute_planner_actions(
                 or item.matched_concepts
                 or item.evidence_ranges
             )[:requested_limit]
+        elif action.action == "expand_query":
+            expressions = action.expressions
+            if any(
+                not _grounded_query_expression(item, vocabulary) for item in expressions
+            ):
+                return (
+                    (),
+                    history,
+                    action_ledgers,
+                    requires_complement,
+                    "planner_ungrounded_query_expansion",
+                )
+            ranked_by_id: OrderedDict[str, CandidateCard] = OrderedDict()
+            expansion_results: list[dict[str, object]] = []
+            for expression in expressions:
+                ranked = _rank_candidates(
+                    expression,
+                    index,
+                    graph,
+                    working_set=working_set,
+                    diff_paths=diff_paths,
+                )
+                matches = tuple(
+                    item
+                    for item in ranked
+                    if item.exact_group != "approximate"
+                    or item.bm25_score > 0
+                    or item.matched_concepts
+                    or item.evidence_ranges
+                )[:8]
+                expansion_results.append(
+                    {
+                        "expression": expression,
+                        "result_candidate_ids": tuple(
+                            item.candidate_id for item in matches
+                        ),
+                    }
+                )
+                for item in matches:
+                    ranked_by_id.setdefault(item.candidate_id, item)
+            selected = tuple(ranked_by_id.values())
         elif action.action == "symbol":
             assert action.identifier is not None
             query = action.identifier.strip()
@@ -2136,6 +2240,11 @@ def _execute_planner_actions(
                 "result_candidate_ids": added,
                 "result_count": len(added),
                 "coverage_delta": delta.model_dump(mode="json"),
+                **(
+                    {"expansions": tuple(expansion_results)}
+                    if action.action == "expand_query"
+                    else {}
+                ),
             }
         )
         action_ledgers.append(after)
@@ -2146,6 +2255,40 @@ def _execute_planner_actions(
         requires_complement,
         None,
     )
+
+
+def _repository_vocabulary(
+    index: RetrievalIndex,
+    modules: dict[str, tuple[str, ...]],
+    task: str,
+) -> frozenset[str]:
+    """Bounded identifier vocabulary, derived exclusively from the generation."""
+
+    values = {
+        token
+        for document in index.documents
+        for value in (
+            *document.symbols,
+            *document.qualified_symbols,
+            *document.source_identifiers,
+            *document.semantic_concepts,
+        )
+        for token in _tokens(value)
+    }
+    values.update(token for module_id in modules for token in _tokens(module_id))
+    values.update(
+        token
+        for role in _task_evidence_roles(task, ())
+        for token in _tokens(role.role_id)
+    )
+    return frozenset(sorted(values)[:4_096])
+
+
+def _grounded_query_expression(expression: str, vocabulary: frozenset[str]) -> bool:
+    """Reject model phrases containing terms absent from the supplied vocabulary."""
+
+    terms = _tokens(expression)
+    return bool(terms) and len(terms) <= 16 and set(terms) <= vocabulary
 
 
 def _deterministic_complementary_search(
@@ -2265,6 +2408,7 @@ def _planner_request(
     max_files: int,
     max_ranges_per_file: int,
     automatic_full_paths: set[str],
+    repository_vocabulary: dict[str, tuple[str, ...]],
     repair: bool,
     legacy_alias: bool,
 ) -> ModelRequest:
@@ -2282,6 +2426,12 @@ def _planner_request(
         if roles
         else ""
     )
+    expansion_instruction = (
+        " expand_query accepts at most eight short expressions using only supplied "
+        "repository_vocabulary tokens; expressions are interpretation, not claims."
+        if len(candidates) > 1 or modules
+        else ""
+    )
     return ModelRequest(
         operation_id="evidence-plan-" + result.generation_id[:24],
         purpose="evidence-planning",
@@ -2290,7 +2440,10 @@ def _planner_request(
             "the minimum sufficient evidence, or request closed search, symbol, "
             "graph, and map actions. search and symbol accept model-written query "
             "text; graph accepts only a supplied candidate_id; map accepts only a "
-            "supplied module_id. Finalize with only supplied candidate_id and "
+            "supplied module_id."
+            + expansion_instruction
+            + " Finalize with only supplied "
+            "candidate_id and "
             "evidence_id values."
             + role_instruction
             + " Never invent paths, symbols, ranges, or source facts. "
@@ -2351,6 +2504,16 @@ def _planner_request(
                 }
                 for module_id, paths in modules.items()
             ],
+            **(
+                {
+                    "repository_vocabulary": {
+                        **repository_vocabulary,
+                        "task_roles": tuple(item.role_id for item in roles),
+                    }
+                }
+                if len(candidates) > 1 or modules
+                else {}
+            ),
             "completed_actions": action_history[-2:],
             "coverage_ledger": {
                 "covered_role_ids": coverage.covered_role_ids,
@@ -2422,6 +2585,39 @@ def _planner_candidate(
             if cost is not None and (name != "full" or allow_full)
         ],
         "representation_costs": candidate.estimated_cost.model_dump(mode="json"),
+    }
+
+
+def _planner_vocabulary_from_index(
+    index: RetrievalIndex,
+    modules: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Small trusted lexicon used only to constrain model query expansions."""
+
+    symbols = tuple(
+        sorted(
+            {
+                value
+                for item in index.documents
+                for value in (
+                    *item.symbols,
+                    *item.qualified_symbols,
+                    *item.source_identifiers,
+                )
+            },
+            key=canonical_casefold_key,
+        )[:8]
+    )
+    concepts = tuple(
+        sorted(
+            {value for item in index.documents for value in item.semantic_concepts},
+            key=canonical_casefold_key,
+        )[:8]
+    )
+    return {
+        "modules": tuple(sorted(modules))[:8],
+        "symbols": symbols,
+        "concepts": concepts,
     }
 
 
@@ -3324,6 +3520,7 @@ __all__ = [
     "RETRIEVAL_SHARD_MAX_BYTES",
     "PlannedEvidence",
     "PlanningDiagnostics",
+    "QueryExpansionDiagnostic",
     "PositionalPosting",
     "RepresentationCosts",
     "RoleEvidenceBinding",
