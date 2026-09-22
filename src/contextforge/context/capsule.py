@@ -42,6 +42,18 @@ AUTOMATIC_SLICE_MAX_RANGES = 3
 AUTOMATIC_MAP_MAX_SYMBOLS = 12
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
+CompilationReasonCode = Literal[
+    "declared_insufficient",
+    "empty_retrieval",
+    "empty_task_context",
+    "plan_replaced",
+    "planned_item_unmaterialized",
+    "planned_evidence_unmaterialized",
+    "planned_range_unmaterialized",
+    "budget_excluded_mandatory_item",
+    "mandatory_role_missing",
+    "planned_role_lost",
+]
 
 
 class RepresentationMode(StrEnum):
@@ -200,6 +212,7 @@ class CompiledContextCapsule(CapsuleModel):
     token_count: NonNegativeInt
     estimator_id: str
     coverage_ledger: CoverageLedger | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
 
     @model_validator(mode="after")
     def validate_metadata(self) -> CompiledContextCapsule:
@@ -208,6 +221,58 @@ class CompiledContextCapsule(CapsuleModel):
             or self.estimator_id != self.capsule.estimator_id
         ):
             raise ValueError("compiled capsule metadata is inconsistent")
+        return self
+
+
+class CompilationSufficiency(CapsuleModel):
+    """Verified effective status after the compiler's real materialization."""
+
+    schema_version: Literal[1] = 1
+    declared_status: Literal["sufficient", "insufficient"]
+    effective_status: Literal["sufficient", "insufficient"]
+    reason_codes: tuple[CompilationReasonCode, ...] = ()
+    planned_item_ids: tuple[str, ...] = ()
+    materialized_item_ids: tuple[str, ...] = ()
+    missing_planned_item_ids: tuple[str, ...] = ()
+    planned_evidence_ids: tuple[str, ...] = ()
+    materialized_evidence_ids: tuple[str, ...] = ()
+    planned_range_count: NonNegativeInt = 0
+    materialized_range_count: NonNegativeInt = 0
+    planned_role_ids: tuple[str, ...] = ()
+    materialized_role_ids: tuple[str, ...] = ()
+    missing_mandatory_role_ids: tuple[str, ...] = ()
+    replacement_used: bool = False
+
+    @model_validator(mode="after")
+    def validate_sufficiency(self) -> CompilationSufficiency:
+        for values, label in (
+            (self.reason_codes, "reason codes"),
+            (self.planned_item_ids, "planned item IDs"),
+            (self.materialized_item_ids, "materialized item IDs"),
+            (self.missing_planned_item_ids, "missing planned item IDs"),
+            (self.planned_evidence_ids, "planned evidence IDs"),
+            (self.materialized_evidence_ids, "materialized evidence IDs"),
+            (self.planned_role_ids, "planned role IDs"),
+            (self.materialized_role_ids, "materialized role IDs"),
+            (self.missing_mandatory_role_ids, "missing mandatory role IDs"),
+        ):
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"compilation {label} must be unique and canonical")
+        if self.missing_planned_item_ids != tuple(
+            item
+            for item in self.planned_item_ids
+            if item not in self.materialized_item_ids
+        ):
+            raise ValueError("compilation missing items must match materialization")
+        if (
+            self.declared_status == "insufficient"
+            and self.effective_status != "insufficient"
+        ):
+            raise ValueError("insufficient plan cannot become effectively sufficient")
+        if self.effective_status == "sufficient" and self.reason_codes:
+            raise ValueError(
+                "sufficient compilation cannot carry insufficiency reasons"
+            )
         return self
 
 
@@ -573,18 +638,151 @@ def compile_context_capsule(
     planner_bindings = (
         () if retrieval.evidence_plan is None else retrieval.evidence_plan.role_bindings
     )
+    materialization_ledger = build_coverage_ledger(
+        task,
+        retrieval.candidates,
+        selected_candidate_ids=materialized_ids,
+        stage="materialization",
+        planner_bindings=planner_bindings,
+    )
     return CompiledContextCapsule(
         capsule=capsule,
         prompt=prompt,
         token_count=token_count,
         estimator_id=selected_estimator.estimator_id,
-        coverage_ledger=build_coverage_ledger(
-            task,
-            retrieval.candidates,
-            selected_candidate_ids=materialized_ids,
-            stage="materialization",
-            planner_bindings=planner_bindings,
+        coverage_ledger=materialization_ledger,
+        compilation_sufficiency=_compilation_sufficiency(
+            retrieval,
+            capsule,
+            materialization_ledger,
+            plan_replaced=plan_fallback,
         ),
+    )
+
+
+def _compilation_sufficiency(
+    retrieval: RetrievalResult,
+    capsule: ContextCapsule,
+    materialization_ledger: CoverageLedger,
+    *,
+    plan_replaced: bool,
+) -> CompilationSufficiency:
+    """Derive effective status from actual materials without mutating retrieval."""
+
+    plan = retrieval.evidence_plan
+    declared_status = "insufficient" if plan is None else plan.sufficiency
+    candidates_by_id = {item.candidate_id: item for item in retrieval.candidates}
+    materials_by_path = {
+        item.path: item for item in (*capsule.working_set, *capsule.task_context)
+    }
+    planned_items = () if plan is None else plan.items
+    planned_item_ids = tuple(sorted(item.candidate_id for item in planned_items))
+    materialized_item_ids = tuple(
+        sorted(
+            item.candidate_id
+            for item in planned_items
+            if (
+                (material := materials_by_path.get(item.path)) is not None
+                and material.source_sha256 == item.source_sha256
+            )
+        )
+    )
+    missing_item_ids = tuple(
+        item for item in planned_item_ids if item not in set(materialized_item_ids)
+    )
+    planned_evidence_ids = tuple(
+        sorted(
+            {evidence_id for item in planned_items for evidence_id in item.evidence_ids}
+        )
+    )
+    materialized_evidence_ids = tuple(
+        sorted(
+            {
+                evidence_id
+                for item in materials_by_path.values()
+                for evidence_id in item.evidence_ids
+            }
+        )
+    )
+    planned_range_count = 0
+    for item in planned_items:
+        candidate = candidates_by_id.get(item.candidate_id)
+        if candidate is None:
+            continue
+        known_evidence_ids = {
+            evidence.evidence_id
+            for evidence in candidate.evidence_ranges
+            if evidence.evidence_id is not None
+        }
+        planned_range_count += len(set(item.evidence_ids) & known_evidence_ids)
+    materialized_range_count = sum(
+        len(item.ranges) for item in materials_by_path.values()
+    )
+    selected_plan_ids = tuple(item.candidate_id for item in planned_items)
+    planned_ledger = build_coverage_ledger(
+        retrieval.task,
+        retrieval.candidates,
+        selected_candidate_ids=selected_plan_ids,
+        stage="plan",
+        planner_bindings=() if plan is None else plan.role_bindings,
+    )
+    planned_role_ids = planned_ledger.covered_role_ids
+    materialized_role_ids = materialization_ledger.covered_role_ids
+    materialized_kinds = {
+        item.role_id: item.kind for item in materialization_ledger.roles
+    }
+    missing_mandatory_role_ids = tuple(
+        role_id
+        for role_id in materialization_ledger.missing_role_ids
+        if materialized_kinds[role_id] != "unknown"
+    )
+    reasons: set[CompilationReasonCode] = set()
+    if declared_status == "insufficient":
+        reasons.add("declared_insufficient")
+    if not retrieval.candidates:
+        reasons.add("empty_retrieval")
+    if not capsule.task_context:
+        reasons.add("empty_task_context")
+    if plan_replaced:
+        reasons.add("plan_replaced")
+    if missing_item_ids:
+        reasons.add("planned_item_unmaterialized")
+        if plan_replaced:
+            reasons.add("budget_excluded_mandatory_item")
+    for item in planned_items:
+        candidate = candidates_by_id.get(item.candidate_id)
+        material = materials_by_path.get(item.path)
+        if candidate is None or material is None or item.evidence_ids == ():
+            continue
+        if not set(item.evidence_ids) <= set(material.evidence_ids):
+            reasons.add("planned_evidence_unmaterialized")
+            continue
+        if not _material_covers_planned_item(candidate, item, material):
+            reasons.add("planned_range_unmaterialized")
+    if set(planned_role_ids) - set(materialized_role_ids):
+        reasons.add("planned_role_lost")
+    if missing_mandatory_role_ids:
+        reasons.add("mandatory_role_missing")
+    effective_status: Literal["sufficient", "insufficient"] = (
+        "sufficient"
+        if declared_status == "sufficient" and capsule.task_context and not reasons
+        else "insufficient"
+    )
+    return CompilationSufficiency(
+        declared_status=declared_status,
+        effective_status=effective_status,
+        reason_codes=tuple(sorted(reasons)),
+        planned_item_ids=planned_item_ids,
+        materialized_item_ids=materialized_item_ids,
+        missing_planned_item_ids=missing_item_ids,
+        planned_evidence_ids=planned_evidence_ids,
+        materialized_evidence_ids=materialized_evidence_ids,
+        planned_range_count=planned_range_count,
+        materialized_range_count=materialized_range_count,
+        planned_role_ids=planned_role_ids,
+        materialized_role_ids=materialized_role_ids,
+        missing_mandatory_role_ids=missing_mandatory_role_ids,
+        replacement_used=plan_replaced,
     )
 
 
@@ -748,6 +946,8 @@ def _materialize_validated_plan(
             continue
         accepted = None
         for material in _planned_materializations(state, candidate, item):
+            if not _material_covers_planned_item(candidate, item, material):
+                continue
             if selected_tokens + material.token_count > evidence_limit:
                 continue
             proposed = capsule.model_copy(
@@ -761,6 +961,36 @@ def _materialize_validated_plan(
         selected.append(accepted)
         selected_tokens += accepted.token_count
     return tuple(selected)
+
+
+def _material_covers_planned_item(
+    candidate: CandidateCard,
+    item: PlannedEvidence,
+    material: CapsuleMaterial,
+) -> bool:
+    if material.source_sha256 != item.source_sha256:
+        return False
+    if not item.evidence_ids:
+        return True
+    if not set(item.evidence_ids) <= set(material.evidence_ids):
+        return False
+    if material.representation == RepresentationMode.FULL:
+        return True
+    if material.representation != RepresentationMode.SLICE:
+        return False
+    expected_ranges = {
+        evidence.evidence_id: evidence.source_range
+        for evidence in candidate.evidence_ranges
+        if evidence.evidence_id in set(item.evidence_ids)
+    }
+    return all(
+        any(
+            actual.start_line <= expected.start_line
+            and actual.end_line >= expected.end_line
+            for actual in material.ranges
+        )
+        for expected in expected_ranges.values()
+    )
 
 
 def _planned_materializations(

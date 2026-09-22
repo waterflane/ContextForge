@@ -83,6 +83,8 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert first.coverage_ledger is not None
     assert first.coverage_ledger.stage == "materialization"
     assert first.coverage_ledger.ranges
+    assert first.compilation_sufficiency is not None
+    assert first.compilation_sufficiency.effective_status == "insufficient"
     assert first.capsule.task_context[0].representation == RepresentationMode.FULL
     assert "&lt;greet&gt;" in first.prompt
     assert "&lt;hello&gt;" in first.prompt
@@ -224,6 +226,12 @@ def test_compiler_replaces_entire_stale_plan_with_deterministic_selection(
     assert all(
         "Use a missing file" not in value for value in compiled.capsule.interpretations
     )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.replacement_used is True
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "planned_item_unmaterialized" in compiled.compilation_sufficiency.reason_codes
+    )
 
 
 def test_compiler_replaces_empty_plan_when_retrieval_has_candidates(
@@ -296,6 +304,96 @@ def test_planned_full_large_file_downgrades_to_selected_slice(tmp_path: Path) ->
     assert material.representation == RepresentationMode.SLICE
     assert material.evidence_ids == (evidence_id,)
     assert material.token_count < candidate.estimated_cost.full
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "planned_range_unmaterialized" in compiled.compilation_sufficiency.reason_codes
+    )
+
+
+def test_sufficient_planup_agenda_plan_cannot_survive_empty_task_context(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "agenda.py", "def build_agenda() -> list[str]:\n    return []\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "review agenda implementation")
+    candidate = retrieval.candidates[0]
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review agenda implementation",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(900),
+        working_files=("agenda.py",),
+    )
+
+    assert compiled.capsule.task_context == ()
+    assert compiled.token_count <= 900
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.declared_status == "sufficient"
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert "empty_task_context" in compiled.compilation_sufficiency.reason_codes
+
+
+def test_startup_one_of_four_cannot_be_effectively_sufficient(tmp_path: Path) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    _write(tmp_path, "config/settings.toml", "enabled = true\n")
+    _write(tmp_path, "docs/api.md", "# API\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(
+        tmp_path,
+        report,
+        "review startup implementation tests configuration documentation API",
+    )
+    candidate = next(item for item in retrieval.candidates if item.path == "main.py")
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review startup implementation tests configuration documentation API",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
+    )
+
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert set(compiled.compilation_sufficiency.missing_mandatory_role_ids) >= {
+        "test",
+        "configuration",
+        "documentation",
+    }
 
 
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(
