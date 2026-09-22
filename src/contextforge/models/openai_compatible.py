@@ -7,9 +7,11 @@ import json
 import re
 import ssl
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -44,6 +46,89 @@ DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:1234/v1"
 OPENAI_COMPATIBLE_PROVIDER_ID = "openai-compatible"
 MAX_HTTP_HEADER_BYTES = 64 * 1024
 MAX_ERROR_TEXT_CHARACTERS = 2_000
+OPENAI_COMPATIBLE_ADAPTER_VERSION = "2"
+CAPABILITY_CACHE_MAX_ENTRIES = 128
+CAPABILITY_CACHE_TTL_SECONDS = 15 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredCapability:
+    """Only safe, endpoint-scoped structured-output observations."""
+
+    json_schema: str
+    json_object: str
+    plain_json: str
+    observed_at: float
+
+
+# This deliberately contains no provider responses, credentials, or request data.
+# It is process-local: a fresh process always probes again after one bounded failure.
+_STRUCTURED_CAPABILITY_CACHE: OrderedDict[
+    tuple[str, str, str, str], _StructuredCapability
+] = OrderedDict()
+_STRUCTURED_CAPABILITY_CACHE_LOCK = Lock()
+
+
+def _capability_cache_key(
+    configuration: ProviderConfiguration,
+) -> tuple[str, str, str, str]:
+    """Return a credential-free identity stable across provider instances."""
+
+    # A base URL query can carry deployment-specific credentials under arbitrary
+    # names. It is irrelevant to endpoint identity, so retain only the sanitized
+    # origin and path.
+    endpoint_identity = sanitize_url(configuration.endpoint).split("?", 1)[0]
+    return (
+        endpoint_identity,
+        configuration.provider_id,
+        configuration.model_id,
+        OPENAI_COMPATIBLE_ADAPTER_VERSION,
+    )
+
+
+def _load_structured_capability(
+    configuration: ProviderConfiguration,
+) -> _StructuredCapability | None:
+    key = _capability_cache_key(configuration)
+    now = time.monotonic()
+    with _STRUCTURED_CAPABILITY_CACHE_LOCK:
+        value = _STRUCTURED_CAPABILITY_CACHE.get(key)
+        if value is None:
+            return None
+        if now - value.observed_at > CAPABILITY_CACHE_TTL_SECONDS:
+            del _STRUCTURED_CAPABILITY_CACHE[key]
+            return None
+        _STRUCTURED_CAPABILITY_CACHE.move_to_end(key)
+        return value
+
+
+def _store_structured_capability(
+    configuration: ProviderConfiguration,
+    *,
+    json_schema: str,
+    json_object: str,
+    plain_json: str = "supported",
+) -> None:
+    """Remember only definitive mode support, with bounded LRU retention."""
+
+    key = _capability_cache_key(configuration)
+    with _STRUCTURED_CAPABILITY_CACHE_LOCK:
+        _STRUCTURED_CAPABILITY_CACHE[key] = _StructuredCapability(
+            json_schema=json_schema,
+            json_object=json_object,
+            plain_json=plain_json,
+            observed_at=time.monotonic(),
+        )
+        _STRUCTURED_CAPABILITY_CACHE.move_to_end(key)
+        while len(_STRUCTURED_CAPABILITY_CACHE) > CAPABILITY_CACHE_MAX_ENTRIES:
+            _STRUCTURED_CAPABILITY_CACHE.popitem(last=False)
+
+
+def _clear_structured_capability_cache() -> None:
+    """Clear process-local observations; retained for deterministic tests only."""
+
+    with _STRUCTURED_CAPABILITY_CACHE_LOCK:
+        _STRUCTURED_CAPABILITY_CACHE.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +193,9 @@ class OpenAICompatibleModelProvider:
         self._closed = False
         self._schema_support: str = "unknown"
         self._json_object_support: str = "unknown"
+        self._capability_cache_observed = False
         self._structured_mode_lock = asyncio.Lock()
+        self._refresh_structured_capability()
 
     @property
     def provider_id(self) -> str:
@@ -219,6 +306,10 @@ class OpenAICompatibleModelProvider:
         credential: SecretStr | None,
         verification_calls: int,
     ) -> ProviderTransportResponse:
+        # A sibling provider may have observed an incompatibility since this
+        # instance was constructed. Refreshing is local-only and never consumes a
+        # provider call.
+        self._refresh_structured_capability()
         if request.schema_mode == "json_object":
             response = await self._complete_json_object_or_plain(request, credential)
             return _with_provider_http_calls(
@@ -254,6 +345,7 @@ class OpenAICompatibleModelProvider:
         except StructuredOutputSchemaUnsupportedError as exc:
             async with self._structured_mode_lock:
                 self._schema_support = "unsupported"
+                self._store_structured_capability()
             self._emit_mode_rejection(request, exc, fallback="plain_json")
             try:
                 response = await self._complete_in_mode(
@@ -272,6 +364,7 @@ class OpenAICompatibleModelProvider:
             )
         async with self._structured_mode_lock:
             self._schema_support = "supported"
+            self._store_structured_capability()
         return _with_provider_http_calls(
             response,
             verification_calls,
@@ -292,6 +385,7 @@ class OpenAICompatibleModelProvider:
         except StructuredOutputJsonObjectUnsupportedError as exc:
             async with self._structured_mode_lock:
                 self._json_object_support = "unsupported"
+                self._store_structured_capability()
             self._emit_mode_rejection(request, exc, fallback="plain_json")
             try:
                 response = await self._complete_in_mode(
@@ -313,7 +407,30 @@ class OpenAICompatibleModelProvider:
             )
         async with self._structured_mode_lock:
             self._json_object_support = "supported"
+            self._store_structured_capability()
         return response
+
+    def _refresh_structured_capability(self) -> None:
+        """Load a live bounded cache entry without treating failures as support."""
+
+        cached = _load_structured_capability(self.configuration)
+        if cached is None:
+            if self._capability_cache_observed:
+                self._schema_support = "unknown"
+                self._json_object_support = "unknown"
+                self._capability_cache_observed = False
+            return
+        self._schema_support = cached.json_schema
+        self._json_object_support = cached.json_object
+        self._capability_cache_observed = True
+
+    def _store_structured_capability(self) -> None:
+        _store_structured_capability(
+            self.configuration,
+            json_schema=self._schema_support,
+            json_object=self._json_object_support,
+        )
+        self._capability_cache_observed = True
 
     def _emit_mode_rejection(
         self,

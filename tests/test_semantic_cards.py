@@ -97,6 +97,37 @@ def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     assert provider.call_count == 1
 
 
+def test_semantic_scheduler_records_selection_reason_and_retrieval_value(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+
+    assert report.semantic is not None
+    outcomes = report.semantic.model_file_outcomes  # type: ignore[union-attr]
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert outcome.path == "main.py"
+    assert "entrypoint" in outcome.selection_reasons
+    assert outcome.grounded_terms_added > 0
+    assert outcome.retrieval_value == (
+        outcome.grounded_terms_added + outcome.grounded_relationships_added
+    )
+    assert outcome.status == "complete"
+    card = load_semantic_card(tmp_path, "main.py", manifest=report.manifest)
+    assert any(item.code == "semantic_scheduler_value" for item in card.diagnostics)
+
+
 def test_repository_maps_project_grounded_claims_and_enriched_graph(
     tmp_path: Path,
 ) -> None:

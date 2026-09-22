@@ -353,6 +353,18 @@ class SemanticCardOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticModelFileOutcome:
+    """Why a file used model budget and the grounded retrieval value it produced."""
+
+    path: str
+    selection_reasons: tuple[str, ...]
+    grounded_terms_added: int
+    grounded_relationships_added: int
+    retrieval_value: int
+    status: Literal["complete", "partial", "fallback"]
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticCardBuildResult:
     manifest: IndexManifest
     cards: tuple[SemanticCard, ...]
@@ -362,6 +374,7 @@ class SemanticCardBuildResult:
     cache_hits: int
     failed_paths: tuple[str, ...]
     reused_card_paths: tuple[str, ...] = ()
+    model_file_outcomes: tuple[SemanticModelFileOutcome, ...] = ()
 
     @property
     def analyzed_paths(self) -> tuple[str, ...]:
@@ -419,6 +432,7 @@ async def build_semantic_card_index(
             cache_hits=0,
             failed_paths=(),
             reused_card_paths=tuple(card.path for card in reusable),
+            model_file_outcomes=(),
         )
     _copy_structural_generation(lock, structural)
     previous_cards = _previous_reusable_cards(
@@ -436,6 +450,7 @@ async def build_semantic_card_index(
     estimated_tokens = 0
     failed: list[str] = []
     reused_card_paths: list[str] = []
+    model_file_outcomes: list[SemanticModelFileOutcome] = []
     analyzers: set[AnalyzerIdentity] = {DETERMINISTIC_CARD_ANALYZER}
 
     for path in sorted(maps):
@@ -468,6 +483,7 @@ async def build_semantic_card_index(
             and path in selected
             and request_count < active_options.max_requests
         )
+        model_selected = should_model
         relationship_candidates: tuple[_RelationshipCandidate, ...] = ()
         previous_card = previous_cards.get(path)
         if previous_card is not None:
@@ -616,6 +632,71 @@ async def build_semantic_card_index(
                 ),
             )
 
+        if model_selected:
+            selection_reasons = _model_selection_reasons(
+                path,
+                code_map,
+                graph,
+                changed_paths=changed_paths,
+            )
+            grounded_terms, grounded_relationships = _grounded_retrieval_value(card)
+            retrieval_value = grounded_terms + grounded_relationships
+            if retrieval_value == 0 and card.quality != "deterministic":
+                card = card.model_copy(
+                    update={
+                        "quality": "partial",
+                        "diagnostics": tuple(
+                            (
+                                *card.diagnostics,
+                                SemanticCardDiagnostic(
+                                    code="semantic_retrieval_value_empty",
+                                    message=(
+                                        "Model card added no grounded retrieval terms "
+                                        "or relationships."
+                                    ),
+                                ),
+                            )
+                        ),
+                    }
+                )
+            card = card.model_copy(
+                update={
+                    "diagnostics": tuple(
+                        (
+                            *card.diagnostics,
+                            SemanticCardDiagnostic(
+                                code="semantic_scheduler_value",
+                                message=(
+                                    "Selected for "
+                                    + ", ".join(selection_reasons)
+                                    + "; added "
+                                    + str(grounded_terms)
+                                    + " grounded retrieval terms and "
+                                    + str(grounded_relationships)
+                                    + " grounded relationships."
+                                ),
+                            ),
+                        )
+                    )
+                }
+            )
+            model_file_outcomes.append(
+                SemanticModelFileOutcome(
+                    path=path,
+                    selection_reasons=selection_reasons,
+                    grounded_terms_added=grounded_terms,
+                    grounded_relationships_added=grounded_relationships,
+                    retrieval_value=retrieval_value,
+                    status=(
+                        "fallback"
+                        if card.provenance.method != "model"
+                        else "partial"
+                        if card.quality == "partial"
+                        else "complete"
+                    ),
+                )
+            )
+
         content = canonical_json_bytes(card.model_dump(mode="json"))
         location = _card_location(path)
         digest = write_index_record(lock, location, content)
@@ -715,6 +796,7 @@ async def build_semantic_card_index(
             cache_hits=cache_hits,
             failed_paths=tuple(sorted(failed)),
             reused_card_paths=tuple(sorted(reused_card_paths)),
+            model_file_outcomes=tuple(model_file_outcomes),
         )
     build = IndexBuildState(
         source_snapshot_digest=structural.build.source_snapshot_digest,
@@ -743,6 +825,7 @@ async def build_semantic_card_index(
         cache_hits=cache_hits,
         failed_paths=tuple(sorted(failed)),
         reused_card_paths=tuple(sorted(reused_card_paths)),
+        model_file_outcomes=tuple(model_file_outcomes),
     )
 
 
@@ -1931,6 +2014,44 @@ def _priority_score(code_map: FileCodeMap) -> int:
     return score
 
 
+def _model_selection_reasons(
+    path: str,
+    code_map: FileCodeMap,
+    graph: RelationshipGraph,
+    *,
+    changed_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Explain deterministic scheduler admission without source content."""
+
+    reasons: list[str] = []
+    if path in set(changed_paths):
+        reasons.append("changed_path")
+    if _is_entrypoint(path):
+        reasons.append("entrypoint")
+    if _has_public_api(code_map):
+        reasons.append("public_api")
+    if _profile_for_path(path) in {"documentation", "config", "test"}:
+        reasons.append("supporting_profile")
+    metrics = {item.path: item for item in graph.file_metrics}
+    metric = metrics.get(path)
+    if metric is not None and metric.normalized_centrality > 0:
+        reasons.append("structural_centrality")
+    if not reasons:
+        reasons.append("priority_score")
+    return tuple(reasons)
+
+
+def _grounded_retrieval_value(card: SemanticCard) -> tuple[int, int]:
+    """Count only grounded semantic terms and closed inferred relationships."""
+
+    terms = {
+        value
+        for value in re.findall(r"[^\W_]+", card.ranking_text().casefold(), re.UNICODE)
+        if value
+    }
+    return len(terms), len(card.inferred_relationships)
+
+
 def _has_public_api(code_map: FileCodeMap) -> bool:
     return bool(code_map.exports) or any(
         symbol.parent_symbol_id is None
@@ -2191,6 +2312,7 @@ __all__ = [
     "SemanticCard",
     "SemanticCardBuildResult",
     "SemanticCardDiagnostic",
+    "SemanticModelFileOutcome",
     "SemanticCardOptions",
     "SemanticCardProvenance",
     "SemanticEvidence",

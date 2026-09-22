@@ -544,6 +544,18 @@ class BenchmarkFailure(BenchmarkModel):
     message: str = Field(min_length=1, max_length=2_000)
 
 
+class BenchmarkSemanticRetrievalComparison(BenchmarkModel):
+    """Deterministic retrieval-only comparison for one enrichment run."""
+
+    with_cards_paths: tuple[RepositoryRelativePath, ...] = ()
+    without_cards_paths: tuple[RepositoryRelativePath, ...] = ()
+    added_candidate_paths: tuple[RepositoryRelativePath, ...] = ()
+    removed_candidate_paths: tuple[RepositoryRelativePath, ...] = ()
+    grounded_terms_added: NonNegativeInt = 0
+    grounded_relationships_added: NonNegativeInt = 0
+    status: Literal["complete", "partial"] = "partial"
+
+
 class BenchmarkRunResult(BenchmarkModel):
     """Canonical result for one task, mode, and repetition."""
 
@@ -582,6 +594,7 @@ class BenchmarkRunResult(BenchmarkModel):
     index_output_tokens: NonNegativeInt = 0
     planning_input_tokens: NonNegativeInt = 0
     planning_output_tokens: NonNegativeInt = 0
+    semantic_retrieval_comparison: BenchmarkSemanticRetrievalComparison | None = None
     paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation

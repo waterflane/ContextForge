@@ -69,6 +69,14 @@ def render_benchmark_text(result: BenchmarkResult) -> str:
                 f"Benchmark expectations: {_expectation_outcome(run)}; "
                 f"Discovery confidence: {_rate(run.confidence)}; selected: {selected}"
             )
+            if comparison := run.semantic_retrieval_comparison:
+                lines.append(
+                    "      semantic retrieval: "
+                    f"{comparison.status}; +{comparison.grounded_terms_added} terms, "
+                    f"+{comparison.grounded_relationships_added} relationships; "
+                    f"candidate delta +{len(comparison.added_candidate_paths)}/"
+                    f"-{len(comparison.removed_candidate_paths)}"
+                )
     lines.extend(("Overall quality:", *_quality_lines(result.metrics, "  ")))
     lines.extend(("Repeatability:", *_repeatability_lines(result.metrics, "  ")))
     lines.extend(("Performance:", *_performance_lines(result.metrics, "  ")))
@@ -124,6 +132,30 @@ def render_benchmark_markdown(result: BenchmarkResult) -> str:
         f"{run.status} | {_expectation_outcome(run)} | {_rate(run.confidence)} |"
         for run in result.runs
     )
+    comparisons = tuple(
+        run for run in result.runs if run.semantic_retrieval_comparison is not None
+    )
+    if comparisons:
+        lines.extend(
+            (
+                "",
+                "### Semantic retrieval comparison",
+                "",
+                "| Task | Mode | Status | Grounded terms | Relationships | "
+                "Candidate delta |",
+                "|---|---|---|---:|---:|---:|",
+            )
+        )
+        for run in comparisons:
+            comparison = run.semantic_retrieval_comparison
+            assert comparison is not None
+            lines.append(
+                f"| `{run.task_id}` | {run.mode.value} | {comparison.status} | "
+                f"{comparison.grounded_terms_added} | "
+                f"{comparison.grounded_relationships_added} | "
+                f"+{len(comparison.added_candidate_paths)}/"
+                f"-{len(comparison.removed_candidate_paths)} |"
+            )
     lines.extend(("", "## Overall quality", ""))
     lines.extend(f"- {line.strip()}" for line in _quality_lines(result.metrics, ""))
     lines.extend(("", "## Repeatability", ""))

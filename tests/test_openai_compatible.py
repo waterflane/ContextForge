@@ -44,6 +44,13 @@ from contextforge.project_config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_structured_capability_cache() -> None:
+    openai_module._clear_structured_capability_cache()
+    yield
+    openai_module._clear_structured_capability_cache()
+
+
 class _Answer(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -605,6 +612,8 @@ def test_structured_output_rejection_falls_back_once_and_caches_capability() -> 
     provider_call_counts: list[int] = []
     diagnostics = []
 
+    openai_module._clear_structured_capability_cache()
+
     async def transport(
         method: str,
         url: str,
@@ -647,6 +656,87 @@ def test_structured_output_rejection_falls_back_once_and_caches_capability() -> 
     assert diagnostics[1].provider_discovery_calls == 0
     assert diagnostics[1].transport_attempts == 1
     assert diagnostics[1].total_provider_http_calls == 1
+
+
+def test_schema_rejection_is_shared_by_new_provider_instances_until_ttl() -> None:
+    response_modes: list[str] = []
+    openai_module._clear_structured_capability_cache()
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        mode = json.loads(body).get("response_format", {}).get("type", "plain_json")
+        response_modes.append(mode)
+        if mode == "json_schema":
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"json_schema grammar is unsupported"}}',
+            )
+        return _completion()
+
+    async def exercise() -> None:
+        first = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        second = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        await first.complete_structured(_request())
+        await second.complete_structured(_request())
+
+    asyncio.run(exercise())
+    assert response_modes == ["json_schema", "plain_json", "plain_json"]
+
+
+def test_transient_failure_does_not_cache_structured_mode_as_unsupported() -> None:
+    response_modes: list[str] = []
+    openai_module._clear_structured_capability_cache()
+
+    async def unavailable_transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, body, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        return OpenAICompatibleHTTPResponse(503, b'{"error":{"message":"busy"}}')
+
+    async def supported_transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        response_modes.append(
+            json.loads(body).get("response_format", {}).get("type", "plain_json")
+        )
+        return _completion()
+
+    async def exercise() -> None:
+        unavailable = OpenAICompatibleModelProvider(
+            _configuration(), transport=unavailable_transport
+        )
+        with pytest.raises(ProviderUnavailableError):
+            await unavailable.complete_structured(_request())
+        supported = OpenAICompatibleModelProvider(
+            _configuration(), transport=supported_transport
+        )
+        await supported.complete_structured(_request())
+
+    asyncio.run(exercise())
+    assert response_modes == ["json_schema"]
 
 
 def test_unsupported_explicit_json_object_continues_plain_without_repair_count() -> (

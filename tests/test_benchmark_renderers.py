@@ -13,6 +13,7 @@ from contextforge.benchmarks import (
     BenchmarkProviderCounters,
     BenchmarkResult,
     BenchmarkRunResult,
+    BenchmarkSemanticRetrievalComparison,
     calculate_benchmark_metrics,
 )
 from contextforge.benchmarks.renderers import (
@@ -135,6 +136,27 @@ def test_successful_expectations_are_separate_from_discovery_confidence(
     report = renderer(_result(_run()))
 
     assert expected in report
+
+
+def test_semantic_retrieval_comparison_is_visible_in_human_reports() -> None:
+    run = _run().model_copy(
+        update={
+            "semantic_retrieval_comparison": BenchmarkSemanticRetrievalComparison(
+                with_cards_paths=("main.py", "handler.py"),
+                without_cards_paths=("main.py",),
+                added_candidate_paths=("handler.py",),
+                grounded_terms_added=4,
+                grounded_relationships_added=1,
+                status="complete",
+            )
+        }
+    )
+    result = _result(run)
+
+    assert "semantic retrieval: complete; +4 terms, +1 relationships" in (
+        render_benchmark_text(result)
+    )
+    assert "### Semantic retrieval comparison" in render_benchmark_markdown(result)
 
 
 @pytest.mark.parametrize("renderer", (render_benchmark_text, render_benchmark_markdown))

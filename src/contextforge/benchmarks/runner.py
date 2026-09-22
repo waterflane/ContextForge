@@ -39,6 +39,7 @@ from contextforge.benchmarks.models import (
     BenchmarkRangeCoverage,
     BenchmarkResult,
     BenchmarkRunResult,
+    BenchmarkSemanticRetrievalComparison,
     BenchmarkSourceRange,
     BenchmarkTask,
 )
@@ -341,6 +342,7 @@ async def _run_index_v3_once(
     planning_input_tokens = 0
     planning_output_tokens = 0
     paired_answer: BenchmarkPairedAnswerEvaluation | None = None
+    semantic_retrieval_comparison: BenchmarkSemanticRetrievalComparison | None = None
     try:
         request = build_discovery_request(
             task=task.task,
@@ -356,6 +358,8 @@ async def _run_index_v3_once(
             counting_provider = _CountingModelProvider(provider)
             semantic_requests = 0
             semantic_repairs = 0
+            semantic_outcomes: tuple[object, ...] = ()
+            structural_manifest: IndexManifest | None = None
             diff_paths: tuple[str, ...] = ()
             if mode is BenchmarkMode.FRESH:
                 report = await build_repository_index(
@@ -365,9 +369,13 @@ async def _run_index_v3_once(
                     progress=progress,
                 )
                 manifest = report.manifest
+                structural_manifest = report.structural.manifest
                 if report.semantic is not None:
                     semantic_requests, semantic_repairs = _semantic_request_counts(
                         report.semantic
+                    )
+                    semantic_outcomes = tuple(
+                        getattr(report.semantic, "model_file_outcomes", ())
                     )
             elif mode is BenchmarkMode.HYBRID:
                 diff_paths = (_controlled_change_path(prepared, task, mode),)
@@ -379,9 +387,13 @@ async def _run_index_v3_once(
                     progress=progress,
                 )
                 manifest = report.manifest
+                structural_manifest = report.structural.manifest
                 if report.semantic is not None:
                     semantic_requests, semantic_repairs = _semantic_request_counts(
                         report.semantic
+                    )
+                    semantic_outcomes = tuple(
+                        getattr(report.semantic, "model_file_outcomes", ())
                     )
             else:
                 manifest = load_manifest(prepared)
@@ -395,6 +407,14 @@ async def _run_index_v3_once(
                 provider=counting_provider,
                 planning_mode=ContextPlanningMode.AUTO,
             )
+            if structural_manifest is not None and semantic_outcomes:
+                semantic_retrieval_comparison = await _compare_semantic_retrieval(
+                    prepared,
+                    task.task,
+                    with_cards_manifest=manifest,
+                    without_cards_manifest=structural_manifest,
+                    outcomes=semantic_outcomes,
+                )
             planning_input_tokens = max(
                 counting_provider.input_tokens - index_input_tokens, 0
             )
@@ -544,6 +564,7 @@ async def _run_index_v3_once(
         index_output_tokens=index_output_tokens,
         planning_input_tokens=planning_input_tokens,
         planning_output_tokens=planning_output_tokens,
+        semantic_retrieval_comparison=semantic_retrieval_comparison,
         paired_answer=paired_answer,
         latency_kind=_latency_kind(mode),
         expectations=expectations,
@@ -840,6 +861,56 @@ def _semantic_request_counts(value: object) -> tuple[int, int]:
     return (
         requests if type(requests) is int and requests >= 0 else 0,
         repairs if type(repairs) is int and repairs >= 0 else 0,
+    )
+
+
+async def _compare_semantic_retrieval(
+    repository: Path,
+    task: str,
+    *,
+    with_cards_manifest: IndexManifest,
+    without_cards_manifest: IndexManifest,
+    outcomes: tuple[object, ...],
+) -> BenchmarkSemanticRetrievalComparison:
+    """Compare persisted rankings only; do not spend planner/model budget twice."""
+
+    with_cards = await retrieve_context_candidates(
+        repository,
+        task,
+        manifest=with_cards_manifest,
+        planning_mode=ContextPlanningMode.OFF,
+    )
+    without_cards = await retrieve_context_candidates(
+        repository,
+        task,
+        manifest=without_cards_manifest,
+        planning_mode=ContextPlanningMode.OFF,
+    )
+    with_paths = tuple(item.path for item in with_cards.candidates)
+    without_paths = tuple(item.path for item in without_cards.candidates)
+    without_set = set(without_paths)
+    with_set = set(with_paths)
+    grounded_terms = sum(
+        int(getattr(item, "grounded_terms_added", 0)) for item in outcomes
+    )
+    grounded_relationships = sum(
+        int(getattr(item, "grounded_relationships_added", 0)) for item in outcomes
+    )
+    partial = grounded_terms + grounded_relationships == 0 or any(
+        getattr(item, "status", "partial") != "complete" for item in outcomes
+    )
+    return BenchmarkSemanticRetrievalComparison(
+        with_cards_paths=with_paths,
+        without_cards_paths=without_paths,
+        added_candidate_paths=tuple(
+            path for path in with_paths if path not in without_set
+        ),
+        removed_candidate_paths=tuple(
+            path for path in without_paths if path not in with_set
+        ),
+        grounded_terms_added=grounded_terms,
+        grounded_relationships_added=grounded_relationships,
+        status="partial" if partial else "complete",
     )
 
 
