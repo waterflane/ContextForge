@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contextforge.dev/schemas/contextforge-bridge-v2.2.schema.json",
   "title": "ContextForge trusted-local bridge protocol v2.2",
-  "description": "Bridge 2.0 plus Index v3 controls and generation-pinned map, search, symbol, and compile operations.",
+  "description": "Bridge 2.0 plus Index v3 controls and generation-pinned map, search, symbol, and compile operations. Additive coverage diagnostics report materialized effective sufficiency; they do not change Bridge 1.0/1.1/2.0/2.1 contracts.",
   "oneOf": [
     { "$ref": "contextforge-bridge-v2.schema.json" },
     { "$ref": "#/$defs/helloRequest" },
@@ -269,8 +269,8 @@
             "prompt": { "type": "string" },
             "token_count": { "type": "integer", "minimum": 0 },
             "estimator_id": { "type": "string", "minLength": 1 },
-            "coverage_ledger": { "type": ["object", "null"] },
-            "compilation_sufficiency": { "type": ["object", "null"] },
+            "coverage_ledger": { "description": "ID-only evidence role coverage, never model-created source facts.", "type": ["object", "null"] },
+            "compilation_sufficiency": { "description": "Post-materialization declared/effective status and bounded reason codes.", "type": ["object", "null"] },
             "evidence_diagnostics": { "$ref": "evidence-coverage-diagnostics-v1.schema.json" }
           }
         }

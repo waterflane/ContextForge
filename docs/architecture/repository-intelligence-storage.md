@@ -23,6 +23,14 @@ and publication failures still abort. Old analyzer records are not reused on
 rebuild; old generations remain readable and publication remains atomic. A
 no-op update does not publish a replacement generation.
 
+CLI `--force-reanalyze` is semantic-only: it bypasses semantic-card/cache reuse
+without requesting structural extraction. CodeMaps retain their source/analyzer
+identity and can be reused when the snapshot is unchanged. The internal
+`force_structural_reanalyze` flag is deliberately separate and is not a normal
+semantic control. A semantic-force run publishes an enriched generation only if
+cards or retrieval maps changed; structural-first publication and writer-lock
+lifetime are unchanged.
+
 `parsed` means syntactically parsed, not exhaustive coverage of a language.
 Recognized declarations without a supported name produce a partial diagnostic.
 Exact relative paths and unambiguous snapshot targets produce verified static
@@ -68,7 +76,7 @@ The layout follows the approved immutable-generation design:
       graph/metrics-*.jsonl            # deterministic file metrics
       graph/file-projection-*.jsonl    # compact retrieval/compiler projection
       retrieval-structural.json        # structural shard manifest
-      retrieval-semantic.json          # enriched shard manifest
+      retrieval-semantic.json          # digest-bound semantic overlay manifest
       retrieval/*.jsonl                # exact/BM25/positional documents
       orientation.json                # full structural orientation map
       architecture.json               # deterministic enriched map
@@ -86,6 +94,15 @@ written. `load_relationship_graph()` reconstructs the public graph from shards,
 while retrieval and compilation load only the compact file-level projection.
 Every shard is capped at 4 MiB; the record-size guard applies to one record, not
 to the repository as a whole.
+
+The semantic retrieval manifest is an overlay with a digest-bound reference to
+the structural retrieval manifest. It stores only semantic fields and merges
+them at load time into the same public `RetrievalIndex` API, avoiding a second
+near-complete postings corpus. Repeated path, SHA, and evidence identities are
+dictionary-normalized at shard level without removing exact identifier
+postings. A loader validates both manifests and shard digests; corrupt or
+incompatible overlays produce `rebuild_required`. Immutable old generations
+are not removed automatically.
 
 `initialize_index()` writes the approved default `config.toml` only if it is
 missing. It never replaces an existing configuration. From that point the file

@@ -34,6 +34,16 @@ and Python distribution versions follow PEP 440.
   negotiation, and paired same-model answer regressions with an ordinary
   full-file baseline, range-validated citations, three-vote blinded
   groundedness judging, and phase-separated token accounting.
+- Added closed task-evidence roles and ID-only CoverageLedger diagnostics across
+  retrieval, planning, and materialization. Bridge 2.2, MCP, HTTP, and CLI
+  compilation results expose additive evidence-coverage diagnostics without
+  changing legacy Bridge or artifact contracts.
+- Added bounded multilingual planner query expansion from supplied repository
+  vocabulary, including expression/result-ID diagnostics, without domain
+  dictionaries or model-created source facts.
+- Added semantic-retrieval comparison reporting and per-file deterministic
+  scheduler/value diagnostics, separating grounded retrieval value from model
+  request cost.
 
 ### Changed
 
@@ -53,6 +63,9 @@ and Python distribution versions follow PEP 440.
 - Semantic enrichment now uses analyzer 7 / `semantic-card-v3.4`, declaration-
   aware one-to-four chunk planning, full-request/schema token accounting, one
   scheduler-owned repair authority, and lexical anchors for ranking prose.
+- Enriched retrieval generations now store a digest-bound semantic overlay over
+  structural postings, preserving the public RetrievalIndex API while avoiding
+  a second near-complete postings corpus.
 
 ### Fixed
 
@@ -111,6 +124,30 @@ and Python distribution versions follow PEP 440.
   operation timeout. Client timeout leaves the job tracked by `operation_id`
   with its writer lock held through completion/cleanup; explicit cancellation
   and shutdown still cancel it.
+- Resolved relative TypeScript emitted import suffixes only through the declared
+  `.js`/`.jsx`/`.mjs`/`.cjs` to source-suffix table. Exact files still win,
+  package imports remain external, and ambiguity remains unresolved with
+  best-effort structural provenance.
+- Replaced the isolated Python test-path policy with a declarative shared file
+  policy. Source-test edges now prefer resolved test imports, calls, and
+  references, carry provenance, and remain excluded from centrality.
+- Constrained entrypoint-handler edges to verified callback or direct bootstrap
+  shapes instead of promoting every entrypoint import/call.
+- Made every planner action demonstrate a measurable evidence-coverage gain;
+  no-gain actions cannot extend a bounded session.
+- Validated plan sufficiency after actual capsule materialization. Missing
+  planned items, evidence/ranges, mandatory role coverage, or task material now
+  downgrade effective sufficiency with bounded reason codes.
+- Made automatic capsule selection coverage-first and prevented upgrades from
+  displacing the final evidence for a required role. Added an automatic compact
+  profile for one short exact file only when it is cheaper than the ordinary
+  verified capsule.
+- Bound `--force-reanalyze` to semantic cache/card reuse. Structural reanalysis
+  has an explicit internal control, and a semantic-force no-op does not publish
+  an unchanged enriched generation.
+- Strengthened paired answer evaluation: assertion evidence support and
+  lexical/identifier support are distinct from citation containment, and the
+  blinded judge sees only answer assertions and cited material ranges.
 
 ## [0.5.1] - 2026-09-05
 

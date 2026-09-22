@@ -16,8 +16,8 @@
     "diagnostics": { "type": "array", "items": { "type": "string" } },
     "evidence_plan": { "oneOf": [{ "$ref": "#/$defs/evidence_plan" }, { "type": "null" }] },
     "planning_diagnostics": { "oneOf": [{ "$ref": "#/$defs/planning_diagnostics" }, { "type": "null" }] },
-    "coverage_ledger": { "oneOf": [{ "type": "object" }, { "type": "null" }] },
-    "coverage_history": { "type": "array", "items": { "type": "object" } },
+    "coverage_ledger": { "description": "Closed ID-only role, symbol, range, and graph-endpoint coverage; never planner prose.", "oneOf": [{ "$ref": "#/$defs/coverage_ledger" }, { "type": "null" }] },
+    "coverage_history": { "type": "array", "items": { "$ref": "#/$defs/coverage_ledger" } },
     "plan_requested": { "type": ["boolean", "null"] },
     "evidence_diagnostics": { "$ref": "evidence-coverage-diagnostics-v1.schema.json" }
   },
@@ -58,6 +58,7 @@
         "rounds": { "type": "integer", "minimum": 0 },
         "dropped_candidates": { "type": "integer", "minimum": 0 },
         "dropped_evidence_ids": { "type": "integer", "minimum": 0 },
+        "query_expansions": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/query_expansion" } },
         "messages": { "type": "array", "items": { "type": "string" } }
       }
     },
@@ -81,9 +82,69 @@
         "schema_version": { "const": 1 },
         "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
         "items": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/planned_evidence" } },
+        "role_bindings": { "type": "array", "items": { "$ref": "#/$defs/role_binding" } },
+        "coverage_ledger": { "oneOf": [{ "$ref": "#/$defs/coverage_ledger" }, { "type": "null" }] },
         "sufficiency": { "enum": ["sufficient", "insufficient"] },
         "interpretation": { "type": ["string", "null"], "maxLength": 2000 },
         "diagnostics": { "$ref": "#/$defs/planning_diagnostics" }
+      }
+    },
+    "query_expansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expression", "result_candidate_ids"],
+      "properties": {
+        "expression": { "description": "Untrusted repository-search expression, not a source claim.", "type": "string", "minLength": 1, "maxLength": 180 },
+        "result_candidate_ids": { "type": "array", "maxItems": 16, "items": { "type": "string" } }
+      }
+    },
+    "task_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_id", "kind"],
+      "properties": {
+        "role_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": { "enum": ["entrypoint", "implementation", "caller", "callee", "configuration", "test", "documentation", "public_api", "data_model", "unknown"] }
+      }
+    },
+    "role_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_id", "candidate_id", "evidence_ids", "source"],
+      "properties": {
+        "role_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "evidence_ids": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
+        "source": { "enum": ["deterministic", "planner"] }
+      }
+    },
+    "coverage_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "stage", "roles", "bindings", "covered_role_ids", "missing_role_ids", "unique_symbols", "concepts", "ranges", "covered_graph_endpoints", "missing_graph_endpoints"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "stage": { "enum": ["retrieval", "action", "plan", "materialization"] },
+        "roles": { "type": "array", "items": { "$ref": "#/$defs/task_role" } },
+        "bindings": { "type": "array", "items": { "$ref": "#/$defs/role_binding" } },
+        "covered_role_ids": { "type": "array", "items": { "type": "string" } },
+        "missing_role_ids": { "type": "array", "items": { "type": "string" } },
+        "unique_symbols": { "type": "array", "items": { "type": "string" } },
+        "concepts": { "type": "array", "items": { "type": "string" } },
+        "ranges": { "type": "array", "items": { "$ref": "#/$defs/evidence_range" } },
+        "covered_graph_endpoints": { "type": "array", "items": { "type": "string" } },
+        "missing_graph_endpoints": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "evidence_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "source_range", "evidence_id", "strength"],
+      "properties": {
+        "path": { "type": "string" },
+        "source_range": { "$ref": "#/$defs/range" },
+        "evidence_id": { "type": ["string", "null"] },
+        "strength": { "enum": ["verified", "grounded"] }
       }
     },
     "candidate": {

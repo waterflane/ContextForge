@@ -47,6 +47,9 @@ commands.
 - **Evidence-first retrieval.** Rank exact paths and symbols before persisted
   BM25, then add bounded graph, centrality, diff, and Working Set signals.
   Centrality can refine relevant evidence but cannot admit a file by itself.
+- **Coverage-aware compilation.** Track complementary task roles from candidate
+  selection through materialization. A capsule reports effective sufficiency
+  only after required evidence is actually present.
 - **Portable artifacts.** Export legacy ContextPackage v1/TaskHandoff artifacts
   or a token-budgeted Context Capsule v2 and stable XML prompt.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,
@@ -171,6 +174,31 @@ contextforge context create . --task "Trace configuration precedence" `
 - preserve a validated handoff that can be reviewed without the original
   checkout;
 - benchmark discovery quality and repeatability against versioned manifests.
+
+## Evidence quality and benchmark results
+
+Candidate recall measures whether required files appear in retrieval;
+materialized recall measures whether those files actually reach the Capsule a
+downstream model receives. A candidate later dropped for budget or
+representation reasons is not materialized evidence.
+
+Citation containment checks only that a citation is within supplied material.
+Semantic grounding is stricter: a blinded majority judge decides whether the
+material supports the assertion. Benchmark reports also record assertion-ID
+recall and lexical/identifier support; neither replaces grounding.
+
+Token savings are headline results only when the quality gate passes: required
+file recall is at least 0.90, required range recall at least 0.85, citation
+validity is 1.0, and answer quality is not below the oracle. A failed gate is
+reported as `quality_gate_failed`; its apparent savings are excluded from the
+headline average. The 30% automatic allocation is a soft compilation ceiling,
+not a promised saving.
+
+For one short exact file, the compiler can select a compact profile with a
+minimal snapshot envelope and verified usage information. It is used only when
+cheaper than the normal capsule while preserving verification rules. See the
+[Index v3 architecture](docs/architecture/index-v3-context-compiler.md) and
+[migration guide](docs/guides/index-v3-migration.md) for the full contracts.
 
 ## CLI overview
 

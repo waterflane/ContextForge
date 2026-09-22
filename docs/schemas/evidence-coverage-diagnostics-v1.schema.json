@@ -10,15 +10,15 @@
     "plan_requested": { "type": "boolean" },
     "plan_validated": { "type": "boolean" },
     "compiler_materialized": { "type": "boolean" },
-    "declared_sufficiency": { "enum": ["sufficient", "insufficient", null] },
-    "effective_sufficiency": { "enum": ["sufficient", "insufficient", null] },
+    "declared_sufficiency": { "description": "Planner status before materialization.", "enum": ["sufficient", "insufficient", null] },
+    "effective_sufficiency": { "description": "Verified compiler status after actual materialization; sufficient has no missing mandatory coverage.", "enum": ["sufficient", "insufficient", null] },
     "covered_role_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
     "missing_role_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
     "materialization_downgrade_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
     "materialization_drop_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
     "effective_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
     "planner_action_deltas": { "type": "array", "items": { "$ref": "#/$defs/action_delta" } },
-    "compact_profile": { "type": ["boolean", "null"] }
+    "compact_profile": { "description": "Whether the compiler used the one-short-file compact profile.", "type": ["boolean", "null"] }
   },
   "$defs": {
     "reason_code": { "enum": ["declared_insufficient", "empty_retrieval", "empty_task_context", "plan_replaced", "planned_item_unmaterialized", "planned_evidence_unmaterialized", "planned_range_unmaterialized", "budget_excluded_mandatory_item", "mandatory_role_missing", "planned_role_lost"] },

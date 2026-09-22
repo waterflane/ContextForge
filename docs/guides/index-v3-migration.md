@@ -21,14 +21,24 @@ enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
 Resolver/analyzer identities changed with this revision (fallback 4, resolver
-7, Python 5, polyglot 8, Semantic Card analyzer 7, prompt
+9, Python 6, polyglot 10, Semantic Card analyzer 7, prompt
 `semantic-card-v3.4`). Rebuild/update does not reuse older CodeMaps or semantic
 cache entries under those contracts. Polyglot analysis now includes Kotlin
 `.kt` and `.kts` declarations, imports, calls, and references.
 
+Relative TypeScript imports that intentionally use emitted `.js`, `.jsx`,
+`.mjs`, or `.cjs` suffixes can resolve to the corresponding source `.ts`,
+`.tsx`, `.mts`, or `.cts` through a closed substitution table. Exact source
+paths still win, ambiguity remains unresolved, package imports are external,
+and `tsconfig` aliases are not executed. Shared file policy now identifies
+polyglot tests and derives source-test links from resolved imports, calls, and
+references; those links do not affect centrality.
+
 A no-op update reuses unchanged records and keeps the active generation ID.
 Unchanged parse-error records are also reused as failed/partial evidence;
-`--force-reanalyze` explicitly retries their extraction. A corrupt active
+`--force-reanalyze` explicitly retries their extraction. For ordinary no-op
+source identity, this force applies to semantic analysis/cache reuse only and
+does not force CodeMap extraction. A corrupt active
 generation is reported as `corrupt` with `rebuild_required` rather than making
 `index status` crash. Recover it with `index build`; old immutable generations
 remain until explicit `index clean`.
@@ -69,19 +79,32 @@ contextforge context create PATH --task "..." \
 allows FULL for an explicitly pinned file; otherwise automatic FULL applies
 only to files of at most 200 lines and only when it fits.
 
-Automatic task evidence has a soft ceiling of 30% of the available budget and
+A 30% automatic task-evidence allocation is a soft ceiling, not a promised
+token saving. The compiler first preserves mandatory role and graph-endpoint
+coverage, then distinct concepts/ranges, then upgrades. Automatic task evidence
+has a soft ceiling of 30% of the available budget and
 stops when its Evidence Plan is covered; it is not padded to that size.
 Explicit Working Set material, requested ranges, pinned FULL files, and required
 Git material may exceed the soft ceiling but never the hard budget. Planner
 representation suggestions are advisory and cannot bypass those rules.
 
 Model-assisted planning may use up to three bounded `search`, `symbol`, `graph`,
-or `map` rounds before finalization. `--planning-rounds` may lower that ceiling.
+`map`, or multilingual `expand_query` rounds before finalization.
+`expand_query` can submit at most eight short expressions from supplied
+repository vocabulary; expressions are search interpretation, not source facts.
+`--planning-rounds` may lower that ceiling.
 The candidate pool and every returned ID remain ContextForge-controlled. In
 `auto`, one invalid or unmaterializable planned item causes the entire plan to
 fall back to deterministic complementary selection. In `required`, the same
 condition is a typed error. Bridge 2.1 continues to map its boolean `rerank`
 field to this behavior; Bridge 2.2 exposes `planning_mode` directly.
+
+The plan's `sufficiency` is declared before compilation. Read the additive
+`CompilationSufficiency.effective_status` and evidence-coverage diagnostics
+after materialization: a missing planned item, range, or mandatory role, and an
+empty task context, must yield `insufficient`. A one-short-file exact retrieval
+may use the additive Capsule v2 `compact_profile` only when it is cheaper than
+the ordinary envelope and retains verification rules.
 
 Package, Capsule, and prompt files created inside the repository are recorded
 in `.contextforge/generated-artifacts.json`. An unchanged registered artifact
@@ -101,6 +124,12 @@ MCP clients should refresh `tools/list` and accept the four new read-only tools.
 Development HTTP clients may use `/v1/map`, `/v1/search`, `/v1/symbol`, and
 `/v1/compile`. No new interface grants source-write, shell, or Git-mutation
 authority.
+
+Bridge 2.2 remains additive: it exposes planning controls plus coverage and
+effective-sufficiency diagnostics in compatible result fields. A DSH-specific
+integration is intentionally out of scope for this migration; track it as a
+separate future Bridge 2.2 migration task rather than changing DSH behavior
+here.
 
 Python callers can migrate incrementally:
 
@@ -138,3 +167,10 @@ For paired answer evaluation, complete required/working files form the ordinary
 token baseline; manual oracle ranges are only the quality reference. Three
 blinded groundedness votes validate ContextForge answers against materialized
 ranges, and phase-specific model tokens, HTTP calls, and latency stay separate.
+Candidate recall is retrieval-pool coverage; materialized recall is delivery to
+the answer model. Citation containment only validates citation location;
+assertion evidence support, lexical/identifier support, and blinded semantic
+grounding are separate measures. Report token savings in the headline only when
+the quality gate passes (file recall >=0.90, range recall >=0.85, citation
+validity 1.0, and quality not below oracle); otherwise retain
+`quality_gate_failed` and exclude savings.

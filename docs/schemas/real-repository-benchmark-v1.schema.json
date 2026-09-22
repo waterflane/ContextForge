@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contextforge.dev/schemas/real-repository-benchmark-v1.schema.json",
   "title": "ContextForge real-repository benchmark report v1",
+  "description": "Headline token savings exclude every run with quality_gate_failed; candidate recall is not materialized evidence coverage.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "suite_name", "runs", "aggregates", "passed"],
@@ -37,6 +38,9 @@
         "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
         "latency_ms": {"type": "integer", "minimum": 0}, "plan_sufficient": {"type": ["boolean", "null"]},
         "citation_validity": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "assertion_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "assertion_evidence_support": {"description": "Assertions with a citation and material evidence IDs, distinct from containment.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "lexical_identifier_support": {"description": "Assertions with lexical or identifier support in cited material, distinct from semantic grounding.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "groundedness_majority": {"type": ["boolean", "null"]}, "quality_not_lower_than_oracle": {"type": ["boolean", "null"]},
         "quality_gate_failed": {"type": "boolean"}
       }
@@ -55,7 +59,11 @@
         "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
         "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
         "mean_latency_ms": {"type": ["number", "null"], "minimum": 0}, "plan_sufficient_count": {"type": "integer", "minimum": 0}, "planned_task_count": {"type": "integer", "minimum": 0},
-        "citation_containment": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]}, "groundedness_majority_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "citation_containment": {"description": "Citation range is contained in supplied material; this is not semantic support.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "assertion_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "assertion_evidence_support": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "lexical_identifier_support": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "groundedness_majority_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "quality_gate_failed_count": {"type": "integer", "minimum": 0}, "headline_token_savings": {"type": "number"}
       }
     }

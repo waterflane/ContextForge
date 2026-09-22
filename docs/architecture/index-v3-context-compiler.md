@@ -56,7 +56,10 @@ The public graph loader still reconstructs the complete `RelationshipGraph`,
 while the warm query path reads only the compact file projection and retrieval
 documents. Grounded synopsis, concepts, and evidence are copied into the
 digest-bound retrieval generation, so a query does not reopen every CodeMap or
-Semantic Card.
+Semantic Card. An enriched generation stores semantic fields as an overlay of
+structural retrieval documents rather than duplicating structural postings. The
+overlay is bound to the structural manifest digest; a corrupt overlay produces
+`rebuild_required`, not a mixed index.
 
 ## Retrieval and evidence planning
 
@@ -84,24 +87,40 @@ MAP/SUMMARY/SLICE/FULL representations that can actually be materialized.
 Default discovery performs no provider call. `ContextPlanningMode` is `off`,
 `auto`, or `required`; the default project configuration is `auto`.
 
-The configured provider may use at most three rounds and four closed actions
-per round: `search(query)`, `symbol(identifier)`, `graph(candidate_id)`, and
-`map(module_id)`, followed by `finalize`. Each action can only expand the
+The configured provider may use at most three rounds and five closed actions
+per round: `search(query)`, `symbol(identifier)`, `graph(candidate_id)`,
+`map(module_id)`, and `expand_query(expressions)`, followed by `finalize`.
+`expand_query` accepts at most eight short expressions from compact repository
+vocabulary (modules, verified identifiers, grounded concepts, and task roles).
+Expressions are interpretation, not source facts: they are used only as
+exact/BM25/structural search input and their returned candidate IDs are
+recorded in bounded diagnostics. This supports multilingual task phrasing
+without a built-in domain dictionary or model-created path.
+
+Each action can only expand the
 verified pool; the model cannot create paths, symbols, ranges, evidence IDs, or
 source claims. The pool is capped at 64 candidates, each request at 8192 input
 and 768 output tokens, and the session at 24,576 input and 2304 output tokens.
 Unsupported `json_schema`, malformed JSON, and repair consume the same three
-HTTP-call ceiling. Capability caching avoids retrying a structured mode already
-known to be unsupported.
+HTTP-call ceiling. A bounded, credential-free process-local capability cache
+avoids retrying a structured mode already known to be unsupported. An action
+must add a role, identifier, evidence range, or graph endpoint; no-gain actions
+cannot expand the session.
 
 The prompt exposes source-spanning representative evidence first, then compact
 previews of remaining evidence, so one large declaration cannot hide later
 facts. A final plan may select at most 8 files and 8 evidence ranges per file.
 Every ID, source identity, relevance signal, representation, and range is
-validated locally. `auto` replaces any materially invalid or incompletely
-materializable plan as a whole with deterministic complementary selection;
-`required` raises a typed planning error. Diagnostics record actual rounds,
-HTTP calls, token counts, and fallback reason. Legacy `rerank=true/false`
+validated locally. Task roles are closed general evidence requirements:
+`entrypoint`, `implementation`, `caller`, `callee`, `configuration`, `test`,
+`documentation`, `public_api`, `data_model`, and `unknown`. They are inferred
+only from task syntax, exact identifiers, graph kinds, and file policy.
+`CoverageLedger` contains canonical IDs for covered/missing roles, bindings,
+symbols, concepts, ranges, and graph endpoints—never model prose. `auto`
+replaces any materially invalid or incompletely materializable plan as a whole
+with deterministic complementary selection; `required` raises a typed planning
+error. Diagnostics record actual rounds, HTTP calls, token counts, query
+expansions, action deltas, and fallback reason. Legacy `rerank=true/false`
 remains a compatibility alias.
 
 The normative wire schema is
@@ -124,10 +143,12 @@ and required Git material may take the capsule beyond that target, while the
 hard available-token budget remains absolute. Unused allocation still flows to
 evidence, then Working Set, then the repository map.
 For automatic compilation the 20/15/55/10 shares are calculated inside the
-soft payload after the capsule envelope. Relevant complementary MAPs are seeded
-before any representation upgrade. Upgrade utility is recomputed against the
-selected set so repeated concepts, ranges, and graph neighbors lose value; a
-single cheap FULL cannot replace several complementary MAPs.
+soft payload after the capsule envelope. The first pass assigns the least-cost
+MAP or SLICE that covers each mandatory role and graph endpoint; later passes
+cover distinct concepts/ranges, then upgrade material. Upgrade utility is
+recomputed against the ledger so repeated concepts, ranges, and graph neighbors
+lose value, and an upgrade cannot displace final coverage for a role. A single
+cheap FULL cannot replace several complementary MAPs.
 
 Representations are:
 
@@ -148,9 +169,18 @@ deterministic duplicate-role filter. An unavailable representation is downgraded
 only through `FULL → SLICE → MAP`; automatic FULL is never advertised for a
 file over 200 lines. If any planned item is stale, missing, over the soft
 ceiling after downgrade, or cannot be materialized, the complete model plan is
-discarded and deterministic complementary selection is used. A plan cannot
-remain `sufficient` after losing an item, and a non-empty retrieval result
-cannot silently compile to empty task material.
+discarded and deterministic complementary selection is used. After every
+materialization, `CompilationSufficiency` compares planned and actual items,
+evidence IDs, ranges, and role coverage. Its `effective_status` cannot be
+`sufficient` if material is absent, a mandatory role is lost, or task context
+is empty. This is distinct from the planner's declared status and carries only
+bounded reason codes; it does not silently mutate the retrieval result.
+
+For exactly one short exact file, an automatic compact profile can use a
+minimal snapshot envelope and concise verified usage section instead of normal
+orientation prose. It is chosen only when cheaper than the ordinary capsule and
+when every verification rule is preserved. The schema stays v2;
+`compact_profile` and evidence diagnostics are additive fields.
 
 The stable prompt root is `<contextforge schema_version="2">` with separate
 snapshot, verified repository map, Working Set, task context, and Git sections.
@@ -185,11 +215,22 @@ IDs and citations; citations must fit inside an actual materialized Capsule or
 oracle source range.
 
 Three blinded groundedness-judge calls compare the ContextForge answer only
-with its materialized source and use majority agreement. The report separates
+with cited material ranges and use majority agreement. Citation containment
+means a citation fits materialized evidence; it does not establish that an
+assertion follows. The benchmark separately records assertion-ID recall,
+assertion evidence support, lexical/identifier support, and semantic grounding.
+The report separates
 offline indexing, evidence planning, final-answer, and judge tokens, latency,
 logical generations, and HTTP calls. It records both conservative estimated
 input and provider-reported input instead of hiding provider truncation or
 repair traffic.
+
+Candidate required-file recall is retrieval-pool coverage; materialized
+required-file recall is the fraction actually delivered in the capsule. Token
+savings count in a headline aggregate only when required-file recall is at
+least 0.90, range recall at least 0.85, citation validity is 1.0, and answer
+quality is not below the oracle. Failed quality gates are reported explicitly
+and never turn missing evidence into a saving.
 
 ## Public surface
 
@@ -198,7 +239,9 @@ Python exports `load_relationship_graph()`, `load_orientation_map()`,
 public card/candidate/capsule/budget/estimator types. Bridge 2.1, MCP, and the
 development HTTP API expose read-only `map`, `search`, `symbol`, and `compile`
 operations. Bridge 2.2 adds explicit `planning_mode` and advertises the Evidence
-Plan schema; Bridge 2.1 keeps the unchanged `rerank` wire field. None can write
+Plan schema; Bridge 2.1 keeps the unchanged `rerank` wire field. Additive
+Bridge 2.2 results expose coverage diagnostics and compilation sufficiency.
+None can write
 source, invoke a shell, or mutate Git.
 `contextforge map --kind orientation|architecture|conventions|features|all`
 exposes the same pinned artifacts. Normative schemas are
