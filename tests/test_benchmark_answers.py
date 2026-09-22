@@ -6,12 +6,15 @@ import pytest
 
 from contextforge.application import build_repository_index
 from contextforge.benchmarks import (
+    BenchmarkAnswerCitation,
+    BenchmarkAnswerEvaluation,
     BenchmarkExpectedAssertion,
     BenchmarkSourceRange,
     render_oracle_context,
     render_ordinary_context,
     run_paired_answer_regression,
 )
+from contextforge.benchmarks.answers import _run_groundedness_judge
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
@@ -158,3 +161,74 @@ def test_ordinary_renderer_uses_complete_required_files(tmp_path: Path) -> None:
         BenchmarkSourceRange(path="service.py", start_line=1, end_line=3),
     )
     assert "first\nsecond\nthird" in rendered
+
+
+def test_dispose_body_is_required_for_blinded_groundedness(tmp_path: Path) -> None:
+    (tmp_path / "lifecycle.py").write_text(
+        "def dispose(resource):\n    resource.close()\n",
+        encoding="utf-8",
+        newline="",
+    )
+    assertion = BenchmarkExpectedAssertion(
+        assertion_id="dispose-closes-resource",
+        description="dispose closes the resource",
+    )
+    answer = BenchmarkAnswerEvaluation(
+        answer="dispose closes the resource.",
+        assertion_ids=(assertion.assertion_id,),
+        citations=(
+            BenchmarkAnswerCitation(
+                assertion_id=assertion.assertion_id,
+                path="lifecycle.py",
+                start_line=1,
+                end_line=1,
+            ),
+        ),
+        valid_citation_count=1,
+        assertion_recall=1.0,
+        citation_validity=1.0,
+    )
+
+    def respond(request: ModelRequest, _: int) -> str:
+        evidence = request.untrusted_sources[1].text
+        return json.dumps(
+            {"schema_version": 1, "grounded": "resource.close()" in evidence}
+        )
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="dispose-judge",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=respond,
+    )
+    header_only = asyncio.run(
+        _run_groundedness_judge(
+            provider,
+            (assertion,),
+            answer,
+            render_oracle_context(
+                tmp_path,
+                (BenchmarkSourceRange(path="lifecycle.py", start_line=1, end_line=1),),
+            ),
+        )
+    )
+    body_present = asyncio.run(
+        _run_groundedness_judge(
+            provider,
+            (assertion,),
+            answer,
+            render_oracle_context(
+                tmp_path,
+                (BenchmarkSourceRange(path="lifecycle.py", start_line=1, end_line=2),),
+            ),
+        )
+    )
+
+    assert header_only.votes == (False, False, False)
+    assert not header_only.passed
+    assert body_present.votes == (True, True, True)
+    assert body_present.passed

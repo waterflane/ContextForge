@@ -86,6 +86,18 @@ class BenchmarkSourceRange(BenchmarkModel):
         return self
 
 
+class BenchmarkAssertionSupport(BenchmarkModel):
+    """Expected source address and material evidence identity for one assertion."""
+
+    citation: BenchmarkSourceRange
+    material_evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("material_evidence_ids")
+    @classmethod
+    def validate_evidence_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_canonical(value, label="assertion evidence IDs")
+
+
 class BenchmarkExpectedAssertion(BenchmarkModel):
     """One answer fact whose support is compared across paired contexts."""
 
@@ -93,6 +105,7 @@ class BenchmarkExpectedAssertion(BenchmarkModel):
         min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
     )
     description: str = Field(min_length=1, max_length=2_000)
+    support: tuple[BenchmarkAssertionSupport, ...] = ()
 
     @field_validator("description")
     @classmethod
@@ -107,12 +120,18 @@ class BenchmarkAnswerCitation(BenchmarkModel):
     path: RepositoryRelativePath
     start_line: PositiveInt
     end_line: PositiveInt
+    material_evidence_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_order(self) -> BenchmarkAnswerCitation:
         if self.end_line < self.start_line:
             raise ValueError("citation end must not precede its start")
         return self
+
+    @field_validator("material_evidence_ids")
+    @classmethod
+    def validate_evidence_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_canonical(value, label="citation evidence IDs")
 
 
 class BenchmarkAnswerEvaluation(BenchmarkModel):
@@ -125,6 +144,8 @@ class BenchmarkAnswerEvaluation(BenchmarkModel):
     invalid_citation_count: NonNegativeInt = 0
     assertion_recall: Rate
     citation_validity: Rate
+    assertion_evidence_support: Rate = 0.0
+    lexical_identifier_support: Rate = 0.0
     input_tokens: NonNegativeInt = 0
     estimated_input_tokens: NonNegativeInt = 0
     provider_input_tokens: NonNegativeInt = 0

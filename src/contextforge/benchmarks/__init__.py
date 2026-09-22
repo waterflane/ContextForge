@@ -6,27 +6,12 @@ from contextforge.benchmarks.answers import (
     run_paired_answer_regression,
 )
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
-from contextforge.benchmarks.real_repositories import (
-    REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION,
-    RealBenchmarkMode,
-    RealBenchmarkObservation,
-    RealBenchmarkTask,
-    RealBenchmarkTaskKind,
-    RealBenchmarkTaskReport,
-    RealBenchmarkTaskRole,
-    RealRepositoryBenchmarkManifest,
-    RealRepositoryBenchmarkReport,
-    aggregate_real_repository_report,
-    evaluate_real_repository_observation,
-    load_real_repository_benchmark_manifest,
-    run_real_repository_benchmark,
-    temporary_read_only_clone,
-)
 from contextforge.benchmarks.models import (
     BENCHMARK_SCHEMA_VERSION,
     BenchmarkAnswerCitation,
     BenchmarkAnswerEvaluation,
     BenchmarkAnyFileExpectation,
+    BenchmarkAssertionSupport,
     BenchmarkBudgetEvaluation,
     BenchmarkCohortMetrics,
     BenchmarkConfidenceSummary,
@@ -54,6 +39,22 @@ from contextforge.benchmarks.models import (
     BenchmarkTask,
     load_benchmark_manifest,
 )
+from contextforge.benchmarks.real_repositories import (
+    REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION,
+    RealBenchmarkMode,
+    RealBenchmarkObservation,
+    RealBenchmarkTask,
+    RealBenchmarkTaskKind,
+    RealBenchmarkTaskReport,
+    RealBenchmarkTaskRole,
+    RealRepositoryBenchmarkManifest,
+    RealRepositoryBenchmarkReport,
+    aggregate_real_repository_report,
+    evaluate_real_repository_observation,
+    load_real_repository_benchmark_manifest,
+    run_real_repository_benchmark,
+    temporary_read_only_clone,
+)
 from contextforge.benchmarks.runner import run_discovery_benchmark
 
 __all__ = [
@@ -61,6 +62,7 @@ __all__ = [
     "BenchmarkAnyFileExpectation",
     "BenchmarkAnswerCitation",
     "BenchmarkAnswerEvaluation",
+    "BenchmarkAssertionSupport",
     "BenchmarkBudgetEvaluation",
     "BenchmarkCohortMetrics",
     "BenchmarkConfidenceSummary",

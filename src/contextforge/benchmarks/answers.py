@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -31,6 +32,7 @@ class _AnswerCitation(BaseModel):
     path: str
     start_line: int = Field(ge=1, strict=True)
     end_line: int = Field(ge=1, strict=True)
+    material_evidence_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_order(self) -> _AnswerCitation:
@@ -76,7 +78,7 @@ async def run_paired_answer_regression(
         root, selected_ordinary_paths
     )
     oracle_context = render_oracle_context(root, oracle_ranges)
-    capsule_ranges = _capsule_source_ranges(compiled)
+    capsule_ranges, capsule_evidence = _capsule_material_evidence(compiled)
     ordinary = _measure_answer_input(
         task,
         assertions,
@@ -90,6 +92,7 @@ async def run_paired_answer_regression(
         assertions,
         oracle_context,
         oracle_ranges,
+        (),
         label="manual-oracle",
     )
     contextforge = await _run_answer(
@@ -98,13 +101,14 @@ async def run_paired_answer_regression(
         assertions,
         compiled.prompt,
         capsule_ranges,
+        capsule_evidence,
         label="contextforge-capsule",
     )
     groundedness = await _run_groundedness_judge(
         provider,
-        task,
+        assertions,
         contextforge,
-        render_oracle_context(root, capsule_ranges),
+        render_oracle_context(root, _cited_ranges(contextforge, capsule_ranges)),
     )
     reduction = (
         0.0
@@ -203,7 +207,7 @@ def _read_source(
 
 async def _run_groundedness_judge(
     provider: ModelProvider,
-    task: str,
+    assertions: tuple[BenchmarkExpectedAssertion, ...],
     answer: BenchmarkAnswerEvaluation,
     source_context: str,
 ) -> BenchmarkGroundednessEvaluation:
@@ -220,6 +224,11 @@ async def _run_groundedness_judge(
             "answer": answer.answer,
             "assertion_ids": answer.assertion_ids,
             "citations": [item.model_dump(mode="json") for item in answer.citations],
+            "assertions": [
+                item.model_dump(mode="json")
+                for item in assertions
+                if item.assertion_id in answer.assertion_ids
+            ],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -236,7 +245,10 @@ async def _run_groundedness_judge(
                 "facts from filenames, wrappers, or missing code. Return "
                 "grounded=false when any material claim lacks direct support."
             ),
-            analysis_task=task,
+            analysis_task=(
+                "Decide support only from the supplied candidate answer and "
+                "cited ranges."
+            ),
             trusted_code_map_facts={"judge_repetition": repetition},
             untrusted_sources=(
                 UntrustedSource.from_text("candidate-answer.json", candidate_payload),
@@ -301,6 +313,7 @@ async def _run_answer(
     assertions: tuple[BenchmarkExpectedAssertion, ...],
     context: str,
     allowed_ranges: tuple[BenchmarkSourceRange, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
     *,
     label: str,
 ) -> BenchmarkAnswerEvaluation:
@@ -309,6 +322,7 @@ async def _run_answer(
         assertions,
         context,
         allowed_ranges,
+        material_evidence,
         label=label,
     )
     started = time.perf_counter()
@@ -324,6 +338,7 @@ async def _run_answer(
             path=item.path,
             start_line=item.start_line,
             end_line=item.end_line,
+            material_evidence_ids=tuple(sorted(set(item.material_evidence_ids))),
         )
         for item in response.value.citations
     )
@@ -333,6 +348,21 @@ async def _run_answer(
         for item in citations
     )
     invalid = len(citations) - valid
+    assertion_by_id = {item.assertion_id: item for item in assertions}
+    supported_assertions = {
+        assertion_id
+        for assertion_id in assertion_ids
+        if _assertion_has_evidence_support(
+            assertion_by_id[assertion_id], citations, material_evidence
+        )
+    }
+    lexical_supported = {
+        assertion_id
+        for assertion_id in assertion_ids
+        if _assertion_has_lexical_support(
+            assertion_by_id[assertion_id], citations, context
+        )
+    }
     estimated_input_tokens = _request_tokens(request)
     usage = response.usage
     provider_input_tokens = (
@@ -354,6 +384,12 @@ async def _run_answer(
         invalid_citation_count=invalid,
         assertion_recall=(len(assertion_ids) / len(expected) if expected else 1.0),
         citation_validity=(valid / len(citations) if citations else 0.0),
+        assertion_evidence_support=(
+            len(supported_assertions) / len(expected) if expected else 1.0
+        ),
+        lexical_identifier_support=(
+            len(lexical_supported) / len(expected) if expected else 1.0
+        ),
         input_tokens=input_tokens,
         estimated_input_tokens=estimated_input_tokens,
         provider_input_tokens=provider_input_tokens,
@@ -382,6 +418,7 @@ def _measure_answer_input(
         assertions,
         context,
         allowed_ranges,
+        (),
         label=label,
     )
     estimated = _request_tokens(request)
@@ -398,6 +435,7 @@ def _answer_request(
     assertions: tuple[BenchmarkExpectedAssertion, ...],
     context: str,
     allowed_ranges: tuple[BenchmarkSourceRange, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
     *,
     label: str,
 ) -> ModelRequest:
@@ -422,6 +460,13 @@ def _answer_request(
             "allowed_citation_ranges": [
                 item.model_dump(mode="json") for item in allowed_ranges
             ],
+            "material_evidence": [
+                {
+                    "range": source_range.model_dump(mode="json"),
+                    "evidence_ids": evidence_ids,
+                }
+                for source_range, evidence_ids in material_evidence
+            ],
         },
         untrusted_sources=(UntrustedSource.from_text(f"{label}.xml", context),),
         response_model=_AnswerResponse,
@@ -433,16 +478,20 @@ def _answer_request(
     )
 
 
-def _capsule_source_ranges(
+def _capsule_material_evidence(
     compiled: CompiledContextCapsule,
-) -> tuple[BenchmarkSourceRange, ...]:
+) -> tuple[
+    tuple[BenchmarkSourceRange, ...],
+    tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
+]:
     values: list[BenchmarkSourceRange] = []
+    evidence: list[tuple[BenchmarkSourceRange, tuple[str, ...]]] = []
     for material in (
         *compiled.capsule.working_set,
         *compiled.capsule.task_context,
     ):
         if material.representation is RepresentationMode.SLICE:
-            values.extend(
+            ranges = tuple(
                 BenchmarkSourceRange(
                     path=material.path,
                     start_line=item.start_line,
@@ -450,17 +499,82 @@ def _capsule_source_ranges(
                 )
                 for item in material.ranges
             )
+            values.extend(ranges)
+            evidence.extend((item, material.evidence_ids) for item in ranges)
         elif material.representation is RepresentationMode.FULL:
             line_count = len(material.content.splitlines())
             if line_count:
-                values.append(
-                    BenchmarkSourceRange(
-                        path=material.path,
-                        start_line=1,
-                        end_line=line_count,
-                    )
+                source_range = BenchmarkSourceRange(
+                    path=material.path,
+                    start_line=1,
+                    end_line=line_count,
                 )
-    return tuple(values)
+                values.append(source_range)
+                evidence.append((source_range, material.evidence_ids))
+    return tuple(values), tuple(evidence)
+
+
+def _cited_ranges(
+    answer: BenchmarkAnswerEvaluation,
+    allowed: tuple[BenchmarkSourceRange, ...],
+) -> tuple[BenchmarkSourceRange, ...]:
+    values = tuple(
+        BenchmarkSourceRange(
+            path=item.path, start_line=item.start_line, end_line=item.end_line
+        )
+        for item in answer.citations
+        if any(_contains(source_range, item) for source_range in allowed)
+    )
+    return values
+
+
+def _assertion_has_evidence_support(
+    assertion: BenchmarkExpectedAssertion,
+    citations: tuple[BenchmarkAnswerCitation, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
+) -> bool:
+    if not assertion.support:
+        return any(item.assertion_id == assertion.assertion_id for item in citations)
+    for expected in assertion.support:
+        for citation in citations:
+            if citation.assertion_id != assertion.assertion_id:
+                continue
+            if not _contains(expected.citation, citation):
+                continue
+            for source_range, evidence_ids in material_evidence:
+                if _contains(source_range, citation) and set(
+                    expected.material_evidence_ids
+                ) <= set(citation.material_evidence_ids) <= set(evidence_ids):
+                    return True
+    return False
+
+
+def _assertion_has_lexical_support(
+    assertion: BenchmarkExpectedAssertion,
+    citations: tuple[BenchmarkAnswerCitation, ...],
+    context: str,
+) -> bool:
+    identifiers = {
+        value.casefold()
+        for value in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", assertion.description)
+        if len(value) > 2
+    }
+    if not identifiers:
+        return bool(citations)
+    cited = "\n".join(
+        _source_block_for_citation(context, citation)
+        for citation in citations
+        if citation.assertion_id == assertion.assertion_id
+    ).casefold()
+    return bool(identifiers & set(re.findall(r"[a-z_][a-z0-9_]*", cited)))
+
+
+def _source_block_for_citation(context: str, citation: BenchmarkAnswerCitation) -> str:
+    pattern = (
+        rf'<(?:source|material) path="{re.escape(citation.path)}"[^>]*>'
+        r"(.*?)</(?:source|material)>"
+    )
+    return "\n".join(re.findall(pattern, context, flags=re.DOTALL))
 
 
 def _contains(allowed: BenchmarkSourceRange, citation: BenchmarkAnswerCitation) -> bool:
