@@ -11,9 +11,16 @@ import threading
 from collections import Counter, OrderedDict, defaultdict, deque
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from contextforge.core.validation import canonical_casefold_key
 from contextforge.intelligence.cards import SemanticCard
@@ -33,6 +40,9 @@ from contextforge.models import (
     UntrustedSource,
     estimate_request_context,
 )
+
+if TYPE_CHECKING:
+    from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
 RETRIEVAL_BUILD_VERSION = 5
@@ -534,6 +544,16 @@ class RetrievalResult(IndexModel):
     planning_diagnostics: PlanningDiagnostics | None = None
     coverage_ledger: CoverageLedger | None = None
     coverage_history: tuple[CoverageLedger, ...] = ()
+    plan_requested: bool | None = None
+
+    @computed_field(return_type=Any)  # type: ignore[prop-decorator]
+    @property
+    def evidence_diagnostics(self) -> EvidenceCoverageDiagnostics:
+        from contextforge.context.evidence_diagnostics import (
+            retrieval_evidence_diagnostics,
+        )
+
+        return retrieval_evidence_diagnostics(self)
 
 
 class _PlanItem(BaseModel):
@@ -1234,6 +1254,7 @@ async def retrieve_context_candidates(
         candidates=tuple(candidates),
         coverage_ledger=retrieval_ledger,
         coverage_history=(retrieval_ledger,),
+        plan_requested=mode != ContextPlanningMode.OFF,
     )
     if mode == ContextPlanningMode.OFF or not candidates:
         return result

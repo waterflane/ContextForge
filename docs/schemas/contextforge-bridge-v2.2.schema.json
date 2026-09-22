@@ -268,7 +268,10 @@
             "capsule": { "$ref": "context-capsule-v2.schema.json" },
             "prompt": { "type": "string" },
             "token_count": { "type": "integer", "minimum": 0 },
-            "estimator_id": { "type": "string", "minLength": 1 }
+            "estimator_id": { "type": "string", "minLength": 1 },
+            "coverage_ledger": { "type": ["object", "null"] },
+            "compilation_sufficiency": { "type": ["object", "null"] },
+            "evidence_diagnostics": { "$ref": "evidence-coverage-diagnostics-v1.schema.json" }
           }
         }
       }

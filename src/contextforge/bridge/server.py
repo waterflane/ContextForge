@@ -1146,7 +1146,11 @@ class BridgeServer:
             params.expected_snapshot_digest, cancellation
         )
         result = await self._retrieve_v21(params, manifest, cancellation)
-        return result.model_dump(mode="json")
+        if self._protocol_version == "2.2":
+            return result.model_dump(mode="json")
+        return result.model_dump(
+            mode="json", exclude={"plan_requested", "evidence_diagnostics"}
+        )
 
     async def _symbol(
         self, params: SymbolParams, cancellation: asyncio.Event
@@ -1237,7 +1241,16 @@ class BridgeServer:
             pinned_full_files=params.pinned_full_files,
             git_diff=params.git_diff,
         )
-        return compiled.model_dump(mode="json")
+        if self._protocol_version == "2.2":
+            diagnostics = compiled.evidence_diagnostics
+            assert diagnostics is not None
+            return {
+                **compiled.model_dump(mode="json"),
+                "evidence_diagnostics": diagnostics.model_dump(mode="json"),
+            }
+        return compiled.model_dump(
+            mode="json", exclude={"capsule": {"evidence_diagnostics"}}
+        )
 
     async def _index(
         self,

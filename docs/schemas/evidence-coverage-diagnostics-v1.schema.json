@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/evidence-coverage-diagnostics-v1.schema.json",
+  "title": "ContextForge Evidence Coverage Diagnostics v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plan_requested", "plan_validated", "compiler_materialized", "declared_sufficiency", "effective_sufficiency", "covered_role_ids", "missing_role_ids", "materialization_downgrade_reason_codes", "materialization_drop_reason_codes", "effective_reason_codes", "planner_action_deltas", "compact_profile"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "plan_requested": { "type": "boolean" },
+    "plan_validated": { "type": "boolean" },
+    "compiler_materialized": { "type": "boolean" },
+    "declared_sufficiency": { "enum": ["sufficient", "insufficient", null] },
+    "effective_sufficiency": { "enum": ["sufficient", "insufficient", null] },
+    "covered_role_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+    "missing_role_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+    "materialization_downgrade_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
+    "materialization_drop_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
+    "effective_reason_codes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/reason_code" } },
+    "planner_action_deltas": { "type": "array", "items": { "$ref": "#/$defs/action_delta" } },
+    "compact_profile": { "type": ["boolean", "null"] }
+  },
+  "$defs": {
+    "reason_code": { "enum": ["declared_insufficient", "empty_retrieval", "empty_task_context", "plan_replaced", "planned_item_unmaterialized", "planned_evidence_unmaterialized", "planned_range_unmaterialized", "budget_excluded_mandatory_item", "mandatory_role_missing", "planned_role_lost"] },
+    "action_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_index", "new_role_ids", "new_identifier_count", "new_evidence_count", "new_graph_endpoint_count"],
+      "properties": {
+        "action_index": { "type": "integer", "minimum": 1 },
+        "new_role_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "new_identifier_count": { "type": "integer", "minimum": 0 },
+        "new_evidence_count": { "type": "integer", "minimum": 0 },
+        "new_graph_endpoint_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

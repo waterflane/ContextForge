@@ -560,8 +560,10 @@ def test_bridge_v2_build_update_and_correlated_progress(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("protocol_version", ["2.1", "2.2"])
 def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
     tmp_path: Path,
+    protocol_version: str,
 ) -> None:
     (tmp_path / "app.py").write_text(
         "def run(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
@@ -575,7 +577,9 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
     async def exercise() -> None:
         harness = _Harness(tmp_path)
         await harness.start(negotiated=False)
-        harness.input.send(_request("hello", "hello", {"protocol_version": "2.1"}))
+        harness.input.send(
+            _request("hello", "hello", {"protocol_version": protocol_version})
+        )
         hello = (await harness.response(1))[-1]["result"]
         assert {"map", "search", "symbol", "compile"} <= set(
             hello["capabilities"]["methods"]
@@ -584,6 +588,7 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
         digest = await _snapshot(harness, 2)
 
         common = {"expected_snapshot_digest": digest}
+        planning = {"planning_mode": "off"} if protocol_version == "2.2" else {}
         harness.input.send(_request("map", "map", common))
         mapped = await asyncio.to_thread(harness.output.wait_for_id, "map")
         assert mapped["result"]["orientation"]["files"][0]["path"] == "app.py"
@@ -594,11 +599,23 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
         }
 
         harness.input.send(
-            _request("search", "search", {**common, "task": "run", "limit": 5})
+            _request(
+                "search", "search", {**common, **planning, "task": "run", "limit": 5}
+            )
         )
         searched = await asyncio.to_thread(harness.output.wait_for_id, "search")
         assert searched["result"]["candidates"][0]["path"] == "app.py"
         assert searched["result"]["provider_calls"] == 0
+        if protocol_version == "2.1":
+            assert "evidence_diagnostics" not in searched["result"]
+            assert "plan_requested" not in searched["result"]
+        else:
+            search_diagnostics = searched["result"]["evidence_diagnostics"]
+            assert (
+                search_diagnostics["plan_requested"]
+                == searched["result"]["plan_requested"]
+            )
+            assert not search_diagnostics["compiler_materialized"]
 
         harness.input.send(_request("symbol", "symbol", {**common, "query": "run"}))
         symbols = await asyncio.to_thread(harness.output.wait_for_id, "symbol")
@@ -610,6 +627,7 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
                 "compile",
                 {
                     **common,
+                    **planning,
                     "task": "change run",
                     "working_files": ["app.py"],
                     "context_window_tokens": 2_000,
@@ -620,6 +638,17 @@ def test_bridge_v21_map_search_symbol_and_compile_are_generation_pinned(
         )
         compiled = await asyncio.to_thread(harness.output.wait_for_id, "compile")
         assert compiled["result"]["capsule"]["schema_version"] == 2
+        if protocol_version == "2.1":
+            assert "evidence_diagnostics" not in compiled["result"]
+            assert "evidence_diagnostics" not in compiled["result"]["capsule"]
+        else:
+            diagnostics = compiled["result"]["evidence_diagnostics"]
+            assert diagnostics == compiled["result"]["capsule"]["evidence_diagnostics"]
+            assert diagnostics["compiler_materialized"]
+            assert (
+                diagnostics["effective_sufficiency"]
+                == compiled["result"]["compilation_sufficiency"]["effective_status"]
+            )
         assert compiled["result"]["token_count"] <= 1_700
         assert '<contextforge schema_version="2">' in compiled["result"]["prompt"]
         await harness.close()

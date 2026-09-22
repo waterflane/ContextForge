@@ -73,8 +73,17 @@ def test_read_only_index_v3_endpoints(tmp_path: Path) -> None:
     }
     assert mapped_with_graph.json()["relationship_graph"]["schema_version"] == 3
     assert searched.json()["provider_calls"] == 0
+    assert not searched.json()["evidence_diagnostics"]["compiler_materialized"]
     assert symbols.json()["symbols"][0]["name"] == "run"
     assert compiled.json()["capsule"]["schema_version"] == 2
+    assert (
+        compiled.json()["evidence_diagnostics"]
+        == compiled.json()["capsule"]["evidence_diagnostics"]
+    )
+    assert (
+        compiled.json()["evidence_diagnostics"]["effective_sufficiency"]
+        == (compiled.json()["compilation_sufficiency"]["effective_status"])
+    )
 
     auto_searched = client.post(
         "/v1/search",

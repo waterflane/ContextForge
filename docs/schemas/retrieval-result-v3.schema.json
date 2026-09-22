@@ -15,7 +15,11 @@
     "provider_calls": { "type": "integer", "minimum": 0 },
     "diagnostics": { "type": "array", "items": { "type": "string" } },
     "evidence_plan": { "oneOf": [{ "$ref": "#/$defs/evidence_plan" }, { "type": "null" }] },
-    "planning_diagnostics": { "oneOf": [{ "$ref": "#/$defs/planning_diagnostics" }, { "type": "null" }] }
+    "planning_diagnostics": { "oneOf": [{ "$ref": "#/$defs/planning_diagnostics" }, { "type": "null" }] },
+    "coverage_ledger": { "oneOf": [{ "type": "object" }, { "type": "null" }] },
+    "coverage_history": { "type": "array", "items": { "type": "object" } },
+    "plan_requested": { "type": ["boolean", "null"] },
+    "evidence_diagnostics": { "$ref": "evidence-coverage-diagnostics-v1.schema.json" }
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

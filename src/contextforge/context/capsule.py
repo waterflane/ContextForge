@@ -11,6 +11,11 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from contextforge.context.evidence_diagnostics import (
+    CompilationReasonCode,
+    EvidenceCoverageDiagnostics,
+    compiled_evidence_diagnostics,
+)
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.cards import SemanticCard, load_semantic_card
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
@@ -42,18 +47,6 @@ AUTOMATIC_SLICE_MAX_RANGES = 3
 AUTOMATIC_MAP_MAX_SYMBOLS = 12
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
-CompilationReasonCode = Literal[
-    "declared_insufficient",
-    "empty_retrieval",
-    "empty_task_context",
-    "plan_replaced",
-    "planned_item_unmaterialized",
-    "planned_evidence_unmaterialized",
-    "planned_range_unmaterialized",
-    "budget_excluded_mandatory_item",
-    "mandatory_role_missing",
-    "planned_role_lost",
-]
 
 
 class RepresentationMode(StrEnum):
@@ -185,6 +178,7 @@ class ContextCapsule(CapsuleModel):
     git_context: str = ""
     interpretations: tuple[str, ...] = ()
     compact_profile: bool = False
+    evidence_diagnostics: EvidenceCoverageDiagnostics | None = None
     allocations: dict[str, NonNegativeInt]
     estimator_id: str = Field(min_length=1, max_length=200)
     token_count: NonNegativeInt
@@ -214,6 +208,10 @@ class CompiledContextCapsule(CapsuleModel):
     estimator_id: str
     coverage_ledger: CoverageLedger | None = None
     compilation_sufficiency: CompilationSufficiency | None = None
+
+    @property
+    def evidence_diagnostics(self) -> EvidenceCoverageDiagnostics | None:
+        return self.capsule.evidence_diagnostics
 
     @model_validator(mode="after")
     def validate_metadata(self) -> CompiledContextCapsule:
@@ -603,18 +601,29 @@ def compile_context_capsule(
         stage="materialization",
         planner_bindings=planner_bindings,
     )
+    sufficiency = _compilation_sufficiency(
+        retrieval,
+        capsule,
+        materialization_ledger,
+        plan_replaced=plan_fallback,
+    )
+    capsule = capsule.model_copy(
+        update={
+            "evidence_diagnostics": compiled_evidence_diagnostics(
+                retrieval,
+                materialization_ledger,
+                sufficiency,
+                compact_profile=capsule.compact_profile,
+            )
+        }
+    )
     return CompiledContextCapsule(
         capsule=capsule,
         prompt=prompt,
         token_count=token_count,
         estimator_id=selected_estimator.estimator_id,
         coverage_ledger=materialization_ledger,
-        compilation_sufficiency=_compilation_sufficiency(
-            retrieval,
-            capsule,
-            materialization_ledger,
-            plan_replaced=plan_fallback,
-        ),
+        compilation_sufficiency=sufficiency,
     )
 
 

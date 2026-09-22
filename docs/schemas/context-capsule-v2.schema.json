@@ -14,6 +14,8 @@
     "task_context": { "type": "array", "items": { "$ref": "#/$defs/material" } },
     "git_context": { "type": "string" },
     "interpretations": { "type": "array", "items": { "type": "string" } },
+    "compact_profile": { "type": "boolean" },
+    "evidence_diagnostics": { "oneOf": [{ "$ref": "evidence-coverage-diagnostics-v1.schema.json" }, { "type": "null" }] },
     "allocations": {
       "description": "Hard section allocations after bounded redistribution; automatic task material additionally observes the compiler's 30 percent soft ceiling and stops after sufficient evidence coverage.",
       "type": "object",

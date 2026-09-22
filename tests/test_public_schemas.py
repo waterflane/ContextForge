@@ -112,7 +112,9 @@ def test_public_artifact_schema_fields_match_runtime_models() -> None:
     )
 
     for model, schema in pairs:
-        assert set(schema["properties"]) == set(model.model_fields)
+        assert set(schema["properties"]) == (
+            set(model.model_fields) | set(model.model_computed_fields)
+        )
 
 
 def test_public_index_api_imports_in_a_fresh_process() -> None:

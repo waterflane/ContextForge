@@ -675,7 +675,12 @@ class ReadOnlyMCPFoundation:
                 pinned_full_files=value.pinned_full_files,
                 git_diff=value.git_diff,
             )
-            return compiled.model_dump(mode="json")
+            diagnostics = compiled.evidence_diagnostics
+            assert diagnostics is not None
+            return {
+                **compiled.model_dump(mode="json"),
+                "evidence_diagnostics": diagnostics.model_dump(mode="json"),
+            }
         except ReadOnlyToolError:
             raise
         except (ContextCompilerError, ValidationError, ValueError, OSError) as exc:

@@ -85,6 +85,23 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert first.coverage_ledger.ranges
     assert first.compilation_sufficiency is not None
     assert first.compilation_sufficiency.effective_status == "insufficient"
+    diagnostics = first.evidence_diagnostics
+    assert diagnostics is not None
+    assert diagnostics == first.capsule.evidence_diagnostics
+    assert diagnostics.compiler_materialized
+    assert not diagnostics.plan_requested
+    assert not diagnostics.plan_validated
+    assert diagnostics.effective_sufficiency == "insufficient"
+    assert diagnostics.covered_role_ids == first.coverage_ledger.covered_role_ids
+    assert diagnostics.missing_role_ids == first.coverage_ledger.missing_role_ids
+    assert (
+        diagnostics.effective_reason_codes == first.compilation_sufficiency.reason_codes
+    )
+    assert diagnostics.compact_profile == first.capsule.compact_profile
+    assert (
+        ContextCapsule.model_validate(first.capsule.model_dump(mode="json"))
+        == first.capsule
+    )
     assert first.capsule.task_context[0].representation == RepresentationMode.FULL
     assert "&lt;greet&gt;" in first.prompt
     assert "&lt;hello&gt;" in first.prompt

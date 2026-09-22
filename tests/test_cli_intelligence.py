@@ -243,10 +243,15 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     assert "ContextForge architecture repository map" in mapped_architecture_text.stdout
     assert "claims=" in mapped_architecture_text.stdout
     retrieval = json.loads(suggested.stdout)
+    assert not retrieval["evidence_diagnostics"]["compiler_materialized"]
     assert retrieval["schema_version"] == 3
     assert retrieval["provider_calls"] == 0
     capsule = json.loads(capsule_path.read_text(encoding="utf-8"))
     assert capsule["schema_version"] == 2
+    assert capsule["evidence_diagnostics"]["compiler_materialized"]
+    assert "Plan requested:" in reviewed.stdout
+    assert "Plan validated:" in reviewed.stdout
+    assert "Compiler materialized:" in reviewed.stdout
     assert capsule["working_set"][0]["path"] == "app.py"
     assert "Capsule schema: 2" in reviewed.stdout
     assert '<contextforge schema_version="2">' in (tmp_path / "capsule.xml").read_text(
