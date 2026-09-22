@@ -695,6 +695,24 @@ async def build_semantic_card_index(
             ),
         }
     )
+    # Semantic force bypasses card reuse, not publication identity.  A repeat
+    # request that grounds to byte-identical cards and maps leaves the enriched
+    # generation pinned instead of manufacturing a no-op generation.
+    if (
+        structural.generation_kind == "enriched"
+        and tuple(next_states) == structural.files
+        and artifacts == structural.artifacts
+    ):
+        return SemanticCardBuildResult(
+            manifest=structural,
+            cards=tuple(cards),
+            generation_path=lock.layout.generations / structural.generation_id,
+            request_count=request_count,
+            repair_count=repair_count,
+            cache_hits=cache_hits,
+            failed_paths=tuple(sorted(failed)),
+            reused_card_paths=tuple(sorted(reused_card_paths)),
+        )
     build = IndexBuildState(
         source_snapshot_digest=structural.build.source_snapshot_digest,
         index_config_digest=structural.build.index_config_digest,

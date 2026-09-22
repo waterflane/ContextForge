@@ -94,6 +94,7 @@ def build_structural_index(
     max_source_bytes: int = DEFAULT_CODEMAP_SOURCE_LIMIT,
     previous_manifest: IndexManifest | None = None,
     force_reanalyze: bool = False,
+    force_structural_reanalyze: bool = False,
     cancellation: asyncio.Event | None = None,
 ) -> StructuralIndexBuildResult:
     """Extract, resolve, and atomically persist facts without semantic analysis."""
@@ -117,7 +118,7 @@ def build_structural_index(
         state = previous_states.get(project_file.path)
         code_map = (
             None
-            if force_reanalyze
+            if force_reanalyze or force_structural_reanalyze
             else _reuse_code_map(lock, previous, state, project_file)
         )
         if code_map is None:

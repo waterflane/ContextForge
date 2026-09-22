@@ -445,7 +445,6 @@ async def _build_repository_index(
                 snapshot,
                 lock,
                 previous_manifest=previous,
-                force_reanalyze=force_reanalyze,
                 cancellation=cancellation,
             )
             progress.report(

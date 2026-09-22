@@ -379,11 +379,25 @@ def test_index_cli_requires_explicit_confirmation_to_recover_unknown_lock(
     assert not lock.exists()
 
 
-def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> None:
+def test_index_force_reanalysis_and_max_files_are_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _write(tmp_path, "a.py", "A = 1\n")
     _write(tmp_path, "b.py", "B = 1\n")
     assert _invoke("index", "build", str(tmp_path), "--provider", "fake").exit_code == 0
 
+    observed_structural: list[object] = []
+    original = cast(Any, application_module).build_structural_index
+
+    def capture_structural(*args: Any, **kwargs: Any) -> Any:
+        assert "force_reanalyze" not in kwargs
+        result = original(*args, **kwargs)
+        observed_structural.append(result)
+        return result
+
+    monkeypatch.setattr(
+        application_module, "build_structural_index", capture_structural
+    )
     forced = _invoke(
         "index",
         "update",
@@ -397,6 +411,9 @@ def test_index_force_reanalysis_and_max_files_are_reported(tmp_path: Path) -> No
 
     assert forced.exit_code == 0
     assert "Semantic analyses completed: 1" in _plain(forced.stdout)
+    structural = observed_structural[0]
+    assert structural.extracted_paths == ()
+    assert structural.reused_paths == ("a.py", "b.py")
     manifest = load_manifest(tmp_path)
     assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
 
@@ -433,15 +450,11 @@ def test_index_provider_failure_keeps_new_structural_generation_active(
     assert failed.stdout == ""
     assert "semantic analysis failed" in _plain(failed.stderr).lower()
     current = load_manifest(tmp_path)
-    assert current.generation_id != previous.generation_id
-    assert current.generation_kind == "structural"
-    assert current.build.source_snapshot_digest == previous.build.source_snapshot_digest
-    assert current.build.previous_generation_id == previous.generation_id
+    assert current == previous
+    assert current.generation_kind == "enriched"
     assert current.artifacts.relationship_graph is not None
     assert current.artifacts.structural_retrieval is not None
     assert current.artifacts.orientation_map is not None
-    assert current.artifacts.semantic_retrieval is None
-    assert current.artifacts.architecture_map is None
 
 
 def test_index_rechecks_snapshot_before_atomic_publication(
