@@ -1,4 +1,4 @@
-# Index v3 retrieval and Context Capsule compiler
+# Index v3.1 retrieval and Context Capsule compiler
 
 The current repository-context pipeline is:
 

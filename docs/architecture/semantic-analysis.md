@@ -1,10 +1,11 @@
 # Sparse grounded Semantic Cards v3
 
-Semantic enrichment in Index v3 is optional, sparse, and evidence-bound. It
+Semantic enrichment in Index v3.1 is evidence-bound. It
 does not replace CodeMaps, source identity, or graph facts. The structural
 generation is published before enrichment starts and remains usable if the
 provider fails, the operation times out, or the caller cancels enrichment.
-The current cache identity is analyzer 7 with prompt `semantic-card-v3.4`.
+The current cache identity is analyzer 8 with prompt `semantic-card-v3.5`.
+An incomplete file remains partial and is retried on the next update.
 
 ## Card contract
 
@@ -32,6 +33,13 @@ a deterministic fallback where safe or records the file failure.
 The normative artifact schema is
 [`semantic-card-v3.schema.json`](../schemas/semantic-card-v3.schema.json).
 
+
+Every callable with a stable CodeMap ID receives a concise description and
+supported English search expressions. Direct call edges may also receive
+expressions. Requests include the full file, all callable IDs and ranges,
+outgoing call provenance, and direct external callee code. Model output cannot
+create IDs or structural edges. Approved expressions feed BM25; exact symbols
+and verified graph edges remain independent.
 ## Profiles and deterministic routing
 
 The four profiles request different bounded facts:
@@ -46,32 +54,33 @@ Empty, generated/control, lock, barrel, and simple metadata files receive
 deterministic cards without a provider call. Barrel classification is
 behavioral: an initializer may contain imports, re-exports, and `__all__`, but
 no executable calls or callable implementations. An executable `__init__.py`
-or `index.js`/`index.ts` remains eligible for model analysis. Model analysis is
-sparse; it does not describe every declaration. Key symbols are limited to
-verified public, exported, central, entrypoint, or side-effect-heavy
-declarations.
+or `index.js`/`index.ts` remains eligible for model analysis. Key symbols
+in the card are limited to verified public, exported, central, entrypoint, or
+side-effect-heavy declarations; the callable lexicon covers every callable.
+The configured scope and budgets bound model requests.
 
 ## Scheduler limits
 
-The default `priority` scope orders tiers as changed/added files, entrypoints,
-public APIs, the highest 10% centrality tier (at least one file), important
-docs/config, related tests, then a stable structural score. Defaults are 64
-model files, 96 requests, 256,000 estimated input tokens, and at most four
-chunks per large file. If changed files alone exceed a ceiling, that same
-deterministic structural score selects within the tier. CLI/config and the
-Python API may select `priority`, `all`, or `none` and lower those ceilings.
+The default `all` scope analyzes every eligible file and callable. The
+`priority` scheduler remains available for bounded work. Defaults are 64
+model files for priority, 100,000 requests, and 100,000,000 estimated input
+tokens. If changed files alone exceed a ceiling, the same
+deterministic structural score selects within the tier.
+CLI/config and the Python API may select `priority`, `all`, or `none` and
+lower those ceilings.
 
 The scheduler plans the whole bounded priority set before dispatch. Per-attempt
 provider timeout is independent of the operation timeout. A provider response
 may never expand the selected file set, evidence table, source ranges, or
 request budget.
 
-A request reserves room for source before adding compact facts and relationship
-candidates. A file uses one request when its complete source-first prompt fits.
-Otherwise the UTF-8/declaration-aware planner emits at most four chunks with
-eight source lines of overlap. Evidence IDs are scoped to the current chunk and also cover
-verified import, call, reference, and config facts. An uncovered tail or
-invalid chunk makes the surviving card partial.
+Code and test requests carry the full source file. Callable targets may be
+batched, but each batch repeats the full file and call table. If direct external
+callee code exceeds the effective context window, the request retries with
+the full file and call table in `file_only` mode. If even that cannot fit,
+the file fails explicitly without source truncation. Documentation and config
+profiles retain bounded chunking. Evidence IDs cover verified import, call,
+reference, and config facts.
 
 Root evidence, key symbols, and resolved facts are bounded independently: a
 card has at most 32 evidence records, at most 12 key symbols, and a 128 KiB

@@ -1,18 +1,18 @@
-# Migrating to Index v3 and Context Capsule v2
+# Migrating to Index v3.1 and Context Capsule v2
 
 ## Index rebuild
 
-Index v2 is not used by v3 retrieval. `contextforge index status PATH` recognizes
-it and reports `rebuild_required`. `contextforge index update PATH` rejects it;
+Index schemas 1–3 are not used by v3.1 retrieval. `contextforge index status PATH`
+reports `rebuild_required` for them. `contextforge index update PATH` rejects them;
 run a full build instead:
 
 ```bash
 contextforge index build PATH --provider none
-# or bounded enrichment
-contextforge index build PATH --semantic-scope priority
+# or full callable enrichment
+contextforge index build PATH --semantic-scope all
 ```
 
-The build creates a new immutable v3 generation. It does not migrate v2
+The build creates a new immutable schema 4 generation. It does not migrate old
 semantics and does not delete old generations. Only explicit
 `contextforge index clean PATH` removes generated index data.
 
@@ -21,8 +21,8 @@ enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
 Resolver/analyzer identities changed with this revision (fallback 4, resolver
-9, Python 6, polyglot 10, Semantic Card analyzer 7, prompt
-`semantic-card-v3.4`). Rebuild/update does not reuse older CodeMaps or semantic
+9, Python 6, polyglot 10, Semantic Card analyzer 8, prompt
+`semantic-card-v3.5`). Rebuild/update does not reuse older CodeMaps or semantic
 cache entries under those contracts. Polyglot analysis now includes Kotlin
 `.kt` and `.kts` declarations, imports, calls, and references.
 

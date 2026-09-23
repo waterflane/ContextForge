@@ -58,24 +58,24 @@ Structured-response repair precedence is CLI `--json-repair-attempts`,
 the built-in default of five. Values are clamped to 0–10; zero keeps validation
 and deterministic normalization but disables model-assisted repair.
 
-## Index v3 semantic scheduler
+## Index v3.1 semantic scheduler
 
 Project model settings may bound sparse Semantic Card enrichment independently
 of provider retry and transport limits:
 
 ```toml
 [models]
-semantic_scope = "priority"
+semantic_scope = "all"
 semantic_max_model_files = 64
-semantic_max_requests = 96
-semantic_max_input_tokens = 256000
+semantic_max_requests = 100000
+semantic_max_input_tokens = 100000000
 semantic_max_chunks_per_file = 4
 ```
 
-`priority` is the default and orders changed/added files, entrypoints, public
-APIs, the top 10% centrality tier (at least one), important docs/config, related
-tests, then stable structural score. `all` considers every eligible file within
-the same hard ceilings. If a tier exceeds a ceiling, deterministic structural
+`all` is the default and analyzes every eligible callable. `priority` orders
+changed/added files, entrypoints, public APIs, the top 10% centrality tier,
+important docs/config, related tests, then stable structural score.
+If a tier exceeds a ceiling, deterministic structural
 score selects within it. `none` publishes the usable structural generation
 without model calls. CLI options of the same names with hyphens override the
 project values for one build/update.

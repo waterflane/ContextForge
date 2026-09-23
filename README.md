@@ -29,7 +29,7 @@ commands.
 
 > [!IMPORTANT]
 > ContextForge is pre-alpha software. The current development branch introduces
-> Index v3, grounded Semantic Cards, BM25/graph retrieval, Context Capsule v2,
+> Index v3.1, grounded Semantic Cards, BM25/graph retrieval, Context Capsule v2,
 > and Bridge 2.2. Discovery benchmarking is experimental and its results should
 > be reviewed alongside the recorded provider, model, configuration, and source
 > snapshot.
@@ -41,7 +41,7 @@ commands.
   reads.
 - **Reviewable selection.** Choose exact files, directories, GitWildMatch
   patterns, or line ranges—or ask a configured model for a bounded suggestion.
-- **Local repository intelligence.** Publish a usable structural Index v3
+- **Local repository intelligence.** Publish a usable structural Index v3.1
   generation first, then optional grounded Semantic Cards and deterministic
   repository maps, all in immutable generations under `.contextforge/index`.
 - **Evidence-first retrieval.** Rank exact paths and symbols before persisted
@@ -197,7 +197,7 @@ not a promised saving.
 For one short exact file, the compiler can select a compact profile with a
 minimal snapshot envelope and verified usage information. It is used only when
 cheaper than the normal capsule while preserving verification rules. See the
-[Index v3 architecture](docs/architecture/index-v3-context-compiler.md) and
+[Index v3.1 architecture](docs/architecture/index-v3-context-compiler.md) and
 [migration guide](docs/guides/index-v3-migration.md) for the full contracts.
 
 ## CLI overview
@@ -212,7 +212,7 @@ mutating operations.
 | `contextforge scan [PATH]` | Inventory repository files | Read-only unless `--output` is used |
 | `contextforge tree [PATH]` | Render a project tree | Read-only unless `--output` is used |
 | `contextforge map [PATH]` | Render orientation or typed architecture/conventions/features maps | Read-only |
-| `contextforge context suggest [PATH]` | Retrieve Index v3 CandidateCards; legacy discovery is opt-in | Source/index read-only |
+| `contextforge context suggest [PATH]` | Retrieve Index v3.1 CandidateCards; legacy discovery is opt-in | Source/index read-only |
 | `contextforge context create [PATH]` | Build a manual package or task-based Capsule v2 | Reads source; optional artifact writes |
 | `contextforge context inspect ARTIFACT` | Validate ContextPackage v1 or Capsule v2 JSON | Read-only |
 | `contextforge context review ARTIFACT` | Review TaskHandoff or Capsule v2 JSON | Read-only |
@@ -226,7 +226,7 @@ mutating operations.
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
 | `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1.0–2.2 | V1 read-only; V2 may atomically mutate only the index |
-| `contextforge benchmark discovery PATH` | Run legacy or Index v3 Capsule benchmark pipelines | Source stays unchanged; temporary/index state may be used |
+| `contextforge benchmark discovery PATH` | Run legacy or Index v3.1 Capsule benchmark pipelines | Source stays unchanged; temporary/index state may be used |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
 repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.
@@ -237,16 +237,16 @@ The local integration contract is documented in the
 [generic client](examples/generic_bridge_client.py).
 
 Long model-backed index jobs can stop issuing new work with `--fail-fast` or
-`--max-failures N`. Existing `--fail-on-error` semantics are unchanged: without
-one of those limits ContextForge finishes the workload and declines publication
-if any semantic unit failed. Hosts that launch the CLI can consume full
+`--max-failures N`. With `--fail-on-error`, ContextForge finishes the workload,
+publishes partial semantic results, then exits with an error listing failed files.
+Hosts that launch the CLI can consume full
 `ProgressEvent` schema 3 objects with `--progress jsonl`:
 
 ```bash
 contextforge index update . --provider openai-compatible \
   --model exact/model-id --progress jsonl --max-failures 3 \
-  --semantic-scope priority --semantic-max-requests 96 \
-  --semantic-max-input-tokens 256000
+  --semantic-scope all --semantic-max-requests 100000 \
+  --semantic-max-input-tokens 100000000
 ```
 
 ## Configuration
@@ -276,9 +276,11 @@ provider and its `lmstudio` CLI alias require an exact model ID and a suitable
 `base_url`.
 
 Model-backed discovery requires the configured provider to be running with the
-named model available. ContextForge's configured `context_window` must not
-exceed the window actually loaded by that provider; inspect the resolved policy
-before a long run with `contextforge diagnostics provider PATH`.
+named model available. The requested `context_window` defaults to 16,384
+tokens. If a server reports a smaller limit, callable analysis retries without
+external callee code before declaring a full-file overflow; diagnostics show
+the server-reported limit. Inspect the resolved policy before a long run with
+`contextforge diagnostics provider PATH`.
 
 Credential configuration stores only the name of an environment variable in
 `credential_env`; the credential value is resolved at request time. See the
@@ -287,7 +289,7 @@ Credential configuration stores only the name of an environment variable in
 
 ## Retrieval and legacy discovery
 
-With an active Index v3 generation, `context suggest` uses deterministic
+With an active Index v3.1 generation, `context suggest` uses deterministic
 CandidateCard retrieval by default. Exact path, qualified-symbol, symbol, and
 source-identifier groups precede approximate scores. Approximate ranking uses
 persisted BM25 plus bounded graph proximity, centrality, current-diff, and
@@ -338,7 +340,7 @@ contextforge context create . \
   --format json
 ```
 
-Task-based creation uses Context Capsule v2 by default when Index v3 is active:
+Task-based creation uses Context Capsule v2 by default when Index v3.1 is active:
 
 ```bash
 contextforge context suggest . \
@@ -404,7 +406,7 @@ the command produced a complete benchmark report containing at least one task,
 expectation, or budget failure. Do not discard stdout or the requested output
 file when handling that code. Every run remains bounded by manifest limits,
 provider retry limits, operation timeouts, and the configured context window.
-For Index v3 answer regressions, the ordinary baseline is the complete set of
+For Index v3.1 answer regressions, the ordinary baseline is the complete set of
 required/working files a client would otherwise send, while the manual range
 oracle is used only as a quality reference. The ContextForge and oracle answers
 use identical model settings and citation schemas. Three blinded groundedness
@@ -449,11 +451,11 @@ details.
 - [CLI logging and diagnostics](docs/guides/cli.md)
 - [Configuration](docs/guides/configuration.md)
 - [Discovery and benchmarking](docs/guides/discovery.md)
-- [Index v3 migration](docs/guides/index-v3-migration.md)
+- [Index v3.1 migration](docs/guides/index-v3-migration.md)
 - [Development](docs/guides/development.md)
 - [Troubleshooting](docs/guides/troubleshooting.md)
 - [Architecture notes](docs/architecture/overview.md)
-- [Index v3 retrieval and Context Capsule compiler](docs/architecture/index-v3-context-compiler.md)
+- [Index v3.1 retrieval and Context Capsule compiler](docs/architecture/index-v3-context-compiler.md)
 - [Complete GitHub Wiki](https://github.com/waterflane/ContextForge/wiki)
 
 The Wiki is maintained in its separate GitHub Wiki repository. A prepared local
