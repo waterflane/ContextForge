@@ -153,7 +153,7 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     """One pipeline measurement; the evaluator owns how it obtained it."""
 
     mode: RealBenchmarkMode
-    retrieved_top5: tuple[RepositoryRelativePath, ...]
+    retrieved_top5: tuple[RepositoryRelativePath, ...] = Field(max_length=5)
     materialized_files: tuple[RepositoryRelativePath, ...]
     materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
     capsule_tokens: NonNegativeInt
@@ -271,11 +271,18 @@ def evaluate_real_repository_observation(
         / observation.ordinary_tokens
     )
     gate_failed = not (
-        materialized_recall >= 0.90
+        retrieval_recall >= 0.90
+        and precision > 0.80
+        and materialized_recall >= 0.90
         and measured_range_recall >= 0.85
         and observation.citation_validity == 1.0
         and observation.groundedness_majority
         and observation.quality_not_lower_than_oracle
+        and observation.planner_calls <= 3
+        and (
+            observation.mode is not RealBenchmarkMode.DETERMINISTIC
+            or observation.planner_calls == 0
+        )
     )
     return RealBenchmarkTaskReport(
         task_id=task.task_id,
@@ -285,9 +292,7 @@ def evaluate_real_repository_observation(
         required_file_recall_at_5=retrieval_recall,
         precision_at_5=precision,
         materialized_required_file_recall=materialized_recall,
-        range_recall=(
-            measured_range_recall if task.required_ranges else None
-        ),
+        range_recall=(measured_range_recall if task.required_ranges else None),
         capsule_tokens=observation.capsule_tokens,
         ordinary_tokens=observation.ordinary_tokens,
         token_savings=token_savings,

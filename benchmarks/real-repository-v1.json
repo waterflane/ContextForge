@@ -2,11 +2,60 @@
   "schema_version": 1,
   "suite_name": "index-v3-real-repository-baseline",
   "repositories": [
+    {"repository_id": "contextforge", "revision": "9ee103b577fb9d5f1308ee06670b76fe22a8ade5"},
     {"repository_id": "dsh-contextforge", "revision": "38ed6afb219b97b5f4b609555fe185df28f01fc0"},
     {"repository_id": "planup", "revision": "750c8bf406b85be980595e56597aceb05603d904"},
     {"repository_id": "syncplayer", "revision": "6e7154b6b0148a5a595e317ca78fa632ecf9f243"}
   ],
   "tasks": [
+    {
+      "task_id": "contextforge-capsule-coverage", "repository_id": "contextforge", "kind": "broad", "dataset_split": "holdout",
+      "task": "Review how retrieval task roles become materialized capsule evidence and how effective sufficiency is validated.",
+      "required_files": ["src/contextforge/context/capsule.py", "src/contextforge/intelligence/retrieval.py", "tests/test_context_capsule.py"],
+      "relevant_top5": ["src/contextforge/context/capsule.py", "src/contextforge/intelligence/retrieval.py", "tests/test_context_capsule.py"],
+      "task_roles": [
+        {"role_id": "compiler", "description": "Materializes selected evidence and validates sufficiency.", "required_paths": ["src/contextforge/context/capsule.py"]},
+        {"role_id": "retrieval", "description": "Defines task role coverage and evidence plans.", "required_paths": ["src/contextforge/intelligence/retrieval.py"]},
+        {"role_id": "verification", "description": "Exercises capsule coverage behavior.", "required_paths": ["tests/test_context_capsule.py"]}
+      ],
+      "answer_assertions": [{"assertion_id": "coverage-flow", "description": "The answer connects role selection to actual capsule material and effective sufficiency."}]
+    },
+    {
+      "task_id": "contextforge-index-publication", "repository_id": "contextforge", "kind": "broad", "dataset_split": "tuning",
+      "task": "Trace structural-first index publication, semantic enrichment, and reuse on a no-op update.",
+      "required_files": ["src/contextforge/application.py", "src/contextforge/intelligence/indexer.py", "tests/test_codemap_indexer.py"],
+      "relevant_top5": ["src/contextforge/application.py", "src/contextforge/intelligence/indexer.py", "tests/test_codemap_indexer.py"],
+      "task_roles": [
+        {"role_id": "workflow", "description": "Publishes structural and enriched generations.", "required_paths": ["src/contextforge/application.py"]},
+        {"role_id": "indexer", "description": "Builds and reuses structural CodeMaps.", "required_paths": ["src/contextforge/intelligence/indexer.py"]},
+        {"role_id": "verification", "description": "Exercises index lifecycle reuse.", "required_paths": ["tests/test_codemap_indexer.py"]}
+      ],
+      "answer_assertions": [{"assertion_id": "publication-flow", "description": "The answer distinguishes structural publication from semantic enrichment and no-op reuse."}]
+    },
+    {
+      "task_id": "contextforge-semantic-retrieval", "repository_id": "contextforge", "kind": "broad", "dataset_split": "tuning",
+      "task": "Explain how grounded semantic cards enrich persisted retrieval while exact identifier postings remain structural.",
+      "required_files": ["src/contextforge/intelligence/cards.py", "src/contextforge/intelligence/retrieval.py", "tests/test_retrieval_v3.py"],
+      "relevant_top5": ["src/contextforge/intelligence/cards.py", "src/contextforge/intelligence/retrieval.py", "tests/test_retrieval_v3.py"],
+      "task_roles": [
+        {"role_id": "cards", "description": "Produces grounded semantic fields.", "required_paths": ["src/contextforge/intelligence/cards.py"]},
+        {"role_id": "retrieval", "description": "Persists and queries structural and semantic fields.", "required_paths": ["src/contextforge/intelligence/retrieval.py"]},
+        {"role_id": "verification", "description": "Exercises retrieval persistence.", "required_paths": ["tests/test_retrieval_v3.py"]}
+      ],
+      "answer_assertions": [{"assertion_id": "semantic-overlay", "description": "The answer connects grounded card fields to retrieval without treating them as structural facts."}]
+    },
+    {
+      "task_id": "contextforge-bridge-compile", "repository_id": "contextforge", "kind": "broad", "dataset_split": "holdout",
+      "task": "Trace a Bridge compile request from protocol validation to materialized evidence diagnostics.",
+      "required_files": ["src/contextforge/bridge/server.py", "src/contextforge/context/capsule.py", "tests/test_bridge.py"],
+      "relevant_top5": ["src/contextforge/bridge/server.py", "src/contextforge/context/capsule.py", "tests/test_bridge.py"],
+      "task_roles": [
+        {"role_id": "bridge", "description": "Validates and dispatches compile requests.", "required_paths": ["src/contextforge/bridge/server.py"]},
+        {"role_id": "compiler", "description": "Materializes evidence and diagnostics.", "required_paths": ["src/contextforge/context/capsule.py"]},
+        {"role_id": "verification", "description": "Exercises Bridge compatibility and compile responses.", "required_paths": ["tests/test_bridge.py"]}
+      ],
+      "answer_assertions": [{"assertion_id": "bridge-compile", "description": "The answer traces the pinned request to materialized evidence diagnostics."}]
+    },
     {
       "task_id": "dsh-active-model-config", "repository_id": "dsh-contextforge", "kind": "broad", "dataset_split": "holdout",
       "task": "Trace active-model configuration and the request path used to create an index.",
@@ -48,7 +97,7 @@
       "task": "Locate ContextForgeIndexManager and ContextForgeWorkerManager, their coordination boundary, and focused tests.",
       "required_files": ["src/index-lifecycle.ts", "src/worker-manager.ts", "tests/index-lifecycle.spec.ts"],
       "relevant_top5": ["src/index-lifecycle.ts", "src/worker-manager.ts", "tests/index-lifecycle.spec.ts"],
-      "required_ranges": [{"path": "src/index-lifecycle.ts", "start_line": 33, "end_line": 68}, {"path": "src/worker-manager.ts", "start_line": 10, "end_line": 60}],
+      "required_ranges": [{"path": "src/index-lifecycle.ts", "start_line": 33, "end_line": 68}, {"path": "src/worker-manager.ts", "start_line": 10, "end_line": 59}],
       "task_roles": [
         {"role_id": "index-manager", "description": "Defines index lifecycle ownership.", "required_paths": ["src/index-lifecycle.ts"]},
         {"role_id": "worker-manager", "description": "Defines worker coordination.", "required_paths": ["src/worker-manager.ts"]},
@@ -98,7 +147,7 @@
       "task": "Locate PlanBackupCodec, BuildAgenda, and RepeatRule implementations with their focused tests.",
       "required_files": ["app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt", "app/src/main/java/com/planup/domain/model/RepeatRule.kt", "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt", "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt", "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"],
       "relevant_top5": ["app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt", "app/src/main/java/com/planup/domain/model/RepeatRule.kt", "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt", "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt", "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"],
-      "required_ranges": [{"path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt", "start_line": 19, "end_line": 68}, {"path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt", "start_line": 9, "end_line": 28}, {"path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt", "start_line": 13, "end_line": 45}],
+      "required_ranges": [{"path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt", "start_line": 19, "end_line": 68}, {"path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt", "start_line": 9, "end_line": 28}, {"path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt", "start_line": 13, "end_line": 30}],
       "task_roles": [
         {"role_id": "backup-codec", "description": "Defines backup serialization.", "required_paths": ["app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt"]},
         {"role_id": "repeat-rule", "description": "Defines repeat behavior.", "required_paths": ["app/src/main/java/com/planup/domain/model/RepeatRule.kt"]},

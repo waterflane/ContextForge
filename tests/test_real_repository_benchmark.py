@@ -3,6 +3,9 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from contextforge.benchmarks import (
     RealBenchmarkMode,
     RealBenchmarkObservation,
@@ -20,7 +23,7 @@ def _observation(
 ) -> RealBenchmarkObservation:
     return RealBenchmarkObservation(
         mode=mode,
-        retrieved_top5=("alpha.py", "beta.py"),
+        retrieved_top5=("alpha.py",),
         materialized_files=materialized,
         capsule_tokens=70,
         ordinary_tokens=100,
@@ -34,12 +37,12 @@ def _observation(
     )
 
 
-def test_real_manifest_locks_nine_broad_and_three_exact_symbol_tasks() -> None:
+def test_real_manifest_covers_four_repositories_and_sixteen_tasks() -> None:
     manifest = load_real_repository_benchmark_manifest(MANIFEST)
 
-    assert len(manifest.repositories) == 3
-    assert len(manifest.tasks) == 12
-    assert sum(task.kind.value == "broad" for task in manifest.tasks) == 9
+    assert len(manifest.repositories) == 4
+    assert len(manifest.tasks) == 16
+    assert sum(task.kind.value == "broad" for task in manifest.tasks) == 13
     assert sum(task.kind.value == "exact_symbol" for task in manifest.tasks) == 3
     assert {task.dataset_split for task in manifest.tasks} == {"tuning", "holdout"}
     assert all(task.task_roles and task.answer_assertions for task in manifest.tasks)
@@ -81,6 +84,65 @@ def test_quality_gate_excludes_savings_when_materialized_recall_is_baseline_red(
     assert report.passed is False
     assert report.aggregates[1].headline_token_savings == 0.0
     assert report.aggregates[1].quality_gate_failed_count == 1
+
+
+def test_quality_gate_rejects_low_candidate_precision_even_with_full_material() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=(*task.required_files, "unrelated.py"),
+        materialized_files=task.required_files,
+        capsule_tokens=10,
+        ordinary_tokens=100,
+        citation_validity=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+    )
+
+    run = evaluate_real_repository_observation(task, observation)
+
+    assert run.required_file_recall_at_5 == 1.0
+    assert run.materialized_required_file_recall == 1.0
+    assert run.precision_at_5 == 0.75
+    assert run.quality_gate_failed is True
+    assert run.valid_token_savings == 0.0
+
+
+@pytest.mark.parametrize(
+    ("mode", "calls"),
+    [
+        (RealBenchmarkMode.DETERMINISTIC, 1),
+        (RealBenchmarkMode.PLANNED, 4),
+    ],
+)
+def test_quality_gate_rejects_provider_call_budget_violation(
+    mode: RealBenchmarkMode, calls: int
+) -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    observation = RealBenchmarkObservation(
+        mode=mode,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        capsule_tokens=10,
+        ordinary_tokens=100,
+        planner_calls=calls,
+        citation_validity=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+    )
+
+    assert evaluate_real_repository_observation(task, observation).quality_gate_failed
+
+
+def test_observation_rejects_more_than_five_top_five_candidates() -> None:
+    with pytest.raises(ValidationError, match="at most 5"):
+        RealBenchmarkObservation(
+            mode=RealBenchmarkMode.DETERMINISTIC,
+            retrieved_top5=tuple(f"candidate-{index}.py" for index in range(6)),
+            materialized_files=(),
+            capsule_tokens=0,
+            ordinary_tokens=1,
+        )
 
 
 def test_aggregation_is_deterministic_and_separates_modes() -> None:
