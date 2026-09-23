@@ -398,6 +398,36 @@ def test_structural_generation_retrieval_needs_no_semantic_cards(
     assert candidate.matched_concepts == ()
 
 
+def test_large_source_keeps_role_coverage_without_overflowing_binding(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "work.py",
+        "".join(
+            f"def operation_{index}():\n    return {index}\n\n" for index in range(30)
+        ),
+    )
+    report = _build(tmp_path)
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "review work implementation "
+            + " ".join(f"operation_{index}" for index in range(30)),
+            manifest=report.manifest,
+            planning_mode=ContextPlanningMode.OFF,
+        )
+    )
+
+    assert len(result.candidates[0].evidence_ranges) > 16
+    assert result.coverage_ledger is not None
+    assert "implementation" in result.coverage_ledger.covered_role_ids
+    assert all(
+        len(binding.evidence_ids) <= 16 for binding in result.coverage_ledger.bindings
+    )
+
+
 def test_retrieval_rejects_missing_and_stale_generation_artifacts(
     tmp_path: Path,
 ) -> None:

@@ -968,12 +968,14 @@ def write_retrieval_index(
         average_field_lengths=index.average_field_lengths,
     )
     header = (
-        RetrievalSemanticOverlayManifest(
-            base_structural_sha256=base_structural_reference.sha256,
-            **header_values,
+        RetrievalSemanticOverlayManifest.model_validate(
+            {
+                **header_values,
+                "base_structural_sha256": base_structural_reference.sha256,
+            }
         )
         if overlay and base_structural_reference is not None
-        else RetrievalIndexShardManifest(**header_values)
+        else RetrievalIndexShardManifest.model_validate(header_values)
     )
     return write_index_record(
         lock, location, canonical_json_bytes(header.model_dump(mode="json"))
@@ -1032,7 +1034,7 @@ def load_retrieval_index(
             base = load_retrieval_index(
                 repository_root, base_reference, manifest=manifest
             )
-            documents: dict[str, RetrievalDocument] = {
+            base_documents: dict[str, RetrievalDocument] = {
                 item.path: item for item in base.documents
             }
             values: list[RetrievalSemanticOverlayDocument] = []
@@ -1051,7 +1053,7 @@ def load_retrieval_index(
                 )
             if len(values) != overlay.document_count or {
                 item.path for item in values
-            } != set(documents):
+            } != set(base_documents):
                 raise ValueError(
                     "retrieval overlay is corrupt; rebuild_required"
                 ) from None
@@ -1061,7 +1063,7 @@ def load_retrieval_index(
                 documents=tuple(
                     RetrievalDocument.model_validate(
                         {
-                            **documents[item.path].model_dump(mode="json"),
+                            **base_documents[item.path].model_dump(mode="json"),
                             **item.model_dump(
                                 mode="json", exclude={"path", "grounded_semantics"}
                             ),
@@ -1069,7 +1071,7 @@ def load_retrieval_index(
                                 item.grounded_semantics
                                 if field.name == "grounded_semantics"
                                 else field
-                                for field in documents[item.path].fields
+                                for field in base_documents[item.path].fields
                             ),
                         }
                     )
@@ -1083,7 +1085,7 @@ def load_retrieval_index(
                 _retrieval_cache[cache_key] = (overlay, index)
             return index
     else:
-        header = cached[0]
+        header = cast(RetrievalIndexShardManifest, cached[0])
     shard_contents: list[bytes] = []
     for shard in header.document_shards:
         shard_content = load_generation_record(
@@ -1136,14 +1138,19 @@ def retrieval_index_record_locations(
         content = load_generation_record(
             repository_root, reference.location, manifest=manifest
         )
+        shard_header: RetrievalIndexShardManifest | RetrievalSemanticOverlayManifest
         try:
-            header = RetrievalIndexShardManifest.model_validate_json(content)
+            shard_header = RetrievalIndexShardManifest.model_validate_json(content)
         except ValueError:
             try:
-                header = RetrievalSemanticOverlayManifest.model_validate_json(content)
+                shard_header = RetrievalSemanticOverlayManifest.model_validate_json(
+                    content
+                )
             except ValueError:
                 continue
-        locations.extend(item.artifact.location for item in header.document_shards)
+        locations.extend(
+            item.artifact.location for item in shard_header.document_shards
+        )
     return tuple(locations)
 
 
@@ -2119,7 +2126,9 @@ async def _plan_evidence(
         expansions = tuple(
             QueryExpansionDiagnostic(
                 expression=str(expansion["expression"]),
-                result_candidate_ids=tuple(expansion["result_candidate_ids"]),
+                result_candidate_ids=cast(
+                    tuple[str, ...], expansion["result_candidate_ids"]
+                ),
             )
             for item in action_history
             for expansion in cast(
@@ -2985,12 +2994,12 @@ def _validate_plan_response(
     }
     role_bindings: list[RoleEvidenceBinding] = []
     selected_ids = {item.candidate_id for item in items}
-    for requested in response.role_bindings:
-        candidate = supplied.get(requested.candidate_id)
-        role = known_roles.get(requested.role_id)
+    for requested_binding in response.role_bindings:
+        candidate = supplied.get(requested_binding.candidate_id)
+        role = known_roles.get(requested_binding.role_id)
         if (
             candidate is None
-            or requested.candidate_id not in selected_ids
+            or requested_binding.candidate_id not in selected_ids
             or role is None
             or role.kind == "unknown"
         ):
@@ -3000,13 +3009,13 @@ def _validate_plan_response(
             for item in candidate.evidence_ranges
             if item.evidence_id is not None
         }
-        if not set(requested.evidence_ids) <= known_evidence:
+        if not set(requested_binding.evidence_ids) <= known_evidence:
             continue
         role_bindings.append(
             RoleEvidenceBinding(
                 role_id=role.role_id,
                 candidate_id=candidate.candidate_id,
-                evidence_ids=tuple(sorted(set(requested.evidence_ids))),
+                evidence_ids=tuple(sorted(set(requested_binding.evidence_ids))),
                 source="planner",
             )
         )
@@ -3350,7 +3359,9 @@ def _task_evidence_roles(
         for anchor in sorted(set(_tokens(candidate.path)) & terms):
             for kind in ("caller", "callee"):
                 role_id = f"{kind}:{anchor}"
-                values[role_id] = TaskEvidenceRole(role_id=role_id, kind=kind)
+                values[role_id] = TaskEvidenceRole(
+                    role_id=role_id, kind=cast(TaskEvidenceRoleKind, kind)
+                )
     if not values:
         values["unknown"] = TaskEvidenceRole(role_id="unknown", kind="unknown")
     return tuple(values[role_id] for role_id in sorted(values))
@@ -3372,7 +3383,7 @@ def _deterministic_role_bindings(
                     if item.evidence_id is not None
                 }
             )
-        )
+        )[:16]
         path_terms = set(_tokens(candidate.path))
         neighbor_kinds = {
             kind
