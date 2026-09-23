@@ -130,8 +130,8 @@ timeout_seconds = 360
 connect_timeout_seconds = 10
 read_timeout_seconds = 300
 operation_timeout_seconds = 360
-# Set this to the actual loaded model/server context. Conservative default: 4096.
-context_window = 4096
+# Set this to the actual loaded model/server context when it differs.
+context_window = 16384
 context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
@@ -492,7 +492,7 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
+    _require_supported_schema_versions(manifest.schema_versions)
     if pointer.schema_version != manifest.schema_version:
         raise IndexManifestReadError("mixed pointer and manifest schema versions")
     if manifest.schema_versions.index_schema_version != manifest.schema_version:
@@ -551,7 +551,7 @@ def load_generation_manifest(
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
+    _require_supported_schema_versions(manifest.schema_versions)
     if (
         manifest.generation_id != generation_id
         or calculate_generation_id(manifest) != generation_id
@@ -921,17 +921,7 @@ def _validate_record_location(value: str) -> str:
     return location
 
 
-def _require_supported_schema_versions(
-    versions: SchemaVersionMetadata,
-    *,
-    legacy: bool = False,
-) -> None:
-    if legacy and versions == SchemaVersionMetadata(
-        index_schema_version=1,
-        manifest_schema_version=1,
-        record_schema_version=1,
-    ):
-        return
+def _require_supported_schema_versions(versions: SchemaVersionMetadata) -> None:
     expected = SchemaVersionMetadata()
     for actual, supported in (
         (versions.index_schema_version, expected.index_schema_version),
@@ -964,7 +954,9 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             record = root.joinpath(*state.record_location.split("/"))
             _require_safe_existing_chain(root, record)
             content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
-            _validate_record_schema(content, manifest.schema_version)
+            _validate_record_schema(
+                content, manifest.schema_versions.record_schema_version
+            )
             if hashlib.sha256(content).hexdigest() != state.record_sha256:
                 raise IndexPublicationError(
                     f"record digest does not match manifest for {state.path}"
@@ -980,7 +972,9 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
             interpretation_content = _read_bounded_bytes(
                 interpretation, MAX_RECORD_BYTES
             )
-            _validate_record_schema(interpretation_content, manifest.schema_version)
+            _validate_record_schema(
+                interpretation_content, manifest.schema_versions.record_schema_version
+            )
             if (
                 hashlib.sha256(interpretation_content).hexdigest()
                 != state.interpretation_record_sha256

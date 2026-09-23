@@ -163,7 +163,7 @@ class CapsuleSnapshot(CapsuleModel):
     generation_id: Sha256
     source_snapshot_digest: Sha256
     generation_kind: Literal["structural", "enriched"]
-    index_schema_version: Literal[3]
+    index_schema_version: Literal[4]
 
 
 class ContextCapsule(CapsuleModel):
@@ -318,8 +318,8 @@ def compile_context_capsule(
     if not isinstance(retrieval, RetrievalResult):
         raise TypeError("compiler requires a RetrievalResult")
     active = manifest if manifest is not None else load_manifest(repository_root)
-    if active.schema_version != 3:
-        raise ContextCompilerError("Context Capsule v2 requires Index v3")
+    if active.schema_version != 4:
+        raise ContextCompilerError("Context Capsule v2 requires Index v3.1")
     if (
         retrieval.generation_id != active.generation_id
         or retrieval.source_snapshot_digest != active.build.source_snapshot_digest

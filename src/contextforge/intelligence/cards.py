@@ -46,6 +46,12 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 from contextforge.intelligence.repository_maps_v3 import build_repository_maps_v3
+from contextforge.intelligence.semantic_lexicon import (
+    FileSemanticLexicon,
+    SemanticContextOverflow,
+    analyze_file_lexicon,
+    callable_symbols,
+)
 from contextforge.intelligence.store import (
     IndexWriteLock,
     load_generation_manifest,
@@ -62,8 +68,8 @@ from contextforge.models import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_CARD_SCHEMA_VERSION: Literal[3] = 3
-SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.4"
-SEMANTIC_CARD_ANALYZER_VERSION = "7"
+SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.5"
+SEMANTIC_CARD_ANALYZER_VERSION = "8"
 MAX_SEMANTIC_EVIDENCE = 32
 MAX_SEMANTIC_CARD_BYTES = 128 * 1024
 DEFAULT_MODEL_FILE_LIMIT = 64
@@ -197,6 +203,7 @@ class SemanticCard(IndexModel):
     inferred_relationships: tuple[SemanticInferredRelationship, ...] = Field(
         default=(), max_length=24
     )
+    lexicon: FileSemanticLexicon | None = None
     coverage_ranges: tuple[SourceRange, ...] = ()
     evidence: tuple[SemanticEvidence, ...] = Field(
         min_length=1, max_length=MAX_SEMANTIC_EVIDENCE
@@ -208,6 +215,15 @@ class SemanticCard(IndexModel):
     @classmethod
     def validate_path(cls, value: str) -> str:
         return validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_lexicon(self) -> SemanticCard:
+        if self.lexicon is not None and (
+            self.lexicon.path != self.path
+            or self.lexicon.source_sha256 != self.source_sha256
+        ):
+            raise ValueError("semantic lexicon identity does not match its card")
+        return self
 
     @model_validator(mode="after")
     def validate_grounding(self) -> SemanticCard:
@@ -275,7 +291,13 @@ class SemanticCard(IndexModel):
         claims.extend(
             claim for values in self.profile_facts.values() for claim in values
         )
-        return "\n".join(claim.text for claim in claims)
+        text = [claim.text for claim in claims]
+        if self.lexicon is not None:
+            for function in self.lexicon.functions:
+                text.extend((function.summary, *function.expressions))
+            for call in self.lexicon.calls:
+                text.extend(call.expressions)
+        return "\n".join(text)
 
 
 class _RawClaim(BaseModel):
@@ -413,6 +435,18 @@ async def build_semantic_card_index(
     maps = {item.path: item for item in code_maps}
     states = {item.path: item for item in structural.files}
     files = {item.path: item for item in snapshot.files}
+    source_texts: dict[str, str] = {}
+    if provider is not None and active_options.scope == "all":
+        for candidate in code_maps:
+            if not callable_symbols(candidate):
+                continue
+            try:
+                source_texts[candidate.path] = _read_source(
+                    snapshot, files[candidate.path]
+                )
+            except (OSError, ValueError):
+                continue
+
     graph = relationship_graph or _load_relationship_graph(lock, structural)
     if graph.source_snapshot_digest != structural.build.source_snapshot_digest:
         raise ValueError("relationship graph does not match the structural snapshot")
@@ -610,6 +644,7 @@ async def build_semantic_card_index(
                         method="deterministic-fallback",
                         diagnostic="invalid_required_grounding",
                     )
+                    card = card.model_copy(update={"quality": "partial"})
             else:
                 failed.append(path)
                 card = _deterministic_card(
@@ -619,6 +654,7 @@ async def build_semantic_card_index(
                     method="deterministic-fallback",
                     diagnostic="model_card_unavailable",
                 )
+                card = card.model_copy(update={"quality": "partial"})
         elif previous_card is None:
             card = _deterministic_card(
                 code_map,
@@ -631,7 +667,78 @@ async def build_semantic_card_index(
                     else "semantic_scope_or_budget"
                 ),
             )
+        if (
+            provider is not None
+            and active_options.scope == "all"
+            and callable_symbols(code_map)
+            and card.lexicon is None
+        ):
+            lexicon_calls = [0]
+            lexicon_tokens = [0]
+            try:
+                source_text = source_texts[path]
+                lexicon = await analyze_file_lexicon(
+                    provider,
+                    code_map,
+                    source_text,
+                    graph,
+                    maps,
+                    source_texts,
+                    call_counter=lexicon_calls,
+                    token_counter=lexicon_tokens,
+                    request_budget=active_options.max_requests - request_count,
+                    estimated_input_budget=active_options.max_estimated_input_tokens
+                    - estimated_tokens,
+                )
+                payload = card.model_dump(mode="json")
+                payload["lexicon"] = lexicon.model_dump(mode="json")
+                if lexicon.context_mode == "file_only":
+                    effective_window = (
+                        lexicon.reported_context_window
+                        or provider.configuration.context_window
+                    )
+                    payload["diagnostics"].append(
+                        SemanticCardDiagnostic(
+                            code="semantic_lexicon_file_only",
+                            message=(
+                                "Direct callee code omitted; effective context "
+                                f"window {effective_window} "
+                                "tokens."
+                            ),
+                        ).model_dump(mode="json")
+                    )
+                card = SemanticCard.model_validate(payload)
+                analyzers.add(_model_analyzer(provider))
+            except Exception as exc:
+                failed.append(path)
+                effective_window = (
+                    getattr(exc, "effective_window", None)
+                    or provider.configuration.context_window
+                )
+                card = card.model_copy(
+                    update={
+                        "quality": "partial",
+                        "diagnostics": (
+                            *card.diagnostics,
+                            SemanticCardDiagnostic(
+                                code=(
+                                    "semantic_lexicon_full_file_overflow"
+                                    if isinstance(exc, SemanticContextOverflow)
+                                    else "semantic_lexicon_unavailable"
+                                ),
+                                message=(
+                                    f"Lexicon incomplete ({type(exc).__name__}); "
+                                    "effective context window "
+                                    f"{effective_window} tokens."
+                                ),
+                            ),
+                        ),
+                    }
+                )
 
+            finally:
+                estimated_tokens += lexicon_tokens[0]
+                request_count += lexicon_calls[0]
         if model_selected:
             selection_reasons = _model_selection_reasons(
                 path,
@@ -888,6 +995,15 @@ def _reusable_cards(
             )
         except ValueError:
             return None
+        if provider is not None and card.provenance.method == "deterministic-fallback":
+            return None
+        if (
+            provider is not None
+            and options.scope == "all"
+            and callable_symbols(code_maps[state.path])
+            and card.lexicon is None
+        ):
+            return None
         analyzer = card.provenance.analyzer
         if card.provenance.method == "model" and analyzer != expected_model:
             return None
@@ -936,6 +1052,8 @@ def _previous_reusable_cards(
                 manifest=previous,
             )
         except ValueError:
+            continue
+        if provider is not None and card.provenance.method == "deterministic-fallback":
             continue
         analyzer = card.provenance.analyzer
         if card.provenance.method == "model":
@@ -1133,8 +1251,9 @@ def _card_request(
         ),
         purpose="semantic-card" if attempt == 0 else "semantic-card-repair",
         system_instructions=(
-            "Return a sparse semantic card for only the supplied source chunk. Every "
-            "claim must cite only IDs listed in trusted_code_map_facts."
+            "Return a sparse semantic card for the supplied source. Write the file "
+            "synopsis as one concise sentence. Every claim must cite only IDs "
+            "listed in trusted_code_map_facts."
             "allowed_evidence_ids and include an exact identifier or at least two "
             "meaningful lexical anchors from that evidence. Speculative wording "
             "such as likely, probably, or may is interpretation and is excluded "
@@ -1200,6 +1319,8 @@ def _plan_card_chunks(
     )
     full_budget = estimate_request_context(full_request, provider.configuration)
     if full_budget.fits:
+        return full, False
+    if _profile_for_path(code_map.path) in {"code", "test"}:
         return full, False
 
     available_source_tokens = max(

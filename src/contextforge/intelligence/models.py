@@ -15,8 +15,8 @@ from contextforge.core.validation import (
     validate_portable_relative_path as validate_portable_relative_path,
 )
 
-INDEX_SCHEMA_VERSION: Literal[3] = 3
-MANIFEST_SCHEMA_VERSION: Literal[3] = 3
+INDEX_SCHEMA_VERSION: Literal[4] = 4
+MANIFEST_SCHEMA_VERSION: Literal[4] = 4
 RECORD_SCHEMA_VERSION: Literal[3] = 3
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
@@ -252,7 +252,7 @@ class IndexStatistics(IndexModel):
 class IndexManifest(IndexModel):
     """Complete immutable generation manifest."""
 
-    schema_version: Literal[1, 2, 3] = MANIFEST_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3, 4] = MANIFEST_SCHEMA_VERSION
     schema_versions: SchemaVersionMetadata = Field(
         default_factory=SchemaVersionMetadata
     )
@@ -284,7 +284,7 @@ class IndexManifest(IndexModel):
 class ActiveIndexPointer(IndexModel):
     """Small atomic root document that selects one immutable generation."""
 
-    schema_version: Literal[1, 2, 3] = INDEX_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3, 4] = INDEX_SCHEMA_VERSION
     generation_id: Sha256
     generation_manifest: str
     source_snapshot_digest: Sha256

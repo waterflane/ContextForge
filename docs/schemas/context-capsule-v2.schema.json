@@ -40,7 +40,7 @@
         "generation_id": { "$ref": "#/$defs/sha256" },
         "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
         "generation_kind": { "enum": ["structural", "enriched"] },
-        "index_schema_version": { "const": 3 }
+        "index_schema_version": { "const": 4 }
       }
     },
     "range": {

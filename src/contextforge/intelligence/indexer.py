@@ -265,8 +265,9 @@ def load_file_code_map(
         raise IndexManifestReadError(
             "published CodeMap does not match its schema"
         ) from exc
-    if code_map.schema_version != active.schema_version or not _map_matches_state(
-        code_map, state
+    if (
+        code_map.schema_version != active.schema_versions.record_schema_version
+        or not _map_matches_state(code_map, state)
     ):
         raise IndexManifestReadError(
             "CodeMap identity does not match its manifest state"

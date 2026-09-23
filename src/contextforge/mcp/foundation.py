@@ -381,7 +381,7 @@ class ReadOnlyMCPFoundation:
                         "architecture",
                         manifest=self._manifest,
                     )
-                    if self._manifest.schema_version == 3
+                    if self._manifest.schema_version == 4
                     else load_architecture_map(
                         self.snapshot.root, manifest=self._manifest
                     )
@@ -398,7 +398,7 @@ class ReadOnlyMCPFoundation:
                     load_repository_map_v3(
                         self.snapshot.root, "features", manifest=self._manifest
                     )
-                    if self._manifest.schema_version == 3
+                    if self._manifest.schema_version == 4
                     else load_feature_map(self.snapshot.root, manifest=self._manifest)
                 ).model_dump(mode="json")
             except (IndexManifestReadError, ValueError) as exc:
@@ -478,8 +478,10 @@ class ReadOnlyMCPFoundation:
     def _require_manifest(self) -> IndexManifest:
         if self._manifest is None:
             raise ReadOnlyToolError("unavailable", "no pinned Index v3 generation")
-        if self._manifest.schema_version != 3:
-            raise ReadOnlyToolError("unavailable", "pinned index requires a v3 rebuild")
+        if self._manifest.schema_version != 4:
+            raise ReadOnlyToolError(
+                "unavailable", "pinned index requires a v3.1 rebuild"
+            )
         return self._manifest
 
     def _map(self, arguments: dict[str, Any]) -> dict[str, Any]:

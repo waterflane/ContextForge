@@ -267,7 +267,7 @@ def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
     manifest_resource = asyncio.run(
         foundation.read_resource("contextforge://index/manifest")
     )
-    assert manifest_resource["schema_version"] == 3
+    assert manifest_resource["schema_version"] == 4
     architecture = asyncio.run(foundation.read_resource("contextforge://architecture"))
     features = asyncio.run(foundation.read_resource("contextforge://features"))
     assert architecture["schema_version"] == 3

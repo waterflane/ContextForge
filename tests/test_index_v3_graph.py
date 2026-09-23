@@ -50,7 +50,7 @@ def test_structural_generation_contains_deterministic_graph_and_orientation(
     graph = load_relationship_graph(tmp_path, manifest=report.manifest)
     orientation = load_orientation_map(tmp_path, manifest=report.manifest)
 
-    assert report.manifest.schema_version == 3
+    assert report.manifest.schema_version == 4
     assert report.manifest.generation_kind == "enriched"
     assert (
         report.manifest.build.previous_generation_id

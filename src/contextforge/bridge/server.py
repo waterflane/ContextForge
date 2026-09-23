@@ -866,11 +866,11 @@ class BridgeServer:
                 "schemas": {
                     "index": {
                         "current": INDEX_SCHEMA_VERSION,
-                        "readable": [1, INDEX_SCHEMA_VERSION],
+                        "readable": [INDEX_SCHEMA_VERSION],
                     },
                     "manifest": {
                         "current": MANIFEST_SCHEMA_VERSION,
-                        "readable": [1, MANIFEST_SCHEMA_VERSION],
+                        "readable": [MANIFEST_SCHEMA_VERSION],
                     },
                     "record": {
                         "current": RECORD_SCHEMA_VERSION,

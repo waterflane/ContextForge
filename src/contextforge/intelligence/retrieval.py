@@ -44,8 +44,8 @@ from contextforge.models import (
 if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
-RETRIEVAL_SCHEMA_VERSION: Literal[3] = 3
-RETRIEVAL_BUILD_VERSION = 5
+RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
+RETRIEVAL_BUILD_VERSION = 6
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -186,7 +186,7 @@ class RetrievalDocument(IndexModel):
 class RetrievalIndex(IndexModel):
     """Generation-pinned persisted postings inputs."""
 
-    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    schema_version: Literal[4] = RETRIEVAL_SCHEMA_VERSION
     record_kind: Literal["retrieval_postings"] = "retrieval_postings"
     source_snapshot_digest: Sha256
     document_count: NonNegativeInt
@@ -226,7 +226,7 @@ class RetrievalDocumentShard(IndexModel):
 class RetrievalIndexShardManifest(IndexModel):
     """Digest-bound header for a sharded persisted retrieval index."""
 
-    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    schema_version: Literal[4] = RETRIEVAL_SCHEMA_VERSION
     record_kind: Literal["retrieval_posting_shards"] = "retrieval_posting_shards"
     source_snapshot_digest: Sha256
     document_count: NonNegativeInt
@@ -275,7 +275,7 @@ class RetrievalSemanticOverlayDocument(IndexModel):
 class RetrievalSemanticOverlayManifest(IndexModel):
     """Digest-bound semantic delta that reuses structural postings verbatim."""
 
-    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    schema_version: Literal[4] = RETRIEVAL_SCHEMA_VERSION
     record_kind: Literal["retrieval_semantic_overlay"] = "retrieval_semantic_overlay"
     source_snapshot_digest: Sha256
     base_structural_sha256: Sha256
@@ -532,7 +532,7 @@ class EvidencePlan(IndexModel):
 class RetrievalResult(IndexModel):
     """Deterministic candidates plus an optional validated evidence plan."""
 
-    schema_version: Literal[3] = RETRIEVAL_SCHEMA_VERSION
+    schema_version: Literal[4] = RETRIEVAL_SCHEMA_VERSION
     source_snapshot_digest: Sha256
     generation_id: Sha256
     task: str
@@ -777,7 +777,7 @@ def build_retrieval_index(
     ):
         card = cards_by_path.get(code_map.path)
         postings = _structural_postings(code_map)
-        semantic_claims = _retrieval_semantic_claims(card)
+        semantic_claims = _retrieval_semantic_claims(card, code_map)
         symbols = tuple(
             sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
         )
@@ -861,6 +861,7 @@ def build_retrieval_index(
 
 def _retrieval_semantic_claims(
     card: SemanticCard | None,
+    code_map: FileCodeMap,
 ) -> tuple[RetrievalSemanticClaim, ...]:
     if card is None:
         return ()
@@ -891,6 +892,36 @@ def _retrieval_semantic_claims(
             continue
         key = (claim.text, tuple(item.evidence_id for item in evidence))
         values[key] = RetrievalSemanticClaim(text=claim.text, evidence=evidence)
+    if card.lexicon is not None:
+        symbols = {item.symbol_id: item for item in code_map.symbols}
+
+        def add_lexicon_claims(symbol_id: str, texts: tuple[str, ...]) -> None:
+            symbol = symbols.get(symbol_id)
+            if symbol is None:
+                return
+            declaration = symbol.declaration_range
+            ending = symbol.body_range or declaration
+            source_range = SourceRange(
+                start_line=declaration.start_line,
+                start_column=declaration.start_column,
+                end_line=ending.end_line,
+                end_column=ending.end_column,
+            )
+            evidence = (
+                RetrievalSemanticEvidence(
+                    evidence_id=f"lexicon:{symbol_id}",
+                    source_range=source_range,
+                ),
+            )
+            for text in texts:
+                values[(text, (evidence[0].evidence_id,))] = RetrievalSemanticClaim(
+                    text=text, evidence=evidence
+                )
+
+        for function in card.lexicon.functions:
+            add_lexicon_claims(
+                function.symbol_id, (function.summary, *function.expressions)
+            )
     return tuple(values[key] for key in sorted(values))
 
 
@@ -1224,8 +1255,8 @@ async def retrieve_context_candidates(
     from contextforge.intelligence.store import load_manifest
 
     active = manifest if manifest is not None else load_manifest(repository_root)
-    if active.schema_version != 3:
-        raise ValueError("retrieval requires an Index v3 generation")
+    if active.schema_version != 4:
+        raise ValueError("retrieval requires an Index v3.1 generation")
     reference = (
         active.artifacts.semantic_retrieval or active.artifacts.structural_retrieval
     )

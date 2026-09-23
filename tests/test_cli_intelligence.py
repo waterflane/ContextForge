@@ -89,7 +89,15 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     _write(tmp_path, "app.py", "def run():\n    return 1\n")
     _write(tmp_path, "tests/test_app.py", "from app import run\n")
 
-    built = _invoke("index", "build", str(tmp_path), "--provider", "fake")
+    built = _invoke(
+        "index",
+        "build",
+        str(tmp_path),
+        "--provider",
+        "fake",
+        "--semantic-scope",
+        "priority",
+    )
 
     assert built.exit_code == 0, built.output
     assert "Status: complete" in _plain(built.stdout)
@@ -104,7 +112,15 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
         for item in first.files
     )
 
-    unchanged = _invoke("index", "update", str(tmp_path), "--provider", "fake")
+    unchanged = _invoke(
+        "index",
+        "update",
+        str(tmp_path),
+        "--provider",
+        "fake",
+        "--semantic-scope",
+        "priority",
+    )
     assert unchanged.exit_code == 0, unchanged.output
     assert "CodeMaps extracted: 0" in _plain(unchanged.stdout)
     assert "Semantic analyses reused:" in _plain(unchanged.stdout)
@@ -113,7 +129,15 @@ def test_index_build_update_reuse_status_and_clean_preserve_config(
     _write(tmp_path, "app.py", "def run():\n    return 2\n")
     _write(tmp_path, "new.py", "VALUE = 1\n")
     (tmp_path / "tests/test_app.py").unlink()
-    updated = _invoke("index", "update", str(tmp_path), "--provider", "fake")
+    updated = _invoke(
+        "index",
+        "update",
+        str(tmp_path),
+        "--provider",
+        "fake",
+        "--semantic-scope",
+        "priority",
+    )
 
     assert updated.exit_code == 0, updated.output
     assert "CodeMaps extracted: 2" in _plain(updated.stdout)
@@ -244,7 +268,7 @@ def test_v3_map_suggest_create_and_review_cli_flow(tmp_path: Path) -> None:
     assert "claims=" in mapped_architecture_text.stdout
     retrieval = json.loads(suggested.stdout)
     assert not retrieval["evidence_diagnostics"]["compiler_materialized"]
-    assert retrieval["schema_version"] == 3
+    assert retrieval["schema_version"] == 4
     assert retrieval["provider_calls"] == 0
     capsule = json.loads(capsule_path.read_text(encoding="utf-8"))
     assert capsule["schema_version"] == 2
@@ -389,7 +413,18 @@ def test_index_force_reanalysis_and_max_files_are_reported(
 ) -> None:
     _write(tmp_path, "a.py", "A = 1\n")
     _write(tmp_path, "b.py", "B = 1\n")
-    assert _invoke("index", "build", str(tmp_path), "--provider", "fake").exit_code == 0
+    assert (
+        _invoke(
+            "index",
+            "build",
+            str(tmp_path),
+            "--provider",
+            "fake",
+            "--semantic-scope",
+            "priority",
+        ).exit_code
+        == 0
+    )
 
     observed_structural: list[object] = []
     original = cast(Any, application_module).build_structural_index
@@ -412,6 +447,8 @@ def test_index_force_reanalysis_and_max_files_are_reported(
         "--force-reanalyze",
         "--max-files",
         "1",
+        "--semantic-scope",
+        "priority",
     )
 
     assert forced.exit_code == 0
@@ -427,7 +464,18 @@ def test_index_provider_failure_keeps_new_structural_generation_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write(tmp_path, "app.py", "def run():\n    return 1\n")
-    assert _invoke("index", "build", str(tmp_path), "--provider", "fake").exit_code == 0
+    assert (
+        _invoke(
+            "index",
+            "build",
+            str(tmp_path),
+            "--provider",
+            "fake",
+            "--semantic-scope",
+            "priority",
+        ).exit_code
+        == 0
+    )
     previous = load_manifest(tmp_path)
     configuration = ProviderConfiguration(
         provider_id="fake",
@@ -448,14 +496,16 @@ def test_index_provider_failure_keeps_new_structural_generation_active(
         "--provider",
         "fake",
         "--force-reanalyze",
+        "--semantic-scope",
+        "priority",
         "--fail-on-error",
     )
 
     assert failed.exit_code == 1
     assert failed.stdout == ""
-    assert "semantic analysis failed" in _plain(failed.stderr).lower()
+    assert "semantic analysis incomplete" in _plain(failed.stderr).lower()
     current = load_manifest(tmp_path)
-    assert current == previous
+    assert current != previous
     assert current.generation_kind == "enriched"
     assert current.artifacts.relationship_graph is not None
     assert current.artifacts.structural_retrieval is not None
@@ -651,7 +701,7 @@ def test_index_jsonl_progress_is_a_clean_schema_three_stream(tmp_path: Path) -> 
     assert events[-1].status is ProgressStatus.COMPLETED
     assert events[-1].metadata["generation_id"] == load_manifest(tmp_path).generation_id
     assert events[-1].metadata["snapshot_digest"]
-    assert events[-1].metadata["index_schema"] == 3
+    assert events[-1].metadata["index_schema"] == 4
     assert events[-1].metadata["partial"] is False
     assert "\x1b[" not in result.stdout
     assert "Status:" not in result.stdout

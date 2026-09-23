@@ -316,7 +316,7 @@ def test_context_preflight_blocks_oversized_request_and_larger_window_permits_it
     None
 ):
     request = replace(_request(source_text="x" * 12_500), max_output_tokens=512)
-    small = _configuration()
+    small = _configuration().model_copy(update={"context_window": 4096})
     budget = estimate_request_context(request, small)
     assert budget.estimated_total_tokens > small.context_window
     assert budget.estimated_total_tokens == (
@@ -492,7 +492,7 @@ def test_provider_attempts_emit_shared_progress_without_artificial_completion() 
     assert all(event.percentage == 0 for event in waiting)
     assert all(event.analyzer_kind == "generic-text-semantic" for event in waiting)
     assert all(event.estimated_input_tokens is not None for event in waiting)
-    assert all(event.configured_context_window == 4096 for event in waiting)
+    assert all(event.configured_context_window == 16384 for event in waiting)
     assert all(event.output_token_budget == 128 for event in waiting)
     assert all(event.input_truncated is True for event in waiting)
     assert events[-1].status is ProgressStatus.FAILED
@@ -533,7 +533,7 @@ def test_debug_request_metrics_are_safe(
     assert "path=src/app.py" in output
     assert "analyzer=generic-text-semantic" in output
     assert "estimated_input_tokens=" in output
-    assert "context_window=4096" in output
+    assert "context_window=16384" in output
     assert "schema_overhead_tokens=" in output
     assert "safety_margin_tokens=256" in output
     assert "output_token_limit=128" in output
@@ -981,7 +981,7 @@ def test_ollama_adapter_contract_is_provider_neutral_and_offline() -> None:
     assert payload["stream"] is False  # type: ignore[index]
     assert payload["format"]["additionalProperties"] is False  # type: ignore[index]
     assert payload["options"] == {  # type: ignore[index]
-        "num_ctx": 4096,
+        "num_ctx": 16384,
         "num_predict": 200,
         "temperature": 0.0,
     }

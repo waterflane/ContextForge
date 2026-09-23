@@ -175,6 +175,12 @@ def _index_operation(
 
     if progress_mode is not ProgressMode.JSONL:
         typer.echo(_render_build_summary(report), nl=False)
+    if report.semantic is not None and report.semantic.failed_paths:
+        typer.echo(
+            "Unfinished semantic file IDs: " + ", ".join(report.semantic.failed_paths),
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @index_app.command("build")

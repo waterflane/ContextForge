@@ -360,7 +360,7 @@ async def _build_repository_index(
     except UnsupportedIndexSchemaError as exc:
         if update_only:
             raise IndexRebuildRequiredError(
-                f"index schema v{exc.schema_version} requires a full v3 rebuild"
+                f"index schema v{exc.schema_version} requires a full v3.1 rebuild"
             ) from None
         previous = None
     model_enabled = provider is not None
@@ -530,11 +530,6 @@ async def _build_repository_index(
                 ),
                 cancellation=cancellation,
             )
-            if fail_on_error and semantic.failed_paths:
-                raise ApplicationError(
-                    "semantic analysis failed; one or more semantic cards "
-                    "required deterministic fallback"
-                )
             semantic_reused_without_work = semantic.request_count == 0 and len(
                 semantic.reused_paths
             ) == len(semantic.cards)
@@ -627,6 +622,10 @@ async def _build_repository_index(
                 with suppress(Exception):
                     write_manifest(lock, previous)
             raise
+    if fail_on_error and semantic is not None and semantic.failed_paths:
+        raise ApplicationError(
+            "semantic analysis incomplete for: " + ", ".join(semantic.failed_paths)
+        )
     return IndexBuildReport(
         snapshot=snapshot,
         structural=structural,
@@ -800,7 +799,7 @@ def _inspect_repository_index(
         if provider_configuration is not None:
             try:
                 code_map = load_file_code_map(root, path, manifest=manifest)
-                if manifest.schema_version == 3:
+                if manifest.schema_version == 4:
                     card = load_semantic_card(root, path, manifest=manifest)
                     identity = card.provenance.analyzer.model_identity
                     if card.provenance.method == "model" and (
@@ -1029,7 +1028,7 @@ async def _create_automatic_handoff(
     features = None
     with suppress(IndexManifestNotFoundError, IndexManifestReadError):
         manifest = load_manifest(snapshot.root)
-        if manifest.schema_version != 3:
+        if manifest.schema_version != 4:
             architecture = load_architecture_map(snapshot.root, manifest=manifest)
             features = load_feature_map(snapshot.root, manifest=manifest)
     progress.report(
@@ -1267,7 +1266,7 @@ def _global_statuses(
     Literal["current", "missing", "stale"],
     Literal["current", "missing", "stale"],
 ]:
-    if manifest.schema_version == 3:
+    if manifest.schema_version == 4:
         current = manifest.build.source_snapshot_digest == repository_identity
 
         def artifact_status(present: bool) -> Literal["current", "missing", "stale"]:

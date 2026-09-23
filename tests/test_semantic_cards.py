@@ -237,7 +237,7 @@ def test_content_cache_rebinds_unchanged_source_after_rename(tmp_path: Path) -> 
     assert all(item.path == "new.py" for item in card.evidence)
 
 
-def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
+def test_unrelated_rename_retries_uncached_fallback_card(tmp_path: Path) -> None:
     (tmp_path / "failed.py").write_text(
         "def failed(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
@@ -276,9 +276,9 @@ def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
     )
 
     reused_failed = load_semantic_card(tmp_path, "failed.py", manifest=updated.manifest)
-    assert provider.call_count == initial_calls
+    assert provider.call_count > initial_calls
     assert updated.semantic is not None
-    assert "failed.py" in updated.semantic.reused_paths
+    assert "failed.py" not in updated.semantic.reused_paths
     assert reused_failed.provenance.method == "deterministic-fallback"
 
 
@@ -792,7 +792,7 @@ def test_lexically_unanchored_optional_claim_is_not_ranking_text(
     assert "likely" not in card.ranking_text().casefold()
 
 
-def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
+def test_large_code_file_is_not_chunked_when_it_exceeds_context(
     tmp_path: Path,
 ) -> None:
     source = "\n".join(
@@ -863,17 +863,11 @@ def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
     )
     card = load_semantic_card(tmp_path, "large.py", manifest=report.manifest)
 
-    assert 2 <= provider.call_count <= 4
-    assert observed == [
-        (index, observed[0][1]) for index in range(1, len(observed) + 1)
-    ]
-    assert all(count <= 4 for _, count in observed)
-    assert card.provenance.method == "model"
-    assert card.quality in {"complete", "partial"}
-    assert len(card.coverage_ranges) == len(observed)
-    assert tuple(item.start_line for item in card.coverage_ranges) == tuple(
-        sorted(item.start_line for item in card.coverage_ranges)
-    )
+    assert provider.call_count == 0
+    assert observed == []
+    assert card.provenance.method == "deterministic-fallback"
+    assert report.semantic is not None
+    assert "large.py" in report.semantic.failed_paths
 
 
 def test_source_first_request_covers_142_line_typescript_in_one_call(

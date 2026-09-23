@@ -959,7 +959,7 @@ def _require_v3_index(repository: Path) -> None:
         raise _BenchmarkPreconditionError(
             "Index v3 benchmark requires an existing generation."
         ) from exc
-    if manifest.schema_version != 3:
+    if manifest.schema_version != 4:
         raise _BenchmarkPreconditionError(
             "Index v3 benchmark cannot use an older generation."
         )
