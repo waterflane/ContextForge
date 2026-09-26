@@ -57,6 +57,10 @@ class RealBenchmarkMode(StrEnum):
     PLANNED = "planned"
 
 
+class _ExternalRepositoryUnavailable(RuntimeError):
+    """A pinned source cannot be cloned or checked out."""
+
+
 class RealBenchmarkTaskRole(RealBenchmarkModel):
     """An independently necessary evidence role for a task."""
 
@@ -162,8 +166,24 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
     latency_ms: NonNegativeInt = 0
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    deterministic_warm_query_ms: NonNegativeInt | None = None
+    agentic_planner_ms: NonNegativeInt | None = None
+    final_answer_ms: NonNegativeInt | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_requested_functions: NonNegativeInt | None = None
+    semantic_described_functions: NonNegativeInt | None = None
+    semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
     citation_validity: Rate = 0.0
+    assertion_recall: Rate = 0.0
+    assertion_evidence_support: Rate = 0.0
+    lexical_identifier_support: Rate = 0.0
     groundedness_majority: bool = False
     quality_not_lower_than_oracle: bool = False
 
@@ -174,11 +194,27 @@ class RealBenchmarkObservation(RealBenchmarkModel):
             raise ValueError("observed paths must be unique in observed order")
         return value
 
+    @model_validator(mode="after")
+    def validate_semantic_counts(self) -> RealBenchmarkObservation:
+        requested = self.semantic_requested_functions
+        described = self.semantic_described_functions
+        file_only = self.semantic_file_only_functions
+        if any(
+            value is not None for value in (requested, described, file_only)
+        ) and any(value is None for value in (requested, described, file_only)):
+            raise ValueError("semantic function counts must be reported together")
+        if requested is not None and described is not None and described > requested:
+            raise ValueError("described functions cannot exceed requested functions")
+        if described is not None and file_only is not None and file_only > described:
+            raise ValueError("file_only functions cannot exceed described functions")
+        return self
+
 
 class RealBenchmarkTaskReport(RealBenchmarkModel):
     task_id: str
     repository_id: str
     mode: RealBenchmarkMode
+    repetition: NonNegativeInt = 1
     status: Literal["complete", "skipped"]
     skip_reason: str | None = None
     required_file_recall_at_5: Rate | None = None
@@ -193,14 +229,32 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
     latency_ms: NonNegativeInt = 0
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    deterministic_warm_query_ms: NonNegativeInt | None = None
+    agentic_planner_ms: NonNegativeInt | None = None
+    final_answer_ms: NonNegativeInt | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_requested_functions: NonNegativeInt | None = None
+    semantic_described_functions: NonNegativeInt | None = None
+    semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
     citation_validity: Rate | None = None
+    assertion_recall: Rate | None = None
+    assertion_evidence_support: Rate | None = None
+    lexical_identifier_support: Rate | None = None
     groundedness_majority: bool | None = None
     quality_not_lower_than_oracle: bool | None = None
     quality_gate_failed: bool
 
     @model_validator(mode="after")
     def validate_status(self) -> RealBenchmarkTaskReport:
+        if self.repetition < 1:
+            raise ValueError("repetition must be positive")
         if self.status == "skipped":
             if self.skip_reason is None or not self.quality_gate_failed:
                 raise ValueError(
@@ -226,9 +280,24 @@ class RealBenchmarkAggregate(RealBenchmarkModel):
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
     mean_latency_ms: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+    mean_cold_structural_ms: float | None = None
+    mean_semantic_offline_ms: float | None = None
+    mean_deterministic_warm_query_ms: float | None = None
+    mean_agentic_planner_ms: float | None = None
+    mean_final_answer_ms: float | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_function_coverage: Rate | None = None
+    semantic_file_only_rate: Rate | None = None
     plan_sufficient_count: NonNegativeInt = 0
     planned_task_count: NonNegativeInt = 0
     citation_containment: Rate | None = None
+    assertion_recall: Rate | None = None
+    assertion_evidence_support: Rate | None = None
+    lexical_identifier_support: Rate | None = None
     groundedness_majority_rate: Rate | None = None
     quality_gate_failed_count: NonNegativeInt = 0
     headline_token_savings: float = Field(default=0.0, allow_inf_nan=False)
@@ -249,7 +318,10 @@ def load_real_repository_benchmark_manifest(
 
 
 def evaluate_real_repository_observation(
-    task: RealBenchmarkTask, observation: RealBenchmarkObservation
+    task: RealBenchmarkTask,
+    observation: RealBenchmarkObservation,
+    *,
+    repetition: int = 1,
 ) -> RealBenchmarkTaskReport:
     """Score an observation with fixed evidence gates, never task-specific rules."""
 
@@ -276,9 +348,16 @@ def evaluate_real_repository_observation(
         and materialized_recall >= 0.90
         and measured_range_recall >= 0.85
         and observation.citation_validity == 1.0
+        and observation.assertion_recall == 1.0
+        and observation.assertion_evidence_support == 1.0
+        and observation.lexical_identifier_support == 1.0
         and observation.groundedness_majority
         and observation.quality_not_lower_than_oracle
         and observation.planner_calls <= 3
+        and (
+            observation.mode is RealBenchmarkMode.DETERMINISTIC
+            or observation.plan_sufficient is True
+        )
         and (
             observation.mode is not RealBenchmarkMode.DETERMINISTIC
             or observation.planner_calls == 0
@@ -288,6 +367,7 @@ def evaluate_real_repository_observation(
         task_id=task.task_id,
         repository_id=task.repository_id,
         mode=observation.mode,
+        repetition=repetition,
         status="complete",
         required_file_recall_at_5=retrieval_recall,
         precision_at_5=precision,
@@ -301,8 +381,24 @@ def evaluate_real_repository_observation(
         planner_input_tokens=observation.planner_input_tokens,
         planner_output_tokens=observation.planner_output_tokens,
         latency_ms=observation.latency_ms,
+        cold_structural_ms=observation.cold_structural_ms,
+        semantic_offline_ms=observation.semantic_offline_ms,
+        deterministic_warm_query_ms=observation.deterministic_warm_query_ms,
+        agentic_planner_ms=observation.agentic_planner_ms,
+        final_answer_ms=observation.final_answer_ms,
+        semantic_provider_calls=observation.semantic_provider_calls,
+        semantic_input_tokens=observation.semantic_input_tokens,
+        semantic_output_tokens=observation.semantic_output_tokens,
+        final_answer_input_tokens=observation.final_answer_input_tokens,
+        final_answer_output_tokens=observation.final_answer_output_tokens,
+        semantic_requested_functions=observation.semantic_requested_functions,
+        semantic_described_functions=observation.semantic_described_functions,
+        semantic_file_only_functions=observation.semantic_file_only_functions,
         plan_sufficient=observation.plan_sufficient,
         citation_validity=observation.citation_validity,
+        assertion_recall=observation.assertion_recall,
+        assertion_evidence_support=observation.assertion_evidence_support,
+        lexical_identifier_support=observation.lexical_identifier_support,
         groundedness_majority=observation.groundedness_majority,
         quality_not_lower_than_oracle=observation.quality_not_lower_than_oracle,
         quality_gate_failed=gate_failed,
@@ -315,16 +411,27 @@ def aggregate_real_repository_report(
 ) -> RealRepositoryBenchmarkReport:
     """Aggregate separately by mode and exclude failed gates from savings."""
 
-    expected = {task.task_id for task in manifest.tasks}
-    if {run.task_id for run in runs} != expected or len(runs) != len(expected):
-        raise ValueError("report must contain exactly one run for each manifest task")
+    expected = {task.task_id: task.repository_id for task in manifest.tasks}
+    repetitions = {run.repetition for run in runs}
+    if not repetitions or repetitions != set(range(1, max(repetitions) + 1)):
+        raise ValueError("report repetitions must be contiguous from one")
+    expected_keys = {
+        (task_id, repetition) for task_id in expected for repetition in repetitions
+    }
+    actual_keys = {(run.task_id, run.repetition) for run in runs}
+    if (
+        actual_keys != expected_keys
+        or len(runs) != len(expected_keys)
+        or any(run.repository_id != expected.get(run.task_id) for run in runs)
+    ):
+        raise ValueError("report must contain exactly one run per task and repetition")
     aggregates = tuple(
         _aggregate(mode, tuple(run for run in runs if run.mode == mode))
         for mode in RealBenchmarkMode
     )
     return RealRepositoryBenchmarkReport(
         suite_name=manifest.suite_name,
-        runs=tuple(sorted(runs, key=lambda item: item.task_id)),
+        runs=tuple(sorted(runs, key=lambda item: (item.task_id, item.repetition))),
         aggregates=aggregates,
         passed=all(
             run.status == "complete" and not run.quality_gate_failed for run in runs
@@ -341,6 +448,21 @@ def _aggregate(
         values = tuple(getattr(item, attribute) for item in complete)
         usable = tuple(value for value in values if value is not None)
         return None if not usable else sum(usable) / len(usable)
+
+    def total(attribute: str) -> int | None:
+        if not complete:
+            return None
+        result = 0
+        for item in complete:
+            value: int | None = getattr(item, attribute)
+            if value is None:
+                return None
+            result += value
+        return result
+
+    requested = total("semantic_requested_functions")
+    described = total("semantic_described_functions")
+    file_only = total("semantic_file_only_functions")
 
     ordinary = sum(
         item.ordinary_tokens for item in complete if not item.quality_gate_failed
@@ -363,9 +485,32 @@ def _aggregate(
         planner_input_tokens=sum(item.planner_input_tokens for item in complete),
         planner_output_tokens=sum(item.planner_output_tokens for item in complete),
         mean_latency_ms=mean("latency_ms"),
+        mean_cold_structural_ms=mean("cold_structural_ms"),
+        mean_semantic_offline_ms=mean("semantic_offline_ms"),
+        mean_deterministic_warm_query_ms=mean("deterministic_warm_query_ms"),
+        mean_agentic_planner_ms=mean("agentic_planner_ms"),
+        mean_final_answer_ms=mean("final_answer_ms"),
+        semantic_provider_calls=total("semantic_provider_calls"),
+        semantic_input_tokens=total("semantic_input_tokens"),
+        semantic_output_tokens=total("semantic_output_tokens"),
+        final_answer_input_tokens=total("final_answer_input_tokens"),
+        final_answer_output_tokens=total("final_answer_output_tokens"),
+        semantic_function_coverage=(
+            described / requested
+            if requested is not None and described is not None and requested > 0
+            else None
+        ),
+        semantic_file_only_rate=(
+            file_only / described
+            if file_only is not None and described is not None and described > 0
+            else None
+        ),
         plan_sufficient_count=sum(item.plan_sufficient is True for item in complete),
         planned_task_count=sum(item.plan_sufficient is not None for item in complete),
         citation_containment=mean("citation_validity"),
+        assertion_recall=mean("assertion_recall"),
+        assertion_evidence_support=mean("assertion_evidence_support"),
+        lexical_identifier_support=mean("lexical_identifier_support"),
         groundedness_majority_rate=(
             None
             if not complete
@@ -435,7 +580,7 @@ def temporary_read_only_clone(source: str | Path, revision: str) -> Iterator[Pat
                 encoding="utf-8",
             )
         except (OSError, subprocess.CalledProcessError) as exc:
-            raise RuntimeError(
+            raise _ExternalRepositoryUnavailable(
                 "external repository clone or revision checkout failed"
             ) from exc
         yield target
@@ -451,44 +596,64 @@ async def run_real_repository_benchmark(
     manifest: RealRepositoryBenchmarkManifest,
     sources: Mapping[str, str | Path],
     evaluator: RealRepositoryEvaluator,
+    *,
+    repetitions: int = 1,
 ) -> RealRepositoryBenchmarkReport:
     """Opt-in live harness. Missing/corrupt sources are skips and never passes."""
 
+    if repetitions < 1:
+        raise ValueError("repetitions must be positive")
     reports: list[RealBenchmarkTaskReport] = []
     repositories = {item.repository_id: item for item in manifest.repositories}
     for task in manifest.tasks:
         repository = repositories[task.repository_id]
         source = sources.get(task.repository_id)
-        if source is None:
-            reports.append(
-                _skipped(
-                    task, RealBenchmarkMode.DETERMINISTIC, "external_source_missing"
+        for repetition in range(1, repetitions + 1):
+            if source is None:
+                reports.append(
+                    _skipped(
+                        task,
+                        RealBenchmarkMode.DETERMINISTIC,
+                        "external_source_missing",
+                        repetition=repetition,
+                    )
                 )
-            )
-            continue
-        try:
-            with temporary_read_only_clone(source, repository.revision) as clone:
-                observed = evaluator(clone, task)
-                observation = (
-                    await observed if inspect.isawaitable(observed) else observed
+                continue
+            try:
+                with temporary_read_only_clone(source, repository.revision) as clone:
+                    observed = evaluator(clone, task)
+                    observation = (
+                        await observed if inspect.isawaitable(observed) else observed
+                    )
+                    reports.append(
+                        evaluate_real_repository_observation(
+                            task, observation, repetition=repetition
+                        )
+                    )
+            except _ExternalRepositoryUnavailable:
+                reports.append(
+                    _skipped(
+                        task,
+                        RealBenchmarkMode.DETERMINISTIC,
+                        "external_source_unavailable",
+                        repetition=repetition,
+                    )
                 )
-                reports.append(evaluate_real_repository_observation(task, observation))
-        except (RuntimeError, OSError, ValueError):
-            reports.append(
-                _skipped(
-                    task, RealBenchmarkMode.DETERMINISTIC, "external_source_unavailable"
-                )
-            )
     return aggregate_real_repository_report(manifest, tuple(reports))
 
 
 def _skipped(
-    task: RealBenchmarkTask, mode: RealBenchmarkMode, reason: str
+    task: RealBenchmarkTask,
+    mode: RealBenchmarkMode,
+    reason: str,
+    *,
+    repetition: int = 1,
 ) -> RealBenchmarkTaskReport:
     return RealBenchmarkTaskReport(
         task_id=task.task_id,
         repository_id=task.repository_id,
         mode=mode,
+        repetition=repetition,
         status="skipped",
         skip_reason=reason,
         quality_gate_failed=True,

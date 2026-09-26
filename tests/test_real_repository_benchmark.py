@@ -15,8 +15,29 @@ from contextforge.benchmarks import (
     load_real_repository_benchmark_manifest,
     run_real_repository_benchmark,
 )
+from contextforge.benchmarks.real_repositories import (
+    RealBenchmarkAggregate,
+    RealBenchmarkTaskReport,
+)
 
 MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
+
+
+def test_real_report_schema_tracks_public_fields() -> None:
+    schema_path = (
+        Path(__file__).parents[1]
+        / "docs"
+        / "schemas"
+        / "real-repository-benchmark-v1.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    assert set(schema["$defs"]["run"]["properties"]) == set(
+        RealBenchmarkTaskReport.model_fields
+    )
+    assert set(schema["$defs"]["aggregate"]["properties"]) == set(
+        RealBenchmarkAggregate.model_fields
+    )
 
 
 def _observation(
@@ -33,6 +54,9 @@ def _observation(
         latency_ms=18,
         plan_sufficient=None if mode is RealBenchmarkMode.DETERMINISTIC else True,
         citation_validity=1.0,
+        assertion_recall=1.0,
+        assertion_evidence_support=1.0,
+        lexical_identifier_support=1.0,
         groundedness_majority=True,
         quality_not_lower_than_oracle=True,
     )
@@ -133,6 +157,75 @@ def test_quality_gate_rejects_provider_call_budget_violation(
     )
 
     assert evaluate_real_repository_observation(task, observation).quality_gate_failed
+
+
+def test_planned_savings_require_effective_sufficiency() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.PLANNED,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        capsule_tokens=10,
+        ordinary_tokens=100,
+        citation_validity=1.0,
+        assertion_recall=1.0,
+        assertion_evidence_support=1.0,
+        lexical_identifier_support=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+        plan_sufficient=False,
+    )
+
+    report = evaluate_real_repository_observation(task, observation)
+
+    assert report.quality_gate_failed
+    assert report.valid_token_savings == 0.0
+
+
+def test_citation_containment_alone_does_not_pass_assertion_support() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        capsule_tokens=10,
+        ordinary_tokens=100,
+        citation_validity=1.0,
+        assertion_recall=1.0,
+        assertion_evidence_support=0.0,
+        lexical_identifier_support=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+    )
+
+    result = evaluate_real_repository_observation(task, observation)
+
+    assert result.citation_validity == 1.0
+    assert result.quality_gate_failed
+    assert result.valid_token_savings == 0.0
+
+
+def test_semantic_counts_must_be_complete_and_bounded() -> None:
+    with pytest.raises(ValidationError, match="reported together"):
+        RealBenchmarkObservation(
+            mode=RealBenchmarkMode.DETERMINISTIC,
+            retrieved_top5=(),
+            materialized_files=(),
+            capsule_tokens=0,
+            ordinary_tokens=0,
+            semantic_requested_functions=4,
+        )
+    with pytest.raises(ValidationError, match="cannot exceed requested"):
+        RealBenchmarkObservation(
+            mode=RealBenchmarkMode.DETERMINISTIC,
+            retrieved_top5=(),
+            materialized_files=(),
+            capsule_tokens=0,
+            ordinary_tokens=0,
+            semantic_requested_functions=4,
+            semantic_described_functions=5,
+            semantic_file_only_functions=0,
+        )
 
 
 def test_observation_rejects_more_than_five_top_five_candidates() -> None:
@@ -242,6 +335,9 @@ def test_range_recall_merges_overlap_but_preserves_gaps() -> None:
         capsule_tokens=70,
         ordinary_tokens=100,
         citation_validity=1.0,
+        assertion_recall=1.0,
+        assertion_evidence_support=1.0,
+        lexical_identifier_support=1.0,
         groundedness_majority=True,
         quality_not_lower_than_oracle=True,
     )
@@ -322,6 +418,54 @@ def test_aggregation_is_deterministic_and_separates_modes() -> None:
     assert planned.mode is RealBenchmarkMode.PLANNED
     assert planned.planner_calls == 3
     assert planned.planner_input_tokens == 120
+
+
+def test_aggregation_reports_phases_and_rejects_missing_repeat() -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    task = manifest.tasks[0]
+    reduced = manifest.model_copy(update={"tasks": (task,)})
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        capsule_tokens=50,
+        ordinary_tokens=100,
+        citation_validity=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+        cold_structural_ms=10,
+        semantic_offline_ms=20,
+        deterministic_warm_query_ms=30,
+        agentic_planner_ms=0,
+        final_answer_ms=40,
+        semantic_provider_calls=2,
+        semantic_input_tokens=400,
+        semantic_output_tokens=100,
+        final_answer_input_tokens=50,
+        final_answer_output_tokens=20,
+        semantic_requested_functions=4,
+        semantic_described_functions=3,
+        semantic_file_only_functions=1,
+    )
+    runs = tuple(
+        evaluate_real_repository_observation(task, observation, repetition=index)
+        for index in range(1, 4)
+    )
+
+    report = aggregate_real_repository_report(reduced, runs)
+
+    assert tuple(item.repetition for item in report.runs) == (1, 2, 3)
+    deterministic = report.aggregates[0]
+    assert deterministic.mean_cold_structural_ms == 10
+    assert deterministic.mean_semantic_offline_ms == 20
+    assert deterministic.mean_deterministic_warm_query_ms == 30
+    assert deterministic.mean_final_answer_ms == 40
+    assert deterministic.semantic_provider_calls == 6
+    assert deterministic.semantic_input_tokens == 1200
+    assert deterministic.semantic_function_coverage == 0.75
+    assert deterministic.semantic_file_only_rate == 1 / 3
+    with pytest.raises(ValueError, match="repetition"):
+        aggregate_real_repository_report(reduced, (runs[0], runs[2]))
 
 
 def test_missing_external_source_is_skip_and_never_a_false_pass() -> None:
@@ -418,13 +562,27 @@ def test_live_harness_clones_a_pinned_repository_and_removes_the_fixture(
         )
 
     report = asyncio.run(
-        run_real_repository_benchmark(manifest, {"fixture": source}, evaluator)
+        run_real_repository_benchmark(
+            manifest, {"fixture": source}, evaluator, repetitions=3
+        )
     )
 
     assert report.passed is True
-    assert len(observed_roots) == 1
-    assert not observed_roots[0].exists()
+    assert len(observed_roots) == 3
+    assert len(set(observed_roots)) == 3
+    assert tuple(run.repetition for run in report.runs) == (1, 2, 3)
+    assert all(not root.exists() for root in observed_roots)
     assert (source / "alpha.py").read_text(encoding="utf-8") == "alpha\n"
+
+    def broken_evaluator(_root: Path, _task: object) -> RealBenchmarkObservation:
+        raise ValueError("evaluator failed")
+
+    with pytest.raises(ValueError, match="evaluator failed"):
+        asyncio.run(
+            run_real_repository_benchmark(
+                manifest, {"fixture": source}, broken_evaluator
+            )
+        )
 
 
 def _write_json(path: Path, payload: object) -> Path:
