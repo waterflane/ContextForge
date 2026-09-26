@@ -1054,7 +1054,18 @@ def test_context_suggest_indexed_missing_then_indexed_success(tmp_path: Path) ->
     assert missing.exit_code == 1
     assert "active index" in _plain(missing.stderr)
 
-    assert _invoke("index", "build", str(tmp_path), "--provider", "fake").exit_code == 0
+    assert (
+        _invoke(
+            "index",
+            "build",
+            str(tmp_path),
+            "--provider",
+            "fake",
+            "--semantic-scope",
+            "none",
+        ).exit_code
+        == 0
+    )
     indexed = _invoke(
         "context",
         "suggest",

@@ -229,11 +229,14 @@ def test_verification_overflow_splits_claims_without_splitting_file(
 
 
 def test_short_code_file_without_callable_is_model_eligible(tmp_path: Path) -> None:
-    (tmp_path / "constants.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "constants.py").write_text(
+        '"""Module placeholder."""\npass\n', encoding="utf-8"
+    )
     report = asyncio.run(
         build_repository_index(tmp_path, provider=None, provider_configuration=None)
     )
     code_map = load_file_code_map(tmp_path, "constants.py", manifest=report.manifest)
+    assert not code_map.symbols
     assert not FILE_POLICY_REGISTRY.requires_deterministic_card(code_map)
 
     def responder(request, call):
@@ -241,12 +244,10 @@ def test_short_code_file_without_callable_is_model_eligible(tmp_path: Path) -> N
             {
                 "schema_version": 1,
                 "synopsis": {
-                    "text": "Defines VALUE constant",
+                    "text": "Module placeholder with pass",
                     "evidence_ids": ["file"],
                 },
-                "concepts": [
-                    {"text": "VALUE constant", "evidence_ids": ["symbol:0000"]}
-                ],
+                "concepts": [{"text": "module placeholder", "evidence_ids": ["file"]}],
                 "responsibilities": [],
                 "key_symbols": [],
                 "side_effects": [],
@@ -266,7 +267,7 @@ def test_short_code_file_without_callable_is_model_eligible(tmp_path: Path) -> N
     from contextforge.intelligence import load_semantic_card
 
     card = load_semantic_card(tmp_path, "constants.py", manifest=enriched.manifest)
-    assert card.synopsis.text == "Defines VALUE constant", card.diagnostics
+    assert card.synopsis.text == "Module placeholder with pass", card.diagnostics
 
 
 def test_lexicon_respects_shared_request_and_token_budgets(tmp_path: Path) -> None:
