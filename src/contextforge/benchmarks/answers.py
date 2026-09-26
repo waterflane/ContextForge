@@ -79,11 +79,18 @@ async def run_paired_answer_regression(
     )
     oracle_context = render_oracle_context(root, oracle_ranges)
     capsule_ranges, capsule_evidence = _capsule_material_evidence(compiled)
-    ordinary = _measure_answer_input(
+    reviewed_evidence = tuple(
+        (support.citation, support.material_evidence_ids)
+        for assertion in assertions
+        for support in assertion.support
+    )
+    ordinary = await _run_answer(
+        provider,
         task,
         assertions,
         ordinary_context,
         ordinary_ranges,
+        reviewed_evidence,
         label="ordinary-client",
     )
     oracle = await _run_answer(
@@ -92,7 +99,7 @@ async def run_paired_answer_regression(
         assertions,
         oracle_context,
         oracle_ranges,
-        (),
+        reviewed_evidence,
         label="manual-oracle",
     )
     contextforge = await _run_answer(
@@ -124,6 +131,10 @@ async def run_paired_answer_regression(
         quality_not_lower=(
             contextforge.assertion_recall >= oracle.assertion_recall
             and contextforge.citation_validity >= oracle.citation_validity
+            and contextforge.assertion_evidence_support
+            >= oracle.assertion_evidence_support
+            and contextforge.lexical_identifier_support
+            >= oracle.lexical_identifier_support
             and groundedness.passed
         ),
     )
@@ -400,33 +411,6 @@ async def _run_answer(
             else response.diagnostic.total_provider_http_calls
         ),
         duration_ms=duration_ms,
-    )
-
-
-def _measure_answer_input(
-    task: str,
-    assertions: tuple[BenchmarkExpectedAssertion, ...],
-    context: str,
-    allowed_ranges: tuple[BenchmarkSourceRange, ...],
-    *,
-    label: str,
-) -> BenchmarkAnswerEvaluation:
-    """Measure an ordinary full-file payload without requiring it to fit Qwen."""
-
-    request = _answer_request(
-        task,
-        assertions,
-        context,
-        allowed_ranges,
-        (),
-        label=label,
-    )
-    estimated = _request_tokens(request)
-    return BenchmarkAnswerEvaluation(
-        assertion_recall=0.0,
-        citation_validity=0.0,
-        input_tokens=estimated,
-        estimated_input_tokens=estimated,
     )
 
 

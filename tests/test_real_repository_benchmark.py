@@ -7,6 +7,10 @@ import pytest
 from pydantic import ValidationError
 
 from contextforge.benchmarks import (
+    BenchmarkAnswerCitation,
+    BenchmarkAnswerEvaluation,
+    BenchmarkGroundednessEvaluation,
+    BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
     RealBenchmarkMode,
     RealBenchmarkObservation,
@@ -28,7 +32,7 @@ def test_real_report_schema_tracks_public_fields() -> None:
         Path(__file__).parents[1]
         / "docs"
         / "schemas"
-        / "real-repository-benchmark-v1.schema.json"
+        / "real-repository-benchmark-v2.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
@@ -37,6 +41,49 @@ def test_real_report_schema_tracks_public_fields() -> None:
     )
     assert set(schema["$defs"]["aggregate"]["properties"]) == set(
         RealBenchmarkAggregate.model_fields
+    )
+
+
+def _paired_answer(
+    *,
+    evidence_support: float = 1.0,
+    ordinary_tokens: int = 100,
+    capsule_tokens: int = 70,
+) -> BenchmarkPairedAnswerEvaluation:
+    citation = BenchmarkAnswerCitation(
+        assertion_id="alpha",
+        path="alpha.py",
+        start_line=1,
+        end_line=1,
+        material_evidence_ids=("symbol:0000",),
+    )
+    oracle = BenchmarkAnswerEvaluation(
+        answer="Alpha is present.",
+        assertion_ids=("alpha",),
+        citations=(citation,),
+        valid_citation_count=1,
+        assertion_recall=1.0,
+        citation_validity=1.0,
+        assertion_evidence_support=1.0,
+        lexical_identifier_support=1.0,
+        input_tokens=40,
+        provider_http_calls=1,
+    )
+    contextforge = oracle.model_copy(
+        update={
+            "input_tokens": capsule_tokens,
+            "assertion_evidence_support": evidence_support,
+        }
+    )
+    return BenchmarkPairedAnswerEvaluation(
+        ordinary=oracle.model_copy(update={"input_tokens": ordinary_tokens}),
+        oracle=oracle,
+        contextforge=contextforge,
+        contextforge_groundedness=BenchmarkGroundednessEvaluation(
+            votes=(True, True, True), passed=True, provider_http_calls=3
+        ),
+        input_token_reduction=(ordinary_tokens - capsule_tokens) / ordinary_tokens,
+        quality_not_lower=evidence_support == 1.0,
     )
 
 
@@ -49,6 +96,7 @@ def _observation(
         materialized_files=materialized,
         capsule_tokens=70,
         ordinary_tokens=100,
+        paired_answer=_paired_answer(),
         planner_calls=0 if mode is RealBenchmarkMode.DETERMINISTIC else 3,
         planner_input_tokens=0 if mode is RealBenchmarkMode.DETERMINISTIC else 120,
         latency_ms=18,
@@ -128,7 +176,8 @@ def test_quality_gate_rejects_low_candidate_precision_even_with_full_material() 
 
     assert run.required_file_recall_at_5 == 1.0
     assert run.materialized_required_file_recall == 1.0
-    assert run.precision_at_5 == 0.75
+    assert run.precision_at_5 == 0.6
+    assert run.precision_at_r == 1.0
     assert run.quality_gate_failed is True
     assert run.valid_token_savings == 0.0
 
@@ -174,6 +223,7 @@ def test_planned_savings_require_effective_sufficiency() -> None:
         groundedness_majority=True,
         quality_not_lower_than_oracle=True,
         plan_sufficient=False,
+        paired_answer=_paired_answer(),
     )
 
     report = evaluate_real_repository_observation(task, observation)
@@ -196,6 +246,7 @@ def test_citation_containment_alone_does_not_pass_assertion_support() -> None:
         lexical_identifier_support=1.0,
         groundedness_majority=True,
         quality_not_lower_than_oracle=True,
+        paired_answer=_paired_answer(evidence_support=0.0),
     )
 
     result = evaluate_real_repository_observation(task, observation)
@@ -203,6 +254,89 @@ def test_citation_containment_alone_does_not_pass_assertion_support() -> None:
     assert result.citation_validity == 1.0
     assert result.quality_gate_failed
     assert result.valid_token_savings == 0.0
+
+
+def test_final_answer_tokens_override_capsule_size_and_legacy_flags() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        capsule_tokens=10,
+        ordinary_tokens=100,
+        citation_validity=0.0,
+        assertion_recall=0.0,
+        paired_answer=_paired_answer(ordinary_tokens=100, capsule_tokens=110),
+    )
+
+    result = evaluate_real_repository_observation(task, observation)
+
+    assert result.capsule_tokens == 110
+    assert result.final_answer_input_tokens == 110
+    assert result.ordinary_tokens == 100
+    assert result.token_savings == pytest.approx(-0.1)
+    assert result.citation_validity == 1.0
+    assert result.paired_answer is not None
+    assert result.paired_answer.contextforge.citations[0].material_evidence_ids == (
+        "symbol:0000",
+    )
+
+
+def test_headline_uses_mean_of_quality_passing_answer_reductions() -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    tasks = manifest.tasks[:2]
+    observations = (
+        _observation(
+            materialized=tasks[0].required_files,
+            mode=RealBenchmarkMode.DETERMINISTIC,
+        ).model_copy(update={"retrieved_top5": tasks[0].required_files}),
+        _observation(
+            materialized=tasks[1].required_files,
+            mode=RealBenchmarkMode.DETERMINISTIC,
+        ).model_copy(
+            update={
+                "retrieved_top5": tasks[1].required_files,
+                "paired_answer": _paired_answer(
+                    ordinary_tokens=1000, capsule_tokens=500
+                ),
+            }
+        ),
+    )
+    reports = tuple(
+        evaluate_real_repository_observation(task, observation)
+        for task, observation in zip(tasks, observations, strict=True)
+    )
+    reduced = manifest.model_copy(update={"tasks": tasks})
+
+    result = aggregate_real_repository_report(reduced, reports)
+
+    assert result.aggregates[0].headline_token_savings == pytest.approx(0.4)
+    assert result.passed is False  # callback observations are not live verification
+
+
+def test_v2_manifest_requires_reviewed_ranges_and_evidence_ids() -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    payload = manifest.model_dump(mode="json")
+    payload["schema_version"] = 2
+    with pytest.raises(ValidationError, match="required and manual oracle ranges"):
+        type(manifest).model_validate_json(json.dumps(payload))
+
+    for task in payload["tasks"]:
+        path = task["required_files"][0]
+        span = {"path": path, "start_line": 1, "end_line": 2}
+        task["required_ranges"] = [span]
+        task["oracle_ranges"] = [span]
+    with pytest.raises(ValidationError, match="reviewed support"):
+        type(manifest).model_validate_json(json.dumps(payload))
+
+    for task in payload["tasks"]:
+        task["answer_assertions"][0]["support"] = [
+            {
+                "citation": task["oracle_ranges"][0],
+                "material_evidence_ids": ["symbol:0000"],
+            }
+        ]
+    assert type(manifest).model_validate_json(json.dumps(payload)).schema_version == 2
 
 
 def test_semantic_counts_must_be_complete_and_bounded() -> None:
@@ -243,7 +377,6 @@ def test_observation_rejects_more_than_five_top_five_candidates() -> None:
     ("change", "message"),
     [
         ({"required_files": ["alpha.py", "alpha.py"]}, "unique"),
-        ({"relevant_top5": ["missing.py"]}, "subset"),
         (
             {
                 "task_roles": [
@@ -567,7 +700,8 @@ def test_live_harness_clones_a_pinned_repository_and_removes_the_fixture(
         )
     )
 
-    assert report.passed is True
+    assert report.passed is False
+    assert report.verified_pipeline is False
     assert len(observed_roots) == 3
     assert len(set(observed_roots)) == 3
     assert tuple(run.repetition for run in report.runs) == (1, 2, 3)

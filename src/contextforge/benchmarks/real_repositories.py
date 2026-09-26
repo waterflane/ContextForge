@@ -30,11 +30,12 @@ from pydantic import (
 
 from contextforge.benchmarks.models import (
     BenchmarkExpectedAssertion,
+    BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
 )
 from contextforge.core.validation import validate_portable_relative_path
 
-REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[1] = 1
+REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[2] = 2
 RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
 Rate = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)]
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
@@ -98,6 +99,7 @@ class RealBenchmarkTask(RealBenchmarkModel):
         min_length=1, max_length=5
     )
     required_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    oracle_ranges: tuple[BenchmarkSourceRange, ...] = ()
     task_roles: tuple[RealBenchmarkTaskRole, ...] = Field(min_length=1)
     answer_assertions: tuple[BenchmarkExpectedAssertion, ...] = ()
 
@@ -108,7 +110,7 @@ class RealBenchmarkTask(RealBenchmarkModel):
             raise ValueError("benchmark paths must be unique")
         return value
 
-    @field_validator("required_ranges")
+    @field_validator("required_ranges", "oracle_ranges")
     @classmethod
     def canonical_ranges(
         cls, value: tuple[BenchmarkSourceRange, ...]
@@ -124,10 +126,11 @@ class RealBenchmarkTask(RealBenchmarkModel):
         role_paths = {path for role in self.task_roles for path in role.required_paths}
         if role_paths != required:
             raise ValueError("task roles must cover exactly the required files")
-        if not set(self.relevant_top5) <= required:
-            raise ValueError("relevant_top5 must be a subset of required_files")
-        if not {item.path for item in self.required_ranges} <= required:
-            raise ValueError("required_ranges must refer to required_files")
+        if (
+            not {item.path for item in (*self.required_ranges, *self.oracle_ranges)}
+            <= required
+        ):
+            raise ValueError("required/oracle ranges must refer to required_files")
         assertion_ids = tuple(item.assertion_id for item in self.answer_assertions)
         if assertion_ids != tuple(sorted(set(assertion_ids))):
             raise ValueError("answer assertions must have canonical unique IDs")
@@ -135,7 +138,7 @@ class RealBenchmarkTask(RealBenchmarkModel):
 
 
 class RealRepositoryBenchmarkManifest(RealBenchmarkModel):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     suite_name: str = Field(min_length=1, max_length=200)
     repositories: tuple[RealBenchmarkRepository, ...] = Field(min_length=1)
     tasks: tuple[RealBenchmarkTask, ...] = Field(min_length=1)
@@ -150,6 +153,33 @@ class RealRepositoryBenchmarkManifest(RealBenchmarkModel):
             raise ValueError("tasks must use unique task_id values")
         if {task.repository_id for task in self.tasks} - set(repository_ids):
             raise ValueError("task references an unknown repository")
+        for task in self.tasks:
+            required = set(task.required_files)
+            relevant = set(task.relevant_top5)
+            if self.schema_version == 1:
+                if not relevant <= required:
+                    raise ValueError("relevant_top5 must be a subset of required_files")
+                continue
+            if not required <= relevant:
+                raise ValueError("relevant_top5 must include required_files")
+            if not task.required_ranges or not task.oracle_ranges:
+                raise ValueError("v2 tasks need required and manual oracle ranges")
+            if not task.answer_assertions or any(
+                not assertion.support for assertion in task.answer_assertions
+            ):
+                raise ValueError("every benchmark assertion needs reviewed support")
+            if any(
+                support.citation.path not in required
+                or not any(
+                    item.path == support.citation.path
+                    and item.start_line <= support.citation.start_line
+                    and support.citation.end_line <= item.end_line
+                    for item in task.oracle_ranges
+                )
+                for assertion in task.answer_assertions
+                for support in assertion.support
+            ):
+                raise ValueError("assertion support must fit a manual oracle range")
         return self
 
 
@@ -180,6 +210,7 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     semantic_described_functions: NonNegativeInt | None = None
     semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     citation_validity: Rate = 0.0
     assertion_recall: Rate = 0.0
     assertion_evidence_support: Rate = 0.0
@@ -219,6 +250,7 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     skip_reason: str | None = None
     required_file_recall_at_5: Rate | None = None
     precision_at_5: Rate | None = None
+    precision_at_r: Rate | None = None
     materialized_required_file_recall: Rate | None = None
     range_recall: Rate | None = None
     capsule_tokens: NonNegativeInt = 0
@@ -243,6 +275,7 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     semantic_described_functions: NonNegativeInt | None = None
     semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     citation_validity: Rate | None = None
     assertion_recall: Rate | None = None
     assertion_evidence_support: Rate | None = None
@@ -272,6 +305,7 @@ class RealBenchmarkAggregate(RealBenchmarkModel):
     skipped_task_count: NonNegativeInt
     required_file_recall_at_5: Rate | None = None
     precision_at_5: Rate | None = None
+    precision_at_r: Rate | None = None
     materialized_required_file_recall: Rate | None = None
     range_recall: Rate | None = None
     capsule_tokens: NonNegativeInt = 0
@@ -304,8 +338,9 @@ class RealBenchmarkAggregate(RealBenchmarkModel):
 
 
 class RealRepositoryBenchmarkReport(RealBenchmarkModel):
-    schema_version: Literal[1] = REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION
+    schema_version: Literal[2] = REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION
     suite_name: str
+    verified_pipeline: bool = False
     runs: tuple[RealBenchmarkTaskReport, ...]
     aggregates: tuple[RealBenchmarkAggregate, ...]
     passed: bool
@@ -329,30 +364,67 @@ def evaluate_real_repository_observation(
     retrieved = set(observation.retrieved_top5)
     materialized = set(observation.materialized_files)
     retrieval_recall = len(required & retrieved) / len(required)
-    precision = len(set(task.relevant_top5) & retrieved) / max(
-        len(observation.retrieved_top5), 1
+    precision = len(set(task.relevant_top5) & retrieved) / 5
+    relevance_depth = min(5, len(task.relevant_top5))
+    precision_at_r = (
+        len(set(task.relevant_top5) & set(observation.retrieved_top5[:relevance_depth]))
+        / relevance_depth
     )
     materialized_recall = len(required & materialized) / len(required)
     measured_range_recall = _range_recall(
         task.required_ranges, observation.materialized_ranges
     )
+    paired = observation.paired_answer
+    ordinary_answer = None if paired is None else paired.ordinary
+    capsule_answer = None if paired is None else paired.contextforge
+    oracle_answer = None if paired is None else paired.oracle
+    groundedness = None if paired is None else paired.contextforge_groundedness
+    ordinary_tokens = 0 if ordinary_answer is None else ordinary_answer.input_tokens
+    capsule_tokens = 0 if capsule_answer is None else capsule_answer.input_tokens
     token_savings = (
         0.0
-        if observation.ordinary_tokens == 0
-        else (observation.ordinary_tokens - observation.capsule_tokens)
-        / observation.ordinary_tokens
+        if ordinary_tokens == 0
+        else (ordinary_tokens - capsule_tokens) / ordinary_tokens
+    )
+    oracle_valid = (
+        oracle_answer is not None
+        and oracle_answer.assertion_recall == 1.0
+        and oracle_answer.citation_validity == 1.0
+        and oracle_answer.assertion_evidence_support == 1.0
+        and oracle_answer.lexical_identifier_support == 1.0
+        and oracle_answer.provider_http_calls > 0
+    )
+    quality_not_lower = (
+        oracle_valid
+        and oracle_answer is not None
+        and capsule_answer is not None
+        and capsule_answer.assertion_recall >= oracle_answer.assertion_recall
+        and capsule_answer.citation_validity >= oracle_answer.citation_validity
+        and capsule_answer.assertion_evidence_support
+        >= oracle_answer.assertion_evidence_support
+        and capsule_answer.lexical_identifier_support
+        >= oracle_answer.lexical_identifier_support
+        and groundedness is not None
+        and groundedness.passed
     )
     gate_failed = not (
         retrieval_recall >= 0.90
-        and precision > 0.80
+        and precision_at_r > 0.80
         and materialized_recall >= 0.90
         and measured_range_recall >= 0.85
-        and observation.citation_validity == 1.0
-        and observation.assertion_recall == 1.0
-        and observation.assertion_evidence_support == 1.0
-        and observation.lexical_identifier_support == 1.0
-        and observation.groundedness_majority
-        and observation.quality_not_lower_than_oracle
+        and capsule_answer is not None
+        and capsule_answer.citation_validity == 1.0
+        and capsule_answer.assertion_recall == 1.0
+        and capsule_answer.assertion_evidence_support == 1.0
+        and capsule_answer.lexical_identifier_support == 1.0
+        and capsule_answer.provider_http_calls > 0
+        and ordinary_answer is not None
+        and ordinary_answer.provider_http_calls > 0
+        and ordinary_tokens > 0
+        and groundedness is not None
+        and groundedness.passed
+        and groundedness.provider_http_calls >= 3
+        and quality_not_lower
         and observation.planner_calls <= 3
         and (
             observation.mode is RealBenchmarkMode.DETERMINISTIC
@@ -371,10 +443,11 @@ def evaluate_real_repository_observation(
         status="complete",
         required_file_recall_at_5=retrieval_recall,
         precision_at_5=precision,
+        precision_at_r=precision_at_r,
         materialized_required_file_recall=materialized_recall,
         range_recall=(measured_range_recall if task.required_ranges else None),
-        capsule_tokens=observation.capsule_tokens,
-        ordinary_tokens=observation.ordinary_tokens,
+        capsule_tokens=capsule_tokens,
+        ordinary_tokens=ordinary_tokens,
         token_savings=token_savings,
         valid_token_savings=0.0 if gate_failed else token_savings,
         planner_calls=observation.planner_calls,
@@ -389,18 +462,35 @@ def evaluate_real_repository_observation(
         semantic_provider_calls=observation.semantic_provider_calls,
         semantic_input_tokens=observation.semantic_input_tokens,
         semantic_output_tokens=observation.semantic_output_tokens,
-        final_answer_input_tokens=observation.final_answer_input_tokens,
-        final_answer_output_tokens=observation.final_answer_output_tokens,
+        final_answer_input_tokens=(
+            None if capsule_answer is None else capsule_answer.input_tokens
+        ),
+        final_answer_output_tokens=(
+            None if capsule_answer is None else capsule_answer.output_tokens
+        ),
         semantic_requested_functions=observation.semantic_requested_functions,
         semantic_described_functions=observation.semantic_described_functions,
         semantic_file_only_functions=observation.semantic_file_only_functions,
         plan_sufficient=observation.plan_sufficient,
-        citation_validity=observation.citation_validity,
-        assertion_recall=observation.assertion_recall,
-        assertion_evidence_support=observation.assertion_evidence_support,
-        lexical_identifier_support=observation.lexical_identifier_support,
-        groundedness_majority=observation.groundedness_majority,
-        quality_not_lower_than_oracle=observation.quality_not_lower_than_oracle,
+        paired_answer=paired,
+        citation_validity=(
+            None if capsule_answer is None else capsule_answer.citation_validity
+        ),
+        assertion_recall=(
+            None if capsule_answer is None else capsule_answer.assertion_recall
+        ),
+        assertion_evidence_support=(
+            None
+            if capsule_answer is None
+            else capsule_answer.assertion_evidence_support
+        ),
+        lexical_identifier_support=(
+            None
+            if capsule_answer is None
+            else capsule_answer.lexical_identifier_support
+        ),
+        groundedness_majority=(None if groundedness is None else groundedness.passed),
+        quality_not_lower_than_oracle=quality_not_lower,
         quality_gate_failed=gate_failed,
     )
 
@@ -408,6 +498,8 @@ def evaluate_real_repository_observation(
 def aggregate_real_repository_report(
     manifest: RealRepositoryBenchmarkManifest,
     runs: tuple[RealBenchmarkTaskReport, ...],
+    *,
+    verified_pipeline: bool = False,
 ) -> RealRepositoryBenchmarkReport:
     """Aggregate separately by mode and exclude failed gates from savings."""
 
@@ -431,10 +523,16 @@ def aggregate_real_repository_report(
     )
     return RealRepositoryBenchmarkReport(
         suite_name=manifest.suite_name,
+        verified_pipeline=verified_pipeline,
         runs=tuple(sorted(runs, key=lambda item: (item.task_id, item.repetition))),
         aggregates=aggregates,
-        passed=all(
-            run.status == "complete" and not run.quality_gate_failed for run in runs
+        passed=(
+            manifest.schema_version == 2
+            and verified_pipeline
+            and all(
+                run.status == "complete" and not run.quality_gate_failed for run in runs
+            )
+            and sum(run.valid_token_savings for run in runs) / len(runs) >= 0.30
         ),
     )
 
@@ -464,12 +562,7 @@ def _aggregate(
     described = total("semantic_described_functions")
     file_only = total("semantic_file_only_functions")
 
-    ordinary = sum(
-        item.ordinary_tokens for item in complete if not item.quality_gate_failed
-    )
-    capsule = sum(
-        item.capsule_tokens for item in complete if not item.quality_gate_failed
-    )
+    quality_valid = tuple(item for item in complete if not item.quality_gate_failed)
     return RealBenchmarkAggregate(
         mode=mode,
         task_count=len(runs),
@@ -477,6 +570,7 @@ def _aggregate(
         skipped_task_count=len(runs) - len(complete),
         required_file_recall_at_5=mean("required_file_recall_at_5"),
         precision_at_5=mean("precision_at_5"),
+        precision_at_r=mean("precision_at_r"),
         materialized_required_file_recall=mean("materialized_required_file_recall"),
         range_recall=mean("range_recall"),
         capsule_tokens=sum(item.capsule_tokens for item in complete),
@@ -519,7 +613,9 @@ def _aggregate(
         ),
         quality_gate_failed_count=sum(item.quality_gate_failed for item in runs),
         headline_token_savings=(
-            0.0 if ordinary == 0 else (ordinary - capsule) / ordinary
+            sum(item.valid_token_savings for item in quality_valid) / len(quality_valid)
+            if quality_valid
+            else 0.0
         ),
     )
 

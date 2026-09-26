@@ -1,14 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contextforge.dev/schemas/real-repository-benchmark-v1.schema.json",
-  "title": "ContextForge real-repository benchmark report v1",
-  "description": "Headline token savings exclude every run with quality_gate_failed; candidate recall is not materialized evidence coverage.",
+  "$id": "https://contextforge.dev/schemas/real-repository-benchmark-v2.schema.json",
+  "title": "ContextForge real-repository benchmark report v2",
+  "description": "Passing results require a verified pipeline and paired final answers; headline savings use final-answer input tokens only for quality-passing runs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "suite_name", "runs", "aggregates", "passed"],
+  "required": ["schema_version", "suite_name", "verified_pipeline", "runs", "aggregates", "passed"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "suite_name": {"type": "string", "minLength": 1},
+    "verified_pipeline": {"type": "boolean"},
     "passed": {"type": "boolean"},
     "runs": {
       "type": "array",
@@ -32,12 +33,14 @@
         "status": {"enum": ["complete", "skipped"]}, "skip_reason": {"type": ["string", "null"]},
         "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "precision_at_r": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
         "token_savings": {"type": "number"}, "valid_token_savings": {"type": "number"},
         "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
         "latency_ms": {"type": "integer", "minimum": 0}, "plan_sufficient": {"type": ["boolean", "null"]},
+        "paired_answer": {"anyOf": [{"$ref": "#/$defs/paired_answer"}, {"type": "null"}]},
         "cold_structural_ms": {"type": ["integer", "null"], "minimum": 0},
         "semantic_offline_ms": {"type": ["integer", "null"], "minimum": 0},
         "deterministic_warm_query_ms": {"type": ["integer", "null"], "minimum": 0},
@@ -68,6 +71,7 @@
         "completed_task_count": {"type": "integer", "minimum": 0}, "skipped_task_count": {"type": "integer", "minimum": 0},
         "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
+        "precision_at_r": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
@@ -91,6 +95,69 @@
         "lexical_identifier_support": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "groundedness_majority_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
         "quality_gate_failed_count": {"type": "integer", "minimum": 0}, "headline_token_savings": {"type": "number"}
+      }
+    },
+    "paired_answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinary", "oracle", "contextforge", "contextforge_groundedness", "input_token_reduction", "quality_not_lower"],
+      "properties": {
+        "ordinary": {"anyOf": [{"$ref": "#/$defs/answer"}, {"type": "null"}]},
+        "oracle": {"$ref": "#/$defs/answer"},
+        "contextforge": {"$ref": "#/$defs/answer"},
+        "contextforge_groundedness": {"anyOf": [{"$ref": "#/$defs/judge"}, {"type": "null"}]},
+        "input_token_reduction": {"type": "number"},
+        "quality_not_lower": {"type": "boolean"}
+      }
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assertion_id", "path", "start_line", "end_line", "material_evidence_ids"],
+      "properties": {
+        "assertion_id": {"type": "string"},
+        "path": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "material_evidence_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answer", "assertion_ids", "citations", "assertion_recall", "citation_validity", "assertion_evidence_support", "lexical_identifier_support", "input_tokens"],
+      "properties": {
+        "answer": {"type": "string"},
+        "assertion_ids": {"type": "array", "items": {"type": "string"}},
+        "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}},
+        "valid_citation_count": {"type": "integer", "minimum": 0},
+        "invalid_citation_count": {"type": "integer", "minimum": 0},
+        "assertion_recall": {"$ref": "#/$defs/rate"},
+        "citation_validity": {"$ref": "#/$defs/rate"},
+        "assertion_evidence_support": {"$ref": "#/$defs/rate"},
+        "lexical_identifier_support": {"$ref": "#/$defs/rate"},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "estimated_input_tokens": {"type": "integer", "minimum": 0},
+        "provider_input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "provider_http_calls": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["votes", "passed", "unsupported_claims", "input_tokens", "provider_http_calls", "duration_ms"],
+      "properties": {
+        "votes": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "boolean"}},
+        "passed": {"type": "boolean"},
+        "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "estimated_input_tokens": {"type": "integer", "minimum": 0},
+        "provider_input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "provider_http_calls": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "integer", "minimum": 0}
       }
     }
   }

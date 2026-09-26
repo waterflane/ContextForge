@@ -122,12 +122,13 @@ def test_oracle_and_capsule_answers_keep_real_citation_identity(
     assert result.contextforge_groundedness.passed is True
     assert result.quality_not_lower is True
     assert result.ordinary.input_tokens > result.oracle.input_tokens
-    assert result.ordinary.provider_http_calls == 0
+    assert result.ordinary.provider_http_calls == 1
     assert result.input_token_reduction == pytest.approx(
         (result.ordinary.input_tokens - result.contextforge.input_tokens)
         / result.ordinary.input_tokens
     )
     assert seen_allowed_ranges == [
+        [{"path": "service.py", "start_line": 1, "end_line": 42}],
         [{"path": "service.py", "start_line": 1, "end_line": 2}],
         [{"path": "service.py", "start_line": 1, "end_line": 42}],
     ]
