@@ -27,7 +27,7 @@ CALLABLE_KINDS = frozenset(
         SymbolKind.CONSTRUCTOR,
     }
 )
-LEXICON_PROMPT_VERSION = "semantic-lexicon-v1"
+LEXICON_PROMPT_VERSION = "semantic-lexicon-v2"
 
 
 def _validate_search_expression(value: str) -> str:
@@ -393,7 +393,10 @@ async def analyze_file_lexicon(
             for item in request.trusted_code_map_facts["outgoing_calls"]
             if item["source_symbol_id"] in expected
         }
-        if any(item.edge_id not in edge_ids for item in response.value.calls):
+        returned_edges = tuple(item.edge_id for item in response.value.calls)
+        if len(returned_edges) != len(set(returned_edges)):
+            raise ValueError("model lexicon repeated a call edge ID")
+        if any(edge_id not in edge_ids for edge_id in returned_edges):
             raise ValueError("model lexicon invented a call edge ID")
         claims: dict[str, str] = {}
         for function in response.value.functions:

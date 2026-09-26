@@ -7,7 +7,11 @@ import pytest
 from pydantic import ValidationError
 
 from contextforge.application import build_repository_index
-from contextforge.intelligence import load_file_code_map, load_relationship_graph
+from contextforge.intelligence import (
+    build_retrieval_index,
+    load_file_code_map,
+    load_relationship_graph,
+)
 from contextforge.intelligence import semantic_lexicon as lexicon_module
 from contextforge.intelligence.semantic_lexicon import (
     SemanticContextOverflow,
@@ -270,6 +274,57 @@ def test_enriched_generation_indexes_verified_expressions(tmp_path: Path) -> Non
     )
     assert "greeting" in semantic.terms
     assert any(item.text == "greeting entrypoint" for item in document.semantic_claims)
+    call_claim = next(
+        item for item in document.semantic_claims if item.text == "greeting call"
+    )
+    assert card.lexicon.calls
+    assert call_claim.evidence[0].evidence_id == (
+        f"lexicon-call:{card.lexicon.calls[0].edge_id}"
+    )
+    assert call_claim.evidence[0].source_range is not None
+    maps = {
+        path: load_file_code_map(tmp_path, path, manifest=report.manifest)
+        for path in ("app.py", "service.py")
+    }
+    graph = load_relationship_graph(tmp_path, manifest=report.manifest)
+    without_callsite = graph.model_copy(
+        update={
+            "edges": tuple(
+                edge.model_copy(update={"source_range": None})
+                if edge.edge_id == card.lexicon.calls[0].edge_id
+                else edge
+                for edge in graph.edges
+            )
+        }
+    )
+    fallback_index = build_retrieval_index(
+        tuple(maps.values()),
+        (card,),
+        report.manifest.build.source_snapshot_digest,
+        relationship_graph=without_callsite,
+    )
+    fallback_document = next(
+        item for item in fallback_index.documents if item.path == "app.py"
+    )
+    fallback_call = next(
+        item
+        for item in fallback_document.semantic_claims
+        if item.text == "greeting call"
+    )
+    assert fallback_call.evidence[0].source_range is not None
+    assert fallback_call.evidence[0].source_range.start_line == 3
+    assert fallback_call.evidence[0].source_range.end_line == 4
+    no_graph_index = build_retrieval_index(
+        tuple(maps.values()),
+        (card,),
+        report.manifest.build.source_snapshot_digest,
+    )
+    no_graph_document = next(
+        item for item in no_graph_index.documents if item.path == "app.py"
+    )
+    assert all(
+        item.text != "greeting call" for item in no_graph_document.semantic_claims
+    )
     assert report.semantic is not None
     assert report.semantic.request_count == provider.call_count
 
@@ -332,6 +387,28 @@ def test_invented_call_edge_id_is_rejected(tmp_path: Path) -> None:
         return json.dumps(payload)
 
     with pytest.raises(ValueError, match="invented a call edge"):
+        asyncio.run(
+            analyze_file_lexicon(
+                _provider(responder),
+                maps["app.py"],
+                sources["app.py"],
+                graph,
+                maps,
+                sources,
+            )
+        )
+
+
+def test_duplicate_call_edge_id_is_rejected(tmp_path: Path) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+
+    def responder(request, call):
+        payload = json.loads(_response(request))
+        if request.purpose == "semantic-lexicon" and payload["calls"]:
+            payload["calls"].append(payload["calls"][0])
+        return json.dumps(payload)
+
+    with pytest.raises(ValueError, match="repeated a call edge"):
         asyncio.run(
             analyze_file_lexicon(
                 _provider(responder),

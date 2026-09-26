@@ -26,6 +26,11 @@ from contextforge.core.validation import canonical_casefold_key
 from contextforge.intelligence.cards import SemanticCard
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
+from contextforge.intelligence.graph import (
+    RelationshipGraph,
+    RelationshipGraphEdge,
+    RelationshipGraphNode,
+)
 from contextforge.intelligence.models import (
     ArtifactReference,
     IndexManifest,
@@ -45,7 +50,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 6
+RETRIEVAL_BUILD_VERSION = 7
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -766,10 +771,22 @@ def build_retrieval_index(
     code_maps: tuple[FileCodeMap, ...],
     cards: tuple[SemanticCard, ...],
     source_snapshot_digest: str,
+    *,
+    relationship_graph: RelationshipGraph | None = None,
 ) -> RetrievalIndex:
     """Build canonical weighted term frequencies from facts and grounded prose."""
 
     cards_by_path = {item.path: item for item in cards}
+    graph_edges = (
+        {}
+        if relationship_graph is None
+        else {item.edge_id: item for item in relationship_graph.edges}
+    )
+    graph_nodes = (
+        {}
+        if relationship_graph is None
+        else {item.node_id: item for item in relationship_graph.nodes}
+    )
     documents: list[RetrievalDocument] = []
     exact_identifier_documents: dict[str, list[int]] = defaultdict(list)
     for document_ordinal, code_map in enumerate(
@@ -777,7 +794,9 @@ def build_retrieval_index(
     ):
         card = cards_by_path.get(code_map.path)
         postings = _structural_postings(code_map)
-        semantic_claims = _retrieval_semantic_claims(card, code_map)
+        semantic_claims = _retrieval_semantic_claims(
+            card, code_map, graph_edges, graph_nodes
+        )
         symbols = tuple(
             sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
         )
@@ -808,7 +827,23 @@ def build_retrieval_index(
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
             "source_identifiers": " ".join((*identifiers, *structural_identifiers)),
-            "grounded_semantics": "" if card is None else card.ranking_text(),
+            "grounded_semantics": (
+                ""
+                if card is None
+                else "\n".join(
+                    (
+                        card.ranking_text(include_call_expressions=False),
+                        *(
+                            claim.text
+                            for claim in semantic_claims
+                            if any(
+                                item.evidence_id.startswith("lexicon-call:")
+                                for item in claim.evidence
+                            )
+                        ),
+                    )
+                )
+            ),
         }
         fields = tuple(_retrieval_field(name, values[name]) for name in FIELD_WEIGHTS)
         documents.append(
@@ -862,6 +897,8 @@ def build_retrieval_index(
 def _retrieval_semantic_claims(
     card: SemanticCard | None,
     code_map: FileCodeMap,
+    graph_edges: dict[str, RelationshipGraphEdge],
+    graph_nodes: dict[str, RelationshipGraphNode],
 ) -> tuple[RetrievalSemanticClaim, ...]:
     if card is None:
         return ()
@@ -922,6 +959,40 @@ def _retrieval_semantic_claims(
             add_lexicon_claims(
                 function.symbol_id, (function.summary, *function.expressions)
             )
+        for call in card.lexicon.calls:
+            edge = graph_edges.get(call.edge_id)
+            if (
+                edge is None
+                or edge.kind != "call"
+                or edge.provenance == "model-inferred"
+                or edge.source_file_path != code_map.path
+                or not call.expressions
+            ):
+                continue
+            source_node = graph_nodes.get(edge.source_node_id)
+            if source_node is None or source_node.symbol_id != call.source_symbol_id:
+                continue
+            caller = symbols.get(call.source_symbol_id)
+            source_range = edge.source_range
+            if source_range is None and caller is not None:
+                declaration = caller.declaration_range
+                ending = caller.body_range or declaration
+                source_range = SourceRange(
+                    start_line=declaration.start_line,
+                    start_column=declaration.start_column,
+                    end_line=ending.end_line,
+                    end_column=ending.end_column,
+                )
+            if source_range is None:
+                continue
+            call_evidence = RetrievalSemanticEvidence(
+                evidence_id=f"lexicon-call:{edge.edge_id}",
+                source_range=source_range,
+            )
+            for expression in call.expressions:
+                values[(expression, (call_evidence.evidence_id,))] = (
+                    RetrievalSemanticClaim(text=expression, evidence=(call_evidence,))
+                )
     return tuple(values[key] for key in sorted(values))
 
 

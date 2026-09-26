@@ -279,7 +279,7 @@ class SemanticCard(IndexModel):
             raise ValueError("semantic card exceeds the bounded record size")
         return self
 
-    def ranking_text(self) -> str:
+    def ranking_text(self, *, include_call_expressions: bool = True) -> str:
         """Return only prose already validated against current evidence."""
 
         claims = [
@@ -295,8 +295,9 @@ class SemanticCard(IndexModel):
         if self.lexicon is not None:
             for function in self.lexicon.functions:
                 text.extend((function.summary, *function.expressions))
-            for call in self.lexicon.calls:
-                text.extend(call.expressions)
+            if include_call_expressions:
+                for call in self.lexicon.calls:
+                    text.extend(call.expressions)
         return "\n".join(text)
 
 
@@ -858,7 +859,10 @@ async def build_semantic_card_index(
     )
 
     semantic_retrieval = build_retrieval_index(
-        code_maps, tuple(cards), structural.build.source_snapshot_digest
+        code_maps,
+        tuple(cards),
+        structural.build.source_snapshot_digest,
+        relationship_graph=graph,
     )
     semantic_retrieval_digest = write_retrieval_index(
         lock,
