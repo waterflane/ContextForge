@@ -116,12 +116,8 @@ class FilePolicyRegistry:
         deterministic_name = path.name.endswith((".lock", ".min.js", ".map")) or (
             path.name in {".gitignore", ".gitattributes", "license", "license.md"}
         )
-        simple_metadata = len(code_map.symbols) == 0 and code_map.line_count <= 8
         return bool(
-            code_map.line_count == 0
-            or deterministic_part
-            or deterministic_name
-            or simple_metadata
+            code_map.line_count == 0 or deterministic_part or deterministic_name
         )
 
     @staticmethod

@@ -13,6 +13,7 @@ from contextforge.intelligence import (
     load_relationship_graph,
 )
 from contextforge.intelligence import semantic_lexicon as lexicon_module
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.semantic_lexicon import (
     SemanticContextOverflow,
     SemanticLexiconBudgetExceeded,
@@ -178,6 +179,94 @@ def test_runtime_limit_retries_without_callee_code(tmp_path: Path) -> None:
     assert lexicon.reported_context_window == 8192
     assert requests[1].trusted_code_map_facts["outgoing_calls"]
     assert [item.path for item in requests[1].untrusted_sources] == ["app.py"]
+
+
+def test_verification_overflow_splits_claims_without_splitting_file(
+    tmp_path: Path,
+) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+    requests = []
+
+    def responder(request, call):
+        requests.append(request)
+        if request.purpose == "semantic-lexicon-verification":
+            proposed = request.trusted_code_map_facts["proposed_claims"]
+            if (
+                request.trusted_code_map_facts["context_mode"] == "full_graph"
+                or len(proposed) > 1
+            ):
+                return ContextWindowExceededError(server_context_window=8192)
+        return _response(request)
+
+    lexicon = asyncio.run(
+        analyze_file_lexicon(
+            _provider(responder),
+            maps["app.py"],
+            sources["app.py"],
+            graph,
+            maps,
+            sources,
+        )
+    )
+    verification = [
+        request
+        for request in requests
+        if request.purpose == "semantic-lexicon-verification"
+    ]
+    assert lexicon.context_mode == "file_only"
+    assert lexicon.reported_context_window == 8192
+    assert any(
+        len(request.trusted_code_map_facts["proposed_claims"]) == 1
+        for request in verification
+    )
+    assert all(
+        next(item.text for item in request.untrusted_sources if item.path == "app.py")
+        == sources["app.py"]
+        for request in verification
+    )
+    assert lexicon.functions[0].summary == "Starts the greeting flow"
+    assert all(not call.expressions for call in lexicon.calls)
+
+
+def test_short_code_file_without_callable_is_model_eligible(tmp_path: Path) -> None:
+    (tmp_path / "constants.py").write_text("VALUE = 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    code_map = load_file_code_map(tmp_path, "constants.py", manifest=report.manifest)
+    assert not FILE_POLICY_REGISTRY.requires_deterministic_card(code_map)
+
+    def responder(request, call):
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": "Defines VALUE constant",
+                    "evidence_ids": ["file"],
+                },
+                "concepts": [
+                    {"text": "VALUE constant", "evidence_ids": ["symbol:0000"]}
+                ],
+                "responsibilities": [],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+            }
+        )
+
+    provider = _provider(responder)
+    enriched = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            semantic_scope="all",
+        )
+    )
+    from contextforge.intelligence import load_semantic_card
+
+    card = load_semantic_card(tmp_path, "constants.py", manifest=enriched.manifest)
+    assert card.synopsis.text == "Defines VALUE constant", card.diagnostics
 
 
 def test_lexicon_respects_shared_request_and_token_budgets(tmp_path: Path) -> None:

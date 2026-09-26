@@ -329,13 +329,22 @@ async def analyze_file_lexicon(
     dropped = 0
     mode: Literal["full_graph", "file_only"] = "full_graph"
     reported_window: int | None = None
+
+    def fits(request: ModelRequest) -> bool:
+        estimate = estimate_request_context(request, provider.configuration)
+        limit = min(
+            provider.configuration.context_window,
+            reported_window or provider.configuration.context_window,
+        )
+        return estimate.estimated_total_tokens <= limit
+
     for start in range(0, len(functions), 4):
         batch = functions[start : start + 4]
         batch_mode = "full_graph"
         request = _request(
             code_map, source, batch, graph, code_maps, sources, include_callees=True
         )
-        if not estimate_request_context(request, provider.configuration).fits:
+        if not fits(request):
             mode = "file_only"
             batch_mode = "file_only"
             request = _request(
@@ -347,15 +356,20 @@ async def analyze_file_lexicon(
                 sources,
                 include_callees=False,
             )
-        if not estimate_request_context(request, provider.configuration).fits:
+        if not fits(request):
             raise SemanticContextOverflow(
-                code_map.path, effective_window=provider.configuration.context_window
+                code_map.path,
+                effective_window=reported_window
+                or provider.configuration.context_window,
             )
         try:
             response = await complete(request)
         except ContextWindowExceededError as exc:
             if exc.server_context_window is not None:
-                reported_window = exc.server_context_window
+                reported_window = min(
+                    reported_window or exc.server_context_window,
+                    exc.server_context_window,
+                )
             if batch_mode == "file_only":
                 raise SemanticContextOverflow(
                     code_map.path, effective_window=reported_window
@@ -371,16 +385,21 @@ async def analyze_file_lexicon(
                 sources,
                 include_callees=False,
             )
-            if not estimate_request_context(request, provider.configuration).fits:
+            if not fits(request):
                 raise SemanticContextOverflow(
                     code_map.path, effective_window=reported_window
                 ) from None
             try:
                 response = await complete(request)
             except ContextWindowExceededError as retry_exc:
+                if retry_exc.server_context_window is not None:
+                    reported_window = min(
+                        reported_window or retry_exc.server_context_window,
+                        retry_exc.server_context_window,
+                    )
                 raise SemanticContextOverflow(
                     code_map.path,
-                    effective_window=retry_exc.server_context_window or reported_window,
+                    effective_window=reported_window,
                 ) from None
         if not isinstance(response.value, _RawLexicon):
             raise ValueError("model lexicon response has an invalid shape")
@@ -406,35 +425,75 @@ async def analyze_file_lexicon(
         for call in response.value.calls:
             for index, expression in enumerate(call.expressions):
                 claims[f"call:{call.edge_id}:{index}"] = expression
-        verify = _request(
-            code_map,
-            source,
-            batch,
-            graph,
-            code_maps,
-            sources,
-            include_callees=batch_mode == "full_graph",
-            verify=True,
-            claims=claims,
-        )
-        if not estimate_request_context(verify, provider.configuration).fits:
-            verify = _request(
-                code_map,
-                source,
-                batch,
-                graph,
-                code_maps,
-                sources,
-                include_callees=False,
-                verify=True,
-                claims=claims,
+        accepted: set[str] = set()
+        pending = list(sorted(claims))
+        verification_mode = batch_mode
+        while pending:
+            count = len(pending)
+            while True:
+                selected = pending[:count]
+                verify = _request(
+                    code_map,
+                    source,
+                    batch,
+                    graph,
+                    code_maps,
+                    sources,
+                    include_callees=verification_mode == "full_graph",
+                    verify=True,
+                    claims={key: claims[key] for key in selected},
+                )
+                if fits(verify):
+                    try:
+                        judgment = await complete(verify)
+                    except ContextWindowExceededError as exc:
+                        if exc.server_context_window is not None:
+                            reported_window = min(
+                                reported_window or exc.server_context_window,
+                                exc.server_context_window,
+                            )
+                        if verification_mode == "full_graph":
+                            verification_mode = "file_only"
+                            mode = "file_only"
+                            continue
+                        if count > 1:
+                            count = max(1, count // 2)
+                            continue
+                        raise SemanticContextOverflow(
+                            code_map.path, effective_window=reported_window
+                        ) from None
+                    if not isinstance(judgment.value, _AcceptedClaims):
+                        raise ValueError(
+                            "semantic support response has an invalid shape"
+                        )
+                    accepted.update(set(judgment.value.accepted_ids) & set(selected))
+                    del pending[:count]
+                    break
+                if verification_mode == "full_graph":
+                    verification_mode = "file_only"
+                    mode = "file_only"
+                elif count > 1:
+                    count = max(1, count // 2)
+                else:
+                    raise SemanticContextOverflow(
+                        code_map.path,
+                        effective_window=reported_window
+                        or provider.configuration.context_window,
+                    )
+        if verification_mode == "file_only":
+            external_edges = {
+                str(edge["edge_id"])
+                for edge in request.trusted_code_map_facts["outgoing_calls"]
+                if edge["target_path"] != code_map.path
+            }
+            accepted.difference_update(
+                claim_id
+                for claim_id in tuple(accepted)
+                if any(
+                    claim_id.startswith(f"call:{edge_id}:")
+                    for edge_id in external_edges
+                )
             )
-        if not estimate_request_context(verify, provider.configuration).fits:
-            raise SemanticContextOverflow(code_map.path)
-        judgment = await complete(verify)
-        if not isinstance(judgment.value, _AcceptedClaims):
-            raise ValueError("semantic support response has an invalid shape")
-        accepted = set(judgment.value.accepted_ids) & set(claims)
         for function in response.value.functions:
             summary_id = f"summary:{function.symbol_id}"
             if summary_id not in accepted:

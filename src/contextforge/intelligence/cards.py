@@ -999,7 +999,11 @@ def _reusable_cards(
             )
         except ValueError:
             return None
-        if provider is not None and card.provenance.method == "deterministic-fallback":
+        if (
+            provider is not None
+            and state.path in selected
+            and card.provenance.method != "model"
+        ):
             return None
         if (
             provider is not None
@@ -1057,7 +1061,11 @@ def _previous_reusable_cards(
             )
         except ValueError:
             continue
-        if provider is not None and card.provenance.method == "deterministic-fallback":
+        if (
+            provider is not None
+            and options.scope != "none"
+            and card.provenance.method != "model"
+        ):
             continue
         analyzer = card.provenance.analyzer
         if card.provenance.method == "model":
