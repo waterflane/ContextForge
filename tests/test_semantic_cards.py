@@ -72,6 +72,130 @@ def test_inferred_relationship_evidence_ids_are_canonical() -> None:
         )
 
 
+def test_semantic_card_rejects_stale_lexicon_and_duplicate_coverage(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    payload = card.model_dump(mode="json")
+    payload["lexicon"] = {
+        "schema_version": 1,
+        "path": "other.py",
+        "source_sha256": card.source_sha256,
+        "context_mode": "full_graph",
+        "functions": [],
+        "calls": [],
+    }
+    with pytest.raises(ValueError, match="lexicon identity"):
+        type(card).model_validate_json(json.dumps(payload))
+
+    payload = card.model_dump(mode="json")
+    span = {"start_line": 1, "start_column": 0, "end_line": 1, "end_column": 1}
+    payload["coverage_ranges"] = [span, span]
+    with pytest.raises(ValueError, match="coverage ranges"):
+        type(card).model_validate_json(json.dumps(payload))
+
+
+def test_semantic_card_rejects_duplicate_and_self_inferred_edges(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    relation = SemanticInferredRelationship(
+        target_candidate_id="target:" + "a" * 64,
+        target_path="other.py",
+        target_source_sha256="b" * 64,
+        evidence_ids=("file",),
+    ).model_dump(mode="json")
+    payload = card.model_dump(mode="json")
+    payload["inferred_relationships"] = [relation, relation]
+    with pytest.raises(ValueError, match="unique and canonical"):
+        type(card).model_validate_json(json.dumps(payload))
+    payload["inferred_relationships"] = [{**relation, "target_path": "app.py"}]
+    with pytest.raises(ValueError, match="self-referential"):
+        type(card).model_validate_json(json.dumps(payload))
+
+
+def test_semantic_card_enforces_serialized_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    monkeypatch.setattr(cards_module, "MAX_SEMANTIC_CARD_BYTES", 10)
+    with pytest.raises(ValueError, match="bounded record size"):
+        type(card).model_validate_json(card.model_dump_json())
+
+
+def test_invalid_grounded_model_card_publishes_retryable_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+
+    def invalid_grounding(*args: object, **kwargs: object) -> None:
+        raise ValueError("invalid required grounding")
+
+    monkeypatch.setattr(cards_module, "_ground_raw_card", invalid_grounding)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    assert report.semantic is not None
+    assert report.semantic.failed_paths == ("app.py",)
+    assert card.provenance.method == "deterministic-fallback"
+    assert card.quality == "partial"
+
+
+def test_noop_update_retries_failed_card_without_reextracting_source(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+
+    def respond(request, call):
+        return _response(synopsis_evidence="unknown" if call < 2 else "file")
+
+    provider = _provider(respond)
+    initial = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    assert initial.semantic is not None and initial.semantic.failed_paths == ("app.py",)
+    before = provider.call_count
+    updated = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    assert updated.structural.extracted_paths == ()
+    assert provider.call_count > before
+    assert updated.semantic is not None and updated.semantic.failed_paths == ()
+    card = load_semantic_card(tmp_path, "app.py", manifest=updated.manifest)
+    assert card.provenance.method == "model"
+
+
 def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     tmp_path: Path,
 ) -> None:
@@ -868,6 +992,91 @@ def test_large_code_file_is_not_chunked_when_it_exceeds_context(
     assert card.provenance.method == "deterministic-fallback"
     assert report.semantic is not None
     assert "large.py" in report.semantic.failed_paths
+
+
+def test_long_documentation_retains_bounded_chunk_planning(tmp_path: Path) -> None:
+    source = "# Guide\n" + "\n".join(
+        f"Section {number}: explains repository behavior and configuration."
+        for number in range(240)
+    )
+    (tmp_path / "README.md").write_text(source, encoding="utf-8")
+    code_map = next(
+        item
+        for item in extract_code_maps(scan_repository(tmp_path))
+        if item.path == "README.md"
+    )
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="small-context",
+            context_window=2048,
+        ),
+        responder=lambda request, call: _response(),
+    )
+    chunks, truncated = cards_module._plan_card_chunks(
+        provider,
+        code_map,
+        source,
+        (),
+        SemanticCardOptions(max_chunks_per_file=4),
+    )
+    assert 1 <= len(chunks) <= 4
+    assert all(chunk.text for chunk in chunks)
+    assert chunks[0].text != source
+    assert truncated
+
+
+def test_documentation_chunks_merge_grounded_claims(tmp_path: Path) -> None:
+    source = "# Guide\n" + "\n".join(
+        f"Section {number}: explains repository behavior and configuration."
+        for number in range(160)
+    )
+    (tmp_path / "README.md").write_text(source, encoding="utf-8")
+    observed = []
+
+    def respond(request, call):
+        observed.append(request)
+        evidence_id = request.trusted_code_map_facts["allowed_evidence_ids"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": "Repository behavior and configuration",
+                    "evidence_ids": [evidence_id],
+                },
+                "concepts": [
+                    {"text": "repository configuration", "evidence_ids": [evidence_id]}
+                ],
+                "responsibilities": [],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+            }
+        )
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="small-context",
+            context_window=4096,
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=respond,
+    )
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    card = load_semantic_card(tmp_path, "README.md", manifest=report.manifest)
+    assert len(observed) >= 2
+    assert card.synopsis.text == "Repository behavior and configuration"
+    assert card.coverage_ranges
 
 
 def test_source_first_request_covers_142_line_typescript_in_one_call(

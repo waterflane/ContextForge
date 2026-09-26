@@ -250,7 +250,10 @@ def build_index(
         bool,
         typer.Option(
             "--fail-on-error",
-            help="Keep the prior active generation on any model-analysis failure.",
+            help=(
+                "Report incomplete semantic analysis as an error after publishing "
+                "the partial generation."
+            ),
         ),
     ] = False,
     fail_fast: Annotated[

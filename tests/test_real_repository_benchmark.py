@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from contextforge.benchmarks import (
+    BenchmarkSourceRange,
     RealBenchmarkMode,
     RealBenchmarkObservation,
     aggregate_real_repository_report,
@@ -143,6 +144,155 @@ def test_observation_rejects_more_than_five_top_five_candidates() -> None:
             capsule_tokens=0,
             ordinary_tokens=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"required_files": ["alpha.py", "alpha.py"]}, "unique"),
+        ({"relevant_top5": ["missing.py"]}, "subset"),
+        (
+            {
+                "task_roles": [
+                    {
+                        "role_id": "only",
+                        "description": "One role.",
+                        "required_paths": ["alpha.py"],
+                    }
+                ]
+            },
+            "cover exactly",
+        ),
+        (
+            {
+                "required_ranges": [
+                    {"path": "missing.py", "start_line": 1, "end_line": 2}
+                ]
+            },
+            "refer to required_files",
+        ),
+        (
+            {
+                "answer_assertions": [
+                    {"assertion_id": "z", "description": "One."},
+                    {"assertion_id": "a", "description": "Two."},
+                ]
+            },
+            "canonical unique",
+        ),
+    ],
+)
+def test_real_manifest_rejects_inconsistent_task_evidence(
+    change: dict[str, object], message: str
+) -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    payload = task.model_dump(mode="json")
+    payload.update(change)
+    with pytest.raises(ValidationError, match=message):
+        type(task).model_validate_json(json.dumps(payload))
+
+
+def test_real_manifest_rejects_duplicate_role_paths_and_ranges() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    payload = task.model_dump(mode="json")
+    path = task.required_files[0]
+    payload["task_roles"][0]["required_paths"] = [path, path]
+    with pytest.raises(ValidationError, match="sorted and unique"):
+        type(task).model_validate_json(json.dumps(payload))
+    payload = task.model_dump(mode="json")
+    span = {"path": path, "start_line": 1, "end_line": 2}
+    payload["required_ranges"] = [span, span]
+    with pytest.raises(ValidationError, match="sorted and unique"):
+        type(task).model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("mutation", ["repositories", "tasks", "unknown_repository"])
+def test_real_manifest_rejects_ambiguous_identity(mutation: str) -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    payload = manifest.model_dump(mode="json")
+    if mutation == "repositories":
+        payload["repositories"].append(payload["repositories"][0])
+    elif mutation == "tasks":
+        payload["tasks"].append(payload["tasks"][0])
+    else:
+        payload["tasks"][0]["repository_id"] = "unknown"
+    with pytest.raises(ValidationError):
+        type(manifest).model_validate_json(json.dumps(payload))
+
+
+def test_range_recall_merges_overlap_but_preserves_gaps() -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    task = next(item for item in manifest.tasks if item.required_ranges)
+    required = task.required_ranges[0]
+    first = BenchmarkSourceRange(
+        path=required.path,
+        start_line=required.start_line,
+        end_line=required.start_line + 2,
+    )
+    overlap = BenchmarkSourceRange(
+        path=required.path,
+        start_line=required.start_line + 2,
+        end_line=required.end_line,
+    )
+    complete = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        materialized_ranges=(first, overlap, *task.required_ranges[1:]),
+        capsule_tokens=70,
+        ordinary_tokens=100,
+        citation_validity=1.0,
+        groundedness_majority=True,
+        quality_not_lower_than_oracle=True,
+    )
+    assert evaluate_real_repository_observation(task, complete).range_recall == 1.0
+    gap = first.model_copy(update={"end_line": required.start_line})
+    partial = complete.model_copy(
+        update={"materialized_ranges": (gap, overlap, *task.required_ranges[1:])}
+    )
+    result = evaluate_real_repository_observation(task, partial)
+    assert result.range_recall is not None and result.range_recall < 1.0
+    insufficient = complete.model_copy(
+        update={"materialized_ranges": (gap, *task.required_ranges[1:])}
+    )
+    assert evaluate_real_repository_observation(task, insufficient).quality_gate_failed
+    empty = complete.model_copy(update={"materialized_ranges": ()})
+    assert evaluate_real_repository_observation(task, empty).range_recall == 0.0
+
+
+def test_observation_rejects_duplicate_observed_paths() -> None:
+    with pytest.raises(ValidationError, match="observed paths must be unique"):
+        RealBenchmarkObservation(
+            mode=RealBenchmarkMode.DETERMINISTIC,
+            retrieved_top5=("alpha.py", "alpha.py"),
+            materialized_files=(),
+            capsule_tokens=1,
+            ordinary_tokens=1,
+        )
+
+
+def test_report_rejects_missing_task_and_invalid_skip_status() -> None:
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    task = manifest.tasks[0]
+    complete = evaluate_real_repository_observation(
+        task,
+        RealBenchmarkObservation(
+            mode=RealBenchmarkMode.DETERMINISTIC,
+            retrieved_top5=task.required_files,
+            materialized_files=task.required_files,
+            capsule_tokens=1,
+            ordinary_tokens=2,
+        ),
+    )
+    with pytest.raises(ValueError, match="exactly one run"):
+        aggregate_real_repository_report(manifest, (complete,))
+    payload = complete.model_dump(mode="json")
+    payload.update(status="skipped", skip_reason=None)
+    with pytest.raises(ValidationError, match="skipped result"):
+        type(complete).model_validate_json(json.dumps(payload))
+    payload.update(status="complete", skip_reason="unexpected")
+    with pytest.raises(ValidationError, match="complete result"):
+        type(complete).model_validate_json(json.dumps(payload))
 
 
 def test_aggregation_is_deterministic_and_separates_modes() -> None:
