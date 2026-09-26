@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from contextforge.intelligence.codemap import FileCodeMap, SymbolKind, SymbolRecord
 from contextforge.intelligence.graph import RelationshipGraph
@@ -28,6 +28,21 @@ CALLABLE_KINDS = frozenset(
     }
 )
 LEXICON_PROMPT_VERSION = "semantic-lexicon-v1"
+
+
+def _validate_search_expression(value: str) -> str:
+    if value != value.strip() or len(value.split()) > 8:
+        raise ValueError("search expression must be short and trimmed")
+    if not any(character.isalpha() for character in value):
+        raise ValueError("search expression must contain letters")
+    return value
+
+
+SearchExpression = Annotated[
+    str,
+    Field(min_length=1, max_length=80, pattern=r"^[\x20-\x7e]+$"),
+    AfterValidator(_validate_search_expression),
+]
 
 
 class SemanticContextOverflow(ValueError):
@@ -52,14 +67,14 @@ class _RawFunction(BaseModel):
 
     symbol_id: str
     summary: str = Field(min_length=1, max_length=400)
-    expressions: tuple[str, ...] = Field(default=(), max_length=4)
+    expressions: tuple[SearchExpression, ...] = Field(default=(), max_length=4)
 
 
 class _RawCall(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     edge_id: str
-    expressions: tuple[str, ...] = Field(default=(), max_length=3)
+    expressions: tuple[SearchExpression, ...] = Field(default=(), max_length=3)
 
 
 class _RawLexicon(BaseModel):

@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from contextforge.application import build_repository_index
 from contextforge.intelligence import load_file_code_map, load_relationship_graph
@@ -19,6 +20,27 @@ from contextforge.models import (
     ProviderConfiguration,
     estimate_request_context,
 )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["", " ", " too long ", "word " * 9, "x" * 81, "поиск", "123"],
+)
+def test_model_search_expressions_are_bounded_printable_ascii(
+    expression: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        lexicon_module._RawLexicon.model_validate(
+            {
+                "functions": [
+                    {
+                        "symbol_id": "supplied-id",
+                        "summary": "Describes the callable.",
+                        "expressions": [expression],
+                    }
+                ]
+            }
+        )
 
 
 def _fixture(root: Path):
