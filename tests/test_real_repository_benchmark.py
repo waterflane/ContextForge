@@ -15,7 +15,7 @@ from contextforge.benchmarks import (
     run_real_repository_benchmark,
 )
 
-MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v1.json"
+MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
 
 
 def _observation(
