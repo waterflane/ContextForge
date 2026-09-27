@@ -200,6 +200,24 @@ cheaper than the normal capsule while preserving verification rules. See the
 [Index v3.1 architecture](docs/architecture/index-v3-context-compiler.md) and
 [migration guide](docs/guides/index-v3-migration.md) for the full contracts.
 
+The pinned real-repository gate uses a reviewed manifest with source ranges and
+evidence IDs. Run `contextforge benchmark real-repositories --manifest
+benchmarks/real-repository-v31.json --source contextforge=PATH --source
+dsh-contextforge=PATH --source planup=PATH --source syncplayer=PATH` with a local
+OpenAI-compatible model. It creates temporary clones, builds each index, and
+compares ordinary, oracle, and Capsule answers. The JSON report is saved under
+`.contextforge/benchmark-results/`; incomplete runs and failed quality gates
+remain red rather than contributing to headline savings.
+
+The pinned real-repository gate uses a reviewed manifest with source ranges and
+evidence IDs. Run `contextforge benchmark real-repositories --manifest
+benchmarks/real-repository-v31.json --source contextforge=PATH --source
+dsh-contextforge=PATH --source planup=PATH --source syncplayer=PATH` with a local
+OpenAI-compatible model. It creates temporary clones, builds each index, and
+compares ordinary, oracle, and Capsule answers. The JSON report is saved under
+`.contextforge/benchmark-results/`; incomplete runs and failed quality gates
+remain red rather than contributing to headline savings.
+
 ## CLI overview
 
 Every command supports `--help`; run group help before using advanced or

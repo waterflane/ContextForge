@@ -164,6 +164,10 @@ class RealRepositoryBenchmarkManifest(RealBenchmarkModel):
                 raise ValueError("relevant_top5 must include required_files")
             if not task.required_ranges or not task.oracle_ranges:
                 raise ValueError("v2 tasks need required and manual oracle ranges")
+            if {item.path for item in task.required_ranges} != required or {
+                item.path for item in task.oracle_ranges
+            } != required:
+                raise ValueError("v2 ranges must cover every required file")
             if not task.answer_assertions or any(
                 not assertion.support for assertion in task.answer_assertions
             ):
@@ -195,6 +199,8 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     planner_calls: NonNegativeInt = 0
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
+    planner_status: str | None = None
+    planner_messages: tuple[str, ...] = ()
     latency_ms: NonNegativeInt = 0
     cold_structural_ms: NonNegativeInt | None = None
     semantic_offline_ms: NonNegativeInt | None = None
@@ -260,6 +266,8 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     planner_calls: NonNegativeInt = 0
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
+    planner_status: str | None = None
+    planner_messages: tuple[str, ...] = ()
     latency_ms: NonNegativeInt = 0
     cold_structural_ms: NonNegativeInt | None = None
     semantic_offline_ms: NonNegativeInt | None = None
@@ -337,10 +345,40 @@ class RealBenchmarkAggregate(RealBenchmarkModel):
     headline_token_savings: float = Field(default=0.0, allow_inf_nan=False)
 
 
+class RealBenchmarkBuildReport(RealBenchmarkModel):
+    """One independently cloned and measured repository build."""
+
+    repository_id: str
+    repetition: NonNegativeInt
+    status: Literal["complete", "skipped", "partial"]
+    reason: str | None = None
+    failed_paths: tuple[RepositoryRelativePath, ...] = ()
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_estimated_input_tokens: NonNegativeInt | None = None
+    semantic_reported_input_tokens: NonNegativeInt | None = None
+    semantic_reported_output_tokens: NonNegativeInt | None = None
+    requested_functions: NonNegativeInt | None = None
+    described_functions: NonNegativeInt | None = None
+    file_only_functions: NonNegativeInt | None = None
+    noop_update_ms: NonNegativeInt | None = None
+    noop_provider_calls: NonNegativeInt | None = None
+    noop_generation_unchanged: bool | None = None
+    active_amplification: float | None = Field(default=None, ge=0)
+    maximum_shard_bytes: NonNegativeInt | None = None
+    fresh_process_reload_successes: NonNegativeInt | None = None
+
+
 class RealRepositoryBenchmarkReport(RealBenchmarkModel):
     schema_version: Literal[2] = REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION
     suite_name: str
     verified_pipeline: bool = False
+    provider_endpoint: str | None = None
+    model_id: str | None = None
+    requested_context_window: NonNegativeInt | None = None
+    reasoning_effort: str | None = None
+    builds: tuple[RealBenchmarkBuildReport, ...] = ()
     runs: tuple[RealBenchmarkTaskReport, ...]
     aggregates: tuple[RealBenchmarkAggregate, ...]
     passed: bool
@@ -453,6 +491,8 @@ def evaluate_real_repository_observation(
         planner_calls=observation.planner_calls,
         planner_input_tokens=observation.planner_input_tokens,
         planner_output_tokens=observation.planner_output_tokens,
+        planner_status=observation.planner_status,
+        planner_messages=observation.planner_messages,
         latency_ms=observation.latency_ms,
         cold_structural_ms=observation.cold_structural_ms,
         semantic_offline_ms=observation.semantic_offline_ms,
@@ -500,6 +540,7 @@ def aggregate_real_repository_report(
     runs: tuple[RealBenchmarkTaskReport, ...],
     *,
     verified_pipeline: bool = False,
+    builds: tuple[RealBenchmarkBuildReport, ...] = (),
 ) -> RealRepositoryBenchmarkReport:
     """Aggregate separately by mode and exclude failed gates from savings."""
 
@@ -507,10 +548,17 @@ def aggregate_real_repository_report(
     repetitions = {run.repetition for run in runs}
     if not repetitions or repetitions != set(range(1, max(repetitions) + 1)):
         raise ValueError("report repetitions must be contiguous from one")
+    modes = tuple(RealBenchmarkMode) if verified_pipeline else (None,)
     expected_keys = {
-        (task_id, repetition) for task_id in expected for repetition in repetitions
+        (task_id, repetition, mode)
+        for task_id in expected
+        for repetition in repetitions
+        for mode in modes
     }
-    actual_keys = {(run.task_id, run.repetition) for run in runs}
+    actual_keys = {
+        (run.task_id, run.repetition, run.mode if verified_pipeline else None)
+        for run in runs
+    }
     if (
         actual_keys != expected_keys
         or len(runs) != len(expected_keys)
@@ -524,13 +572,40 @@ def aggregate_real_repository_report(
     return RealRepositoryBenchmarkReport(
         suite_name=manifest.suite_name,
         verified_pipeline=verified_pipeline,
-        runs=tuple(sorted(runs, key=lambda item: (item.task_id, item.repetition))),
+        builds=builds,
+        runs=tuple(
+            sorted(runs, key=lambda item: (item.task_id, item.repetition, item.mode))
+        ),
         aggregates=aggregates,
         passed=(
             manifest.schema_version == 2
             and verified_pipeline
+            and len(manifest.tasks) >= 16
+            and {task.dataset_split for task in manifest.tasks} == {"tuning", "holdout"}
+            and len(repetitions) >= 3
+            and len(builds) == len(manifest.repositories) * len(repetitions)
+            and all(
+                build.status == "complete"
+                and build.noop_update_ms is not None
+                and build.noop_update_ms < 2_000
+                and build.noop_generation_unchanged is True
+                and build.noop_provider_calls == 0
+                and build.active_amplification is not None
+                and build.active_amplification <= 12
+                and build.maximum_shard_bytes is not None
+                and build.maximum_shard_bytes <= 4 * 1_024 * 1_024
+                and build.fresh_process_reload_successes == 100
+                and build.requested_functions == build.described_functions
+                for build in builds
+            )
             and all(
                 run.status == "complete" and not run.quality_gate_failed for run in runs
+            )
+            and all(
+                run.deterministic_warm_query_ms is not None
+                and run.deterministic_warm_query_ms < 1_000
+                for run in runs
+                if run.mode is RealBenchmarkMode.DETERMINISTIC
             )
             and sum(run.valid_token_savings for run in runs) / len(runs) >= 0.30
         ),
@@ -661,8 +736,22 @@ def temporary_read_only_clone(source: str | Path, revision: str) -> Iterator[Pat
     ) as directory:
         target = Path(directory) / "repository"
         try:
+            source_path = Path(source).expanduser().resolve(strict=True)
+            if not source_path.is_dir():
+                raise _ExternalRepositoryUnavailable(
+                    "external source is not a directory"
+                )
             subprocess.run(
-                ["git", "clone", "--quiet", "--no-local", str(source), str(target)],
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={source_path}",
+                    "clone",
+                    "--quiet",
+                    "--no-local",
+                    str(source_path),
+                    str(target),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -758,6 +847,7 @@ def _skipped(
 
 __all__ = [
     "REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION",
+    "RealBenchmarkBuildReport",
     "RealBenchmarkMode",
     "RealBenchmarkObservation",
     "RealBenchmarkTask",

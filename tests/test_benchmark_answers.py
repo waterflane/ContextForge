@@ -8,13 +8,17 @@ from contextforge.application import build_repository_index
 from contextforge.benchmarks import (
     BenchmarkAnswerCitation,
     BenchmarkAnswerEvaluation,
+    BenchmarkAssertionSupport,
     BenchmarkExpectedAssertion,
     BenchmarkSourceRange,
     render_oracle_context,
     render_ordinary_context,
     run_paired_answer_regression,
 )
-from contextforge.benchmarks.answers import _run_groundedness_judge
+from contextforge.benchmarks.answers import (
+    _assertion_has_evidence_support,
+    _run_groundedness_judge,
+)
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
@@ -162,6 +166,41 @@ def test_ordinary_renderer_uses_complete_required_files(tmp_path: Path) -> None:
         BenchmarkSourceRange(path="service.py", start_line=1, end_line=3),
     )
     assert "first\nsecond\nthird" in rendered
+
+
+def test_cross_file_assertion_requires_each_reviewed_support() -> None:
+    first = BenchmarkSourceRange(path="caller.py", start_line=2, end_line=3)
+    second = BenchmarkSourceRange(path="callee.py", start_line=4, end_line=5)
+    assertion = BenchmarkExpectedAssertion(
+        assertion_id="call-flow",
+        description="caller invokes callee",
+        support=(
+            BenchmarkAssertionSupport(
+                citation=first, material_evidence_ids=("caller-id",)
+            ),
+            BenchmarkAssertionSupport(
+                citation=second, material_evidence_ids=("callee-id",)
+            ),
+        ),
+    )
+    caller = BenchmarkAnswerCitation(
+        assertion_id="call-flow",
+        path="caller.py",
+        start_line=2,
+        end_line=3,
+        material_evidence_ids=("caller-id",),
+    )
+    callee = BenchmarkAnswerCitation(
+        assertion_id="call-flow",
+        path="callee.py",
+        start_line=4,
+        end_line=5,
+        material_evidence_ids=("callee-id",),
+    )
+    material = ((first, ("caller-id",)), (second, ("callee-id",)))
+
+    assert not _assertion_has_evidence_support(assertion, (caller,), material)
+    assert _assertion_has_evidence_support(assertion, (caller, callee), material)
 
 
 def test_dispose_body_is_required_for_blinded_groundedness(tmp_path: Path) -> None:

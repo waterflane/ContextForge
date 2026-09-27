@@ -519,18 +519,21 @@ def _assertion_has_evidence_support(
 ) -> bool:
     if not assertion.support:
         return any(item.assertion_id == assertion.assertion_id for item in citations)
-    for expected in assertion.support:
-        for citation in citations:
-            if citation.assertion_id != assertion.assertion_id:
-                continue
-            if not _contains(expected.citation, citation):
-                continue
-            for source_range, evidence_ids in material_evidence:
-                if _contains(source_range, citation) and set(
-                    expected.material_evidence_ids
-                ) <= set(citation.material_evidence_ids) <= set(evidence_ids):
-                    return True
-    return False
+    return all(
+        any(
+            citation.assertion_id == assertion.assertion_id
+            and _contains(expected.citation, citation)
+            and any(
+                _contains(source_range, citation)
+                and set(expected.material_evidence_ids)
+                <= set(citation.material_evidence_ids)
+                <= set(evidence_ids)
+                for source_range, evidence_ids in material_evidence
+            )
+            for citation in citations
+        )
+        for expected in assertion.support
+    )
 
 
 def _assertion_has_lexical_support(

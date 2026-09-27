@@ -21,6 +21,29 @@ runner = CliRunner()
 TERMINAL_WIDTH = 140
 
 
+def test_real_repository_command_refuses_unreviewed_manifest(tmp_path: Path) -> None:
+    reviewed = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
+    payload = json.loads(reviewed.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    manifest = tmp_path / "unreviewed.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "real-repositories",
+            "--manifest",
+            str(manifest),
+            "--source",
+            f"contextforge={tmp_path}",
+            "--repetitions",
+            "1",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "reviewed v2 manifest" in result.output
+
+
 def _write(root: Path, path: str, content: str) -> None:
     destination = root.joinpath(*path.split("/"))
     destination.parent.mkdir(parents=True, exist_ok=True)

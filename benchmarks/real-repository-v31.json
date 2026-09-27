@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "suite_name": "index-v3.1-real-repository",
   "repositories": [
     {
@@ -62,7 +62,53 @@
       "answer_assertions": [
         {
           "assertion_id": "active-model-flow",
-          "description": "The answer identifies configuration, forwarding, and worker evidence."
+          "description": "completeWithActiveModel streams messages through the selected Harness model.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/active-model-index-proxy.ts",
+                "start_line": 189,
+                "end_line": 226
+              },
+              "material_evidence_ids": [
+                "structural-0450576c96189dcd4d37848403a602bf"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/active-model-index-proxy.ts",
+          "start_line": 189,
+          "end_line": 226
+        },
+        {
+          "path": "src/config.ts",
+          "start_line": 155,
+          "end_line": 160
+        },
+        {
+          "path": "src/worker.ts",
+          "start_line": 94,
+          "end_line": 109
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/active-model-index-proxy.ts",
+          "start_line": 189,
+          "end_line": 226
+        },
+        {
+          "path": "src/config.ts",
+          "start_line": 155,
+          "end_line": 160
+        },
+        {
+          "path": "src/worker.ts",
+          "start_line": 94,
+          "end_line": 109
         }
       ]
     },
@@ -108,7 +154,53 @@
       "answer_assertions": [
         {
           "assertion_id": "capsule-flow",
-          "description": "The answer traces each evidence role."
+          "description": "prepare calls protocol.compile after checking the structural index and returns selected material paths.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/pipeline.ts",
+                "start_line": 38,
+                "end_line": 104
+              },
+              "material_evidence_ids": [
+                "structural-a4fb82f2b452d3cdccbe63ec1b220391"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/consolidator.ts",
+          "start_line": 33,
+          "end_line": 77
+        },
+        {
+          "path": "src/pipeline.ts",
+          "start_line": 38,
+          "end_line": 104
+        },
+        {
+          "path": "src/tools.ts",
+          "start_line": 92,
+          "end_line": 130
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/consolidator.ts",
+          "start_line": 33,
+          "end_line": 77
+        },
+        {
+          "path": "src/pipeline.ts",
+          "start_line": 38,
+          "end_line": 104
+        },
+        {
+          "path": "src/tools.ts",
+          "start_line": 92,
+          "end_line": 130
         }
       ]
     },
@@ -154,7 +246,53 @@
       "answer_assertions": [
         {
           "assertion_id": "lifecycle-evidence",
-          "description": "The answer is supported by implementation and test evidence."
+          "description": "dispose settles active proxies and closes those that started successfully.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/index-lifecycle.ts",
+                "start_line": 47,
+                "end_line": 119
+              },
+              "material_evidence_ids": [
+                "structural-de5c8a7ad2dde6d0cc20648f9f73b4ff"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 47,
+          "end_line": 119
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 52
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 47,
+          "end_line": 119
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 52
         }
       ]
     },
@@ -178,12 +316,17 @@
         {
           "path": "src/index-lifecycle.ts",
           "start_line": 33,
-          "end_line": 68
+          "end_line": 70
         },
         {
           "path": "src/worker-manager.ts",
-          "start_line": 10,
-          "end_line": 60
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 39
         }
       ],
       "task_roles": [
@@ -212,7 +355,36 @@
       "answer_assertions": [
         {
           "assertion_id": "manager-boundary",
-          "description": "The answer identifies both manager roles and test coverage."
+          "description": "workerFor canonicalizes a workspace and reuses its cached worker.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/worker-manager.ts",
+                "start_line": 28,
+                "end_line": 47
+              },
+              "material_evidence_ids": [
+                "structural-e083d4af605e041f50dc6b4696aa319f"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 33,
+          "end_line": 70
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 39
         }
       ]
     },
@@ -258,7 +430,53 @@
       "answer_assertions": [
         {
           "assertion_id": "agenda-repeat",
-          "description": "The answer connects repeat rules to agenda construction."
+          "description": "BuildAgenda filters repeating entries with occursOn and tasks by date.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+                "start_line": 14,
+                "end_line": 29
+              },
+              "material_evidence_ids": [
+                "structural-7e09a419ea80fa3343938069ff73242c"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 28
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 28
         }
       ]
     },
@@ -313,7 +531,63 @@
       "answer_assertions": [
         {
           "assertion_id": "android-startup",
-          "description": "The answer traces all startup roles."
+          "description": "MainActivity obtains PlanUpApplication.container and supplies it to the app content.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/MainActivity.kt",
+                "start_line": 19,
+                "end_line": 37
+              },
+              "material_evidence_ids": [
+                "structural-7befa8a66feede41ba38f2f1cf78d4dc"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/AndroidManifest.xml",
+          "start_line": 3,
+          "end_line": 27
+        },
+        {
+          "path": "app/src/main/java/com/planup/MainActivity.kt",
+          "start_line": 19,
+          "end_line": 37
+        },
+        {
+          "path": "app/src/main/java/com/planup/PlanUpApplication.kt",
+          "start_line": 6,
+          "end_line": 8
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 21,
+          "end_line": 31
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/AndroidManifest.xml",
+          "start_line": 3,
+          "end_line": 27
+        },
+        {
+          "path": "app/src/main/java/com/planup/MainActivity.kt",
+          "start_line": 19,
+          "end_line": 37
+        },
+        {
+          "path": "app/src/main/java/com/planup/PlanUpApplication.kt",
+          "start_line": 6,
+          "end_line": 8
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 21,
+          "end_line": 31
         }
       ]
     },
@@ -359,7 +633,53 @@
       "answer_assertions": [
         {
           "assertion_id": "backup-roundtrip",
-          "description": "The answer connects codec behavior to tested model data."
+          "description": "PlanBackupCodec.encode writes format, version, schedule, and tasks into JSON.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+                "start_line": 25,
+                "end_line": 125
+              },
+              "material_evidence_ids": [
+                "structural-825fa37e4023fd579e9239b1938dd9a9"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/Task.kt",
+          "start_line": 8,
+          "end_line": 24
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/Task.kt",
+          "start_line": 8,
+          "end_line": 24
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
         }
       ]
     },
@@ -386,18 +706,28 @@
       "required_ranges": [
         {
           "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
-          "start_line": 19,
-          "end_line": 68
+          "start_line": 25,
+          "end_line": 125
         },
         {
           "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
-          "start_line": 9,
+          "start_line": 21,
           "end_line": 28
         },
         {
           "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
-          "start_line": 13,
-          "end_line": 45
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 42
         }
       ],
       "task_roles": [
@@ -440,7 +770,46 @@
       "answer_assertions": [
         {
           "assertion_id": "symbol-results",
-          "description": "The answer returns implementations and focused tests."
+          "description": "RepeatRule.occursOn checks date bounds, weekday, and week interval.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+                "start_line": 21,
+                "end_line": 28
+              },
+              "material_evidence_ids": [
+                "structural-5f2070a25b05f6c7d1c47aa4ba07751a"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 42
         }
       ]
     },
@@ -495,7 +864,63 @@
       "answer_assertions": [
         {
           "assertion_id": "client-server-flow",
-          "description": "The answer covers browser, clock, server, and test evidence."
+          "description": "connectSocket routes playback state and sync events to applyState.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/app.js",
+                "start_line": 108,
+                "end_line": 150
+              },
+              "material_evidence_ids": [
+                "structural-f44bb5d547cfe1fb9efdc59b1657b943"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "server.js",
+          "start_line": 199,
+          "end_line": 224
+        },
+        {
+          "path": "test/video-api.test.js",
+          "start_line": 236,
+          "end_line": 295
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "server.js",
+          "start_line": 199,
+          "end_line": 224
+        },
+        {
+          "path": "test/video-api.test.js",
+          "start_line": 236,
+          "end_line": 295
         }
       ]
     },
@@ -550,7 +975,63 @@
       "answer_assertions": [
         {
           "assertion_id": "startup-flow",
-          "description": "The answer traces server and browser startup evidence."
+          "description": "startServer listens on HOST and PORT and reports its address.",
+          "support": [
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 1311,
+                "end_line": 1339
+              },
+              "material_evidence_ids": [
+                "lexicon:symbol:ed280a0fb9a11b5614b60e835fc348ecdd06623af4f4d2d48159dd0ef3b05674"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/index.html",
+          "start_line": 153,
+          "end_line": 163
+        },
+        {
+          "path": "server.js",
+          "start_line": 1311,
+          "end_line": 1339
+        },
+        {
+          "path": "test/server-startup.test.js",
+          "start_line": 1,
+          "end_line": 12
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/index.html",
+          "start_line": 153,
+          "end_line": 163
+        },
+        {
+          "path": "server.js",
+          "start_line": 1311,
+          "end_line": 1339
+        },
+        {
+          "path": "test/server-startup.test.js",
+          "start_line": 1,
+          "end_line": 12
         }
       ]
     },
@@ -575,18 +1056,23 @@
       "required_ranges": [
         {
           "path": "public/app.js",
-          "start_line": 180,
-          "end_line": 189
+          "start_line": 290,
+          "end_line": 321
         },
         {
           "path": "public/clock-sync.js",
-          "start_line": 8,
-          "end_line": 47
+          "start_line": 22,
+          "end_line": 46
         },
         {
           "path": "public/sync-policy.js",
           "start_line": 6,
-          "end_line": 25
+          "end_line": 24
+        },
+        {
+          "path": "test/clock-sync.test.js",
+          "start_line": 5,
+          "end_line": 19
         }
       ],
       "task_roles": [
@@ -622,7 +1108,41 @@
       "answer_assertions": [
         {
           "assertion_id": "symbol-flow",
-          "description": "The answer identifies implementation, caller, and test."
+          "description": "shouldAlignPosition always aligns hard mode and aligns soft mode for source or revision changes.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/sync-policy.js",
+                "start_line": 6,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-a7767194e6e29f5af56cc0f090ef3d41"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 321
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/clock-sync.test.js",
+          "start_line": 5,
+          "end_line": 19
         }
       ]
     },
@@ -668,7 +1188,53 @@
       "answer_assertions": [
         {
           "assertion_id": "sync-policy",
-          "description": "The answer is grounded in policy, caller, and test evidence."
+          "description": "mediaRequestPolicy grants viewer seeking only in soft mode and routes administrator actions.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/sync-policy.js",
+                "start_line": 6,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-b53eac2f009654092b2c7522dd5d57a1"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 334
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/sync-mode.test.js",
+          "start_line": 7,
+          "end_line": 28
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 334
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/sync-mode.test.js",
+          "start_line": 7,
+          "end_line": 28
         }
       ]
     },
@@ -723,7 +1289,63 @@
       "answer_assertions": [
         {
           "assertion_id": "contextforge-structural-lifecycle-flow",
-          "description": "The answer identifies structural extraction, publication, and reuse evidence."
+          "description": "build_structural_index reuses unchanged CodeMaps and constructs verified relationships.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/intelligence/indexer.py",
+                "start_line": 90,
+                "end_line": 245
+              },
+              "material_evidence_ids": [
+                "structural-dae76e3b517fa3614d9f69b3bfa15356"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 380,
+          "end_line": 520
+        },
+        {
+          "path": "src/contextforge/intelligence/indexer.py",
+          "start_line": 90,
+          "end_line": 245
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 95,
+          "end_line": 114
+        },
+        {
+          "path": "tests/test_intelligence_store.py",
+          "start_line": 56,
+          "end_line": 110
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 380,
+          "end_line": 520
+        },
+        {
+          "path": "src/contextforge/intelligence/indexer.py",
+          "start_line": 90,
+          "end_line": 245
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 95,
+          "end_line": 114
+        },
+        {
+          "path": "tests/test_intelligence_store.py",
+          "start_line": 56,
+          "end_line": 110
         }
       ]
     },
@@ -778,7 +1400,63 @@
       "answer_assertions": [
         {
           "assertion_id": "contextforge-semantic-lexicon-flow",
-          "description": "The answer distinguishes model-approved BM25 expressions from exact symbol and verified graph facts."
+          "description": "analyze_file_lexicon verifies proposed model expressions before storing them.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/intelligence/semantic_lexicon.py",
+                "start_line": 278,
+                "end_line": 473
+              },
+              "material_evidence_ids": [
+                "structural-e6269c2429a7e3e7ad803e836eb2412d"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/intelligence/cards.py",
+          "start_line": 635,
+          "end_line": 743
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 897,
+          "end_line": 995
+        },
+        {
+          "path": "src/contextforge/intelligence/semantic_lexicon.py",
+          "start_line": 278,
+          "end_line": 473
+        },
+        {
+          "path": "tests/test_semantic_lexicon.py",
+          "start_line": 87,
+          "end_line": 115
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/intelligence/cards.py",
+          "start_line": 635,
+          "end_line": 743
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 897,
+          "end_line": 995
+        },
+        {
+          "path": "src/contextforge/intelligence/semantic_lexicon.py",
+          "start_line": 278,
+          "end_line": 473
+        },
+        {
+          "path": "tests/test_semantic_lexicon.py",
+          "start_line": 87,
+          "end_line": 115
         }
       ]
     },
@@ -833,7 +1511,63 @@
       "answer_assertions": [
         {
           "assertion_id": "contextforge-capsule-evidence-flow",
-          "description": "The answer ties sufficiency to actually materialized mandatory evidence."
+          "description": "compile_context_capsule recomputes sufficiency after materializing evidence.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/context/capsule.py",
+                "start_line": 580,
+                "end_line": 627
+              },
+              "material_evidence_ids": [
+                "structural-24b3fbb9b26ee8808d45fa5dd04d49a4"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/context/capsule.py",
+          "start_line": 580,
+          "end_line": 627
+        },
+        {
+          "path": "src/contextforge/intelligence/coverage.py",
+          "start_line": 57,
+          "end_line": 103
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 1259,
+          "end_line": 1355
+        },
+        {
+          "path": "tests/test_context_capsule.py",
+          "start_line": 125,
+          "end_line": 170
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/context/capsule.py",
+          "start_line": 580,
+          "end_line": 627
+        },
+        {
+          "path": "src/contextforge/intelligence/coverage.py",
+          "start_line": 57,
+          "end_line": 103
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 1259,
+          "end_line": 1355
+        },
+        {
+          "path": "tests/test_context_capsule.py",
+          "start_line": 125,
+          "end_line": 170
         }
       ]
     },
@@ -888,7 +1622,63 @@
       "answer_assertions": [
         {
           "assertion_id": "contextforge-bridge-status-flow",
-          "description": "The answer distinguishes index schema 4 from unchanged Bridge wire versions."
+          "description": "The Bridge _status response reports index generation and stale-file state.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/bridge/server.py",
+                "start_line": 918,
+                "end_line": 971
+              },
+              "material_evidence_ids": [
+                "structural-5487f5ab705956543088a2347dd7f6e5"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 647,
+          "end_line": 875
+        },
+        {
+          "path": "src/contextforge/bridge/server.py",
+          "start_line": 918,
+          "end_line": 971
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 667,
+          "end_line": 701
+        },
+        {
+          "path": "tests/test_bridge.py",
+          "start_line": 138,
+          "end_line": 159
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 647,
+          "end_line": 875
+        },
+        {
+          "path": "src/contextforge/bridge/server.py",
+          "start_line": 918,
+          "end_line": 971
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 667,
+          "end_line": 701
+        },
+        {
+          "path": "tests/test_bridge.py",
+          "start_line": 138,
+          "end_line": 159
         }
       ]
     }

@@ -10,7 +10,12 @@
     "schema_version": {"const": 2},
     "suite_name": {"type": "string", "minLength": 1},
     "verified_pipeline": {"type": "boolean"},
+    "provider_endpoint": {"type": ["string", "null"]},
+    "model_id": {"type": ["string", "null"]},
+    "requested_context_window": {"type": ["integer", "null"], "minimum": 0},
+    "reasoning_effort": {"type": ["string", "null"]},
     "passed": {"type": "boolean"},
+    "builds": {"type": "array", "items": {"$ref": "#/$defs/build"}},
     "runs": {
       "type": "array",
       "items": {"$ref": "#/$defs/run"}
@@ -22,6 +27,33 @@
   },
   "$defs": {
     "rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "repetition", "status"],
+      "properties": {
+        "repository_id": {"type": "string"},
+        "repetition": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["complete", "skipped", "partial"]},
+        "reason": {"type": ["string", "null"]},
+        "failed_paths": {"type": "array", "items": {"type": "string"}},
+        "cold_structural_ms": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_offline_ms": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_provider_calls": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_estimated_input_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_reported_input_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_reported_output_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "requested_functions": {"type": ["integer", "null"], "minimum": 0},
+        "described_functions": {"type": ["integer", "null"], "minimum": 0},
+        "file_only_functions": {"type": ["integer", "null"], "minimum": 0},
+        "noop_update_ms": {"type": ["integer", "null"], "minimum": 0},
+        "noop_provider_calls": {"type": ["integer", "null"], "minimum": 0},
+        "noop_generation_unchanged": {"type": ["boolean", "null"]},
+        "active_amplification": {"type": ["number", "null"], "minimum": 0},
+        "maximum_shard_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "fresh_process_reload_successes": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,
@@ -39,6 +71,7 @@
         "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
         "token_savings": {"type": "number"}, "valid_token_savings": {"type": "number"},
         "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
+        "planner_status": {"type": ["string", "null"]}, "planner_messages": {"type": "array", "items": {"type": "string"}},
         "latency_ms": {"type": "integer", "minimum": 0}, "plan_sufficient": {"type": ["boolean", "null"]},
         "paired_answer": {"anyOf": [{"$ref": "#/$defs/paired_answer"}, {"type": "null"}]},
         "cold_structural_ms": {"type": ["integer", "null"], "minimum": 0},

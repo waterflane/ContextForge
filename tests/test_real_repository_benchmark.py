@@ -17,12 +17,15 @@ from contextforge.benchmarks import (
     aggregate_real_repository_report,
     evaluate_real_repository_observation,
     load_real_repository_benchmark_manifest,
+    run_pinned_real_repository_benchmark,
     run_real_repository_benchmark,
 )
 from contextforge.benchmarks.real_repositories import (
     RealBenchmarkAggregate,
+    RealBenchmarkBuildReport,
     RealBenchmarkTaskReport,
 )
+from contextforge.models import FakeModelProvider, ProviderConfiguration
 
 MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
 
@@ -42,6 +45,50 @@ def test_real_report_schema_tracks_public_fields() -> None:
     assert set(schema["$defs"]["aggregate"]["properties"]) == set(
         RealBenchmarkAggregate.model_fields
     )
+    assert set(schema["$defs"]["build"]["properties"]) == set(
+        RealBenchmarkBuildReport.model_fields
+    )
+
+
+def test_live_reload_compares_complete_candidate_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextforge.benchmarks.live_real_repositories as live_module
+
+    outputs = iter(("stable\n", "stable\n", "different\n"))
+    seeds: list[str] = []
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        script = args[0]
+        assert isinstance(script, list)
+        assert "c.model_dump(mode='json')" in script[3]
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        seeds.append(environment["PYTHONHASHSEED"])
+        return subprocess.CompletedProcess(script, 0, next(outputs))
+
+    monkeypatch.setattr(live_module.subprocess, "run", run)
+    assert live_module._fresh_process_reloads(tmp_path, "alpha", attempts=3) == 2
+    assert seeds == ["0", "1", "2"]
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    (
+        ("reviewed range is stale: alpha.py", "reviewed_range_stale"),
+        ("reviewed evidence references an absent source", "reviewed_source_absent"),
+        (
+            "reviewed evidence ID is stale or outside its range",
+            "reviewed_evidence_stale",
+        ),
+        ("reviewed evidence has no retrieval index", "retrieval_index_absent"),
+        ("unrelated failure", "pipeline_error:ValueError"),
+    ),
+)
+def test_live_failure_reasons_are_bounded(message: str, reason: str) -> None:
+    import contextforge.benchmarks.live_real_repositories as live_module
+
+    assert live_module._failure_reason(ValueError(message)) == reason
 
 
 def _paired_answer(
@@ -289,13 +336,19 @@ def test_headline_uses_mean_of_quality_passing_answer_reductions() -> None:
         _observation(
             materialized=tasks[0].required_files,
             mode=RealBenchmarkMode.DETERMINISTIC,
-        ).model_copy(update={"retrieved_top5": tasks[0].required_files}),
+        ).model_copy(
+            update={
+                "retrieved_top5": tasks[0].required_files,
+                "materialized_ranges": tasks[0].required_ranges,
+            }
+        ),
         _observation(
             materialized=tasks[1].required_files,
             mode=RealBenchmarkMode.DETERMINISTIC,
         ).model_copy(
             update={
                 "retrieved_top5": tasks[1].required_files,
+                "materialized_ranges": tasks[1].required_ranges,
                 "paired_answer": _paired_answer(
                     ordinary_tokens=1000, capsule_tokens=500
                 ),
@@ -318,14 +371,20 @@ def test_v2_manifest_requires_reviewed_ranges_and_evidence_ids() -> None:
     manifest = load_real_repository_benchmark_manifest(MANIFEST)
     payload = manifest.model_dump(mode="json")
     payload["schema_version"] = 2
+    for task in payload["tasks"]:
+        task["required_ranges"] = []
+        task["oracle_ranges"] = []
+        task["answer_assertions"][0]["support"] = []
     with pytest.raises(ValidationError, match="required and manual oracle ranges"):
         type(manifest).model_validate_json(json.dumps(payload))
 
     for task in payload["tasks"]:
-        path = task["required_files"][0]
-        span = {"path": path, "start_line": 1, "end_line": 2}
-        task["required_ranges"] = [span]
-        task["oracle_ranges"] = [span]
+        spans = [
+            {"path": path, "start_line": 1, "end_line": 2}
+            for path in sorted(task["required_files"])
+        ]
+        task["required_ranges"] = spans
+        task["oracle_ranges"] = spans
     with pytest.raises(ValidationError, match="reviewed support"):
         type(manifest).model_validate_json(json.dumps(payload))
 
@@ -612,6 +671,265 @@ def test_missing_external_source_is_skip_and_never_a_false_pass() -> None:
     assert report.runs[0].status == "skipped"
     assert report.runs[0].skip_reason == "external_source_missing"
     assert report.runs[0].quality_gate_failed is True
+
+
+def test_official_runner_requires_reviewed_manifest_and_reports_missing_source() -> (
+    None
+):
+    manifest = load_real_repository_benchmark_manifest(MANIFEST)
+    configuration = ProviderConfiguration(
+        provider_id="openai-compatible",
+        endpoint="http://127.0.0.1:1919/v1",
+        model_id="Qwen3.6-35B-A3B-NVFP4",
+        context_window=16_384,
+        reasoning_effort="off",
+    )
+    with pytest.raises(ValueError, match="reviewed v2"):
+        asyncio.run(
+            run_pinned_real_repository_benchmark(
+                manifest.model_copy(update={"schema_version": 1}),
+                {},
+                configuration,
+                repetitions=1,
+            )
+        )
+    payload = manifest.model_dump(mode="json")
+    payload["schema_version"] = 2
+    payload["repositories"] = payload["repositories"][:1]
+    task = next(
+        item
+        for item in payload["tasks"]
+        if item["repository_id"] == payload["repositories"][0]["repository_id"]
+    )
+    payload["tasks"] = [task]
+    spans = [
+        {"path": path, "start_line": 1, "end_line": 2}
+        for path in sorted(task["required_files"])
+    ]
+    span = spans[0]
+    task["required_ranges"] = spans
+    task["oracle_ranges"] = spans
+    task["answer_assertions"][0]["support"] = [
+        {"citation": span, "material_evidence_ids": ["symbol:0000"]}
+    ]
+    reviewed = type(manifest).model_validate_json(json.dumps(payload))
+
+    report = asyncio.run(
+        run_pinned_real_repository_benchmark(reviewed, {}, configuration, repetitions=1)
+    )
+
+    assert report.verified_pipeline
+    assert not report.passed
+    assert len(report.runs) == 2
+    assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
+    assert all(run.skip_reason == "external_source_missing" for run in report.runs)
+    assert report.builds[0].status == "skipped"
+    assert report.provider_endpoint == "http://127.0.0.1:1919/v1"
+
+
+def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextforge.benchmarks.live_real_repositories as live_module
+    from contextforge.application import build_repository_index
+    from contextforge.intelligence.retrieval import load_retrieval_index
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "alpha.py").write_text(
+        'def alpha():\n    return "hello"\n', encoding="utf-8"
+    )
+    (source / ".gitignore").write_text(".contextforge/\n", encoding="utf-8")
+    for command in (
+        ("git", "init", "--quiet", str(source)),
+        ("git", "-C", str(source), "config", "user.email", "benchmark@example.test"),
+        ("git", "-C", str(source), "config", "user.name", "Benchmark"),
+        ("git", "-C", str(source), "add", "alpha.py", ".gitignore"),
+        ("git", "-C", str(source), "commit", "--quiet", "-m", "fixture"),
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    revision = subprocess.run(
+        ("git", "-C", str(source), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    structural = asyncio.run(
+        build_repository_index(source, provider=None, provider_configuration=None)
+    )
+    reference = structural.manifest.artifacts.structural_retrieval
+    assert reference is not None
+    index = load_retrieval_index(source, reference, manifest=structural.manifest)
+    evidence_id = next(
+        item.evidence_id
+        for document in index.documents
+        if document.path == "alpha.py"
+        for item in document.positional_postings
+        if item.identifier == "alpha"
+    )
+    manifest = type(
+        load_real_repository_benchmark_manifest(MANIFEST)
+    ).model_validate_json(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "suite_name": "built-in-fixture",
+                "repositories": [{"repository_id": "fixture", "revision": revision}],
+                "tasks": [
+                    {
+                        "task_id": "alpha",
+                        "repository_id": "fixture",
+                        "kind": "broad",
+                        "dataset_split": "tuning",
+                        "task": "Explain alpha.",
+                        "required_files": ["alpha.py"],
+                        "relevant_top5": ["alpha.py"],
+                        "required_ranges": [
+                            {"path": "alpha.py", "start_line": 1, "end_line": 2}
+                        ],
+                        "oracle_ranges": [
+                            {"path": "alpha.py", "start_line": 1, "end_line": 2}
+                        ],
+                        "task_roles": [
+                            {
+                                "role_id": "implementation",
+                                "description": "Defines alpha.",
+                                "required_paths": ["alpha.py"],
+                            }
+                        ],
+                        "answer_assertions": [
+                            {
+                                "assertion_id": "alpha",
+                                "description": "alpha returns hello",
+                                "support": [
+                                    {
+                                        "citation": {
+                                            "path": "alpha.py",
+                                            "start_line": 1,
+                                            "end_line": 2,
+                                        },
+                                        "material_evidence_ids": [evidence_id],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    def responder(request, call):
+        del call
+        facts = request.trusted_code_map_facts
+        if request.purpose.startswith("semantic-card"):
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "synopsis": {
+                        "text": "alpha returns hello",
+                        "evidence_ids": ["file"],
+                    },
+                    "concepts": [{"text": "alpha hello", "evidence_ids": ["file"]}],
+                    "responsibilities": [],
+                    "key_symbols": [],
+                    "side_effects": [],
+                    "profile_facts": {},
+                }
+            )
+        if request.purpose == "semantic-lexicon":
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "functions": [
+                        {
+                            "symbol_id": item["symbol_id"],
+                            "summary": "Returns hello",
+                            "expressions": ["greeting function"],
+                        }
+                        for item in facts["target_functions"]
+                    ],
+                    "calls": [],
+                }
+            )
+        if request.purpose == "semantic-lexicon-verification":
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "accepted_ids": sorted(facts["proposed_claims"]),
+                }
+            )
+        if request.purpose == "benchmark-groundedness-judge":
+            return json.dumps(
+                {"schema_version": 1, "grounded": True, "unsupported_claims": []}
+            )
+        if request.purpose == "benchmark-answer-regression":
+            allowed = facts["allowed_citation_ranges"]
+            material = facts["material_evidence"]
+            citations = (
+                [
+                    {
+                        "assertion_id": "alpha",
+                        **allowed[0],
+                        "material_evidence_ids": (
+                            material[0]["evidence_ids"] if material else []
+                        ),
+                    }
+                ]
+                if allowed
+                else []
+            )
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "answer": "alpha returns hello"
+                    if citations
+                    else "Insufficient evidence",
+                    "assertion_ids": ["alpha"] if citations else [],
+                    "citations": citations,
+                }
+            )
+        return json.dumps(
+            {"schema_version": 1, "selected": [], "sufficiency": "insufficient"}
+        )
+
+    def fake_provider(_configuration):
+        return FakeModelProvider(
+            ProviderConfiguration(
+                provider_id="fake",
+                endpoint="http://127.0.0.1:1",
+                model_id="benchmark-fake",
+                context_window=16_384,
+                retry_limit=0,
+                max_json_repair_attempts=0,
+            ),
+            responder=responder,
+        )
+
+    monkeypatch.setattr(live_module, "_new_provider", fake_provider)
+    configuration = ProviderConfiguration(
+        provider_id="openai-compatible",
+        endpoint="http://127.0.0.1:1919/v1",
+        model_id="Qwen3.6-35B-A3B-NVFP4",
+        context_window=16_384,
+        reasoning_effort="off",
+    )
+    report = asyncio.run(
+        run_pinned_real_repository_benchmark(
+            manifest,
+            {"fixture": source},
+            configuration,
+            repetitions=1,
+            hash_seed_reloads=0,
+        )
+    )
+    assert not report.passed
+    assert report.builds[0].status == "complete"
+    assert report.builds[0].requested_functions == 1
+    assert report.builds[0].described_functions == 1
+    assert report.builds[0].noop_generation_unchanged
+    assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
+    assert all(run.status == "complete" for run in report.runs)
 
 
 def test_corrupt_external_source_is_skip_and_never_a_false_pass(

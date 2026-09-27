@@ -5,6 +5,9 @@ from contextforge.benchmarks.answers import (
     render_ordinary_context,
     run_paired_answer_regression,
 )
+from contextforge.benchmarks.live_real_repositories import (
+    run_pinned_real_repository_benchmark,
+)
 from contextforge.benchmarks.metrics import calculate_benchmark_metrics
 from contextforge.benchmarks.models import (
     BENCHMARK_SCHEMA_VERSION,
@@ -42,6 +45,7 @@ from contextforge.benchmarks.models import (
 )
 from contextforge.benchmarks.real_repositories import (
     REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION,
+    RealBenchmarkBuildReport,
     RealBenchmarkMode,
     RealBenchmarkObservation,
     RealBenchmarkTask,
@@ -93,6 +97,7 @@ __all__ = [
     "calculate_benchmark_metrics",
     "REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION",
     "RealBenchmarkMode",
+    "RealBenchmarkBuildReport",
     "RealBenchmarkObservation",
     "RealBenchmarkTask",
     "RealBenchmarkTaskKind",
@@ -105,6 +110,7 @@ __all__ = [
     "load_benchmark_manifest",
     "load_real_repository_benchmark_manifest",
     "run_real_repository_benchmark",
+    "run_pinned_real_repository_benchmark",
     "temporary_read_only_clone",
     "render_oracle_context",
     "render_ordinary_context",

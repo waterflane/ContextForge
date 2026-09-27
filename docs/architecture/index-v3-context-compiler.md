@@ -232,6 +232,15 @@ least 0.90, range recall at least 0.85, citation validity is 1.0, and answer
 quality is not below the oracle. Failed quality gates are reported explicitly
 and never turn missing evidence into a saving.
 
+The pinned real-repository manifest uses schema 2: every required file has a
+reviewed range, and every assertion binds to source ranges and CodeMap evidence
+IDs. The built-in runner clones each pinned revision independently, records
+structural and semantic build cost separately from warm retrieval, final answers,
+and blinded judging, and requires three repetitions for a passing report. It
+also records function-description coverage, `file_only` use, no-op identity,
+active index size, and fresh-process reload stability. Callback-based
+observations remain useful for unit tests but cannot certify a live pass.
+
 ## Public surface
 
 Python exports `load_relationship_graph()`, `load_orientation_map()`,
