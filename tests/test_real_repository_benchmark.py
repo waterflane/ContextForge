@@ -71,6 +71,19 @@ def test_live_reload_compares_complete_candidate_records(
     monkeypatch.setattr(live_module.subprocess, "run", run)
     assert live_module._fresh_process_reloads(tmp_path, "alpha", attempts=3) == 2
     assert seeds == ["0", "1", "2"]
+    monkeypatch.setattr(
+        live_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, ""),
+    )
+    assert live_module._fresh_process_reloads(tmp_path, "alpha", attempts=1) == 0
+
+
+def test_live_materialization_rejects_an_uncompiled_value() -> None:
+    import contextforge.benchmarks.live_real_repositories as live_module
+
+    with pytest.raises(TypeError, match="compiled capsule expected"):
+        live_module._materialized(object())
 
 
 @pytest.mark.parametrize(
@@ -991,6 +1004,23 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         run.phase_errors == ("final_answer:pipeline_error:ProviderCircuitOpenError",)
         for run in degraded.runs
     )
+    task = manifest.tasks[0]
+    stale_range = BenchmarkSourceRange(path="alpha.py", start_line=1, end_line=99)
+    with pytest.raises(ValueError, match="reviewed range is stale"):
+        live_module._validate_reviewed_sources(
+            source, task.model_copy(update={"required_ranges": (stale_range,)})
+        )
+    assertion = task.answer_assertions[0]
+    support = assertion.support[0].model_copy(
+        update={"material_evidence_ids": ("unknown-evidence",)}
+    )
+    stale_evidence = task.model_copy(
+        update={
+            "answer_assertions": (assertion.model_copy(update={"support": (support,)}),)
+        }
+    )
+    with pytest.raises(ValueError, match="reviewed evidence ID is stale"):
+        live_module._validate_reviewed_sources(source, stale_evidence)
 
 
 def test_corrupt_external_source_is_skip_and_never_a_false_pass(

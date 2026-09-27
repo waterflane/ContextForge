@@ -45,6 +45,7 @@ from contextforge.intelligence.models import (
     analyzer_identity_key,
     validate_portable_relative_path,
 )
+from contextforge.intelligence.polyglot import SUPPORTED_POLYGLOT_LANGUAGES
 from contextforge.intelligence.repository_maps_v3 import build_repository_maps_v3
 from contextforge.intelligence.semantic_lexicon import (
     FileSemanticLexicon,
@@ -488,7 +489,7 @@ async def build_semantic_card_index(
     model_file_outcomes: list[SemanticModelFileOutcome] = []
     analyzers: set[AnalyzerIdentity] = {DETERMINISTIC_CARD_ANALYZER}
 
-    for path in sorted(maps):
+    for path in _semantic_processing_paths(maps, active_options.scope):
         _raise_if_cancelled(cancellation)
         code_map = maps[path]
         state = states[path]
@@ -821,6 +822,9 @@ async def build_semantic_card_index(
             )
         )
 
+    cards.sort(key=lambda item: item.path)
+    next_states.sort(key=lambda item: item.path)
+    model_file_outcomes.sort(key=lambda item: item.path)
     interpretations_digest = hashlib.sha256(
         canonical_json_bytes(
             [(state.path, state.interpretation_record_sha256) for state in next_states]
@@ -2210,6 +2214,24 @@ def _related_test_paths(graph: RelationshipGraph, selected: set[str]) -> set[str
 
 def _requires_deterministic_card(code_map: FileCodeMap) -> bool:
     return FILE_POLICY_REGISTRY.requires_deterministic_card(code_map)
+
+
+def _semantic_processing_paths(
+    maps: dict[str, FileCodeMap], scope: SemanticScope
+) -> tuple[str, ...]:
+    if scope != "all":
+        return tuple(sorted(maps))
+    code_languages = frozenset({"Python", *SUPPORTED_POLYGLOT_LANGUAGES})
+
+    def priority(path: str) -> tuple[int, str]:
+        code_map = maps[path]
+        if callable_symbols(code_map):
+            return (0, path)
+        if code_map.language in code_languages:
+            return (1, path)
+        return (2, path)
+
+    return tuple(sorted(maps, key=priority))
 
 
 def _profile_for_path(path: str) -> SemanticProfile:

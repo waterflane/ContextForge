@@ -1439,6 +1439,24 @@ def test_barrel_policy_distinguishes_reexports_from_executable_initializer(
     assert not cards_module._requires_deterministic_card(maps["executable/__init__.py"])
 
 
+def test_scope_all_analyzes_callable_code_before_other_files(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "empty.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "module.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    maps = {item.path: item for item in extract_code_maps(scan_repository(tmp_path))}
+
+    assert cards_module._semantic_processing_paths(maps, "all") == (
+        "module.py",
+        "empty.py",
+        "README.md",
+    )
+    assert cards_module._semantic_processing_paths(maps, "priority") == (
+        "README.md",
+        "empty.py",
+        "module.py",
+    )
+
+
 def test_inferred_relationships_validate_and_rebind_both_renames(
     tmp_path: Path,
 ) -> None:
