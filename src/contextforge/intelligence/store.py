@@ -667,20 +667,20 @@ def load_generation_record(
     """Read one approved record from a caller-pinned immutable generation."""
 
     location = _validate_record_location(record_location)
-    referenced = {
-        candidate
-        for state in manifest.files
-        for candidate in (
-            state.record_location,
-            state.interpretation_record_location,
-        )
-        if candidate is not None
-    }
     layout = _layout(repository_root)
     generation = layout.generations / manifest.generation_id
-    referenced.update(_referenced_graph_shards(generation, manifest))
-    referenced.update(_referenced_retrieval_shards(generation, manifest))
-    if location not in _STAGED_ROOT_RECORDS and location not in referenced:
+    directly_referenced = location in _STAGED_ROOT_RECORDS or any(
+        location in (state.record_location, state.interpretation_record_location)
+        for state in manifest.files
+    )
+    shard_referenced = False
+    if not directly_referenced and location.startswith("graph/"):
+        shard_referenced = location in _referenced_graph_shards(generation, manifest)
+    elif not directly_referenced and location.startswith("retrieval/"):
+        shard_referenced = location in _referenced_retrieval_shards(
+            generation, manifest
+        )
+    if not directly_referenced and not shard_referenced:
         raise IndexManifestReadError(
             "record location is not referenced by the pinned manifest"
         )

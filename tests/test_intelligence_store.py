@@ -267,6 +267,18 @@ def test_existing_valid_index_round_trips_through_atomic_pointer(
     )
 
 
+def test_generation_record_checks_direct_and_shard_references(tmp_path: Path) -> None:
+    source = _file("src/app.py", "pass")
+    manifest, _ = _publish(tmp_path, "authorized-records", (source,))
+
+    assert store_module.load_generation_record(
+        tmp_path, manifest.files[0].record_location or "", manifest=manifest
+    ) == _record_content(source)
+    for location in ("files/other.json", "graph/other.json", "retrieval/other.json"):
+        with pytest.raises(IndexManifestReadError, match="not referenced"):
+            store_module.load_generation_record(tmp_path, location, manifest=manifest)
+
+
 def test_publication_prunes_unreferenced_interrupted_records(
     tmp_path: Path,
 ) -> None:
