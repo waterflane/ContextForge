@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -89,6 +90,43 @@ def test_live_failure_reasons_are_bounded(message: str, reason: str) -> None:
     import contextforge.benchmarks.live_real_repositories as live_module
 
     assert live_module._failure_reason(ValueError(message)) == reason
+
+
+def test_live_meter_does_not_count_open_circuit_as_http() -> None:
+    from pydantic import BaseModel, ConfigDict
+
+    import contextforge.benchmarks.live_real_repositories as live_module
+    from contextforge.models import ModelRequest, ProviderCircuitOpenError
+
+    class Response(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        schema_version: Literal[1] = 1
+
+    class OpenCircuitProvider:
+        configuration = ProviderConfiguration(
+            provider_id="openai-compatible",
+            endpoint="http://127.0.0.1:1919/v1",
+            model_id="fixture",
+        )
+
+        async def complete_structured(self, *_: object, **__: object) -> None:
+            raise ProviderCircuitOpenError("provider circuit opened")
+
+    metered = live_module._MeasuredProvider(OpenCircuitProvider())
+    request = ModelRequest(
+        operation_id="benchmark-test",
+        purpose="test",
+        system_instructions="system",
+        analysis_task="task",
+        trusted_code_map_facts={},
+        untrusted_sources=(),
+        response_model=Response,
+    )
+    with pytest.raises(ProviderCircuitOpenError):
+        asyncio.run(metered.complete_structured(request))
+    assert metered.calls == 0
+    assert metered.estimated_input > 0
 
 
 def _paired_answer(
@@ -930,6 +968,29 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
     assert report.builds[0].noop_generation_unchanged
     assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
     assert all(run.status == "complete" for run in report.runs)
+
+    async def fail_answers(*args: object, **kwargs: object) -> None:
+        from contextforge.models import ProviderCircuitOpenError
+
+        raise ProviderCircuitOpenError("provider circuit opened")
+
+    monkeypatch.setattr(live_module, "run_paired_answer_regression", fail_answers)
+    degraded = asyncio.run(
+        run_pinned_real_repository_benchmark(
+            manifest,
+            {"fixture": source},
+            configuration,
+            repetitions=1,
+            hash_seed_reloads=0,
+        )
+    )
+    assert all(run.status == "complete" for run in degraded.runs)
+    assert all(run.required_file_recall_at_5 == 1 for run in degraded.runs)
+    assert all(run.quality_gate_failed for run in degraded.runs)
+    assert all(
+        run.phase_errors == ("final_answer:pipeline_error:ProviderCircuitOpenError",)
+        for run in degraded.runs
+    )
 
 
 def test_corrupt_external_source_is_skip_and_never_a_false_pass(

@@ -207,6 +207,10 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     deterministic_warm_query_ms: NonNegativeInt | None = None
     agentic_planner_ms: NonNegativeInt | None = None
     final_answer_ms: NonNegativeInt | None = None
+    final_answer_provider_calls: NonNegativeInt | None = None
+    final_answer_estimated_input_tokens: NonNegativeInt | None = None
+    final_answer_reported_input_tokens: NonNegativeInt | None = None
+    phase_errors: tuple[str, ...] = ()
     semantic_provider_calls: NonNegativeInt | None = None
     semantic_input_tokens: NonNegativeInt | None = None
     semantic_output_tokens: NonNegativeInt | None = None
@@ -274,6 +278,10 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     deterministic_warm_query_ms: NonNegativeInt | None = None
     agentic_planner_ms: NonNegativeInt | None = None
     final_answer_ms: NonNegativeInt | None = None
+    final_answer_provider_calls: NonNegativeInt | None = None
+    final_answer_estimated_input_tokens: NonNegativeInt | None = None
+    final_answer_reported_input_tokens: NonNegativeInt | None = None
+    phase_errors: tuple[str, ...] = ()
     semantic_provider_calls: NonNegativeInt | None = None
     semantic_input_tokens: NonNegativeInt | None = None
     semantic_output_tokens: NonNegativeInt | None = None
@@ -353,6 +361,7 @@ class RealBenchmarkBuildReport(RealBenchmarkModel):
     status: Literal["complete", "skipped", "partial"]
     reason: str | None = None
     failed_paths: tuple[RepositoryRelativePath, ...] = ()
+    failure_code_counts: dict[str, NonNegativeInt] = Field(default_factory=dict)
     cold_structural_ms: NonNegativeInt | None = None
     semantic_offline_ms: NonNegativeInt | None = None
     semantic_provider_calls: NonNegativeInt | None = None
@@ -499,6 +508,14 @@ def evaluate_real_repository_observation(
         deterministic_warm_query_ms=observation.deterministic_warm_query_ms,
         agentic_planner_ms=observation.agentic_planner_ms,
         final_answer_ms=observation.final_answer_ms,
+        final_answer_provider_calls=observation.final_answer_provider_calls,
+        final_answer_estimated_input_tokens=(
+            observation.final_answer_estimated_input_tokens
+        ),
+        final_answer_reported_input_tokens=(
+            observation.final_answer_reported_input_tokens
+        ),
+        phase_errors=observation.phase_errors,
         semantic_provider_calls=observation.semantic_provider_calls,
         semantic_input_tokens=observation.semantic_input_tokens,
         semantic_output_tokens=observation.semantic_output_tokens,

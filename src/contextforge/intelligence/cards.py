@@ -905,7 +905,7 @@ async def build_semantic_card_index(
             request_count=request_count,
             repair_count=repair_count,
             cache_hits=cache_hits,
-            failed_paths=tuple(sorted(failed)),
+            failed_paths=tuple(sorted(set(failed))),
             reused_card_paths=tuple(sorted(reused_card_paths)),
             model_file_outcomes=tuple(model_file_outcomes),
         )
@@ -934,7 +934,7 @@ async def build_semantic_card_index(
         request_count=request_count,
         repair_count=repair_count,
         cache_hits=cache_hits,
-        failed_paths=tuple(sorted(failed)),
+        failed_paths=tuple(sorted(set(failed))),
         reused_card_paths=tuple(sorted(reused_card_paths)),
         model_file_outcomes=tuple(model_file_outcomes),
     )

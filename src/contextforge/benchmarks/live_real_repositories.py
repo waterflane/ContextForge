@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -49,7 +50,9 @@ from contextforge.models import (
     ModelResponse,
     OpenAICompatibleModelProvider,
     ProviderCapabilities,
+    ProviderCircuitOpenError,
     ProviderConfiguration,
+    ProviderConfigurationError,
     estimate_request_context,
 )
 
@@ -88,8 +91,13 @@ class _MeasuredProvider:
         except ModelProviderError as exc:
             self.calls += (
                 0
-                if isinstance(exc, ContextWindowExceededError)
-                and exc.budget is not None
+                if isinstance(
+                    exc, (ProviderCircuitOpenError, ProviderConfigurationError)
+                )
+                or (
+                    isinstance(exc, ContextWindowExceededError)
+                    and exc.budget is not None
+                )
                 else exc.total_provider_http_calls
             )
             raise
@@ -253,15 +261,24 @@ async def _evaluate_task(
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1_000)
     compiled = compile_context_capsule(root, task.task, retrieval, budget=budget)
     paths, ranges = _materialized(compiled)
-    paired = await run_paired_answer_regression(
-        root,
-        task.task,
-        task.answer_assertions,
-        task.oracle_ranges,
-        compiled,
-        provider,
-        ordinary_paths=task.required_files,
-    )
+    answer_started = time.perf_counter()
+    prior_calls = provider.calls
+    prior_estimated = provider.estimated_input
+    prior_reported = provider.reported_input
+    phase_errors: tuple[str, ...] = ()
+    try:
+        paired = await run_paired_answer_regression(
+            root,
+            task.task,
+            task.answer_assertions,
+            task.oracle_ranges,
+            compiled,
+            provider,
+            ordinary_paths=task.required_files,
+        )
+    except (ModelProviderError, ValueError) as exc:
+        paired = None
+        phase_errors = (f"final_answer:{_failure_reason(exc)}",)
     planning = retrieval.planning_diagnostics
     sufficiency = compiled.compilation_sufficiency
     observation = RealBenchmarkObservation(
@@ -270,7 +287,11 @@ async def _evaluate_task(
         materialized_files=paths,
         materialized_ranges=ranges,
         capsule_tokens=compiled.token_count,
-        ordinary_tokens=paired.ordinary.input_tokens if paired.ordinary else 0,
+        ordinary_tokens=(
+            paired.ordinary.input_tokens
+            if paired is not None and paired.ordinary is not None
+            else 0
+        ),
         planner_calls=retrieval.provider_calls,
         planner_input_tokens=0 if planning is None else planning.input_tokens,
         planner_output_tokens=0 if planning is None else planning.output_tokens,
@@ -283,9 +304,19 @@ async def _evaluate_task(
         agentic_planner_ms=(
             retrieval_ms if mode is RealBenchmarkMode.PLANNED else None
         ),
-        final_answer_ms=(paired.ordinary.duration_ms if paired.ordinary else 0)
-        + paired.oracle.duration_ms
-        + paired.contextforge.duration_ms,
+        final_answer_ms=(
+            (paired.ordinary.duration_ms if paired.ordinary else 0)
+            + paired.oracle.duration_ms
+            + paired.contextforge.duration_ms
+            if paired is not None
+            else round((time.perf_counter() - answer_started) * 1_000)
+        ),
+        final_answer_provider_calls=provider.calls - prior_calls,
+        final_answer_estimated_input_tokens=(
+            provider.estimated_input - prior_estimated
+        ),
+        final_answer_reported_input_tokens=(provider.reported_input - prior_reported),
+        phase_errors=phase_errors,
         plan_sufficient=(
             None
             if mode is RealBenchmarkMode.DETERMINISTIC
@@ -431,6 +462,18 @@ async def run_pinned_real_repository_benchmark(
                             if card.lexicon is not None
                             and card.lexicon.context_mode == "file_only"
                         )
+                        failed_paths = (
+                            set(report.semantic.failed_paths)
+                            if report.semantic is not None
+                            else set()
+                        )
+                        failure_codes = Counter(
+                            diagnostic.code
+                            for card in cards
+                            if card.path in failed_paths
+                            for diagnostic in card.diagnostics
+                            if diagnostic.code != "semantic_scheduler_value"
+                        )
                         source_bytes = sum(
                             item.size_bytes for item in report.snapshot.files
                         )
@@ -466,6 +509,7 @@ async def run_pinned_real_repository_benchmark(
                                     if report.semantic is None
                                     else report.semantic.failed_paths
                                 ),
+                                failure_code_counts=dict(sorted(failure_codes.items())),
                                 cold_structural_ms=structural_ms,
                                 semantic_offline_ms=semantic_ms,
                                 semantic_provider_calls=semantic_calls,
