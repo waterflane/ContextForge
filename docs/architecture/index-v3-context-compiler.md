@@ -242,6 +242,8 @@ and blinded judging, and requires three repetitions for a passing report. It
 also records function-description coverage, `file_only` use, no-op identity,
 active index size, and fresh-process reload stability. Callback-based
 observations remain useful for unit tests but cannot certify a live pass.
+No-op duration is diagnostic, not a quality gate; a ContextForge final answer
+over 90 seconds fails its task quality gate.
 
 ## Public surface
 

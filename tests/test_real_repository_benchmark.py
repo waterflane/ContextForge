@@ -354,6 +354,31 @@ def test_citation_containment_alone_does_not_pass_assertion_support() -> None:
     assert result.valid_token_savings == 0.0
 
 
+def test_final_answer_over_ninety_seconds_fails_quality_gate() -> None:
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    paired = _paired_answer()
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        materialized_ranges=task.required_ranges,
+        capsule_tokens=70,
+        ordinary_tokens=100,
+        paired_answer=paired.model_copy(
+            update={
+                "contextforge": paired.contextforge.model_copy(
+                    update={"duration_ms": 90_001}
+                )
+            }
+        ),
+    )
+
+    result = evaluate_real_repository_observation(task, observation)
+
+    assert result.quality_gate_failed
+    assert result.valid_token_savings == 0.0
+
+
 def test_final_answer_tokens_override_capsule_size_and_legacy_flags() -> None:
     task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
     observation = RealBenchmarkObservation(

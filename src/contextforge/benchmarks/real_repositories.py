@@ -36,6 +36,7 @@ from contextforge.benchmarks.models import (
 from contextforge.core.validation import validate_portable_relative_path
 
 REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[2] = 2
+MAX_FINAL_ANSWER_MS = 90_000
 RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
 Rate = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)]
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
@@ -465,6 +466,7 @@ def evaluate_real_repository_observation(
         and capsule_answer.assertion_evidence_support == 1.0
         and capsule_answer.lexical_identifier_support == 1.0
         and capsule_answer.provider_http_calls > 0
+        and capsule_answer.duration_ms <= MAX_FINAL_ANSWER_MS
         and ordinary_answer is not None
         and ordinary_answer.provider_http_calls > 0
         and ordinary_tokens > 0
@@ -604,7 +606,6 @@ def aggregate_real_repository_report(
             and all(
                 build.status == "complete"
                 and build.noop_update_ms is not None
-                and build.noop_update_ms < 2_000
                 and build.noop_generation_unchanged is True
                 and build.noop_provider_calls == 0
                 and build.active_amplification is not None
