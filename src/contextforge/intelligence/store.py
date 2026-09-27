@@ -12,6 +12,7 @@ import socket
 import stat
 import tempfile
 import time
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -54,6 +55,9 @@ RUNS_DIRECTORY = "runs"
 TEMPORARY_SUFFIX = ".contextforge-tmp"
 MAX_MANIFEST_BYTES = 4_000_000
 MAX_RECORD_BYTES = 16_000_000
+_COMPRESSED_RECORD_PREFIX = b"CFZ1"
+_COMPRESSION_MIN_BYTES = 4_096
+_COMPRESSED_RECORD_DIRECTORIES = ("files/", "graph/", "retrieval/")
 
 
 @dataclass(slots=True)
@@ -397,8 +401,41 @@ def write_index_record(
     stage = begin_index_build(lock)
     destination = stage.joinpath(*location.split("/"))
     _ensure_directory_chain(stage, destination.parent)
-    _atomic_write_bytes(destination, encoded, error_type=IndexRecordWriteError)
+    _atomic_write_bytes(
+        destination,
+        _encode_record(location, encoded),
+        error_type=IndexRecordWriteError,
+    )
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _encode_record(location: str, content: bytes) -> bytes:
+    if len(content) < _COMPRESSION_MIN_BYTES or not location.startswith(
+        _COMPRESSED_RECORD_DIRECTORIES
+    ):
+        return content
+    compressed = _COMPRESSED_RECORD_PREFIX + zlib.compress(content, level=9)
+    return compressed if len(compressed) < len(content) else content
+
+
+def _decode_record(stored: bytes, *, error_type: type[IndexStorageError]) -> bytes:
+    if not stored.startswith(_COMPRESSED_RECORD_PREFIX):
+        return stored
+    try:
+        decoder = zlib.decompressobj()
+        content = decoder.decompress(
+            stored[len(_COMPRESSED_RECORD_PREFIX) :], MAX_RECORD_BYTES + 1
+        )
+    except zlib.error as exc:
+        raise error_type("compressed index record is corrupt") from exc
+    if (
+        len(content) > MAX_RECORD_BYTES
+        or not decoder.eof
+        or decoder.unconsumed_tail
+        or decoder.unused_data
+    ):
+        raise error_type("compressed index record is corrupt or exceeds its limit")
+    return content
 
 
 def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
@@ -580,7 +617,10 @@ def load_index_record(
     generation = layout.generations / active.generation_id
     record = generation.joinpath(*state.record_location.split("/"))
     _require_safe_existing_chain(generation, record)
-    content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    content = _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
     if hashlib.sha256(content).hexdigest() != state.record_sha256:
         raise IndexManifestReadError("published record digest does not match manifest")
     return content
@@ -646,7 +686,10 @@ def load_generation_record(
         )
     record = generation.joinpath(*location.split("/"))
     _require_safe_existing_chain(generation, record)
-    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    return _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
 
 
 def load_staged_index_record(
@@ -661,7 +704,10 @@ def load_staged_index_record(
     if not os.path.lexists(record):
         return None
     _require_safe_existing_chain(stage, record)
-    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    return _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
 
 
 def inspect_index_status(
@@ -953,7 +999,10 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
         if state.record_location is not None and state.record_sha256 is not None:
             record = root.joinpath(*state.record_location.split("/"))
             _require_safe_existing_chain(root, record)
-            content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
+            content = _decode_record(
+                _read_bounded_bytes(record, MAX_RECORD_BYTES),
+                error_type=IndexPublicationError,
+            )
             _validate_record_schema(
                 content, manifest.schema_versions.record_schema_version
             )
@@ -969,8 +1018,9 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 *state.interpretation_record_location.split("/")
             )
             _require_safe_existing_chain(root, interpretation)
-            interpretation_content = _read_bounded_bytes(
-                interpretation, MAX_RECORD_BYTES
+            interpretation_content = _decode_record(
+                _read_bounded_bytes(interpretation, MAX_RECORD_BYTES),
+                error_type=IndexPublicationError,
             )
             _validate_record_schema(
                 interpretation_content, manifest.schema_versions.record_schema_version
@@ -988,7 +1038,10 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
         location = _validate_record_location(reference["location"])
         artifact = root.joinpath(*location.split("/"))
         _require_safe_existing_chain(root, artifact)
-        content = _read_bounded_bytes(artifact, MAX_RECORD_BYTES)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, MAX_RECORD_BYTES),
+            error_type=IndexPublicationError,
+        )
         if hashlib.sha256(content).hexdigest() != reference["sha256"]:
             raise IndexPublicationError(
                 f"artifact digest does not match manifest for {location}"
@@ -996,7 +1049,12 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
     for location, digest in _referenced_graph_shards(root, manifest).items():
         artifact = root.joinpath(*location.split("/"))
         _require_safe_existing_chain(root, artifact)
-        content = _read_bounded_bytes(artifact, 4 * 1024 * 1024)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, 4 * 1024 * 1024),
+            error_type=IndexPublicationError,
+        )
+        if len(content) > 4 * 1024 * 1024:
+            raise IndexPublicationError("graph shard exceeds its byte limit")
         if hashlib.sha256(content).hexdigest() != digest:
             raise IndexPublicationError(
                 f"graph shard digest does not match manifest for {location}"
@@ -1004,7 +1062,12 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
     for location, digest in _referenced_retrieval_shards(root, manifest).items():
         artifact = root.joinpath(*location.split("/"))
         _require_safe_existing_chain(root, artifact)
-        content = _read_bounded_bytes(artifact, 4 * 1024 * 1024)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, 4 * 1024 * 1024),
+            error_type=IndexPublicationError,
+        )
+        if len(content) > 4 * 1024 * 1024:
+            raise IndexPublicationError("retrieval shard exceeds its byte limit")
         if hashlib.sha256(content).hexdigest() != digest:
             raise IndexPublicationError(
                 f"retrieval shard digest does not match manifest for {location}"

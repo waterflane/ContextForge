@@ -421,6 +421,30 @@ def test_record_replacement_is_atomic_and_leaves_no_temporary(tmp_path: Path) ->
         assert list(destination.parent.glob(".*.contextforge-tmp")) == []
 
 
+def test_large_internal_record_is_bounded_and_digest_checked(tmp_path: Path) -> None:
+    payload = b'{"value":"' + b"a" * 12_000 + b'"}\n'
+    location = "files/large.facts.json"
+    with acquire_index_lock(tmp_path, "compressed") as lock:
+        digest = write_index_record(lock, location, payload)
+        stored = begin_index_build(lock) / location
+        encoded = stored.read_bytes()
+        assert encoded.startswith(b"CFZ1")
+        assert len(encoded) < len(payload)
+        assert digest == _sha(payload)
+        assert store_module.load_staged_index_record(lock, location) == payload
+
+        stored.write_bytes(encoded + b"tampered")
+        with pytest.raises(IndexManifestReadError, match="compressed index record"):
+            store_module.load_staged_index_record(lock, location)
+
+        stored.write_bytes(
+            b"CFZ1"
+            + store_module.zlib.compress(b"x" * (store_module.MAX_RECORD_BYTES + 1))
+        )
+        with pytest.raises(IndexManifestReadError, match="exceeds its limit"):
+            store_module.load_staged_index_record(lock, location)
+
+
 def test_failed_temporary_write_preserves_previous_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

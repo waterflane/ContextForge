@@ -52,6 +52,8 @@ lexical or identifier anchor in cited evidence.
 
 Graph nodes, edges, metrics, and file projections are stored in digest-bound
 shards of at most 4 MiB. Retrieval documents use the same bounded shard format.
+Internal file, graph, and retrieval records use bounded compression; manifests
+still bind their decoded contents by digest and remain readable JSON.
 The public graph loader still reconstructs the complete `RelationshipGraph`,
 while the warm query path reads only the compact file projection and retrieval
 documents. Grounded synopsis, concepts, and evidence are copied into the

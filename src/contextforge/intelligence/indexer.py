@@ -623,7 +623,9 @@ def _build_options_digest(max_source_bytes: int) -> str:
 
 
 def _index_config_digest() -> str:
-    return hashlib.sha256(canonical_json_bytes({"structural_only": True})).hexdigest()
+    return hashlib.sha256(
+        canonical_json_bytes({"structural_only": True, "record_encoding": "zlib-v1"})
+    ).hexdigest()
 
 
 __all__ = [
