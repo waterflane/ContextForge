@@ -233,15 +233,22 @@ def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:
 
 
 @pytest.mark.parametrize(
-    "message, limit",
+    "message, limit, code",
     [
-        ("maximum context length is 8264 tokens; requested 22427", 8264),
-        ("maximum prompt length is 8,264 tokens", 8264),
-        ("context window exceeded by 12345 tokens", None),
+        ("maximum context length is 8264 tokens; requested 22427", 8264, None),
+        ("maximum prompt length is 8,264 tokens", 8264, None),
+        ("context window exceeded by 12345 tokens", None, None),
+        (
+            "prompt is too long: 11342 tokens > 8203 maximum "
+            "(prompt + generation); shorten the prompt or increase the KV cache budget",
+            8203,
+            "context_length_exceeded",
+        ),
+        ("request exceeded capacity", None, "context_length_exceeded"),
     ],
 )
 def test_server_context_limit_is_typed_and_only_decreases(
-    message: str, limit: int | None
+    message: str, limit: int | None, code: str | None
 ) -> None:
     posts = 0
 
@@ -260,7 +267,7 @@ def test_server_context_limit_is_typed_and_only_decreases(
             status=400,
             body=json.dumps(
                 {
-                    "error": {"message": message},
+                    "error": {"message": message, "code": code},
                 }
             ).encode(),
         )

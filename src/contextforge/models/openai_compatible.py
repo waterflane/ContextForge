@@ -853,15 +853,19 @@ def _raise_for_status(
     if (
         status in {400, 422}
         and operation == "chat completion"
-        and any(
-            marker in lowered
-            for marker in (
-                "context size",
-                "context length",
-                "context window",
-                "maximum context",
-                "too many tokens",
-                "maximum prompt",
+        and (
+            classified == "context_length_exceeded"
+            or any(
+                marker in lowered
+                for marker in (
+                    "context size",
+                    "context length",
+                    "context window",
+                    "maximum context",
+                    "too many tokens",
+                    "maximum prompt",
+                    "prompt is too long",
+                )
             )
         )
     ):
@@ -871,6 +875,11 @@ def _raise_for_status(
             r"|context (?:window|size|length))\s*(?:is|of|:|=)?\s*([0-9][0-9,]*)",
             lowered,
         )
+        if match is None:
+            match = re.search(
+                r">\s*([0-9][0-9,]*)\s+maximum\s*\(\s*prompt\s*\+\s*generation\s*\)",
+                lowered,
+            )
         limit = int(match.group(1).replace(",", "")) if match else None
         if limit is not None and not 1024 <= limit <= 2_000_000:
             limit = None
