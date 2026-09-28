@@ -1029,6 +1029,32 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         run.phase_errors == ("final_answer:pipeline_error:ProviderCircuitOpenError",)
         for run in degraded.runs
     )
+
+    def failed_semantic_responder(request, call):
+        if request.purpose.startswith("semantic-card"):
+            return "{}"
+        return responder(request, call)
+
+    monkeypatch.setattr(
+        live_module,
+        "_new_provider",
+        lambda _configuration: FakeModelProvider(
+            fake_provider(None).configuration,
+            responder=failed_semantic_responder,
+        ),
+    )
+    partial = asyncio.run(
+        run_pinned_real_repository_benchmark(
+            manifest,
+            {"fixture": source},
+            configuration,
+            repetitions=1,
+            hash_seed_reloads=0,
+        )
+    )
+    assert partial.builds[0].status == "partial"
+    assert partial.builds[0].noop_update_ms is None
+    assert partial.builds[0].noop_provider_calls is None
     task = manifest.tasks[0]
     stale_range = BenchmarkSourceRange(path="alpha.py", start_line=1, end_line=99)
     with pytest.raises(ValueError, match="reviewed range is stale"):

@@ -426,19 +426,28 @@ async def run_pinned_real_repository_benchmark(
                         semantic_estimated_input = provider.estimated_input
                         reported_input = provider.reported_input
                         reported_output = provider.reported_output
-                        noop_start = time.perf_counter()
-                        before_noop_calls = provider.calls
-                        noop = await build_repository_index(
-                            root,
-                            provider=provider,
-                            provider_configuration=configuration,
-                            update_only=True,
-                            semantic_scope="all",
-                            max_files=max(len(structural.snapshot.files), 1),
-                            semantic_max_requests=4_096,
-                            semantic_max_input_tokens=50_000_000,
-                        )
-                        noop_ms = round((time.perf_counter() - noop_start) * 1_000)
+                        noop_ms: int | None = None
+                        noop_calls: int | None = None
+                        noop_generation_unchanged: bool | None = None
+                        if not report.partial:
+                            noop_start = time.perf_counter()
+                            before_noop_calls = provider.calls
+                            noop = await build_repository_index(
+                                root,
+                                provider=provider,
+                                provider_configuration=configuration,
+                                update_only=True,
+                                semantic_scope="all",
+                                max_files=max(len(structural.snapshot.files), 1),
+                                semantic_max_requests=4_096,
+                                semantic_max_input_tokens=50_000_000,
+                            )
+                            noop_ms = round((time.perf_counter() - noop_start) * 1_000)
+                            noop_calls = provider.calls - before_noop_calls
+                            noop_generation_unchanged = (
+                                noop.manifest.generation_id
+                                == report.manifest.generation_id
+                            )
                         requested = sum(
                             len(callable_symbols(code_map))
                             for code_map in report.structural.code_maps
@@ -522,11 +531,8 @@ async def run_pinned_real_repository_benchmark(
                                 described_functions=described,
                                 file_only_functions=file_only,
                                 noop_update_ms=noop_ms,
-                                noop_provider_calls=provider.calls - before_noop_calls,
-                                noop_generation_unchanged=(
-                                    noop.manifest.generation_id
-                                    == report.manifest.generation_id
-                                ),
+                                noop_provider_calls=noop_calls,
+                                noop_generation_unchanged=noop_generation_unchanged,
                                 active_amplification=(
                                     artifact_bytes / source_bytes
                                     if source_bytes
