@@ -200,6 +200,45 @@ def test_noop_update_retries_failed_card_without_reextracting_source(
     assert all(tag.provenance == "model" for tag in card.file_tags)
 
 
+def test_unusable_model_tags_remain_partial_and_retry_uncached(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+
+    def respond(request, call):
+        answer = json.loads(_response())
+        if call == 0:
+            answer["concepts"][0]["text"] = " ".join(["request"] * 12)
+        return json.dumps(answer)
+
+    provider = _provider(respond)
+    first = asyncio.run(
+        build_repository_index(
+            tmp_path, provider=provider, provider_configuration=provider.configuration
+        )
+    )
+    assert first.partial
+    assert first.semantic is not None and first.semantic.failed_paths == ("app.py",)
+    first_card = load_semantic_card(tmp_path, "app.py", manifest=first.manifest)
+    assert first_card.quality == "partial"
+    assert all(tag.provenance == "structural-fallback" for tag in first_card.file_tags)
+
+    before = provider.call_count
+    updated = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    assert updated.structural.extracted_paths == ()
+    assert provider.call_count > before
+    assert updated.semantic is not None and updated.semantic.failed_paths == ()
+    card = load_semantic_card(tmp_path, "app.py", manifest=updated.manifest)
+    assert any(tag.provenance == "model" for tag in card.file_tags)
+
+
 def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     tmp_path: Path,
 ) -> None:

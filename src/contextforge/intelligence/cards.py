@@ -574,6 +574,7 @@ async def build_semantic_card_index(
                 diagnostic="semantic_scope_or_budget",
             )
         source: str | None = None
+        raw_to_cache: tuple[str, _RawSemanticCard] | None = None
         if should_model:
             source = _read_source(snapshot, project_file)
 
@@ -649,7 +650,7 @@ async def build_semantic_card_index(
                 repair_count += int(repair_attempted)
                 incomplete = incomplete or request_incomplete
                 if raw is not None and not incomplete:
-                    _store_cached_raw(lock, cache_key, raw)
+                    raw_to_cache = (cache_key, raw)
             if raw is not None:
                 try:
                     card = _ground_raw_card(
@@ -813,6 +814,14 @@ async def build_semantic_card_index(
                 estimated_tokens += lexicon_tokens[0]
                 request_count += lexicon_calls[0]
         card = _with_file_tags(card, code_map)
+        if (
+            model_selected
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
+        ):
+            failed.append(path)
+        elif raw_to_cache is not None and card.provenance.method == "model":
+            _store_cached_raw(lock, *raw_to_cache)
         if model_selected:
             selection_reasons = _model_selection_reasons(
                 path,
@@ -1083,6 +1092,13 @@ def _reusable_cards(
             return None
         if (
             provider is not None
+            and state.path in selected
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
+        ):
+            return None
+        if (
+            provider is not None
             and options.scope == "all"
             and callable_symbols(code_maps[state.path])
             and (card.lexicon is None or card.lexicon.missing_symbol_ids)
@@ -1141,6 +1157,13 @@ def _previous_reusable_cards(
             provider is not None
             and options.scope != "none"
             and card.provenance.method != "model"
+        ):
+            continue
+        if (
+            provider is not None
+            and options.scope != "none"
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
         ):
             continue
         analyzer = card.provenance.analyzer
