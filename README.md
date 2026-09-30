@@ -283,6 +283,22 @@ The default provider is local Ollama at
 `--provider none` for structural-only indexing. The `openai-compatible`
 provider and its `lmstudio` CLI alias require an exact model ID and a suitable
 `base_url`.
+To use the signed-in Codex CLI for model-backed indexing and planning, select it
+explicitly in `.contextforge/config.toml`:
+
+```toml
+[models]
+provider = "codex"
+model = "gpt-5.6-sol"
+local_only = false
+external_data_policy = "allow_repository"
+```
+
+Run `codex login` with ChatGPT first. ContextForge sends source through
+`codex exec` in an isolated read-only workspace; it does not read login tokens
+or fall back to a different provider. Code/test files retain structural search
+tags if model analysis is incomplete, and `index update` resumes missing
+function descriptions.
 
 Model-backed discovery requires the configured provider to be running with the
 named model available. The requested `context_window` defaults to 16,384
@@ -422,6 +438,10 @@ use identical model settings and citation schemas. Three blinded groundedness
 votes check the ContextForge answer against only its materialized ranges.
 Offline indexing, planner, final-answer, judge, estimated-input, provider-input,
 HTTP-call, and latency costs are reported separately.
+The pinned real-repository benchmark accepts `--provider codex --model-id ID
+--allow-repository-code` for an explicitly authorized Codex run. Its build
+report separates tagged files, model-tagged files, described functions, and
+`file_only` coverage. Savings exclude incomplete paired answers.
 
 ## Output formats and streams
 

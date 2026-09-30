@@ -44,6 +44,33 @@ def test_real_repository_command_refuses_unreviewed_manifest(tmp_path: Path) -> 
     assert "reviewed v2 manifest" in result.output
 
 
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    (
+        (("--provider", "codex", "--model-id", "gpt-6-sol"), "--allow-repository-code"),
+        (("--provider", "codex", "--allow-repository-code"), "explicit --model-id"),
+    ),
+)
+def test_real_repository_codex_requires_explicit_consent_and_model(
+    tmp_path: Path, extra: tuple[str, ...], message: str
+) -> None:
+    reviewed = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "real-repositories",
+            "--manifest",
+            str(reviewed),
+            "--source",
+            f"contextforge={tmp_path}",
+            *extra,
+        ],
+    )
+    assert result.exit_code == 2
+    assert message in result.output
+
+
 def _write(root: Path, path: str, content: str) -> None:
     destination = root.joinpath(*path.split("/"))
     destination.parent.mkdir(parents=True, exist_ok=True)

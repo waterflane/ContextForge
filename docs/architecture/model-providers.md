@@ -52,7 +52,7 @@ timeout_seconds = 360
 connect_timeout_seconds = 10
 read_timeout_seconds = 300
 operation_timeout_seconds = 360
-context_window = 4096
+context_window = 16384
 context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
@@ -291,6 +291,16 @@ circuit after the first final result and are not retried for each file. Rate
 limits, timeouts, and service unavailability retain bounded request retries;
 three consecutive exhausted failures with the same safe code and
 provider/model identity open the circuit. A success resets that sequence.
+
+## Codex subscription adapter
+
+`provider="codex"` requires an explicit model, `local_only=false`, and
+`external_data_policy="allow_repository"`. The adapter checks `codex login status`
+for a ChatGPT login, then uses `codex exec` with stdin, an output JSON Schema,
+JSONL usage events, an isolated working directory, and a read-only sandbox.
+Authentication, quota, model, and context failures stay typed; the adapter never
+switches silently to a local provider or reads stored login tokens. It uses the
+same schema validation and request budgets as the other model stages.
 OpenAI-compatible HTTP 429 responses use bounded structured `error.code` and
 message fields to distinguish quota exhaustion from transient rate limiting.
 
