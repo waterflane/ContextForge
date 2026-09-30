@@ -21,7 +21,12 @@ from contextforge.benchmarks.models import (
 )
 from contextforge.context import CompiledContextCapsule, RepresentationMode
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
-from contextforge.models import ModelProvider, ModelRequest, UntrustedSource
+from contextforge.models import (
+    ContextWindowExceededError,
+    ModelProvider,
+    ModelRequest,
+    UntrustedSource,
+)
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
 
 
@@ -58,6 +63,10 @@ class _GroundednessResponse(BaseModel):
     unsupported_claims: tuple[str, ...] = ()
 
 
+class OrdinaryBaselineContextOverflow(ValueError):
+    """The unmodified ordinary baseline cannot fit the selected model."""
+
+
 async def run_paired_answer_regression(
     repository_root: str | Path,
     task: str,
@@ -84,15 +93,20 @@ async def run_paired_answer_regression(
         for assertion in assertions
         for support in assertion.support
     )
-    ordinary = await _run_answer(
-        provider,
-        task,
-        assertions,
-        ordinary_context,
-        ordinary_ranges,
-        reviewed_evidence,
-        label="ordinary-client",
-    )
+    try:
+        ordinary = await _run_answer(
+            provider,
+            task,
+            assertions,
+            ordinary_context,
+            ordinary_ranges,
+            reviewed_evidence,
+            label="ordinary-client",
+        )
+    except ContextWindowExceededError as exc:
+        raise OrdinaryBaselineContextOverflow(
+            "ordinary baseline exceeds the model context window"
+        ) from exc
     oracle = await _run_answer(
         provider,
         task,
@@ -580,6 +594,7 @@ def _request_tokens(request: ModelRequest) -> int:
 
 
 __all__ = [
+    "OrdinaryBaselineContextOverflow",
     "render_oracle_context",
     "render_ordinary_context",
     "run_paired_answer_regression",

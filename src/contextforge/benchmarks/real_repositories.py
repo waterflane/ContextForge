@@ -372,6 +372,9 @@ class RealBenchmarkBuildReport(RealBenchmarkModel):
     requested_functions: NonNegativeInt | None = None
     described_functions: NonNegativeInt | None = None
     file_only_functions: NonNegativeInt | None = None
+    code_test_files: NonNegativeInt | None = None
+    tagged_code_test_files: NonNegativeInt | None = None
+    model_tagged_code_test_files: NonNegativeInt | None = None
     noop_update_ms: NonNegativeInt | None = None
     noop_provider_calls: NonNegativeInt | None = None
     noop_generation_unchanged: bool | None = None
@@ -614,6 +617,8 @@ def aggregate_real_repository_report(
                 and build.maximum_shard_bytes <= 4 * 1_024 * 1_024
                 and build.fresh_process_reload_successes == 100
                 and build.requested_functions == build.described_functions
+                and build.code_test_files is not None
+                and build.tagged_code_test_files == build.code_test_files
                 for build in builds
             )
             and all(

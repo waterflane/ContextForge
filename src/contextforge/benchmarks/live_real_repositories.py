@@ -13,7 +13,10 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from contextforge.application import build_repository_index
-from contextforge.benchmarks.answers import run_paired_answer_regression
+from contextforge.benchmarks.answers import (
+    OrdinaryBaselineContextOverflow,
+    run_paired_answer_regression,
+)
 from contextforge.benchmarks.models import BenchmarkSourceRange
 from contextforge.benchmarks.real_repositories import (
     RealBenchmarkBuildReport,
@@ -36,7 +39,9 @@ from contextforge.context import (
 )
 from contextforge.intelligence.cards import SemanticCardBuildResult
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
+from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.retrieval import (
+    _all_structural_postings,
     load_retrieval_index,
     retrieve_context_candidates,
 )
@@ -48,13 +53,13 @@ from contextforge.models import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
-    OpenAICompatibleModelProvider,
     ProviderCapabilities,
     ProviderCircuitOpenError,
     ProviderConfiguration,
     ProviderConfigurationError,
     estimate_request_context,
 )
+from contextforge.project_config import create_model_provider
 
 
 class _MeasuredProvider:
@@ -116,7 +121,7 @@ class _MeasuredProvider:
 
 
 def _new_provider(configuration: ProviderConfiguration) -> ModelProvider:
-    return OpenAICompatibleModelProvider(configuration)
+    return create_model_provider(configuration)
 
 
 def _fresh_process_reloads(root: Path, task: str, *, attempts: int) -> int:
@@ -208,6 +213,11 @@ def _validate_reviewed_sources(root: Path, task: RealBenchmarkTask) -> None:
                 item.evidence_id: item.source_range
                 for item in document.positional_postings
             }
+            code_map = load_file_code_map(root, support.citation.path, manifest=active)
+            identities.update(
+                (item.evidence_id, item.source_range)
+                for item in _all_structural_postings(code_map)
+            )
             identities.update(
                 (item.evidence_id, item.source_range)
                 for claim in document.semantic_claims
@@ -228,6 +238,8 @@ def _failure_reason(error: Exception) -> str:
 
     if isinstance(error, ValueError):
         detail = str(error)
+        if isinstance(error, OrdinaryBaselineContextOverflow):
+            return "ordinary_baseline_context_overflow"
         if detail.startswith("reviewed range is stale:"):
             return "reviewed_range_stale"
         if detail == "reviewed evidence references an absent source":
@@ -261,10 +273,6 @@ async def _evaluate_task(
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1_000)
     compiled = compile_context_capsule(root, task.task, retrieval, budget=budget)
     paths, ranges = _materialized(compiled)
-    answer_started = time.perf_counter()
-    prior_calls = provider.calls
-    prior_estimated = provider.estimated_input
-    prior_reported = provider.reported_input
     phase_errors: tuple[str, ...] = ()
     try:
         paired = await run_paired_answer_regression(
@@ -305,17 +313,17 @@ async def _evaluate_task(
             retrieval_ms if mode is RealBenchmarkMode.PLANNED else None
         ),
         final_answer_ms=(
-            (paired.ordinary.duration_ms if paired.ordinary else 0)
-            + paired.oracle.duration_ms
-            + paired.contextforge.duration_ms
-            if paired is not None
-            else round((time.perf_counter() - answer_started) * 1_000)
+            paired.contextforge.duration_ms if paired is not None else None
         ),
-        final_answer_provider_calls=provider.calls - prior_calls,
+        final_answer_provider_calls=(
+            paired.contextforge.provider_http_calls if paired is not None else None
+        ),
         final_answer_estimated_input_tokens=(
-            provider.estimated_input - prior_estimated
+            paired.contextforge.estimated_input_tokens if paired is not None else None
         ),
-        final_answer_reported_input_tokens=(provider.reported_input - prior_reported),
+        final_answer_reported_input_tokens=(
+            paired.contextforge.provider_input_tokens if paired is not None else None
+        ),
         phase_errors=phase_errors,
         plan_sufficient=(
             None
@@ -348,8 +356,8 @@ async def run_pinned_real_repository_benchmark(
         raise ValueError("repetitions must be positive")
     if hash_seed_reloads < 0 or hash_seed_reloads > 100:
         raise ValueError("hash-seed reload count must be between 0 and 100")
-    if configuration.provider_id != "openai-compatible":
-        raise ValueError("official live benchmark requires an OpenAI-compatible model")
+    if configuration.provider_id not in {"openai-compatible", "codex"}:
+        raise ValueError("official live benchmark requires an approved model provider")
     effective_budget = budget or ContextBudget(
         context_window_tokens=configuration.context_window,
         response_tokens=1_024,
@@ -471,6 +479,28 @@ async def run_pinned_real_repository_benchmark(
                             if card.lexicon is not None
                             and card.lexicon.context_mode == "file_only"
                         )
+                        retrieval_reference = (
+                            report.manifest.artifacts.semantic_retrieval
+                            or report.manifest.artifacts.structural_retrieval
+                        )
+                        if retrieval_reference is None:
+                            raise ValueError("reviewed evidence has no retrieval index")
+                        indexed_documents = load_retrieval_index(
+                            root, retrieval_reference, manifest=report.manifest
+                        ).documents
+                        code_test_documents = tuple(
+                            document
+                            for document in indexed_documents
+                            if FILE_POLICY_REGISTRY.profile(document.path)
+                            in {"code", "test"}
+                        )
+                        tagged_documents = sum(
+                            bool(document.file_tags) for document in code_test_documents
+                        )
+                        model_tagged_documents = sum(
+                            any(tag.provenance == "model" for tag in document.file_tags)
+                            for document in code_test_documents
+                        )
                         failed_paths = (
                             set(report.semantic.failed_paths)
                             if report.semantic is not None
@@ -530,6 +560,9 @@ async def run_pinned_real_repository_benchmark(
                                 requested_functions=requested,
                                 described_functions=described,
                                 file_only_functions=file_only,
+                                code_test_files=len(code_test_documents),
+                                tagged_code_test_files=tagged_documents,
+                                model_tagged_code_test_files=model_tagged_documents,
                                 noop_update_ms=noop_ms,
                                 noop_provider_calls=noop_calls,
                                 noop_generation_unchanged=noop_generation_unchanged,

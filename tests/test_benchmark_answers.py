@@ -16,6 +16,7 @@ from contextforge.benchmarks import (
     run_paired_answer_regression,
 )
 from contextforge.benchmarks.answers import (
+    OrdinaryBaselineContextOverflow,
     _assertion_has_evidence_support,
     _run_groundedness_judge,
 )
@@ -153,6 +154,64 @@ def test_oracle_renderer_rejects_missing_and_out_of_bounds_sources(
             tmp_path,
             (BenchmarkSourceRange(path="service.py", start_line=1, end_line=2),),
         )
+
+
+def test_ordinary_context_overflow_is_reported_without_truncation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "service.py").write_text(
+        "def serve():\n    return 1\n" + "# " + ("filler " * 8_000),
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, "serve", manifest=report.manifest)
+    )
+    compiled = compile_context_capsule(
+        tmp_path,
+        "serve",
+        retrieval,
+        manifest=report.manifest,
+        budget=ContextBudget(
+            context_window_tokens=16_384,
+            response_tokens=512,
+            safety_margin_tokens=256,
+        ),
+    )
+
+    def unexpected_response(request: ModelRequest, call: int) -> str:
+        raise AssertionError("ordinary overflow must be rejected before dispatch")
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="answer-test",
+            context_window=1_024,
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=unexpected_response,
+    )
+    with pytest.raises(OrdinaryBaselineContextOverflow):
+        asyncio.run(
+            run_paired_answer_regression(
+                tmp_path,
+                "serve",
+                (
+                    BenchmarkExpectedAssertion(
+                        assertion_id="serve", description="serve returns 1"
+                    ),
+                ),
+                (BenchmarkSourceRange(path="service.py", start_line=1, end_line=2),),
+                compiled,
+                provider,
+                ordinary_paths=("service.py",),
+            )
+        )
+    assert provider.call_count == 0
 
 
 def test_ordinary_renderer_uses_complete_required_files(tmp_path: Path) -> None:

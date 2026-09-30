@@ -1003,9 +1003,23 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
     assert report.builds[0].status == "complete"
     assert report.builds[0].requested_functions == 1
     assert report.builds[0].described_functions == 1
+    assert report.builds[0].code_test_files == 1
+    assert report.builds[0].tagged_code_test_files == 1
+    assert report.builds[0].model_tagged_code_test_files == 1
     assert report.builds[0].noop_generation_unchanged
     assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
     assert all(run.status == "complete" for run in report.runs)
+    assert all(
+        run.final_answer_ms == run.paired_answer.contextforge.duration_ms
+        for run in report.runs
+        if run.paired_answer is not None
+    )
+    assert all(
+        run.final_answer_provider_calls
+        == run.paired_answer.contextforge.provider_http_calls
+        for run in report.runs
+        if run.paired_answer is not None
+    )
 
     async def fail_answers(*args: object, **kwargs: object) -> None:
         from contextforge.models import ProviderCircuitOpenError
@@ -1023,8 +1037,9 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         )
     )
     assert all(run.status == "complete" for run in degraded.runs)
-    assert all(run.required_file_recall_at_5 == 1 for run in degraded.runs)
     assert all(run.quality_gate_failed for run in degraded.runs)
+    assert all(run.final_answer_ms is None for run in degraded.runs)
+    assert all(run.required_file_recall_at_5 == 1 for run in degraded.runs)
     assert all(
         run.phase_errors == ("final_answer:pipeline_error:ProviderCircuitOpenError",)
         for run in degraded.runs
