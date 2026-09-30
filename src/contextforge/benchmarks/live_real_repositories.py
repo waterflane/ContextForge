@@ -346,6 +346,8 @@ async def run_pinned_real_repository_benchmark(
     repetitions: int = 3,
     budget: ContextBudget | None = None,
     hash_seed_reloads: int = 100,
+    semantic_max_files: int | None = None,
+    semantic_max_requests: int = 4_096,
     progress: Callable[[str], None] | None = None,
 ) -> RealRepositoryBenchmarkReport:
     """Build once per clone, then evaluate both retrieval modes and paired answers."""
@@ -356,6 +358,10 @@ async def run_pinned_real_repository_benchmark(
         raise ValueError("repetitions must be positive")
     if hash_seed_reloads < 0 or hash_seed_reloads > 100:
         raise ValueError("hash-seed reload count must be between 0 and 100")
+    if semantic_max_files is not None and semantic_max_files < 1:
+        raise ValueError("semantic file limit must be positive")
+    if semantic_max_requests < 1:
+        raise ValueError("semantic request limit must be positive")
     if configuration.provider_id not in {"openai-compatible", "codex"}:
         raise ValueError("official live benchmark requires an approved model provider")
     effective_budget = budget or ContextBudget(
@@ -423,8 +429,12 @@ async def run_pinned_real_repository_benchmark(
                             provider=provider,
                             provider_configuration=configuration,
                             semantic_scope="all",
-                            max_files=max(len(structural.snapshot.files), 1),
-                            semantic_max_requests=4_096,
+                            max_files=(
+                                semantic_max_files
+                                if semantic_max_files is not None
+                                else max(len(structural.snapshot.files), 1)
+                            ),
+                            semantic_max_requests=semantic_max_requests,
                             semantic_max_input_tokens=50_000_000,
                         )
                         semantic_ms = round(
@@ -446,8 +456,12 @@ async def run_pinned_real_repository_benchmark(
                                 provider_configuration=configuration,
                                 update_only=True,
                                 semantic_scope="all",
-                                max_files=max(len(structural.snapshot.files), 1),
-                                semantic_max_requests=4_096,
+                                max_files=(
+                                    semantic_max_files
+                                    if semantic_max_files is not None
+                                    else max(len(structural.snapshot.files), 1)
+                                ),
+                                semantic_max_requests=semantic_max_requests,
                                 semantic_max_input_tokens=50_000_000,
                             )
                             noop_ms = round((time.perf_counter() - noop_start) * 1_000)

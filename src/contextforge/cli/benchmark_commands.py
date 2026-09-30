@@ -86,6 +86,12 @@ def benchmark_real_repositories(
     hash_seed_reloads: Annotated[
         int, typer.Option("--hash-seed-reloads", min=0, max=100)
     ] = 100,
+    semantic_max_files: Annotated[
+        int | None, typer.Option("--semantic-max-files", min=1)
+    ] = None,
+    semantic_max_requests: Annotated[
+        int, typer.Option("--semantic-max-requests", min=1)
+    ] = 4_096,
     output: Annotated[Path | None, typer.Option("--output")] = None,
 ) -> None:
     """Run both retrieval modes and paired answers on fresh pinned clones."""
@@ -127,6 +133,8 @@ def benchmark_real_repositories(
                 configuration,
                 repetitions=repetitions,
                 hash_seed_reloads=hash_seed_reloads,
+                semantic_max_files=semantic_max_files,
+                semantic_max_requests=semantic_max_requests,
                 progress=lambda message: typer.echo(message, err=True),
             )
         )

@@ -769,6 +769,18 @@ def test_official_runner_requires_reviewed_manifest_and_reports_missing_source()
                 repetitions=1,
             )
         )
+    with pytest.raises(ValueError, match="semantic file limit"):
+        asyncio.run(
+            run_pinned_real_repository_benchmark(
+                manifest, {}, configuration, semantic_max_files=0
+            )
+        )
+    with pytest.raises(ValueError, match="semantic request limit"):
+        asyncio.run(
+            run_pinned_real_repository_benchmark(
+                manifest, {}, configuration, semantic_max_requests=0
+            )
+        )
     payload = manifest.model_dump(mode="json")
     payload["schema_version"] = 2
     payload["repositories"] = payload["repositories"][:1]
