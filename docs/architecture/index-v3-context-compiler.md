@@ -27,9 +27,9 @@ generation active and usable.
 whole index job. A Bridge client timeout does not cancel the tracked job or
 release its writer lock. Explicit cancellation and shutdown do cancel it.
 
-Index, manifest, and record schemas are version 3. A v2 index is readable only
-for status/migration diagnostics, reports `rebuild_required`, is excluded from
-retrieval, and is rejected by `index update`. Run `index build` to create v3;
+Index storage and manifest schemas are version 4. Index schemas 1–3 are readable
+only for status/migration diagnostics, report `rebuild_required`, and are excluded
+from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
@@ -42,13 +42,20 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 
-Semantic Card analyzer version 7 (`semantic-card-v3.4`) uses one full request
+Semantic Card analyzer version 9 (`semantic-card-v3.6`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of
 overlap. Evidence is constrained to the active chunk and may address verified
 import, call, reference, or config facts. Every primary and scheduler-owned
 repair consumes the shared request and full-request token ceilings; provider
 internal repair is disabled for card requests. Ranking prose must also have a
 lexical or identifier anchor in cited evidence.
+Every indexed code/test file has source-bound search tags. Grounded model tags
+have a dedicated BM25 field; if they are unavailable, structural tags preserve
+coverage while the model analysis remains partial. Function descriptions and
+direct-call expressions retain stable symbol/edge identities. Successfully
+verified function groups survive a later failure and an update retries missing
+IDs. Every function request carries the full file and outgoing call table;
+`file_only` omits external callee code if the request exceeds the actual window.
 
 Graph nodes, edges, metrics, and file projections are stored in digest-bound
 shards of at most 4 MiB. Retrieval documents use the same bounded shard format.
@@ -68,7 +75,7 @@ overlay is bound to the structural manifest digest; a corrupt overlay produces
 Retrieval first partitions exact matches in this order: exact path, qualified
 symbol, symbol, and source identifier. Approximate candidates use BM25 with
 `k1=1.2`, `b=0.75`, and weights path `4`, symbols `3`, source identifiers `2`,
-grounded semantics `2`. It then applies graph proximity (`+0.20` one hop,
+model file tags `3`, grounded semantics `2`. It then applies graph proximity (`+0.20` one hop,
 `+0.08` two hops), normalized centrality (up to `+0.10`), current diff
 (`+0.25`), and Working Set (`+1.0`). Exact groups always precede approximate
 scores.

@@ -166,7 +166,17 @@ FILE_POLICY_REGISTRY = FilePolicyRegistry(
             suffixes=frozenset(
                 {".toml", ".yaml", ".yml", ".ini", ".cfg", ".json", ".env"}
             ),
-            names=frozenset({".env", "dockerfile"}),
+            names=frozenset(
+                {
+                    ".env",
+                    ".gitignore",
+                    ".gitattributes",
+                    ".editorconfig",
+                    ".npmrc",
+                    ".prettierrc",
+                    "dockerfile",
+                }
+            ),
         ),
     ),
     test_naming_rules=(

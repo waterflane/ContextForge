@@ -26,6 +26,7 @@ from contextforge.intelligence import (
     load_retrieval_index,
     retrieve_context_candidates,
 )
+from contextforge.intelligence.retrieval import FIELD_WEIGHTS
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 
 
@@ -95,6 +96,28 @@ def test_exact_symbol_precedes_graph_related_approximate_candidates(
     assert app.evidence_ranges
     assert any(item.path == "src/service.py" for item in app.graph_neighbors)
     assert report.manifest.artifacts.semantic_retrieval is not None
+
+
+def test_code_and_test_documents_have_source_bound_tags_before_enrichment(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "src/app.py", "def start():\n    return 1\n")
+    _write(tmp_path, "tests/test_app.py", "def test_start():\n    assert True\n")
+    _write(tmp_path, "README.md", "Project documentation.\n")
+    report = _build(tmp_path)
+    assert report.manifest.artifacts.structural_retrieval is not None
+    index = load_retrieval_index(
+        tmp_path,
+        report.manifest.artifacts.structural_retrieval,
+        manifest=report.manifest,
+    )
+    by_path = {item.path: item for item in index.documents}
+    for path in ("src/app.py", "tests/test_app.py"):
+        assert by_path[path].file_tags
+        assert all(
+            tag.provenance == "structural-fallback" for tag in by_path[path].file_tags
+        )
+    assert by_path["README.md"].file_tags == ()
 
 
 def test_working_set_and_diff_boosts_are_deterministic(tmp_path: Path) -> None:
@@ -232,6 +255,17 @@ def test_grounded_semantics_supply_ranked_concepts_and_ranges(tmp_path: Path) ->
             provider_configuration=provider.configuration,
         )
     )
+    semantic_reference = report.manifest.artifacts.semantic_retrieval
+    assert semantic_reference is not None
+    semantic_index = load_retrieval_index(
+        tmp_path, semantic_reference, manifest=report.manifest
+    )
+    document = next(
+        item for item in semantic_index.documents if item.path == "handler.py"
+    )
+    assert any(tag.provenance == "model" for tag in document.file_tags)
+    tag_field = next(item for item in document.fields if item.name == "file_tags")
+    assert tag_field.terms["normalization"] > 0
 
     result = asyncio.run(
         retrieve_context_candidates(
@@ -301,7 +335,7 @@ def test_retrieval_schemas_reject_noncanonical_postings() -> None:
         RetrievalField(name="path", length=2, terms={"z": 1, "a": 1})
     field_values = tuple(
         RetrievalField(name=name, length=0, terms={})  # type: ignore[arg-type]
-        for name in ("path", "symbols", "source_identifiers", "grounded_semantics")
+        for name in FIELD_WEIGHTS
     )
     with pytest.raises(ValidationError, match="unique and canonical"):
         RetrievalDocument(

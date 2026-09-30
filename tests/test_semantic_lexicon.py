@@ -18,11 +18,13 @@ from contextforge.intelligence.semantic_lexicon import (
     SemanticContextOverflow,
     SemanticLexiconBudgetExceeded,
     analyze_file_lexicon,
+    analyze_file_lexicon_resumable,
 )
 from contextforge.models import (
     ContextWindowExceededError,
     FakeModelProvider,
     ProviderConfiguration,
+    ProviderQuotaError,
     estimate_request_context,
 )
 
@@ -46,6 +48,12 @@ def test_model_search_expressions_are_bounded_printable_ascii(
                 ]
             }
         )
+
+
+def test_repeated_model_expressions_do_not_add_search_weight() -> None:
+    assert lexicon_module._unique_expressions(
+        ("request routing", "Request Routing", "route invocation")
+    ) == ("request routing", "route invocation")
 
 
 def _fixture(root: Path):
@@ -465,6 +473,141 @@ def test_each_batch_receives_full_file_and_complete_function_table(
     )
     assert all(request.untrusted_sources[0].text == source for request in requests)
     assert len(lexicon.functions) == 5
+
+
+def test_failed_group_preserves_verified_functions_and_retries_only_missing(
+    tmp_path: Path,
+) -> None:
+    _fixture(tmp_path)
+    path = tmp_path / "service.py"
+    path.write_text(
+        "".join(
+            f"def function_{number}() -> int:\n    return {number}\n\n"
+            for number in range(5)
+        ),
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    code_map = load_file_code_map(tmp_path, "service.py", manifest=report.manifest)
+    graph = load_relationship_graph(tmp_path, manifest=report.manifest)
+    source = path.read_text(encoding="utf-8")
+    maps = {"service.py": code_map}
+    sources = {"service.py": source}
+
+    def incomplete(request, call):
+        if (
+            request.purpose == "semantic-lexicon-verification"
+            and len(request.trusted_code_map_facts["target_functions"]) == 1
+        ):
+            return json.dumps({"schema_version": 1, "accepted_ids": []})
+        return _response(request)
+
+    first = asyncio.run(
+        analyze_file_lexicon_resumable(
+            _provider(incomplete), code_map, source, graph, maps, sources
+        )
+    )
+    assert len(first.functions) == 4
+    assert len(first.missing_symbol_ids) == 1
+    assert first.failure_codes == ("ValueError",)
+    requests = []
+
+    def complete(request, call):
+        requests.append(request)
+        return _response(request)
+
+    second = asyncio.run(
+        analyze_file_lexicon_resumable(
+            _provider(complete),
+            code_map,
+            source,
+            graph,
+            maps,
+            sources,
+            previous=first,
+        )
+    )
+    assert len(second.functions) == 5
+    assert second.missing_symbol_ids == ()
+    builds = [item for item in requests if item.purpose == "semantic-lexicon"]
+    assert len(builds) == 1
+    assert len(builds[0].trusted_code_map_facts["target_functions"]) == 1
+
+
+def test_resumable_lexicon_reports_budget_before_any_model_call(tmp_path: Path) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+    provider = _provider(lambda request, call: _response(request))
+    result = asyncio.run(
+        analyze_file_lexicon_resumable(
+            provider,
+            maps["service.py"],
+            sources["service.py"],
+            graph,
+            maps,
+            sources,
+            request_budget=0,
+        )
+    )
+    assert result.functions == ()
+    assert result.missing_symbol_ids
+    assert result.failure_codes == ("SemanticLexiconBudgetExceeded",)
+    assert provider.call_count == 0
+
+
+def test_resumable_lexicon_stops_after_provider_wide_failure(tmp_path: Path) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+
+    def quota(request, call):
+        raise ProviderQuotaError("subscription limit")
+
+    provider = _provider(quota)
+    result = asyncio.run(
+        analyze_file_lexicon_resumable(
+            provider,
+            maps["service.py"],
+            sources["service.py"],
+            graph,
+            maps,
+            sources,
+        )
+    )
+    assert result.functions == ()
+    assert result.missing_symbol_ids
+    assert "ProviderQuotaError" in result.failure_codes
+    assert provider.call_count == 1
+
+
+def test_resumable_lexicon_ignores_previous_different_source_sha(
+    tmp_path: Path,
+) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+    first = asyncio.run(
+        analyze_file_lexicon_resumable(
+            _provider(lambda request, call: _response(request)),
+            maps["service.py"],
+            sources["service.py"],
+            graph,
+            maps,
+            sources,
+        )
+    )
+    stale = first.model_copy(update={"source_sha256": "0" * 64})
+    provider = _provider(lambda request, call: _response(request))
+    renewed = asyncio.run(
+        analyze_file_lexicon_resumable(
+            provider,
+            maps["service.py"],
+            sources["service.py"],
+            graph,
+            maps,
+            sources,
+            previous=stale,
+        )
+    )
+    assert renewed.functions == first.functions
+    assert provider.call_count > 0
 
 
 def test_invented_call_edge_id_is_rejected(tmp_path: Path) -> None:

@@ -50,7 +50,7 @@ from contextforge.intelligence.repository_maps_v3 import build_repository_maps_v
 from contextforge.intelligence.semantic_lexicon import (
     FileSemanticLexicon,
     SemanticContextOverflow,
-    analyze_file_lexicon,
+    analyze_file_lexicon_resumable,
     callable_symbols,
 )
 from contextforge.intelligence.store import (
@@ -69,8 +69,8 @@ from contextforge.models import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_CARD_SCHEMA_VERSION: Literal[3] = 3
-SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.5"
-SEMANTIC_CARD_ANALYZER_VERSION = "8"
+SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.6"
+SEMANTIC_CARD_ANALYZER_VERSION = "9"
 MAX_SEMANTIC_EVIDENCE = 32
 MAX_SEMANTIC_CARD_BYTES = 128 * 1024
 DEFAULT_MODEL_FILE_LIMIT = 64
@@ -132,6 +132,21 @@ class GroundedClaim(IndexModel):
     def validate_evidence_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if value != tuple(sorted(set(value))):
             raise ValueError("claim evidence IDs must be unique and canonical")
+        return value
+
+
+class FileSearchTag(IndexModel):
+    """A bounded search expression with explicit source and origin."""
+
+    text: str = Field(min_length=1, max_length=80)
+    evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    provenance: Literal["model", "structural-fallback"]
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def validate_evidence_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("tag evidence IDs must be unique and canonical")
         return value
 
 
@@ -205,6 +220,7 @@ class SemanticCard(IndexModel):
         default=(), max_length=24
     )
     lexicon: FileSemanticLexicon | None = None
+    file_tags: tuple[FileSearchTag, ...] = Field(default=(), max_length=12)
     coverage_ranges: tuple[SourceRange, ...] = ()
     evidence: tuple[SemanticEvidence, ...] = Field(
         min_length=1, max_length=MAX_SEMANTIC_EVIDENCE
@@ -254,6 +270,18 @@ class SemanticCard(IndexModel):
         )
         if any(not set(claim.evidence_ids) <= known for claim in claims):
             raise ValueError("semantic claim references unknown evidence")
+        lexicon_ids = (
+            set()
+            if self.lexicon is None
+            else {f"lexicon:{item.symbol_id}" for item in self.lexicon.functions}
+        )
+        if any(
+            not set(tag.evidence_ids) <= known | lexicon_ids for tag in self.file_tags
+        ):
+            raise ValueError("file tag references unknown evidence")
+        tag_keys = tuple(tag.text.casefold() for tag in self.file_tags)
+        if tag_keys != tuple(sorted(set(tag_keys))):
+            raise ValueError("file tags must be unique and canonical")
         relationship_ids = tuple(
             item.target_candidate_id for item in self.inferred_relationships
         )
@@ -673,13 +701,13 @@ async def build_semantic_card_index(
             provider is not None
             and active_options.scope == "all"
             and callable_symbols(code_map)
-            and card.lexicon is None
+            and (card.lexicon is None or card.lexicon.missing_symbol_ids)
         ):
             lexicon_calls = [0]
             lexicon_tokens = [0]
             try:
                 source_text = source_texts[path]
-                lexicon = await analyze_file_lexicon(
+                lexicon = await analyze_file_lexicon_resumable(
                     provider,
                     code_map,
                     source_text,
@@ -691,9 +719,19 @@ async def build_semantic_card_index(
                     request_budget=active_options.max_requests - request_count,
                     estimated_input_budget=active_options.max_estimated_input_tokens
                     - estimated_tokens,
+                    previous=card.lexicon,
                 )
                 payload = card.model_dump(mode="json")
                 payload["lexicon"] = lexicon.model_dump(mode="json")
+                payload["diagnostics"] = [
+                    item
+                    for item in payload["diagnostics"]
+                    if item["code"]
+                    not in {
+                        "semantic_lexicon_partial",
+                        "semantic_lexicon_full_file_overflow",
+                    }
+                ]
                 if lexicon.context_mode == "file_only":
                     effective_window = (
                         lexicon.reported_context_window
@@ -711,6 +749,39 @@ async def build_semantic_card_index(
                     )
                 card = SemanticCard.model_validate(payload)
                 analyzers.add(_model_analyzer(provider))
+                if lexicon.missing_symbol_ids:
+                    failed.append(path)
+                    card = card.model_copy(
+                        update={
+                            "quality": "partial",
+                            "diagnostics": (
+                                *card.diagnostics,
+                                SemanticCardDiagnostic(
+                                    code=(
+                                        "semantic_lexicon_full_file_overflow"
+                                        if "SemanticContextOverflow"
+                                        in lexicon.failure_codes
+                                        else "semantic_lexicon_partial"
+                                    ),
+                                    message=(
+                                        f"Missing {len(lexicon.missing_symbol_ids)} "
+                                        "function description(s)."
+                                    ),
+                                    dropped_items=len(lexicon.missing_symbol_ids),
+                                ),
+                            ),
+                        }
+                    )
+                elif card.provenance.method == "model" and not any(
+                    item.code
+                    in {
+                        "optional_claims_dropped",
+                        "semantic_chunk_coverage_incomplete",
+                        "stale_inferred_relationships_dropped",
+                    }
+                    for item in card.diagnostics
+                ):
+                    card = card.model_copy(update={"quality": "complete"})
             except Exception as exc:
                 failed.append(path)
                 effective_window = (
@@ -741,6 +812,7 @@ async def build_semantic_card_index(
             finally:
                 estimated_tokens += lexicon_tokens[0]
                 request_count += lexicon_calls[0]
+        card = _with_file_tags(card, code_map)
         if model_selected:
             selection_reasons = _model_selection_reasons(
                 path,
@@ -1013,7 +1085,7 @@ def _reusable_cards(
             provider is not None
             and options.scope == "all"
             and callable_symbols(code_maps[state.path])
-            and card.lexicon is None
+            and (card.lexicon is None or card.lexicon.missing_symbol_ids)
         ):
             return None
         analyzer = card.provenance.analyzer
@@ -1653,6 +1725,78 @@ def _deterministic_card(
                 message="A deterministic grounded card was used.",
             ),
         ),
+    )
+
+
+def _with_file_tags(card: SemanticCard, code_map: FileCodeMap) -> SemanticCard:
+    """Attach canonical model tags or source-derived fallback tags to code and tests."""
+
+    if card.profile not in {"code", "test"}:
+        return card
+    known = {item.evidence_id for item in card.evidence}
+    model_tags = [
+        FileSearchTag(
+            text=claim.text,
+            evidence_ids=claim.evidence_ids,
+            provenance="model",
+        )
+        for claim in card.concepts
+        if card.provenance.method == "model"
+        and len(claim.text) <= 80
+        and len(claim.text.split()) <= 8
+        and set(claim.evidence_ids) <= known
+    ]
+    if card.lexicon is not None:
+        model_tags.extend(
+            FileSearchTag(
+                text=expression,
+                evidence_ids=(f"lexicon:{function.symbol_id}",),
+                provenance="model",
+            )
+            for function in card.lexicon.functions
+            for expression in function.expressions
+            if len(expression) <= 80
+        )
+    if model_tags:
+        chosen = model_tags[:12]
+    else:
+        by_symbol = {
+            item.symbol_id: item.evidence_id
+            for item in card.evidence
+            if item.symbol_id is not None
+        }
+        root = next(
+            (
+                item.evidence_id
+                for item in card.evidence
+                if item.evidence_id == "file" or item.evidence_id.startswith("chunk:")
+            ),
+            card.evidence[0].evidence_id,
+        )
+        chosen = [
+            FileSearchTag(
+                text=symbol.name,
+                evidence_ids=(by_symbol.get(symbol.symbol_id, root),),
+                provenance="structural-fallback",
+            )
+            for symbol in code_map.symbols
+            if symbol.name.strip() and len(symbol.name) <= 80
+        ][:11]
+        stem = PurePosixPath(code_map.path).stem
+        chosen.append(
+            FileSearchTag(
+                text=stem[:80] or card.profile,
+                evidence_ids=(root,),
+                provenance="structural-fallback",
+            )
+        )
+    unique = {tag.text.casefold(): tag for tag in chosen}
+    tags = tuple(unique[key] for key in sorted(unique))
+    quality = card.quality
+    if not model_tags and card.provenance.method == "model":
+        quality = "partial"
+    return SemanticCard.model_validate(
+        {**card.model_dump(mode="json"), "file_tags": tags, "quality": quality}
     )
 
 

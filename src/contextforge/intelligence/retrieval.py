@@ -23,7 +23,7 @@ from pydantic import (
 )
 
 from contextforge.core.validation import canonical_casefold_key
-from contextforge.intelligence.cards import SemanticCard
+from contextforge.intelligence.cards import FileSearchTag, SemanticCard
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.graph import (
@@ -50,13 +50,14 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 7
+RETRIEVAL_BUILD_VERSION = 8
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
     "path": 4.0,
     "symbols": 3.0,
     "source_identifiers": 2.0,
+    "file_tags": 3.0,
     "grounded_semantics": 2.0,
 }
 RepresentationMode = Literal["map", "summary", "slice", "full"]
@@ -111,7 +112,9 @@ _retrieval_cache_lock = threading.Lock()
 class RetrievalField(IndexModel):
     """Canonical term frequencies for one weighted document field."""
 
-    name: Literal["path", "symbols", "source_identifiers", "grounded_semantics"]
+    name: Literal[
+        "path", "symbols", "source_identifiers", "file_tags", "grounded_semantics"
+    ]
     length: NonNegativeInt
     terms: dict[str, NonNegativeInt]
 
@@ -168,6 +171,7 @@ class RetrievalDocument(IndexModel):
     semantic_synopsis: str = ""
     semantic_concepts: tuple[str, ...] = ()
     semantic_claims: tuple[RetrievalSemanticClaim, ...] = ()
+    file_tags: tuple[FileSearchTag, ...] = ()
 
     @field_validator("path")
     @classmethod
@@ -274,6 +278,7 @@ class RetrievalSemanticOverlayDocument(IndexModel):
     semantic_synopsis: str = ""
     semantic_concepts: tuple[str, ...] = ()
     semantic_claims: tuple[RetrievalSemanticClaim, ...] = ()
+    file_tags: tuple[FileSearchTag, ...] = ()
     grounded_semantics: RetrievalField
 
 
@@ -827,6 +832,11 @@ def build_retrieval_index(
             "path": code_map.path,
             "symbols": " ".join((*symbols, *qualified)),
             "source_identifiers": " ".join((*identifiers, *structural_identifiers)),
+            "file_tags": " ".join(
+                tag.text
+                for tag in (() if card is None else card.file_tags)
+                if tag.provenance == "model"
+            ),
             "grounded_semantics": (
                 ""
                 if card is None
@@ -864,6 +874,11 @@ def build_retrieval_index(
                     () if card is None else tuple(item.text for item in card.concepts)
                 ),
                 semantic_claims=semantic_claims,
+                file_tags=(
+                    card.file_tags
+                    if card is not None and card.file_tags
+                    else _structural_file_tags(code_map)
+                ),
             )
         )
     frequencies: dict[str, dict[str, int]] = {}
@@ -996,6 +1011,32 @@ def _retrieval_semantic_claims(
     return tuple(values[key] for key in sorted(values))
 
 
+def _structural_file_tags(code_map: FileCodeMap) -> tuple[FileSearchTag, ...]:
+    """Keep code and tests searchable before semantic enrichment finishes."""
+
+    if FILE_POLICY_REGISTRY.profile(code_map.path) not in {"code", "test"}:
+        return ()
+    values = [
+        FileSearchTag(
+            text=symbol.name,
+            evidence_ids=(f"symbol:{index:04d}",),
+            provenance="structural-fallback",
+        )
+        for index, symbol in enumerate(code_map.symbols)
+        if symbol.name.strip() and len(symbol.name) <= 80
+    ][:11]
+    stem = Path(code_map.path).stem
+    values.append(
+        FileSearchTag(
+            text=stem[:80] or "source",
+            evidence_ids=("file",),
+            provenance="structural-fallback",
+        )
+    )
+    by_text = {value.text.casefold(): value for value in values}
+    return tuple(by_text[key] for key in sorted(by_text))
+
+
 def write_retrieval_index(
     lock: object,
     location: str,
@@ -1046,6 +1087,7 @@ def write_retrieval_index(
                 semantic_synopsis=document.semantic_synopsis,
                 semantic_concepts=document.semantic_concepts,
                 semantic_claims=document.semantic_claims,
+                file_tags=document.file_tags,
                 grounded_semantics=next(
                     item
                     for item in document.fields
@@ -1172,6 +1214,15 @@ def load_retrieval_index(
                             "fields": tuple(
                                 item.grounded_semantics
                                 if field.name == "grounded_semantics"
+                                else _retrieval_field(
+                                    "file_tags",
+                                    " ".join(
+                                        tag.text
+                                        for tag in item.file_tags
+                                        if tag.provenance == "model"
+                                    ),
+                                )
+                                if field.name == "file_tags"
                                 else field
                                 for field in base_documents[item.path].fields
                             ),

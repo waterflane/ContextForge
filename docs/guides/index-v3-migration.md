@@ -21,8 +21,8 @@ enrichment fails, status may be partial but `map`, deterministic search, symbol
 lookup, and compilation against structural evidence remain usable.
 
 Resolver/analyzer identities changed with this revision (fallback 4, resolver
-9, Python 6, polyglot 10, Semantic Card analyzer 8, prompt
-`semantic-card-v3.5`). Rebuild/update does not reuse older CodeMaps or semantic
+9, Python 6, polyglot 10, Semantic Card analyzer 9, prompt
+`semantic-card-v3.6`). Rebuild/update does not reuse older CodeMaps or semantic
 cache entries under those contracts. Polyglot analysis now includes Kotlin
 `.kt` and `.kts` declarations, imports, calls, and references.
 

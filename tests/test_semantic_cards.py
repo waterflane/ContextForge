@@ -159,6 +159,8 @@ def test_invalid_grounded_model_card_publishes_retryable_fallback(
     assert report.semantic.failed_paths == ("app.py",)
     assert card.provenance.method == "deterministic-fallback"
     assert card.quality == "partial"
+    assert card.file_tags
+    assert all(tag.provenance == "structural-fallback" for tag in card.file_tags)
 
 
 def test_noop_update_retries_failed_card_without_reextracting_source(
@@ -194,6 +196,8 @@ def test_noop_update_retries_failed_card_without_reextracting_source(
     assert updated.semantic is not None and updated.semantic.failed_paths == ()
     card = load_semantic_card(tmp_path, "app.py", manifest=updated.manifest)
     assert card.provenance.method == "model"
+    assert card.file_tags
+    assert all(tag.provenance == "model" for tag in card.file_tags)
 
 
 def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(

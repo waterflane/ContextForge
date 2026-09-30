@@ -13,6 +13,7 @@ from contextforge.intelligence.graph import RelationshipGraph
 from contextforge.models import (
     ContextWindowExceededError,
     ModelProvider,
+    ModelProviderError,
     ModelRequest,
     ModelResponse,
     UntrustedSource,
@@ -60,6 +61,13 @@ class SemanticContextOverflow(ValueError):
 
 class SemanticLexiconBudgetExceeded(ValueError):
     """The shared semantic request or input-token budget is exhausted."""
+
+
+def _unique_expressions(expressions: tuple[str, ...]) -> tuple[str, ...]:
+    by_text: dict[str, str] = {}
+    for expression in expressions:
+        by_text.setdefault(expression.casefold(), expression)
+    return tuple(by_text.values())
 
 
 class _RawFunction(BaseModel):
@@ -121,6 +129,8 @@ class FileSemanticLexicon(BaseModel):
     functions: tuple[FunctionLexiconEntry, ...]
     calls: tuple[CallLexiconEntry, ...]
     dropped_claims: int = 0
+    missing_symbol_ids: tuple[str, ...] = ()
+    failure_codes: tuple[str, ...] = ()
 
 
 def callable_symbols(code_map: FileCodeMap) -> tuple[SymbolRecord, ...]:
@@ -285,7 +295,11 @@ def _request(
             )
         ),
         response_model=_AcceptedClaims if verify else _RawLexicon,
-        max_output_tokens=1024 if verify else 2048,
+        max_output_tokens=(
+            min(2048, max(512, 256 + 40 * len(claims or {})))
+            if verify
+            else min(4096, max(1024, 768 * len(target_symbols)))
+        ),
         metadata={"prompt_version": LEXICON_PROMPT_VERSION},
     )
 
@@ -302,6 +316,7 @@ async def analyze_file_lexicon(
     token_counter: list[int] | None = None,
     request_budget: int | None = None,
     estimated_input_budget: int | None = None,
+    target_symbol_ids: frozenset[str] | None = None,
 ) -> FileSemanticLexicon:
     """Analyze stable callable IDs with a complete file in every request."""
 
@@ -323,7 +338,11 @@ async def analyze_file_lexicon(
         tokens[0] += cost
         return await provider.complete_structured(request)
 
-    functions = callable_symbols(code_map)
+    functions = tuple(
+        item
+        for item in callable_symbols(code_map)
+        if target_symbol_ids is None or item.symbol_id in target_symbol_ids
+    )
     entries: list[FunctionLexiconEntry] = []
     calls: list[CallLexiconEntry] = []
     dropped = 0
@@ -501,10 +520,12 @@ async def analyze_file_lexicon(
             symbol = next(
                 item for item in batch if item.symbol_id == function.symbol_id
             )
-            expressions = tuple(
-                expression
-                for index, expression in enumerate(function.expressions)
-                if f"function:{function.symbol_id}:{index}" in accepted
+            expressions = _unique_expressions(
+                tuple(
+                    expression
+                    for index, expression in enumerate(function.expressions)
+                    if f"function:{function.symbol_id}:{index}" in accepted
+                )
             )
             dropped += len(function.expressions) - len(expressions)
             entries.append(
@@ -526,10 +547,12 @@ async def analyze_file_lexicon(
                 for item in request.trusted_code_map_facts["outgoing_calls"]
                 if item["edge_id"] == call.edge_id
             )
-            expressions = tuple(
-                expression
-                for index, expression in enumerate(call.expressions)
-                if f"call:{call.edge_id}:{index}" in accepted
+            expressions = _unique_expressions(
+                tuple(
+                    expression
+                    for index, expression in enumerate(call.expressions)
+                    if f"call:{call.edge_id}:{index}" in accepted
+                )
             )
             dropped += len(call.expressions) - len(expressions)
             calls.append(
@@ -547,4 +570,104 @@ async def analyze_file_lexicon(
         functions=tuple(sorted(entries, key=lambda item: item.symbol_id)),
         calls=tuple(sorted(calls, key=lambda item: item.edge_id)),
         dropped_claims=dropped,
+    )
+
+
+async def analyze_file_lexicon_resumable(
+    provider: ModelProvider,
+    code_map: FileCodeMap,
+    source: str,
+    graph: RelationshipGraph,
+    code_maps: Mapping[str, FileCodeMap],
+    sources: Mapping[str, str],
+    *,
+    previous: FileSemanticLexicon | None = None,
+    call_counter: list[int] | None = None,
+    token_counter: list[int] | None = None,
+    request_budget: int | None = None,
+    estimated_input_budget: int | None = None,
+) -> FileSemanticLexicon:
+    """Retain verified groups when a later group cannot be analyzed."""
+
+    counter = call_counter if call_counter is not None else [0]
+    tokens = token_counter if token_counter is not None else [0]
+    usable = (
+        previous
+        if previous is not None
+        and previous.path == code_map.path
+        and previous.source_sha256 == code_map.source_sha256
+        else None
+    )
+    function_by_id = {
+        item.symbol_id: item for item in (() if usable is None else usable.functions)
+    }
+    call_by_id = {
+        item.edge_id: item for item in (() if usable is None else usable.calls)
+    }
+    functions = callable_symbols(code_map)
+    pending = tuple(item for item in functions if item.symbol_id not in function_by_id)
+    missing: list[str] = []
+    failures: set[str] = set()
+    dropped = 0 if usable is None else usable.dropped_claims
+    mode: Literal["full_graph", "file_only"] = (
+        "full_graph" if usable is None else usable.context_mode
+    )
+    reported_window = None if usable is None else usable.reported_context_window
+    batches = [pending[start : start + 4] for start in range(0, len(pending), 4)]
+    while batches:
+        batch = batches.pop(0)
+        if request_budget is not None and counter[0] >= request_budget:
+            missing.extend(item.symbol_id for item in batch)
+            missing.extend(item.symbol_id for group in batches for item in group)
+            failures.add("SemanticLexiconBudgetExceeded")
+            break
+        try:
+            result = await analyze_file_lexicon(
+                provider,
+                code_map,
+                source,
+                graph,
+                code_maps,
+                sources,
+                call_counter=counter,
+                token_counter=tokens,
+                request_budget=(None if request_budget is None else request_budget),
+                estimated_input_budget=(
+                    None if estimated_input_budget is None else estimated_input_budget
+                ),
+                target_symbol_ids=frozenset(item.symbol_id for item in batch),
+            )
+        except Exception as exc:
+            provider_wide = isinstance(exc, ModelProviderError) and exc.provider_wide
+            if len(batch) > 1 and not (
+                isinstance(exc, SemanticLexiconBudgetExceeded) or provider_wide
+            ):
+                split = len(batch) // 2
+                batches[:0] = [batch[:split], batch[split:]]
+                continue
+            missing.extend(item.symbol_id for item in batch)
+            failures.add(type(exc).__name__)
+            if isinstance(exc, SemanticContextOverflow):
+                mode = "file_only"
+                reported_window = exc.effective_window or reported_window
+            if isinstance(exc, SemanticLexiconBudgetExceeded) or provider_wide:
+                missing.extend(item.symbol_id for group in batches for item in group)
+                break
+            continue
+        function_by_id.update((item.symbol_id, item) for item in result.functions)
+        call_by_id.update((item.edge_id, item) for item in result.calls)
+        dropped += result.dropped_claims
+        if result.context_mode == "file_only":
+            mode = "file_only"
+        reported_window = result.reported_context_window or reported_window
+    return FileSemanticLexicon(
+        path=code_map.path,
+        source_sha256=code_map.source_sha256,
+        context_mode=mode,
+        reported_context_window=reported_window,
+        functions=tuple(function_by_id[key] for key in sorted(function_by_id)),
+        calls=tuple(call_by_id[key] for key in sorted(call_by_id)),
+        dropped_claims=dropped,
+        missing_symbol_ids=tuple(sorted(set(missing))),
+        failure_codes=tuple(sorted(failures)),
     )
