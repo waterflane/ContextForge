@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 import contextforge.models.codex_cli as codex_module
+from contextforge.intelligence.cards import _RawSemanticCard
 from contextforge.models import (
     ContextWindowExceededError,
     ModelRequest,
@@ -312,6 +313,70 @@ def test_codex_rejects_unavailable_chatgpt_model_as_model_error() -> None:
     )
     with pytest.raises(ProviderModelNotFoundError):
         codex_module._parse_cli_result(1, stream)
+
+
+def test_codex_projects_dynamic_card_maps_into_strict_schema() -> None:
+    async def runner(
+        args: tuple[str, ...], prompt: bytes | None, directory: Path
+    ) -> tuple[int, bytes, bytes]:
+        if args[1:3] == ("login", "status"):
+            return 0, b"Logged in using ChatGPT", b""
+        schema = json.loads((directory / "schema.json").read_text(encoding="utf-8"))
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["properties"]["profile_facts"]["type"] == "array"
+        assert schema["$defs"]["_RawKeySymbol"]["required"] == [
+            "evidence_id",
+            "summary",
+        ]
+        answer = {
+            "schema_version": 1,
+            "synopsis": {"text": "Serves requests", "evidence_ids": ["e1"]},
+            "concepts": [{"text": "server", "evidence_ids": ["e1"]}],
+            "responsibilities": [],
+            "key_symbols": [],
+            "side_effects": [],
+            "profile_facts": [
+                {
+                    "key": "apis",
+                    "value": [{"text": "HTTP endpoint", "evidence_ids": ["e1"]}],
+                }
+            ],
+            "inferred_relationships": [],
+        }
+        events = [
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": json.dumps(answer)},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 12, "output_tokens": 8},
+            },
+        ]
+        return 0, b"\n".join(json.dumps(item).encode() for item in events), b""
+
+    request = ModelRequest(
+        operation_id="codex-card-schema-test",
+        purpose="semantic-card",
+        system_instructions="Describe the source.",
+        analysis_task="Summarize the supplied file.",
+        trusted_code_map_facts={"path": "src/app.py"},
+        untrusted_sources=(UntrustedSource.from_text("src/app.py", "def run(): pass"),),
+        response_model=_RawSemanticCard,
+    )
+    provider = CodexCLIModelProvider(
+        _configuration(), runner=runner, executable="codex-test"
+    )
+    response = asyncio.run(provider.complete_structured(request))
+    assert response.value.profile_facts["apis"][0].text == "HTTP endpoint"
+
+
+def test_codex_rejects_duplicate_dynamic_map_keys() -> None:
+    schema = _RawSemanticCard.model_json_schema()
+    with pytest.raises(ValueError, match="duplicate"):
+        codex_module._restore_dynamic_maps(
+            {"profile_facts": [{"key": "apis", "value": []}] * 2}, schema
+        )
 
 
 @pytest.mark.parametrize(
