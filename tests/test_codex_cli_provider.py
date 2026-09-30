@@ -380,6 +380,115 @@ def test_codex_rejects_duplicate_dynamic_map_keys() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    (
+        {},
+        ["not an entry"],
+        [{"key": 7, "value": []}],
+        [{"key": "apis"}],
+    ),
+)
+def test_codex_rejects_malformed_dynamic_maps(value: object) -> None:
+    with pytest.raises(ValueError, match="dynamic map"):
+        codex_module._restore_dynamic_maps(
+            {"profile_facts": value}, _RawSemanticCard.model_json_schema()
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "expected"),
+    (
+        ("object", {}, True),
+        ("object", [], False),
+        ("array", [], True),
+        ("array", {}, False),
+        ("null", None, True),
+        ("null", "x", False),
+        ("string", "x", True),
+        ("string", 1, False),
+        ("integer", 1, True),
+        ("integer", True, False),
+        ("number", 1.5, True),
+        ("boolean", True, True),
+        ("boolean", 1, False),
+        ("unknown", "x", True),
+    ),
+)
+def test_codex_restores_only_matching_schema_branches(
+    kind: str, value: object, expected: bool
+) -> None:
+    assert codex_module._matches_schema_shape(value, {"type": kind}) is expected
+
+
+def test_codex_projection_preserves_nullable_schema_and_closes_objects() -> None:
+    projected = codex_module._codex_output_schema(_RawSemanticCard.model_json_schema())
+    assert projected["additionalProperties"] is False
+    assert set(projected["required"]) == set(projected["properties"])
+    key_symbol = projected["$defs"]["_RawKeySymbol"]
+    assert key_symbol["additionalProperties"] is False
+    assert key_symbol["properties"]["summary"]["anyOf"][-1] == {"type": "null"}
+
+
+def test_codex_rejects_non_json_structured_message() -> None:
+    async def runner(
+        args: tuple[str, ...], prompt: bytes | None, directory: Path
+    ) -> tuple[int, bytes, bytes]:
+        if args[1:3] == ("login", "status"):
+            return 0, b"Logged in using ChatGPT", b""
+        events = (
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "{"}},
+            {"type": "turn.completed"},
+        )
+        return 0, b"\n".join(json.dumps(item).encode() for item in events), b""
+
+    provider = CodexCLIModelProvider(
+        _configuration(), runner=runner, executable="codex-test"
+    )
+    assert provider.provider_id == "codex"
+    assert provider.capabilities().structured_responses
+    with pytest.raises(ProviderRequestError, match="invalid structured value"):
+        asyncio.run(provider.complete_structured(_request()))
+    asyncio.run(provider.close())
+
+
+def test_codex_subprocess_cancellation_kills_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        killed = asyncio.Event()
+
+        class Process:
+            returncode = None
+
+            async def communicate(self, prompt: bytes | None) -> tuple[bytes, bytes]:
+                entered.set()
+                await asyncio.Future[None]()
+                raise AssertionError("cancelled process continued")
+
+            def kill(self) -> None:
+                killed.set()
+
+            async def wait(self) -> int:
+                return 1
+
+        async def start(*args: object, **kwargs: object) -> Process:
+            return Process()
+
+        monkeypatch.setattr(codex_module.asyncio, "create_subprocess_exec", start)
+        pending = asyncio.create_task(
+            codex_module._run_cli(("codex-test", "exec"), b"{}", tmp_path)
+        )
+        await entered.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert killed.is_set()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
     "event_stream", [b"not-json", b"[]", b'{"type":"turn.completed"}']
 )
 def test_codex_rejects_invalid_or_incomplete_event_stream(event_stream: bytes) -> None:
