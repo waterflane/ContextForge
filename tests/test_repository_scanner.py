@@ -759,6 +759,44 @@ def test_generated_artifact_registry_serializes_concurrent_writers(
     assert not (tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH).exists()
 
 
+def test_generated_registry_retries_windows_permission_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / generated_module.REGISTRY_LOCK_RELATIVE_PATH
+    lock.parent.mkdir()
+    lock.write_text("busy\n", encoding="utf-8")
+    real_open = os.open
+    attempts = 0
+
+    def racing_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("Windows lock sharing violation")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(generated_module.os, "open", racing_open)
+    monkeypatch.setattr(generated_module.time, "sleep", lambda _: lock.unlink())
+    assert register_generated_artifact(tmp_path, artifact, kind="capsule")
+    assert attempts >= 2
+
+
+def test_generated_registry_does_not_mask_real_permission_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+
+    def denied_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(generated_module.os, "open", denied_open)
+    with pytest.raises(GeneratedArtifactRegistryError, match="unable to acquire"):
+        register_generated_artifact(tmp_path, artifact, kind="capsule")
+
+
 def test_generated_artifact_registry_recovers_stale_lock(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact.json"
     artifact.write_text("{}\n", encoding="utf-8")
