@@ -195,6 +195,7 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     retrieved_top5: tuple[RepositoryRelativePath, ...] = Field(max_length=5)
     materialized_files: tuple[RepositoryRelativePath, ...]
     materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     capsule_tokens: NonNegativeInt
     ordinary_tokens: NonNegativeInt
     planner_calls: NonNegativeInt = 0
@@ -259,6 +260,11 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     repetition: NonNegativeInt = 1
     status: Literal["complete", "skipped"]
     skip_reason: str | None = None
+    retrieved_top5: tuple[RepositoryRelativePath, ...] = ()
+    materialized_files: tuple[RepositoryRelativePath, ...] = ()
+    materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    failure_reasons: tuple[str, ...] = ()
     required_file_recall_at_5: Rate | None = None
     precision_at_5: Rate | None = None
     precision_at_r: Rate | None = None
@@ -493,6 +499,43 @@ def evaluate_real_repository_observation(
         mode=observation.mode,
         repetition=repetition,
         status="complete",
+        retrieved_top5=observation.retrieved_top5,
+        materialized_files=observation.materialized_files,
+        materialized_ranges=observation.materialized_ranges,
+        material_evidence_ids=observation.material_evidence_ids,
+        failure_reasons=tuple(
+            name
+            for name, passed in (
+                ("required_file_recall", retrieval_recall >= 0.90),
+                ("precision_at_r", precision_at_r > 0.80),
+                ("materialized_recall", materialized_recall >= 0.90),
+                ("range_recall", measured_range_recall >= 0.85),
+                ("oracle_quality", oracle_valid),
+                ("quality_not_lower", quality_not_lower),
+                ("answer_present", capsule_answer is not None),
+                (
+                    "citation_containment",
+                    capsule_answer is not None
+                    and capsule_answer.citation_validity == 1.0,
+                ),
+                (
+                    "assertion_support",
+                    capsule_answer is not None
+                    and capsule_answer.assertion_evidence_support == 1.0,
+                ),
+                (
+                    "semantic_grounding",
+                    groundedness is not None and groundedness.passed,
+                ),
+                (
+                    "planner_sufficiency",
+                    observation.mode is RealBenchmarkMode.DETERMINISTIC
+                    or observation.plan_sufficient is True,
+                ),
+            )
+            if not passed
+        )
+        + observation.phase_errors,
         required_file_recall_at_5=retrieval_recall,
         precision_at_5=precision,
         precision_at_r=precision_at_r,

@@ -294,6 +294,13 @@ async def _evaluate_task(
         retrieved_top5=tuple(item.path for item in retrieval.candidates[:5]),
         materialized_files=paths,
         materialized_ranges=ranges,
+        material_evidence_ids={
+            material.path: material.evidence_ids
+            for material in (
+                *compiled.capsule.working_set,
+                *compiled.capsule.task_context,
+            )
+        },
         capsule_tokens=compiled.token_count,
         ordinary_tokens=(
             paired.ordinary.input_tokens

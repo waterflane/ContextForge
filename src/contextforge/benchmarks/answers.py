@@ -21,6 +21,9 @@ from contextforge.benchmarks.models import (
 )
 from contextforge.context import CompiledContextCapsule, RepresentationMode
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
+from contextforge.intelligence.indexer import load_file_code_map
+from contextforge.intelligence.retrieval import _all_structural_postings
+from contextforge.intelligence.store import load_manifest
 from contextforge.models import (
     ContextWindowExceededError,
     ModelProvider,
@@ -88,11 +91,8 @@ async def run_paired_answer_regression(
     )
     oracle_context = render_oracle_context(root, oracle_ranges)
     capsule_ranges, capsule_evidence = _capsule_material_evidence(compiled)
-    reviewed_evidence = tuple(
-        (support.citation, support.material_evidence_ids)
-        for assertion in assertions
-        for support in assertion.support
-    )
+    ordinary_evidence = _source_material_evidence(root, ordinary_ranges)
+    oracle_evidence = _source_material_evidence(root, oracle_ranges)
     try:
         ordinary = await _run_answer(
             provider,
@@ -100,7 +100,7 @@ async def run_paired_answer_regression(
             assertions,
             ordinary_context,
             ordinary_ranges,
-            reviewed_evidence,
+            ordinary_evidence,
             label="ordinary-client",
         )
     except ContextWindowExceededError as exc:
@@ -113,7 +113,7 @@ async def run_paired_answer_regression(
         assertions,
         oracle_context,
         oracle_ranges,
-        reviewed_evidence,
+        oracle_evidence,
         label="manual-oracle",
     )
     contextforge = await _run_answer(
@@ -454,7 +454,10 @@ def _answer_request(
         ),
         analysis_task=task,
         trusted_code_map_facts={
-            "assertions": [item.model_dump(mode="json") for item in assertions],
+            "assertions": [
+                {"assertion_id": item.assertion_id, "description": item.description}
+                for item in assertions
+            ],
             "allowed_citation_ranges": [
                 item.model_dump(mode="json") for item in allowed_ranges
             ],
@@ -512,6 +515,33 @@ def _capsule_material_evidence(
     return tuple(values), tuple(evidence)
 
 
+def _source_material_evidence(
+    root: Path, ranges: tuple[BenchmarkSourceRange, ...]
+) -> tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...]:
+    """Bind source IDs to visible intersections, independently of the answer key."""
+
+    manifest = load_manifest(root)
+    evidence: list[tuple[BenchmarkSourceRange, tuple[str, ...]]] = []
+    for path in sorted({item.path for item in ranges}):
+        code_map = load_file_code_map(root, path, manifest=manifest)
+        for posting in _all_structural_postings(code_map):
+            for visible in ranges:
+                if visible.path != path:
+                    continue
+                start = max(visible.start_line, posting.source_range.start_line)
+                end = min(visible.end_line, posting.source_range.end_line)
+                if start <= end:
+                    evidence.append(
+                        (
+                            BenchmarkSourceRange(
+                                path=path, start_line=start, end_line=end
+                            ),
+                            (posting.evidence_id,),
+                        )
+                    )
+    return tuple(evidence)
+
+
 def _cited_ranges(
     answer: BenchmarkAnswerEvaluation,
     allowed: tuple[BenchmarkSourceRange, ...],
@@ -537,13 +567,14 @@ def _assertion_has_evidence_support(
         any(
             citation.assertion_id == assertion.assertion_id
             and _contains(expected.citation, citation)
-            and any(
-                _contains(source_range, citation)
-                and set(expected.material_evidence_ids)
-                <= set(citation.material_evidence_ids)
-                <= set(evidence_ids)
+            and set(expected.material_evidence_ids)
+            <= set(citation.material_evidence_ids)
+            <= {
+                evidence_id
                 for source_range, evidence_ids in material_evidence
-            )
+                if _contains(source_range, citation)
+                for evidence_id in evidence_ids
+            }
             for citation in citations
         )
         for expected in assertion.support

@@ -17,8 +17,10 @@ from contextforge.benchmarks import (
 )
 from contextforge.benchmarks.answers import (
     OrdinaryBaselineContextOverflow,
+    _answer_request,
     _assertion_has_evidence_support,
     _run_groundedness_judge,
+    _source_material_evidence,
 )
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
@@ -260,6 +262,39 @@ def test_cross_file_assertion_requires_each_reviewed_support() -> None:
 
     assert not _assertion_has_evidence_support(assertion, (caller,), material)
     assert _assertion_has_evidence_support(assertion, (caller, callee), material)
+    assert not _assertion_has_evidence_support(
+        assertion, (caller, callee), ((first, ("caller-id",)), (second, ()))
+    )
+
+
+def test_answer_request_isolates_reviewed_support(tmp_path: Path) -> None:
+    (tmp_path / "service.py").write_text(
+        "def serve():\n    return 1\n", encoding="utf-8"
+    )
+    asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    visible = (BenchmarkSourceRange(path="service.py", start_line=1, end_line=2),)
+    assertion = BenchmarkExpectedAssertion(
+        assertion_id="serve",
+        description="serve returns 1",
+        support=(
+            BenchmarkAssertionSupport(
+                citation=visible[0], material_evidence_ids=("secret-reviewed-id",)
+            ),
+        ),
+    )
+    material = _source_material_evidence(tmp_path, visible)
+    assert material
+    for label in ("ordinary-client", "manual-oracle", "contextforge-capsule"):
+        request = _answer_request(
+            "serve", (assertion,), "source", visible, material, label=label
+        )
+        facts = request.trusted_code_map_facts
+        assert facts["assertions"] == [
+            {"assertion_id": "serve", "description": "serve returns 1"}
+        ]
+        assert "secret-reviewed-id" not in json.dumps(facts)
 
 
 def test_dispose_body_is_required_for_blinded_groundedness(tmp_path: Path) -> None:
