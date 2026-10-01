@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -155,7 +156,7 @@ def test_mixed_legacy_versions_and_nested_transactions_are_rejected(
 
 @pytest.mark.parametrize("legacy_version", [2, 3])
 def test_legacy_status_requires_rebuild_and_update_is_rejected(
-    tmp_path: Path, legacy_version: int
+    tmp_path: Path, legacy_version: Literal[1, 2, 3]
 ) -> None:
     (tmp_path / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
     asyncio.run(

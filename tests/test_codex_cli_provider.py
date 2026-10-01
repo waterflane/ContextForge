@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -38,7 +39,7 @@ class _Answer(BaseModel):
 
 
 def _configuration(**values: object) -> ProviderConfiguration:
-    return ProviderConfiguration(
+    defaults = ProviderConfiguration(
         provider_id="codex",
         endpoint="codex://subscription",
         model_id="gpt-6-sol",
@@ -46,8 +47,8 @@ def _configuration(**values: object) -> ProviderConfiguration:
         external_data_policy="allow_repository",
         retry_limit=0,
         max_json_repair_attempts=0,
-        **values,
     )
+    return ProviderConfiguration.model_validate({**defaults.model_dump(), **values})
 
 
 def _request() -> ModelRequest:
@@ -66,7 +67,7 @@ def _request() -> ModelRequest:
 
 
 def _events(*, tool: bool = False) -> bytes:
-    items = [
+    items: list[dict[str, object]] = [
         {"type": "thread.started", "thread_id": "test"},
         {"type": "turn.started"},
     ]
@@ -120,6 +121,7 @@ def test_codex_exec_uses_subscription_schema_stdin_and_usage() -> None:
         _configuration(), runner=runner, executable="codex-test"
     )
     result = asyncio.run(provider.complete_structured(_request()))
+    assert isinstance(result.value, _Answer)
     assert result.value.summary == "Runs a function."
     assert result.usage is not None
     assert (result.usage.input_tokens, result.usage.output_tokens) == (55, 11)
@@ -138,6 +140,7 @@ def test_codex_accepts_chatgpt_login_status_on_stderr() -> None:
         _configuration(), runner=runner, executable="codex-test"
     )
     response = asyncio.run(provider.complete_structured(_request()))
+    assert isinstance(response.value, _Answer)
     assert response.value.summary == "Runs a function."
 
 
@@ -368,6 +371,7 @@ def test_codex_projects_dynamic_card_maps_into_strict_schema() -> None:
         _configuration(), runner=runner, executable="codex-test"
     )
     response = asyncio.run(provider.complete_structured(request))
+    assert isinstance(response.value, _RawSemanticCard)
     assert response.value.profile_facts["apis"][0].text == "HTTP endpoint"
 
 
@@ -475,7 +479,7 @@ def test_codex_subprocess_cancellation_kills_child(
         async def start(*args: object, **kwargs: object) -> Process:
             return Process()
 
-        monkeypatch.setattr(codex_module.asyncio, "create_subprocess_exec", start)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
         pending = asyncio.create_task(
             codex_module._run_cli(("codex-test", "exec"), b"{}", tmp_path)
         )
@@ -527,12 +531,12 @@ def test_codex_rejects_incompatible_provider_configuration(
 ) -> None:
     with pytest.raises(ProviderConfigurationError):
         CodexCLIModelProvider(
-            _configuration().model_copy(update=change), runner=lambda *_: None
+            _configuration().model_copy(update=change), runner=_unexpected_runner
         )
 
 
 def test_codex_reports_missing_executable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(codex_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(shutil, "which", lambda _: None)
     with pytest.raises(ProviderUnavailableError):
         CodexCLIModelProvider(_configuration())
 
@@ -543,6 +547,12 @@ def test_codex_subprocess_start_failure_is_typed(
     async def cannot_start(*args: object, **kwargs: object) -> None:
         raise OSError("missing")
 
-    monkeypatch.setattr(codex_module.asyncio, "create_subprocess_exec", cannot_start)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", cannot_start)
     with pytest.raises(ProviderUnavailableError):
         asyncio.run(codex_module._run_cli(("codex-test",), b"prompt", tmp_path))
+
+
+async def _unexpected_runner(
+    args: tuple[str, ...], prompt: bytes | None, directory: Path
+) -> tuple[int, bytes, bytes]:
+    raise AssertionError("runner must not be called")

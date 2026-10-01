@@ -34,6 +34,7 @@ from contextforge.intelligence import (
     load_manifest,
     retrieve_context_candidates,
 )
+from contextforge.intelligence.indexer import StructuralIndexBuildResult
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 from contextforge.progress import ProgressEvent, ProgressStatus
 from contextforge.repositories import scan_repository
@@ -426,7 +427,7 @@ def test_index_force_reanalysis_and_max_files_are_reported(
         == 0
     )
 
-    observed_structural: list[object] = []
+    observed_structural: list[StructuralIndexBuildResult] = []
     original = cast(Any, application_module).build_structural_index
 
     def capture_structural(*args: Any, **kwargs: Any) -> Any:
@@ -457,7 +458,8 @@ def test_index_force_reanalysis_and_max_files_are_reported(
     assert structural.extracted_paths == ()
     assert structural.reused_paths == ("a.py", "b.py")
     manifest = load_manifest(tmp_path)
-    assert sum(item.semantic_status == "skipped" for item in manifest.files) == 1
+    assert sum(item.semantic_status == "partial" for item in manifest.files) == 1
+    assert all(item.interpretation_record_location for item in manifest.files)
 
 
 def test_index_provider_failure_keeps_new_structural_generation_active(

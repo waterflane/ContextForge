@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 from contextforge.intelligence.retrieval import (
+    ContextPlanningMode,
     CoverageLedger,
     PlanningDiagnostics,
     RetrievalResult,
@@ -21,7 +22,7 @@ def test_retrieval_action_deltas_are_deterministic_and_source_free() -> None:
         candidates=(),
         diagnostics=("arbitrary provider text SECRET",),
         planning_diagnostics=PlanningDiagnostics(
-            mode="auto",
+            mode=ContextPlanningMode.AUTO,
             status="fallback",
             messages=("arbitrary provider text SECRET",),
         ),

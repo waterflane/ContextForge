@@ -2,7 +2,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from pydantic import ValidationError
@@ -26,7 +26,12 @@ from contextforge.benchmarks.real_repositories import (
     RealBenchmarkBuildReport,
     RealBenchmarkTaskReport,
 )
-from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.models import (
+    FakeModelProvider,
+    ModelProvider,
+    ModelRequest,
+    ProviderConfiguration,
+)
 
 MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
 
@@ -68,11 +73,11 @@ def test_live_reload_compares_complete_candidate_records(
         seeds.append(environment["PYTHONHASHSEED"])
         return subprocess.CompletedProcess(script, 0, next(outputs))
 
-    monkeypatch.setattr(live_module.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     assert live_module._fresh_process_reloads(tmp_path, "alpha", attempts=3) == 2
     assert seeds == ["0", "1", "2"]
     monkeypatch.setattr(
-        live_module.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, ""),
     )
@@ -126,7 +131,7 @@ def test_live_meter_does_not_count_open_circuit_as_http() -> None:
         async def complete_structured(self, *_: object, **__: object) -> None:
             raise ProviderCircuitOpenError("provider circuit opened")
 
-    metered = live_module._MeasuredProvider(OpenCircuitProvider())
+    metered = live_module._MeasuredProvider(cast(ModelProvider, OpenCircuitProvider()))
     request = ModelRequest(
         operation_id="benchmark-test",
         purpose="test",
@@ -741,7 +746,9 @@ def test_missing_external_source_is_skip_and_never_a_false_pass() -> None:
     task = manifest.tasks[0]
     reduced = manifest.model_copy(update={"tasks": (task,)})
 
-    report = asyncio.run(run_real_repository_benchmark(reduced, {}, lambda *_: None))
+    report = asyncio.run(
+        run_real_repository_benchmark(reduced, {}, _unexpected_observation)
+    )
 
     assert report.passed is False
     assert report.runs[0].status == "skipped"
@@ -907,7 +914,7 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         )
     )
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> str:
         del call
         facts = request.trusted_code_map_facts
         if request.purpose.startswith("semantic-card"):
@@ -981,7 +988,9 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
             {"schema_version": 1, "selected": [], "sufficiency": "insufficient"}
         )
 
-    def fake_provider(_configuration):
+    def fake_provider(
+        _configuration: ProviderConfiguration | None,
+    ) -> FakeModelProvider:
         return FakeModelProvider(
             ProviderConfiguration(
                 provider_id="fake",
@@ -1057,7 +1066,7 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         for run in degraded.runs
     )
 
-    def failed_semantic_responder(request, call):
+    def failed_semantic_responder(request: ModelRequest, call: int) -> str:
         if request.purpose.startswith("semantic-card"):
             return "{}"
         return responder(request, call)
@@ -1114,7 +1123,7 @@ def test_corrupt_external_source_is_skip_and_never_a_false_pass(
         run_real_repository_benchmark(
             reduced,
             {task.repository_id: corrupt_source},
-            lambda *_: None,
+            _unexpected_observation,
         )
     )
 
@@ -1209,3 +1218,7 @@ def test_live_harness_clones_a_pinned_repository_and_removes_the_fixture(
 def _write_json(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _unexpected_observation(*_: object) -> RealBenchmarkObservation:
+    raise AssertionError("observer must not be called")

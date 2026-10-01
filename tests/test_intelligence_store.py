@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import tempfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -450,8 +451,7 @@ def test_large_internal_record_is_bounded_and_digest_checked(tmp_path: Path) -> 
             store_module.load_staged_index_record(lock, location)
 
         stored.write_bytes(
-            b"CFZ1"
-            + store_module.zlib.compress(b"x" * (store_module.MAX_RECORD_BYTES + 1))
+            b"CFZ1" + zlib.compress(b"x" * (store_module.MAX_RECORD_BYTES + 1))
         )
         with pytest.raises(IndexManifestReadError, match="exceeds its limit"):
             store_module.load_staged_index_record(lock, location)

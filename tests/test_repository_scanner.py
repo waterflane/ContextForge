@@ -777,8 +777,8 @@ def test_generated_registry_retries_windows_permission_race(
             raise PermissionError("Windows lock sharing violation")
         return real_open(path, flags, mode)
 
-    monkeypatch.setattr(generated_module.os, "open", racing_open)
-    monkeypatch.setattr(generated_module.time, "sleep", lambda _: lock.unlink())
+    monkeypatch.setattr(os, "open", racing_open)
+    monkeypatch.setattr(time, "sleep", lambda _: lock.unlink())
     assert register_generated_artifact(tmp_path, artifact, kind="capsule")
     assert attempts >= 2
 
@@ -792,7 +792,7 @@ def test_generated_registry_does_not_mask_real_permission_denial(
     def denied_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
         raise PermissionError("access denied")
 
-    monkeypatch.setattr(generated_module.os, "open", denied_open)
+    monkeypatch.setattr(os, "open", denied_open)
     with pytest.raises(GeneratedArtifactRegistryError, match="unable to acquire"):
         register_generated_artifact(tmp_path, artifact, kind="capsule")
 

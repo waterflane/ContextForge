@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -45,7 +45,7 @@ from contextforge.project_config import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_structured_capability_cache() -> None:
+def _isolated_structured_capability_cache() -> Iterator[None]:
     openai_module._clear_structured_capability_cache()
     yield
     openai_module._clear_structured_capability_cache()

@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -13,7 +14,9 @@ from contextforge.intelligence import (
     load_relationship_graph,
 )
 from contextforge.intelligence import semantic_lexicon as lexicon_module
+from contextforge.intelligence.codemap import FileCodeMap
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
+from contextforge.intelligence.graph import RelationshipGraph
 from contextforge.intelligence.semantic_lexicon import (
     SemanticContextOverflow,
     SemanticLexiconBudgetExceeded,
@@ -23,11 +26,14 @@ from contextforge.intelligence.semantic_lexicon import (
 from contextforge.models import (
     ContextWindowExceededError,
     FakeModelProvider,
+    ModelProvider,
     ModelRequest,
+    ModelResponse,
     ProviderConfiguration,
     ProviderQuotaError,
     estimate_request_context,
 )
+from contextforge.models.fake import FakeResponder, FakeResult
 
 
 @pytest.mark.parametrize(
@@ -57,7 +63,9 @@ def test_repeated_model_expressions_do_not_add_search_weight() -> None:
     ) == ("request routing", "route invocation")
 
 
-def _fixture(root: Path):
+def _fixture(
+    root: Path,
+) -> tuple[dict[str, FileCodeMap], RelationshipGraph, dict[str, str]]:
     (root / "service.py").write_text(
         "def greet(value: str) -> str:\n    return value.upper()\n",
         encoding="utf-8",
@@ -78,7 +86,9 @@ def _fixture(root: Path):
     return maps, graph, sources
 
 
-def _provider(responder, *, context_window: int = 16384):
+def _provider(
+    responder: FakeResponder, *, context_window: int = 16384
+) -> FakeModelProvider:
     return FakeModelProvider(
         ProviderConfiguration(
             provider_id="fake",
@@ -92,7 +102,7 @@ def _provider(responder, *, context_window: int = 16384):
     )
 
 
-def _response(request, *, invented: bool = False):
+def _response(request: ModelRequest, *, invented: bool = False) -> str:
     if request.purpose == "semantic-lexicon-verification":
         return json.dumps(
             {
@@ -127,7 +137,7 @@ def test_full_file_and_direct_callee_code_are_sent(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
     requests = []
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         return _response(request)
 
@@ -168,7 +178,7 @@ def test_runtime_limit_retries_without_callee_code(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
     requests = []
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         if call == 0:
             return ContextWindowExceededError(server_context_window=8192)
@@ -196,7 +206,7 @@ def test_verification_overflow_splits_claims_without_splitting_file(
     maps, graph, sources = _fixture(tmp_path)
     requests = []
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         if request.purpose == "semantic-lexicon-verification":
             proposed = request.trusted_code_map_facts["proposed_claims"]
@@ -248,7 +258,7 @@ def test_short_code_file_without_callable_is_model_eligible(tmp_path: Path) -> N
     assert not code_map.symbols
     assert not FILE_POLICY_REGISTRY.requires_deterministic_card(code_map)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         return json.dumps(
             {
                 "schema_version": 1,
@@ -332,7 +342,7 @@ def test_full_file_overflow_is_explicit(tmp_path: Path) -> None:
 def test_enriched_generation_indexes_verified_expressions(tmp_path: Path) -> None:
     _fixture(tmp_path)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         if request.purpose.startswith("semantic-card"):
             return json.dumps(
                 {
@@ -577,7 +587,7 @@ def test_each_batch_receives_full_file_and_complete_function_table(
     source = path.read_text(encoding="utf-8")
     requests = []
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         return _response(request)
 
@@ -625,7 +635,7 @@ def test_failed_group_preserves_verified_functions_and_retries_only_missing(
     maps = {"service.py": code_map}
     sources = {"service.py": source}
 
-    def incomplete(request, call):
+    def incomplete(request: ModelRequest, call: int) -> FakeResult:
         if (
             request.purpose == "semantic-lexicon-verification"
             and len(request.trusted_code_map_facts["target_functions"]) == 1
@@ -643,7 +653,7 @@ def test_failed_group_preserves_verified_functions_and_retries_only_missing(
     assert first.failure_codes == ("ValueError",)
     requests = []
 
-    def complete(request, call):
+    def complete(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         return _response(request)
 
@@ -688,7 +698,7 @@ def test_resumable_lexicon_reports_budget_before_any_model_call(tmp_path: Path) 
 def test_resumable_lexicon_stops_after_provider_wide_failure(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
 
-    def quota(request, call):
+    def quota(request: ModelRequest, call: int) -> FakeResult:
         raise ProviderQuotaError("subscription limit")
 
     provider = _provider(quota)
@@ -742,7 +752,7 @@ def test_resumable_lexicon_ignores_previous_different_source_sha(
 def test_invented_call_edge_id_is_rejected(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         payload = json.loads(_response(request))
         if request.purpose == "semantic-lexicon":
             payload["calls"] = [{"edge_id": "invented", "expressions": ["wrong"]}]
@@ -764,7 +774,7 @@ def test_invented_call_edge_id_is_rejected(tmp_path: Path) -> None:
 def test_duplicate_call_edge_id_is_rejected(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         payload = json.loads(_response(request))
         if request.purpose == "semantic-lexicon" and payload["calls"]:
             payload["calls"].append(payload["calls"][0])
@@ -788,7 +798,7 @@ def test_verifier_drops_unsupported_expressions_and_rejects_summary(
 ) -> None:
     maps, graph, sources = _fixture(tmp_path)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         if request.purpose == "semantic-lexicon-verification":
             return json.dumps(
                 {
@@ -818,7 +828,7 @@ def test_verifier_drops_unsupported_expressions_and_rejects_summary(
     assert all(call.expressions == () for call in lexicon.calls)
     assert lexicon.dropped_claims >= 1
 
-    def reject_summary(request, call):
+    def reject_summary(request: ModelRequest, call: int) -> FakeResult:
         if request.purpose == "semantic-lexicon-verification":
             return json.dumps({"schema_version": 1, "accepted_ids": []})
         return _response(request)
@@ -841,7 +851,7 @@ def test_second_server_limit_becomes_explicit_full_file_overflow(
 ) -> None:
     maps, graph, sources = _fixture(tmp_path)
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         return ContextWindowExceededError(
             server_context_window=8192 if call == 0 else 4096
         )
@@ -884,7 +894,7 @@ def test_integrated_file_only_records_server_window(tmp_path: Path) -> None:
     _fixture(tmp_path)
     limited: set[str] = set()
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         if request.purpose.startswith("semantic-card"):
             return json.dumps(
                 {
@@ -936,7 +946,7 @@ def test_missing_or_inconsistent_callee_source_preserves_call_ids(
     maps, graph, sources = _fixture(tmp_path)
     requests = []
 
-    def responder(request, call):
+    def responder(request: ModelRequest, call: int) -> FakeResult:
         requests.append(request)
         return _response(request)
 
@@ -1023,7 +1033,7 @@ def test_preflight_file_only_server_rejection_is_explicit(tmp_path: Path) -> Non
     )
     observed = []
 
-    def reject(request, call):
+    def reject(request: ModelRequest, call: int) -> FakeResult:
         observed.append(request)
         return ContextWindowExceededError(server_context_window=window - 1)
 
@@ -1051,7 +1061,9 @@ def test_provider_shape_mismatch_is_rejected(
     class WrongShapeProvider:
         configuration = provider.configuration
 
-        async def complete_structured(self, request):
+        async def complete_structured(
+            self, request: ModelRequest
+        ) -> ModelResponse | SimpleNamespace:
             response = await provider.complete_structured(request)
             return (
                 SimpleNamespace(value=object())
@@ -1062,7 +1074,7 @@ def test_provider_shape_mismatch_is_rejected(
     with pytest.raises(ValueError, match="invalid shape"):
         asyncio.run(
             analyze_file_lexicon(
-                WrongShapeProvider(),
+                cast(ModelProvider, WrongShapeProvider()),
                 maps["app.py"],
                 sources["app.py"],
                 graph,

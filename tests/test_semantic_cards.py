@@ -17,7 +17,7 @@ from contextforge.intelligence import (
     load_semantic_card,
 )
 from contextforge.intelligence import cards as cards_module
-from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
 from contextforge.repositories import scan_repository
 
 
@@ -170,7 +170,7 @@ def test_noop_update_retries_failed_card_without_reextracting_source(
         "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
 
-    def respond(request, call):
+    def respond(request: ModelRequest, call: int) -> str:
         return _response(synopsis_evidence="unknown" if call < 2 else "file")
 
     provider = _provider(respond)
@@ -205,7 +205,7 @@ def test_unusable_model_tags_remain_partial_and_retry_uncached(tmp_path: Path) -
         "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
 
-    def respond(request, call):
+    def respond(request: ModelRequest, call: int) -> str:
         answer = json.loads(_response())
         if call == 0:
             answer["concepts"][0]["text"] = " ".join(["request"] * 12)
@@ -1078,7 +1078,7 @@ def test_documentation_chunks_merge_grounded_claims(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text(source, encoding="utf-8")
     observed = []
 
-    def respond(request, call):
+    def respond(request: ModelRequest, call: int) -> str:
         observed.append(request)
         evidence_id = request.trusted_code_map_facts["allowed_evidence_ids"][0]
         return json.dumps(
