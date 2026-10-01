@@ -321,18 +321,25 @@ def test_planned_full_large_file_downgrades_to_selected_slice(tmp_path: Path) ->
         tmp_path,
         "process",
         retrieval.model_copy(update={"evidence_plan": plan}),
-        budget=_budget(5_000),
+        budget=_budget(10_000),
     )
 
     material = compiled.capsule.task_context[0]
     assert material.representation == RepresentationMode.SLICE
     assert material.evidence_ids == (evidence_id,)
-    assert material.token_count < candidate.estimated_cost.full
+    assert "return value" in material.content
     assert compiled.compilation_sufficiency is not None
-    assert compiled.compilation_sufficiency.effective_status == "insufficient"
-    assert (
-        "planned_range_unmaterialized" in compiled.compilation_sufficiency.reason_codes
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert compiled.token_count <= 10_000
+    tight = compile_context_capsule(
+        tmp_path,
+        "process",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
     )
+    assert tight.token_count <= 5_000
+    assert tight.compilation_sufficiency is not None
+    assert tight.compilation_sufficiency.effective_status == "insufficient"
 
 
 def test_sufficient_planup_agenda_plan_cannot_survive_empty_task_context(
@@ -551,7 +558,7 @@ def test_large_full_file_requires_explicit_pin(tmp_path: Path) -> None:
     assert pinned.capsule.working_set[0].content == source
 
 
-def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
+def test_automatic_slice_preserves_explicit_large_declaration_ranges(
     tmp_path: Path,
 ) -> None:
     body = "".join(
@@ -582,8 +589,9 @@ def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
     assert material.representation == RepresentationMode.SLICE
     assert "def process_value" in material.content
     assert "target_marker = target_step(value)" in material.content
-    assert "padding_120" not in material.content
-    assert material.token_count < 800
+    assert "padding_120" in material.content
+    assert "return target_marker" in material.content
+    assert compiled.token_count <= 10_000
 
 
 def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
@@ -681,7 +689,7 @@ def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> Non
     assert explicit.token_count <= 10_000
 
 
-def test_complementary_maps_are_seeded_before_representation_upgrades(
+def test_required_source_coverage_precedes_supplemental_maps(
     tmp_path: Path,
 ) -> None:
     for name in ("alpha", "beta", "gamma"):
@@ -713,12 +721,64 @@ def test_complementary_maps_are_seeded_before_representation_upgrades(
         budget=_budget(3_000),
     )
 
-    assert {item.path for item in compiled.capsule.task_context} == {
-        "alpha.py",
-        "beta.py",
-        "gamma.py",
-    }
-    assert compiled.token_count <= 900
+    assert compiled.coverage_ledger is not None
+    assert "implementation" in compiled.coverage_ledger.covered_role_ids
+    assert any(
+        item.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for item in compiled.capsule.task_context
+    )
+    assert compiled.token_count <= 3_000
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Trace alpha_stage beta_stage gamma_stage delta_stage implementation tests",
+        "Объясни alpha_stage beta_stage gamma_stage delta_stage и проверь tests",
+    ],
+)
+def test_required_flow_ranges_survive_automatic_materialization(
+    tmp_path: Path, task: str
+) -> None:
+    names = ("alpha_stage", "beta_stage", "gamma_stage", "delta_stage")
+    _write(
+        tmp_path,
+        "engine.py",
+        "\n".join(
+            f"def {name}():\n"
+            + "".join(f"    value_{i} = {i}\n" for i in range(55))
+            + f"    return '{name} complete'\n"
+            for name in names
+        ),
+    )
+    _write(
+        tmp_path,
+        "tests/test_engine.py",
+        "from engine import "
+        + ", ".join(names)
+        + "\ndef test_stages():\n"
+        + "".join(f"    assert {name}()\n" for name in names),
+    )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, task)
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=_budget(24_000)
+    )
+    materials = {item.path: item for item in compiled.capsule.task_context}
+    assert "engine.py" in materials
+    assert "tests/test_engine.py" in materials
+    assert all(
+        materials[path].representation
+        in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for path in materials
+    )
+    engine = materials["engine.py"]
+    assert all(f"{name} complete" in engine.content for name in names)
+    assert compiled.coverage_ledger is not None
+    assert "test" in compiled.coverage_ledger.covered_role_ids
+    assert compiled.token_count <= 24_000
 
 
 def test_deterministic_fallback_stops_after_duplicate_identifier_coverage(

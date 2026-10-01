@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from contextforge.context.capsule import CompilationSufficiency
 
 CompilationReasonCode = Literal[
+    "graph_endpoint_missing",
     "declared_insufficient",
     "empty_retrieval",
     "empty_task_context",

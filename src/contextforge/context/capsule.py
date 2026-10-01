@@ -730,6 +730,8 @@ def _compilation_sufficiency(
         reasons.add("planned_role_lost")
     if missing_mandatory_role_ids:
         reasons.add("mandatory_role_missing")
+    if materialization_ledger.missing_graph_endpoints:
+        reasons.add("graph_endpoint_missing")
     effective_status: Literal["sufficient", "insufficient"] = (
         "sufficient"
         if declared_status == "sufficient" and capsule.task_context and not reasons
@@ -760,40 +762,71 @@ def _capsule_ledger(
 ) -> CoverageLedger:
     """Build coverage from actual material identities, never from ranking order."""
 
-    paths = {item.path for item in (*capsule.working_set, *capsule.task_context)}
+    materials = {
+        item.path: item
+        for item in (*capsule.working_set, *capsule.task_context)
+        if item.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+    }
+    visible_candidates: list[CandidateCard] = []
+    selected_ids: list[str] = []
+    for candidate in candidates:
+        material = materials.get(candidate.path)
+        visible = (
+            ()
+            if material is None
+            else tuple(
+                evidence
+                for evidence in candidate.evidence_ranges
+                if material.representation == RepresentationMode.FULL
+                or any(
+                    actual.start_line <= evidence.source_range.start_line
+                    and evidence.source_range.end_line <= actual.end_line
+                    for actual in material.ranges
+                )
+            )
+        )
+        visible_candidates.append(
+            candidate.model_copy(update={"evidence_ranges": visible})
+        )
+        if material is not None and (visible or not candidate.evidence_ranges):
+            selected_ids.append(candidate.candidate_id)
     return build_coverage_ledger(
         task,
-        candidates,
-        selected_candidate_ids=tuple(
-            item.candidate_id for item in candidates if item.path in paths
-        ),
+        tuple(visible_candidates),
+        selected_candidate_ids=tuple(selected_ids),
         stage="materialization",
     )
 
 
 def _mandatory_role_ids(ledger: CoverageLedger) -> tuple[str, ...]:
     kinds = {item.role_id: item.kind for item in ledger.roles}
-    return tuple(
-        role_id for role_id in ledger.missing_role_ids if kinds[role_id] != "unknown"
-    )
+    return tuple(role_id for role_id in kinds if kinds[role_id] != "unknown")
 
 
 def _automatic_material_options(
-    state: _CompilerState, candidate: CandidateCard
+    state: _CompilerState, candidate: CandidateCard, *, required_evidence: bool = False
 ) -> tuple[CapsuleMaterial, ...]:
     """Return the cheapest verified map/slice choices for one candidate."""
 
     options = [
         material
         for material in (
-            _materialize(state, candidate.path, RepresentationMode.MAP, candidate, ()),
+            None
+            if required_evidence
+            else _materialize(
+                state, candidate.path, RepresentationMode.MAP, candidate, ()
+            ),
             _materialize(
                 state,
                 candidate.path,
                 RepresentationMode.SLICE,
                 candidate,
-                _automatic_slice_ranges(state, candidate),
+                tuple(item.source_range for item in candidate.evidence_ranges)
+                if required_evidence
+                or candidate.exact_group in {"exact_symbol", "exact_qualified_symbol"}
+                else _automatic_slice_ranges(state, candidate),
             ),
+            _materialize(state, candidate.path, RepresentationMode.FULL, candidate, ()),
         )
         if material is not None
     ]
@@ -863,30 +896,23 @@ def _select_automatic_evidence(
     def current_ledger() -> CoverageLedger:
         return _capsule_ledger(task, candidates, capsule)
 
-    def append_for(predicate: object) -> bool:
+    def append_for(predicate: object, *, required_evidence: bool = False) -> bool:
         nonlocal capsule, selected_tokens
         before = current_ledger()
         choices: list[
             tuple[int, int, int, float, str, CandidateCard, CapsuleMaterial]
         ] = []
         for candidate in remaining:
-            options = _automatic_material_options(state, candidate)
-            prospective = (
-                capsule.model_copy(
-                    update={"task_context": tuple((*selected, options[0]))}
-                )
-                if options
-                else None
+            options = _automatic_material_options(
+                state, candidate, required_evidence=required_evidence
             )
-            if prospective is None:
-                continue
-            after = _capsule_ledger(task, candidates, prospective)
-            if not callable(predicate) or not predicate(before, after, candidate):
-                continue
             for material in options:
                 proposed = capsule.model_copy(
                     update={"task_context": tuple((*selected, material))}
                 )
+                after = _capsule_ledger(task, candidates, proposed)
+                if not callable(predicate) or not predicate(before, after, candidate):
+                    continue
                 fits_limit = _fits(proposed, budget, estimator, token_limit=token_limit)
                 fits_first_indivisible = not selected and _fits(
                     proposed, budget, estimator
@@ -920,7 +946,8 @@ def _select_automatic_evidence(
                 lambda before, after, _candidate, expected=role_id: (
                     expected
                     in set(after.covered_role_ids) - set(before.covered_role_ids)
-                )
+                ),
+                required_evidence=True,
             ):
                 break
     for endpoint in all_ledger.covered_graph_endpoints:
@@ -930,7 +957,8 @@ def _select_automatic_evidence(
                     expected
                     in set(after.covered_graph_endpoints)
                     - set(before.covered_graph_endpoints)
-                )
+                ),
+                required_evidence=True,
             ):
                 break
 
@@ -1091,6 +1119,10 @@ def _apply_greedy_upgrades(
             if set(before.covered_role_ids) - set(after.covered_role_ids) or set(
                 before.covered_graph_endpoints
             ) - set(after.covered_graph_endpoints):
+                continue
+            if {item.evidence_id for item in before.ranges} - {
+                item.evidence_id for item in after.ranges
+            }:
                 continue
             if _fits(
                 candidate_capsule,
@@ -1294,6 +1326,11 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
 def _automatic_slice_ranges(
     state: _CompilerState, candidate: CandidateCard | None
 ) -> tuple[SourceRange, ...]:
+    if candidate is not None and candidate.exact_group in {
+        "exact_symbol",
+        "exact_qualified_symbol",
+    }:
+        return tuple(item.source_range for item in candidate.evidence_ranges)
     if candidate is None:
         return ()
     ordered = sorted(
@@ -1402,8 +1439,8 @@ def _materialize(
             and (
                 mode != RepresentationMode.SLICE
                 or any(
-                    item.source_range.start_line <= value.end_line
-                    and item.source_range.end_line >= value.start_line
+                    value.start_line <= item.source_range.start_line
+                    and item.source_range.end_line <= value.end_line
                     for value in ranges
                 )
             )
@@ -1548,6 +1585,11 @@ def _slice_ranges(
 ) -> tuple[CapsuleRange, ...]:
     expanded: list[tuple[int, int]] = []
     for evidence in evidence_ranges:
+        # A requested evidence address is indivisible. Context/header expansion
+        # may add lines, but must never replace the address with a cheap header.
+        expanded.append(
+            (max(1, evidence.start_line), min(line_count, evidence.end_line))
+        )
         overlapping = []
         for symbol in code_map.symbols:
             declaration_start = symbol.declaration_range.start_line
