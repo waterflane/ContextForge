@@ -23,6 +23,7 @@ from contextforge.intelligence.semantic_lexicon import (
 from contextforge.models import (
     ContextWindowExceededError,
     FakeModelProvider,
+    ModelRequest,
     ProviderConfiguration,
     ProviderQuotaError,
     estimate_request_context,
@@ -425,6 +426,134 @@ def test_enriched_generation_indexes_verified_expressions(tmp_path: Path) -> Non
     )
     assert report.semantic is not None
     assert report.semantic.request_count == provider.call_count
+
+
+@pytest.mark.parametrize("max_files,expected", [(1, 1), (100_000, 2)])
+def test_full_scope_shares_file_limit_between_cards_and_functions(
+    tmp_path: Path, max_files: int, expected: int
+) -> None:
+    _fixture(tmp_path)
+    card_paths: set[str] = set()
+    function_paths: set[str] = set()
+
+    def responder(request: ModelRequest, call: int) -> str:
+        del call
+        path = request.trusted_code_map_facts["path"]
+        if request.purpose.startswith("semantic-card"):
+            card_paths.add(path)
+            return json.dumps(
+                {
+                    "synopsis": {"text": "greeting", "evidence_ids": ["file"]},
+                    "concepts": [{"text": "greeting", "evidence_ids": ["symbol:0000"]}],
+                }
+            )
+        if request.purpose == "semantic-lexicon":
+            function_paths.add(path)
+        return _response(request)
+
+    provider = _provider(responder)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            semantic_scope="all",
+            max_files=max_files,
+        )
+    )
+    assert len(card_paths) == expected
+    assert card_paths == function_paths
+    from contextforge.intelligence import load_semantic_card
+
+    for state in report.manifest.files:
+        card = load_semantic_card(tmp_path, state.path, manifest=report.manifest)
+        if state.path not in card_paths:
+            assert state.semantic_status == "partial"
+            assert card.file_tags
+            assert all(
+                tag.provenance == "structural-fallback" for tag in card.file_tags
+            )
+            assert card.lexicon is None
+
+
+def test_index_update_resumes_only_missing_function_ids(tmp_path: Path) -> None:
+    (tmp_path / "service.py").write_text(
+        "\n".join(
+            f"def greet{i}(value):\n    return value.upper()\n" for i in range(5)
+        ),
+        encoding="utf-8",
+    )
+    requests: list[ModelRequest] = []
+
+    def responder(request: ModelRequest, call: int) -> str:
+        del call
+        requests.append(request)
+        if request.purpose.startswith("semantic-card"):
+            return json.dumps(
+                {
+                    "synopsis": {"text": "value upper", "evidence_ids": ["file"]},
+                    "concepts": [{"text": "upper", "evidence_ids": ["symbol:0000"]}],
+                }
+            )
+        return _response(request)
+
+    provider = _provider(responder)
+    first = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            semantic_scope="all",
+            semantic_max_requests=4,
+        )
+    )
+    from contextforge.intelligence import load_semantic_card
+
+    card = load_semantic_card(tmp_path, "service.py", manifest=first.manifest)
+    assert card.lexicon is not None
+    assert len(card.lexicon.functions) == 4
+    pending = card.lexicon.missing_symbol_ids
+    assert len(pending) == 1
+    assert first.semantic is not None and first.semantic.request_count == 4
+    requests.clear()
+    second = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            semantic_scope="all",
+            semantic_max_requests=2,
+            update_only=True,
+        )
+    )
+    assert second.structural.extracted_paths == ()
+    assert second.semantic is not None and second.semantic.request_count == 2
+    analyses = [item for item in requests if item.purpose == "semantic-lexicon"]
+    assert len(analyses) == 1
+    assert (
+        tuple(
+            item["symbol_id"]
+            for item in analyses[0].trusted_code_map_facts["target_functions"]
+        )
+        == pending
+    )
+    completed = load_semantic_card(tmp_path, "service.py", manifest=second.manifest)
+    assert completed.lexicon is not None
+    assert len(completed.lexicon.functions) == 5
+    assert not completed.lexicon.missing_symbol_ids
+    requests.clear()
+    noop = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            semantic_scope="all",
+            update_only=True,
+        )
+    )
+    assert not requests
+    assert noop.manifest.generation_id == second.manifest.generation_id
+    assert noop.structural.extracted_paths == ()
 
 
 def test_each_batch_receives_full_file_and_complete_function_table(

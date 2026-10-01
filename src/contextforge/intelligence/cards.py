@@ -524,22 +524,6 @@ async def build_semantic_card_index(
         project_file = files[path]
         evidence = _evidence_table(code_map)
         deterministic_only = _requires_deterministic_card(code_map)
-        if (
-            provider is not None
-            and active_options.scope != "none"
-            and path not in selected
-            and not deterministic_only
-        ):
-            next_states.append(
-                state.model_copy(
-                    update={
-                        "interpretation_record_location": None,
-                        "interpretation_record_sha256": None,
-                        "semantic_status": "skipped",
-                    }
-                )
-            )
-            continue
         should_model = (
             provider is not None
             and active_options.scope != "none"
@@ -564,7 +548,13 @@ async def build_semantic_card_index(
                 relationship_candidates,
             )
             reused_card_paths.append(path)
-            should_model = False
+            should_model = should_model and (
+                card.provenance.method != "model"
+                or (
+                    card.profile in {"code", "test"}
+                    and not any(tag.provenance == "model" for tag in card.file_tags)
+                )
+            )
         else:
             card = _deterministic_card(
                 code_map,
@@ -653,6 +643,7 @@ async def build_semantic_card_index(
                     raw_to_cache = (cache_key, raw)
             if raw is not None:
                 try:
+                    previous_lexicon = card.lexicon
                     card = _ground_raw_card(
                         raw,
                         code_map,
@@ -666,6 +657,8 @@ async def build_semantic_card_index(
                         force_partial=incomplete,
                         coverage_ranges=coverage_ranges,
                     )
+                    if previous_lexicon is not None:
+                        card = card.model_copy(update={"lexicon": previous_lexicon})
                 except ValueError:
                     failed.append(path)
                     card = _deterministic_card(
@@ -701,6 +694,7 @@ async def build_semantic_card_index(
         if (
             provider is not None
             and active_options.scope == "all"
+            and path in selected
             and callable_symbols(code_map)
             and (card.lexicon is None or card.lexicon.missing_symbol_ids)
         ):
@@ -813,6 +807,12 @@ async def build_semantic_card_index(
             finally:
                 estimated_tokens += lexicon_tokens[0]
                 request_count += lexicon_calls[0]
+        if (
+            provider is not None
+            and not deterministic_only
+            and card.provenance.method != "model"
+        ):
+            card = card.model_copy(update={"quality": "partial"})
         card = _with_file_tags(card, code_map)
         if (
             model_selected
@@ -1100,6 +1100,7 @@ def _reusable_cards(
         if (
             provider is not None
             and options.scope == "all"
+            and state.path in selected
             and callable_symbols(code_maps[state.path])
             and (card.lexicon is None or card.lexicon.missing_symbol_ids)
         ):
@@ -1124,7 +1125,11 @@ def _previous_reusable_cards(
 ) -> dict[str, SemanticCard]:
     """Load unchanged cards from the generation preceding a structural update."""
 
-    previous_id = structural.build.previous_generation_id
+    previous_id = (
+        structural.generation_id
+        if structural.generation_kind == "enriched"
+        else structural.build.previous_generation_id
+    )
     if options.force_reanalyze or previous_id is None:
         return {}
     try:
@@ -1157,6 +1162,7 @@ def _previous_reusable_cards(
             provider is not None
             and options.scope != "none"
             and card.provenance.method != "model"
+            and not (card.lexicon is not None and card.lexicon.functions)
         ):
             continue
         if (
@@ -1164,6 +1170,7 @@ def _previous_reusable_cards(
             and options.scope != "none"
             and card.profile in {"code", "test"}
             and not any(tag.provenance == "model" for tag in card.file_tags)
+            and not (card.lexicon is not None and card.lexicon.functions)
         ):
             continue
         analyzer = card.provenance.analyzer
@@ -2258,8 +2265,6 @@ def _priority_paths(
     eligible = {
         item.path: item for item in code_maps if not _requires_deterministic_card(item)
     }
-    if options.scope == "all":
-        return set(eligible)
     metrics = {item.path: item for item in graph.file_metrics}
 
     def ordered(paths: set[str]) -> list[str]:
@@ -2271,6 +2276,9 @@ def _priority_paths(
                 path,
             ),
         )
+
+    if options.scope == "all":
+        return set(ordered(set(eligible))[: options.max_model_files])
 
     selected: list[str] = []
     seen: set[str] = set()
