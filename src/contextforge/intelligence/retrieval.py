@@ -1395,6 +1395,7 @@ async def retrieve_context_candidates(
         working_set=working_set,
         diff_paths=diff_paths,
     )
+    ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
     seed_limit = max(
         limit,
         min(planning_max_candidates, planning_max_pool_candidates),
@@ -1572,7 +1573,16 @@ def _rank_candidates(
                 matched_concepts=concepts,
                 matched_symbols=matched_symbols[document.path],
                 evidence_ranges=evidence,
-                graph_neighbors=neighbors.get(document.path, ()),
+                graph_neighbors=tuple(
+                    sorted(
+                        neighbors.get(document.path, ()),
+                        key=lambda neighbor: (
+                            -int("source-test" in neighbor.relationship_kinds),
+                            -len(set(_tokens(neighbor.path)) & set(query_terms)),
+                            neighbor.path,
+                        ),
+                    )[:12]
+                ),
                 provenance=tuple(provenance),
                 estimated_cost=_representation_costs(document, evidence),
             )
@@ -1581,6 +1591,151 @@ def _rank_candidates(
         key=lambda item: (_group_order(item.exact_group), -item.score, item.path)
     )
     return results
+
+
+def _complementary_candidates(
+    task: str, index: RetrievalIndex, ranked: list[CandidateCard]
+) -> list[CandidateCard]:
+    """Satisfy broad evidence requirements before cutting the candidate pool.
+
+    Scores and exact lookup remain untouched. Explicit identifiers retain their
+    exact ordering; natural-language flows use lexical order inside the coverage
+    selection so incidental prose identifiers cannot consume every slot.
+    """
+
+    roles = _task_evidence_roles(task, ())
+    kinds = {str(role.kind) for role in roles} - {"unknown"}
+    if not ranked or not kinds:
+        return ranked
+    explicit = _exact_identifier_scope(task) != task
+    if len(task.split()) == 1:
+        return ranked
+    terms = set(_tokens(task))
+    # Only discriminative repository vocabulary forms lexical coverage facets.
+    frequencies: Counter[str] = Counter()
+    document_terms: dict[str, set[str]] = {}
+    for document in index.documents:
+        present = {
+            term for field in document.fields for term in field.terms if term in terms
+        }
+        document_terms[document.path] = present
+        frequencies.update(present)
+    facets = {
+        term
+        for term in terms
+        if 0 < frequencies[term] <= max(1, index.document_count // 2)
+    }
+    relevant = [
+        candidate
+        for candidate in ranked
+        if candidate.bm25_score > 0
+        or candidate.exact_group != "approximate"
+        or "working-set" in candidate.provenance
+        or "current-diff" in candidate.provenance
+    ]
+    if explicit:
+        selected = [
+            candidate
+            for candidate in relevant
+            if candidate.exact_group != "approximate"
+        ][:1]
+    else:
+        selected = []
+        relevant.sort(key=lambda candidate: (-candidate.bm25_score, candidate.path))
+    covered: set[str] = set()
+    covered_roles: set[str] = set()
+
+    def candidate_roles(candidate: CandidateCard) -> set[str]:
+        neighbors = {
+            kind
+            for neighbor in candidate.graph_neighbors
+            for kind in neighbor.relationship_kinds
+        }
+        return {
+            role.kind
+            for role in roles
+            if _candidate_covers_role(candidate, role, neighbors)
+        }
+
+    def add(candidate: CandidateCard) -> None:
+        selected.append(candidate)
+        covered.update(document_terms[candidate.path] & facets)
+        covered_roles.update(candidate_roles(candidate))
+
+    for candidate in selected:
+        covered.update(document_terms[candidate.path] & facets)
+        covered_roles.update(candidate_roles(candidate))
+    if not selected:
+        anchors = [
+            candidate
+            for candidate in relevant
+            if "implementation" in candidate_roles(candidate)
+        ]
+        if not anchors:
+            anchors = relevant
+        if anchors:
+            add(anchors[0])
+    while len(selected) < 5:
+        selected_paths = {candidate.path for candidate in selected}
+        complementary_paths = {
+            neighbor.path
+            for candidate in selected
+            for neighbor in candidate.graph_neighbors
+            if "verified" in neighbor.provenance
+            and (
+                ("test" in kinds and "source-test" in neighbor.relationship_kinds)
+                or (
+                    "configuration" in kinds
+                    and "config-consumer" in neighbor.relationship_kinds
+                )
+            )
+        }
+        relevant_ids = {candidate.candidate_id for candidate in relevant}
+        relevant.extend(
+            candidate
+            for candidate in ranked
+            if candidate.path in complementary_paths
+            and candidate.candidate_id not in relevant_ids
+        )
+        available = [candidate for candidate in relevant if candidate not in selected]
+        missing_roles = kinds - covered_roles
+        choices = [
+            candidate
+            for candidate in available
+            if candidate_roles(candidate) & missing_roles
+        ]
+        if not choices:
+            choices = [
+                candidate
+                for candidate in available
+                if document_terms[candidate.path] & (facets - covered)
+                and (
+                    "test" in kinds or not FILE_POLICY_REGISTRY.is_test(candidate.path)
+                )
+            ]
+        if not choices:
+            break
+
+        def order(
+            candidate: CandidateCard, selected_paths: set[str] = selected_paths
+        ) -> tuple[int, int, float, str]:
+            connected = any(
+                neighbor.path in selected_paths and "verified" in neighbor.provenance
+                for neighbor in candidate.graph_neighbors
+            )
+            return (
+                -int(connected),
+                -len(document_terms[candidate.path] & (facets - covered)),
+                -candidate.bm25_score,
+                candidate.path,
+            )
+
+        add(min(choices, key=order))
+    ids = {candidate.candidate_id for candidate in selected}
+    return [
+        *selected,
+        *(candidate for candidate in ranked if candidate.candidate_id not in ids),
+    ]
 
 
 def _bm25(
@@ -1694,7 +1849,7 @@ def _candidate_neighbors(
                     ),
                 )
             )
-        by_path[source] = tuple(values[:12])
+        by_path[source] = tuple(values)
     return by_path
 
 
@@ -1708,8 +1863,7 @@ def _candidate_evidence(
     query = set(query_terms)
     for posting in document.positional_postings:
         if posting.identifier.casefold() in matched_folded or (
-            posting.fact_kind != "declaration"
-            and set(_tokens(posting.identifier)) & query
+            set(_tokens(posting.identifier)) & query
         ):
             key = (posting.source_range.start_line, posting.source_range.end_line)
             values[key] = CandidateEvidenceRange(
@@ -3497,7 +3651,7 @@ def _task_evidence_roles(
         if terms & markers:
             requested.add(cast(TaskEvidenceRoleKind, kind))
     if terms & {"call", "caller", "callee", "trace", "flow", "route", "request"}:
-        requested.update({"caller", "callee"})
+        requested.update({"implementation", "caller", "callee"})
     values: dict[str, TaskEvidenceRole] = {
         kind: TaskEvidenceRole(role_id=kind, kind=kind) for kind in requested
     }

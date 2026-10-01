@@ -120,6 +120,62 @@ def test_code_and_test_documents_have_source_bound_tags_before_enrichment(
     assert by_path["README.md"].file_tags == ()
 
 
+def test_complementary_test_is_recovered_before_pool_cutoff(tmp_path: Path) -> None:
+    _write(tmp_path, "codec.py", "def restore_encoding(value):\n    return value\n")
+    _write(
+        tmp_path,
+        "tests/test_codec.py",
+        "from codec import restore_encoding\ndef test_roundtrip():\n"
+        "    assert restore_encoding(1) == 1\n",
+    )
+    for index in range(25):
+        _write(
+            tmp_path,
+            f"other{index}.py",
+            f"def encoding{index}(value):\n    return value\n",
+        )
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review restoration encoding behavior and tests",
+            limit=5,
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    paths = [candidate.path for candidate in result.candidates]
+    assert "codec.py" in paths
+    assert "tests/test_codec.py" in paths
+    assert result.provider_calls == 0
+    candidate = next(
+        item for item in result.candidates if item.path == "tests/test_codec.py"
+    )
+    assert candidate.evidence_ranges
+    assert any(
+        "verified" in neighbor.provenance for neighbor in candidate.graph_neighbors
+    )
+
+
+def test_complementary_selection_keeps_explicit_exact_symbol_first(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "impl.py", "def restore_encoding(value):\n    return value\n")
+    _write(tmp_path, "tests/test_impl.py", "from impl import restore_encoding\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review restore_encoding behavior and tests",
+            limit=5,
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert result.candidates[0].path == "impl.py"
+    assert result.candidates[0].exact_group == "exact_symbol"
+
+
 def test_working_set_and_diff_boosts_are_deterministic(tmp_path: Path) -> None:
     _write(tmp_path, "alpha.py", "def alpha():\n    return 1\n")
     _write(tmp_path, "beta.py", "def beta():\n    return 2\n")
