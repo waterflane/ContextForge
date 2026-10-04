@@ -166,6 +166,74 @@ def test_planned_search_can_start_with_an_empty_lexical_pool(tmp_path: Path) -> 
     assert result.candidates[0].path == "worker.py"
 
 
+@pytest.mark.parametrize("record", ["codemap", "graph-header", "graph-shard"])
+def test_warm_caches_still_reject_changed_immutable_records(
+    tmp_path: Path, record: str
+) -> None:
+    from contextforge.intelligence.store import (
+        IndexManifestReadError,
+        load_generation_record,
+    )
+
+    _write(tmp_path, "jobs.py", "def execute_job():\n    return 7\n")
+    _write(
+        tmp_path,
+        "main.py",
+        "from jobs import execute_job\ndef invoke():\n    return execute_job()\n",
+    )
+    report = _build(tmp_path)
+    first = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job implementation",
+            manifest=report.manifest,
+        )
+    )
+    assert (
+        asyncio.run(
+            retrieve_context_candidates(
+                tmp_path,
+                "execute_job implementation",
+                manifest=report.manifest,
+            )
+        )
+        == first
+    )
+    if record == "codemap":
+        location = next(
+            s.record_location for s in report.manifest.files if s.path == "jobs.py"
+        )
+        assert location is not None
+    else:
+        reference = report.manifest.artifacts.relationship_graph
+        assert reference is not None
+        location = reference.location
+        if record == "graph-shard":
+            header = json.loads(
+                load_generation_record(
+                    tmp_path,
+                    location,
+                    manifest=report.manifest,
+                )
+            )
+            location = header["file_projection_shards"][0]["artifact"]["location"]
+    destination = (
+        tmp_path
+        / ".contextforge/index/generations"
+        / report.manifest.generation_id
+        / location
+    )
+    destination.write_bytes(b"invalid record")
+    with pytest.raises((IndexManifestReadError, ValueError)):
+        asyncio.run(
+            retrieve_context_candidates(
+                tmp_path,
+                "execute_job implementation",
+                manifest=report.manifest,
+            )
+        )
+
+
 def test_exact_symbol_precedes_graph_related_approximate_candidates(
     tmp_path: Path,
 ) -> None:

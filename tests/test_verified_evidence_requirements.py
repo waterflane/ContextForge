@@ -198,6 +198,60 @@ def test_same_file_call_endpoints_use_symbol_bound_source(
     assert all(r.anchor_symbol_id for r in retrieval.requirements.source_evidence)
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_two_symbols_in_one_file_keep_separate_test_obligations(
+    tmp_path: Path, missing: bool
+) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def execute_job():\n    return 7\ndef finish_job():\n    return 9\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_jobs.py").write_text(
+        "from jobs import execute_job, finish_job\ndef test_execute():\n"
+        "    assert execute_job() == 7\ndef test_finish():\n"
+        "    assert finish_job() == 9\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Review jobs.execute_job jobs.finish_job implementation tests"
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert result.requirements is not None
+    test_requirements = [
+        r for r in result.requirements.source_evidence if r.role_id == "test"
+    ]
+    assert len({r.anchor_symbol_id for r in test_requirements}) == 2
+    if missing:
+        removed = set(test_requirements[0].evidence_ids)
+        result = result.model_copy(
+            update={
+                "candidates": tuple(
+                    c.model_copy(
+                        update={
+                            "evidence_ranges": tuple(
+                                e
+                                for e in c.evidence_ranges
+                                if e.evidence_id not in removed
+                            )
+                        }
+                    )
+                    for c in result.candidates
+                )
+            }
+        )
+    compiled = compile_context_capsule(
+        tmp_path, task, result, budget=ContextBudget(context_window_tokens=8_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "insufficient" if missing else "sufficient"
+    )
+
+
 @pytest.mark.parametrize("direction", ["caller", "callers", "callee", "callees"])
 @pytest.mark.parametrize("missing", [False, True])
 def test_directed_role_requests_require_the_requested_endpoint(

@@ -34,6 +34,7 @@ from contextforge.intelligence.graph import (
 )
 from contextforge.intelligence.models import (
     ArtifactReference,
+    IndexedFileState,
     IndexManifest,
     IndexModel,
     Sha256,
@@ -111,6 +112,35 @@ _retrieval_cache: OrderedDict[
     ],
 ] = OrderedDict()
 _retrieval_cache_lock = threading.Lock()
+_source_record_cache: OrderedDict[tuple[str, str, str, str], dict[str, Any]] = (
+    OrderedDict()
+)
+
+
+def _load_source_record(
+    repository_root: str | Path, manifest: IndexManifest, state: IndexedFileState
+) -> dict[str, Any]:
+    """Reuse parsed immutable facts only after the store rechecks their digest."""
+    from contextforge.intelligence.store import load_index_record
+
+    encoded = load_index_record(repository_root, state, manifest=manifest)
+    key = (
+        str(Path(repository_root).resolve()),
+        manifest.generation_id,
+        state.record_location or "",
+        state.record_sha256 or "",
+    )
+    with _retrieval_cache_lock:
+        cached = _source_record_cache.get(key)
+        if cached is not None:
+            _source_record_cache.move_to_end(key)
+            return cached
+    payload = cast(dict[str, Any], json.loads(encoded))
+    with _retrieval_cache_lock:
+        _source_record_cache[key] = payload
+        while len(_source_record_cache) > 256:
+            _source_record_cache.popitem(last=False)
+    return payload
 
 
 class RetrievalField(IndexModel):
@@ -1790,7 +1820,7 @@ def _topical_seeds(
         candidate = min(
             remaining,
             key=lambda c: (
-                -sum(weights[t] for t in document_terms[c.path] & uncovered),
+                -sum(weights[t] for t in sorted(document_terms[c.path] & uncovered)),
                 -c.bm25_score,
                 _group_order(c.exact_group),
                 c.path,
@@ -2008,10 +2038,12 @@ def _candidate_neighbors(
         if isinstance(graph, RelationshipGraph)
         else graph
     )
-    grouped: dict[tuple[str, str], list[FileRelationshipProjection]] = defaultdict(list)
+    grouped: dict[str, dict[str, list[FileRelationshipProjection]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for edge in projection.relationships:
-        grouped[(edge.source_path, edge.target_path)].append(edge)
-        grouped[(edge.target_path, edge.source_path)].append(edge)
+        grouped[edge.source_path][edge.target_path].append(edge)
+        grouped[edge.target_path][edge.source_path].append(edge)
     by_path: dict[str, tuple[CandidateGraphNeighbor, ...]] = {}
 
     def verified_kinds(edge: FileRelationshipProjection) -> tuple[str, ...]:
@@ -2021,9 +2053,7 @@ def _candidate_neighbors(
 
     for source in {item.path for item in projection.file_metrics}:
         values = []
-        for (candidate_source, target), edges in sorted(grouped.items()):
-            if candidate_source != source:
-                continue
+        for target, edges in sorted(grouped[source].items()):
             values.append(
                 CandidateGraphNeighbor(
                     path=target,
@@ -2112,8 +2142,6 @@ def _resolve_source_symbols(
     task: str,
     candidates: list[CandidateCard],
 ) -> list[CandidateCard]:
-    from contextforge.intelligence.store import load_index_record
-
     scope = _exact_identifier_scope(task)
     original_identifiers = {
         value.casefold(): value for value in re.findall(r"[A-Za-z_][\w.:]*", task)
@@ -2163,10 +2191,8 @@ def _resolve_source_symbols(
         symbols: list[ResolvedSourceSymbol] = []
         additions: list[CandidateEvidenceRange] = []
         if candidate.path in resolved:
-            payload = json.loads(
-                load_index_record(
-                    repository_root, states[candidate.path], manifest=manifest
-                )
+            payload = _load_source_record(
+                repository_root, manifest, states[candidate.path]
             )
             if (
                 payload.get("path") != candidate.path
@@ -2327,8 +2353,6 @@ def _restore_required_source_evidence(
     Only selected source-bound CodeMaps are read; no parser or provider runs.
     Declaration addresses remain available alongside implementation addresses.
     """
-    from contextforge.intelligence.store import load_index_record
-
     requirements = build_evidence_requirements(task, tuple(candidates))
     required_paths = {r.path for r in requirements.source_evidence}
     anchor_paths = {c.path for c in candidates if c.resolved_symbols}
@@ -2362,10 +2386,7 @@ def _restore_required_source_evidence(
         ):
             continue
         state = states[c.path]
-        payload = cast(
-            dict[str, Any],
-            json.loads(load_index_record(repository_root, state, manifest=manifest)),
-        )
+        payload = _load_source_record(repository_root, manifest, state)
         if (
             payload.get("source_sha256") != c.source_sha256
             or payload.get("path") != c.path
@@ -2377,6 +2398,8 @@ def _restore_required_source_evidence(
         evidence_id = _structural_evidence_id_from_source(
             path, states[path].source_sha256, identity, source_range
         )
+        if evidence_id in additions[path]:
+            return
         additions[path][evidence_id] = CandidateEvidenceRange(
             path=path,
             source_range=source_range,
@@ -2384,7 +2407,13 @@ def _restore_required_source_evidence(
             strength="verified",
         )
 
+    restored_bodies: set[tuple[str, str]] = set()
+
     def body(path: str, symbol: dict[str, Any]) -> None:
+        key = (path, symbol["symbol_id"])
+        if key in restored_bodies:
+            return
+        restored_bodies.add(key)
         declaration = SourceRange.model_validate(symbol["declaration_range"])
         ending = SourceRange.model_validate(
             symbol.get("body_range") or symbol["declaration_range"]
@@ -2449,8 +2478,13 @@ def _restore_required_source_evidence(
     from contextforge.intelligence.graph import _structural_provenance
 
     connections: list[VerifiedSourceConnection] = []
+    symbols_by_path = {
+        path: {s["symbol_id"]: s for s in payload.get("symbols", [])}
+        for path, payload in maps.items()
+    }
+    restored_ids: dict[tuple[str, str], tuple[str, ...]] = {}
     for source_path, payload in maps.items():
-        source_symbols = {s["symbol_id"]: s for s in payload.get("symbols", [])}
+        source_symbols = symbols_by_path[source_path]
         for relationship in payload.get("relationships", []):
             target = relationship["target"]
             target_path = target.get("file_path")
@@ -2463,18 +2497,14 @@ def _restore_required_source_evidence(
             ):
                 continue
             source_symbol = source_symbols.get(relationship.get("source_symbol_id"))
-            target_symbol = next(
-                (
-                    s
-                    for s in maps[target_path].get("symbols", [])
-                    if s["symbol_id"] == target.get("symbol_id")
-                ),
-                None,
-            )
+            target_symbol = symbols_by_path[target_path].get(target.get("symbol_id"))
             if source_symbol is None or target_symbol is None:
                 continue
 
             def symbol_ids(path: str, symbol: dict[str, Any]) -> tuple[str, ...]:
+                key = (path, symbol["symbol_id"])
+                if key in restored_ids:
+                    return restored_ids[key]
                 body(path, symbol)
                 declaration = SourceRange.model_validate(symbol["declaration_range"])
                 identity = _structural_evidence_id_from_source(
@@ -2498,7 +2528,7 @@ def _restore_required_source_evidence(
                         "end_column": ending.end_column,
                     }
                 )
-                return (
+                restored_ids[key] = (
                     identity,
                     _structural_evidence_id_from_source(
                         path,
@@ -2507,6 +2537,7 @@ def _restore_required_source_evidence(
                         implementation,
                     ),
                 )
+                return restored_ids[key]
 
             source_ids = symbol_ids(source_path, source_symbol)
             target_ids = symbol_ids(target_path, target_symbol)
@@ -2590,16 +2621,12 @@ def _exact_postings_from_persisted_map(
 
     from contextforge.intelligence.store import (
         IndexManifestReadError,
-        load_index_record,
     )
 
     state = next((item for item in manifest.files if item.path == path), None)
     if state is None:
         raise IndexManifestReadError("exact-hit path is absent from the manifest")
-    payload = cast(
-        dict[str, Any],
-        json.loads(load_index_record(repository_root, state, manifest=manifest)),
-    )
+    payload = _load_source_record(repository_root, manifest, state)
     if (
         payload.get("path") != path
         or payload.get("source_sha256") != state.source_sha256
@@ -2615,10 +2642,15 @@ def _exact_postings_from_persisted_map(
     ) -> None:
         if not isinstance(raw_identifier, str):
             return
+        matched = tuple(
+            identifier
+            for identifier in _safe_structural_identifiers(raw_identifier)
+            if identifier.casefold() in identifiers
+        )
+        if not matched:
+            return
         source_range = SourceRange.model_validate(raw_range)
-        for identifier in _safe_structural_identifiers(raw_identifier):
-            if identifier.casefold() not in identifiers:
-                continue
+        for identifier in matched:
             evidence_id = _structural_evidence_id_from_source(
                 path,
                 state.source_sha256,
@@ -2649,6 +2681,13 @@ def _exact_postings_from_persisted_map(
             ("reference", "direct_references"),
         ):
             for occurrence in cast(list[dict[str, Any]], raw_symbol.get(field, [])):
+                if not any(
+                    identifier.casefold() in identifiers
+                    for identifier in _safe_structural_identifiers(
+                        occurrence["observed_name"]
+                    )
+                ):
+                    continue
                 source_range = SourceRange.model_validate(occurrence["source_range"])
                 fact_id = hashlib.sha256(
                     (
@@ -4766,6 +4805,9 @@ def build_evidence_requirements(
         else "unresolved"
     )
     obligations: dict[str, EvidenceRequirement] = {}
+    connections = tuple(
+        dict.fromkeys(v for c in candidates for v in c.source_connections)
+    )
 
     def add(
         candidate: CandidateCard,
@@ -4832,13 +4874,6 @@ def build_evidence_requirements(
                 )
                 queue_symbols = deque([(anchor.path, sid, 0)])
                 visited_symbols = {(anchor.path, sid)}
-                connections = tuple(
-                    {
-                        v.model_dump_json(): v
-                        for c in candidates
-                        for v in c.source_connections
-                    }.values()
-                )
                 while queue_symbols:
                     current_path, current_sid, depth = queue_symbols.popleft()
                     for connection in connections:

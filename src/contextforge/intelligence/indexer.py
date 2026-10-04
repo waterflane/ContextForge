@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -431,6 +433,13 @@ def _deserialize_relationship_graph(
     )
 
 
+_projection_cache: OrderedDict[
+    tuple[str, str, str],
+    tuple[RelationshipGraphShardManifest, RelationshipGraphProjection],
+] = OrderedDict()
+_projection_cache_lock = threading.Lock()
+
+
 def load_relationship_graph_projection(
     repository_root: str | Path,
     *,
@@ -445,8 +454,17 @@ def load_relationship_graph_projection(
     content = load_generation_record(
         repository_root, reference.location, manifest=active
     )
+    if hashlib.sha256(content).hexdigest() != reference.sha256:
+        raise IndexManifestReadError("relationship graph header digest mismatch")
+    key = (str(Path(repository_root).resolve()), active.generation_id, reference.sha256)
+    with _projection_cache_lock:
+        cached = _projection_cache.get(key)
     try:
-        shard_manifest = RelationshipGraphShardManifest.model_validate_json(content)
+        shard_manifest = (
+            cached[0]
+            if cached is not None
+            else RelationshipGraphShardManifest.model_validate_json(content)
+        )
     except ValueError:
         return project_relationship_graph(
             RelationshipGraph.model_validate_json(content)
@@ -469,18 +487,31 @@ def load_relationship_graph_projection(
             lines = tuple(line for line in encoded.splitlines() if line)
             if len(lines) != shard.record_count:
                 raise ValueError("relationship graph projection shard count mismatch")
-            values.extend(model.model_validate_json(line) for line in lines)  # type: ignore[attr-defined]
+            if cached is None:
+                values.extend(model.model_validate_json(line) for line in lines)  # type: ignore[attr-defined]
         return tuple(values)
 
+    relationships = load_shards(
+        shard_manifest.file_projection_shards, FileRelationshipProjection
+    )
+    metrics = load_shards(shard_manifest.metric_shards, FileGraphMetrics)
+    if cached is not None:
+        if cached[1].source_snapshot_digest != active.build.source_snapshot_digest:
+            raise IndexManifestReadError("relationship graph projection is stale")
+        with _projection_cache_lock:
+            _projection_cache.move_to_end(key)
+        return cached[1]
     projection = RelationshipGraphProjection(
         source_snapshot_digest=shard_manifest.source_snapshot_digest,
-        relationships=load_shards(
-            shard_manifest.file_projection_shards, FileRelationshipProjection
-        ),
-        file_metrics=load_shards(shard_manifest.metric_shards, FileGraphMetrics),
+        relationships=relationships,
+        file_metrics=metrics,
     )
     if projection.source_snapshot_digest != active.build.source_snapshot_digest:
         raise IndexManifestReadError("relationship graph projection is stale")
+    with _projection_cache_lock:
+        _projection_cache[key] = (shard_manifest, projection)
+        while len(_projection_cache) > 2:
+            _projection_cache.popitem(last=False)
     return projection
 
 

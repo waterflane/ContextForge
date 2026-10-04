@@ -319,6 +319,12 @@ insufficient result does not automatically fail answer quality; contradictory
 sufficient claims do. Legacy `plan_sufficient` remains readable, while acceptance
 requires the new compilation audit and verified semantic evaluation.
 
+Warm retrieval caches parsed immutable CodeMaps and graph projections by
+generation and digest. Every query still reads and validates their records and
+shards before reuse. Neighbor lookup groups edges by source once; implementation
+and symbol lookup structures are reused within the query. These runtime caches
+do not change persisted derived records or trigger structural reanalysis.
+
 Frozen source obligations retain declaration IDs and add implementation/call-site
 addresses from digest-checked persisted CodeMaps. The compiler selects source
 coverage before optional context and evaluates the final ledger from actual
