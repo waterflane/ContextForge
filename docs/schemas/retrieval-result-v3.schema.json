@@ -779,6 +779,14 @@
           },
           "title": "Ambiguous Identifiers",
           "type": "array"
+        },
+        "source_connections": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VerifiedSourceConnection"
+          },
+          "title": "Source Connections",
+          "type": "array"
         }
       }
     },
@@ -1053,6 +1061,61 @@
         "implementation_evidence_id"
       ],
       "title": "ResolvedSourceSymbol",
+      "type": "object"
+    },
+    "VerifiedSourceConnection": {
+      "additionalProperties": false,
+      "description": "Directed symbol evidence reconstructed from verified stored relationships.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "call",
+            "reference"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_path": {
+          "title": "Source Path",
+          "type": "string"
+        },
+        "target_path": {
+          "title": "Target Path",
+          "type": "string"
+        },
+        "source_symbol_id": {
+          "title": "Source Symbol Id",
+          "type": "string"
+        },
+        "target_symbol_id": {
+          "title": "Target Symbol Id",
+          "type": "string"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        },
+        "target_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "source_path",
+        "target_path",
+        "source_symbol_id",
+        "target_symbol_id",
+        "source_evidence_ids",
+        "target_evidence_ids"
+      ],
+      "title": "VerifiedSourceConnection",
       "type": "object"
     }
   }

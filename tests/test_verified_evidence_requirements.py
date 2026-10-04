@@ -49,6 +49,66 @@ def test_class_qualified_anchor_requires_unique_source_identity(
     )
 
 
+@pytest.mark.parametrize("long_method", [False, True])
+def test_required_method_does_not_require_its_large_container(
+    tmp_path: Path, long_method: bool
+) -> None:
+    padding = "".join(f"    unused_{i} = {repr('x' * 60)}\n" for i in range(800))
+    body = (
+        "".join(f"        value_{i} = {repr('x' * 60)}\n" for i in range(800))
+        if long_method
+        else ""
+    )
+    (tmp_path / "widget.py").write_text(
+        "class Widget:\n    def run(self):\n" + body + "        return 7\n" + padding,
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain Widget.run implementation"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=2_500)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "insufficient" if long_method else "sufficient"
+    )
+    assert compiled.token_count <= 2_500
+    if not long_method:
+        assert all(
+            r.end_line < 20 for m in compiled.capsule.task_context for r in m.ranges
+        )
+
+
+@pytest.mark.parametrize("direction", ["callers", "callees"])
+def test_same_file_call_endpoints_use_symbol_bound_source(
+    tmp_path: Path, direction: str
+) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def finish_job():\n    return 7\ndef execute_job():\n"
+        "    return finish_job()\ndef invoke_job():\n    return execute_job()\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = f"Find {direction} of execute_job"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert retrieval.requirements is not None
+    assert all(r.anchor_symbol_id for r in retrieval.requirements.source_evidence)
+
+
 @pytest.mark.parametrize("direction", ["caller", "callers", "callee", "callees"])
 @pytest.mark.parametrize("missing", [False, True])
 def test_directed_role_requests_require_the_requested_endpoint(
@@ -250,11 +310,13 @@ def test_complete_and_damaged_source_sets(
         candidates = tuple(c for c in candidates if c.path != missing)
     elif missing in {"range", "id"}:
         anchor = next(c for c in candidates if c.path == "jobs.py")
+        required_id = anchor.resolved_symbols[0].implementation_evidence_id
         changed = tuple(
             e.model_copy(update={"evidence_id": "substituted-source-id"})
             if missing == "id"
             else e
-            for e in anchor.evidence_ranges[1:]
+            for e in anchor.evidence_ranges
+            if missing == "id" or e.evidence_id != required_id
         )
         candidates = tuple(
             c.model_copy(update={"evidence_ranges": changed})

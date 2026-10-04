@@ -347,6 +347,18 @@ class ResolvedSourceSymbol(IndexModel):
     implementation_evidence_id: str
 
 
+class VerifiedSourceConnection(IndexModel):
+    """Directed symbol evidence reconstructed from verified stored relationships."""
+
+    kind: Literal["call", "reference"]
+    source_path: str
+    target_path: str
+    source_symbol_id: str
+    target_symbol_id: str
+    source_evidence_ids: tuple[str, ...]
+    target_evidence_ids: tuple[str, ...]
+
+
 class CandidateCard(IndexModel):
     """Retrieval result with evidence, graph context, and representation costs."""
 
@@ -364,6 +376,7 @@ class CandidateCard(IndexModel):
     matched_symbols: tuple[str, ...] = ()
     resolved_symbols: tuple[ResolvedSourceSymbol, ...] = ()
     ambiguous_identifiers: tuple[str, ...] = ()
+    source_connections: tuple[VerifiedSourceConnection, ...] = ()
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
     graph_neighbors: tuple[CandidateGraphNeighbor, ...] = ()
     provenance: tuple[str, ...]
@@ -2194,10 +2207,19 @@ def _restore_exact_identifier_evidence(
             candidate.matched_symbols,
         )
         merged = {
-            (item.source_range.start_line, item.source_range.end_line): item
+            item.evidence_id or str(item.source_range): item
             for item in (*candidate.evidence_ranges, *evidence)
         }
-        ranges = tuple(merged[key] for key in sorted(merged))
+        ranges = tuple(
+            sorted(
+                merged.values(),
+                key=lambda e: (
+                    e.source_range.start_line,
+                    e.source_range.end_line,
+                    e.evidence_id or "",
+                ),
+            )
+        )
         restored.append(
             candidate.model_copy(
                 update={
@@ -2225,15 +2247,35 @@ def _restore_required_source_evidence(
 
     requirements = build_evidence_requirements(task, tuple(candidates))
     required_paths = {r.path for r in requirements.source_evidence}
+    anchor_paths = {c.path for c in candidates if c.resolved_symbols}
+    connected_paths = set(anchor_paths)
+    by_path = {c.path: c for c in candidates}
+    frontier = set(anchor_paths)
+    for _ in range(2):
+        frontier = {
+            n.path
+            for path in frontier
+            for n in by_path[path].graph_neighbors
+            if n.path in by_path
+            and _verified_neighbor_kinds(n) & {"call", "reference", "config-consumer"}
+        } - connected_paths
+        connected_paths.update(frontier)
     states = {f.path: f for f in manifest.files}
     documents = {d.path: d for d in index.documents}
     maps: dict[str, dict[str, Any]] = {}
     additions: dict[str, dict[str, CandidateEvidenceRange]] = defaultdict(dict)
     for c in candidates:
-        if c.path not in required_paths and c.exact_group not in {
-            "exact_symbol",
-            "exact_qualified_symbol",
-        }:
+        related = c.path in connected_paths
+        if (
+            not related
+            and c.path not in anchor_paths
+            and c.path not in required_paths
+            and c.exact_group
+            not in {
+                "exact_symbol",
+                "exact_qualified_symbol",
+            }
+        ):
             continue
         state = states[c.path]
         payload = cast(
@@ -2320,6 +2362,93 @@ def _restore_required_source_evidence(
                     SourceRange.model_validate(call["source_range"]),
                 )
                 body(str(target_path), target)
+    from contextforge.intelligence.graph import _structural_provenance
+
+    connections: list[VerifiedSourceConnection] = []
+    for source_path, payload in maps.items():
+        source_symbols = {s["symbol_id"]: s for s in payload.get("symbols", [])}
+        for relationship in payload.get("relationships", []):
+            target = relationship["target"]
+            target_path = target.get("file_path")
+            if (
+                relationship["kind"] not in {"call", "reference"}
+                or target.get("resolution") != "internal"
+                or target_path not in maps
+                or _structural_provenance(relationship["detection_method"])
+                != "verified"
+            ):
+                continue
+            source_symbol = source_symbols.get(relationship.get("source_symbol_id"))
+            target_symbol = next(
+                (
+                    s
+                    for s in maps[target_path].get("symbols", [])
+                    if s["symbol_id"] == target.get("symbol_id")
+                ),
+                None,
+            )
+            if source_symbol is None or target_symbol is None:
+                continue
+
+            def symbol_ids(path: str, symbol: dict[str, Any]) -> tuple[str, ...]:
+                body(path, symbol)
+                declaration = SourceRange.model_validate(symbol["declaration_range"])
+                identity = _structural_evidence_id_from_source(
+                    path,
+                    states[path].source_sha256,
+                    f"declaration:{symbol['symbol_id']}",
+                    declaration,
+                )
+                additions[path][identity] = CandidateEvidenceRange(
+                    path=path,
+                    source_range=declaration,
+                    evidence_id=identity,
+                    strength="verified",
+                )
+                ending = SourceRange.model_validate(
+                    symbol.get("body_range") or symbol["declaration_range"]
+                )
+                implementation = declaration.model_copy(
+                    update={
+                        "end_line": ending.end_line,
+                        "end_column": ending.end_column,
+                    }
+                )
+                return (
+                    identity,
+                    _structural_evidence_id_from_source(
+                        path,
+                        states[path].source_sha256,
+                        f"implementation:{symbol['symbol_id']}",
+                        implementation,
+                    ),
+                )
+
+            source_ids = symbol_ids(source_path, source_symbol)
+            target_ids = symbol_ids(target_path, target_symbol)
+            address = SourceRange.model_validate(relationship["source_range"])
+            connection_identity = (
+                f"connection:{source_symbol['symbol_id']}:"
+                f"{target_symbol['symbol_id']}:{relationship['kind']}"
+            )
+            add(source_path, connection_identity, address)
+            call_id = _structural_evidence_id_from_source(
+                source_path,
+                states[source_path].source_sha256,
+                connection_identity,
+                address,
+            )
+            connections.append(
+                VerifiedSourceConnection(
+                    kind=relationship["kind"],
+                    source_path=source_path,
+                    target_path=target_path,
+                    source_symbol_id=source_symbol["symbol_id"],
+                    target_symbol_id=target_symbol["symbol_id"],
+                    source_evidence_ids=tuple(sorted((*source_ids, call_id))),
+                    target_evidence_ids=tuple(sorted(target_ids)),
+                )
+            )
     return [
         c.model_copy(
             update={
@@ -2342,6 +2471,24 @@ def _restore_required_source_evidence(
                 "estimated_cost": _representation_costs(
                     documents[c.path],
                     tuple((*c.evidence_ranges, *additions[c.path].values())),
+                ),
+                "source_connections": tuple(
+                    sorted(
+                        (
+                            connection
+                            for connection in connections
+                            if c.path
+                            in {connection.source_path, connection.target_path}
+                        ),
+                        key=lambda v: (
+                            v.source_path,
+                            v.source_symbol_id,
+                            v.target_path,
+                            v.target_symbol_id,
+                            v.kind,
+                            v.source_evidence_ids,
+                        ),
+                    )
                 ),
             }
         )
@@ -4430,7 +4577,7 @@ def _test_bindings_cover_anchors(
 ) -> bool:
     test_ids = {b.candidate_id for b in bindings if b.role_id == "test"}
     code_anchors = {
-        r.candidate_id
+        (r.candidate_id, r.anchor_symbol_id)
         for r in requirements.source_evidence
         if r.candidate_id in requirements.anchors
         and (
@@ -4442,11 +4589,12 @@ def _test_bindings_cover_anchors(
         anchor in test_ids
         or any(
             r.anchor_candidate_id == anchor
+            and r.anchor_symbol_id == symbol_id
             and r.role_id == "test"
             and r.candidate_id in test_ids
             for r in requirements.source_evidence
         )
-        for anchor in code_anchors
+        for anchor, symbol_id in code_anchors
     )
 
 
@@ -4529,15 +4677,26 @@ def build_evidence_requirements(
             "task-syntax",
         ],
         role_id: str,
+        evidence: tuple[str, ...] | None = None,
+        anchor_symbol_id: str | None = None,
     ) -> None:
         identity = (
             "requirement-"
             + hashlib.sha256(
-                f"{role_id}:{anchor.candidate_id}:{candidate.candidate_id}:{basis}".encode()
+                (
+                    f"{role_id}:{anchor.candidate_id}:{candidate.candidate_id}:"
+                    f"{basis}:{anchor_symbol_id or ''}:{evidence or ()}"
+                ).encode()
             ).hexdigest()[:24]
         )
-        evidence_ids = tuple(
-            sorted({e.evidence_id for e in candidate.evidence_ranges if e.evidence_id})
+        evidence_ids = (
+            evidence
+            if evidence is not None
+            else tuple(
+                sorted(
+                    {e.evidence_id for e in candidate.evidence_ranges if e.evidence_id}
+                )
+            )
         )
         obligations[identity] = EvidenceRequirement(
             requirement_id=identity,
@@ -4548,9 +4707,152 @@ def build_evidence_requirements(
             evidence_ids=evidence_ids,
             basis=basis,
             anchor_candidate_id=anchor.candidate_id,
+            anchor_symbol_id=anchor_symbol_id,
         )
 
     for anchor in anchors:
+        if anchor.resolved_symbols:
+            for resolved in anchor.resolved_symbols:
+                sid = resolved.symbol_id
+                add(
+                    anchor,
+                    anchor,
+                    "exact-symbol",
+                    "implementation" if "implementation" in kinds else "unknown",
+                    tuple(
+                        sorted(
+                            (
+                                resolved.declaration_evidence_id,
+                                resolved.implementation_evidence_id,
+                            )
+                        )
+                    ),
+                    sid,
+                )
+                queue_symbols = deque([(anchor.path, sid, 0)])
+                visited_symbols = {(anchor.path, sid)}
+                connections = tuple(
+                    {
+                        v.model_dump_json(): v
+                        for c in candidates
+                        for v in c.source_connections
+                    }.values()
+                )
+                while queue_symbols:
+                    current_path, current_sid, depth = queue_symbols.popleft()
+                    for connection in connections:
+                        if connection.kind != "call":
+                            continue
+                        incoming = (
+                            "caller" in kinds
+                            and connection.target_path == current_path
+                            and connection.target_symbol_id == current_sid
+                        )
+                        outgoing = (
+                            "callee" in kinds
+                            and connection.source_path == current_path
+                            and connection.source_symbol_id == current_sid
+                        )
+                        if not incoming and not outgoing:
+                            continue
+                        path = (
+                            connection.source_path
+                            if incoming
+                            else connection.target_path
+                        )
+                        endpoint_sid = (
+                            connection.source_symbol_id
+                            if incoming
+                            else connection.target_symbol_id
+                        )
+                        candidate = by_path.get(path)
+                        if candidate is None:
+                            continue
+                        ids = (
+                            connection.source_evidence_ids
+                            if incoming
+                            else connection.target_evidence_ids
+                        )
+                        add(
+                            candidate,
+                            anchor,
+                            "verified-call",
+                            "caller" if incoming else "callee",
+                            ids,
+                            sid,
+                        )
+                        source_candidate = by_path.get(connection.source_path)
+                        if source_candidate is not None:
+                            add(
+                                source_candidate,
+                                anchor,
+                                "verified-call",
+                                "caller",
+                                connection.source_evidence_ids,
+                                sid,
+                            )
+                        if depth < 1 and (path, endpoint_sid) not in visited_symbols:
+                            visited_symbols.add((path, endpoint_sid))
+                            queue_symbols.append((path, endpoint_sid, depth + 1))
+                if "test" in kinds:
+                    test_connections = [
+                        v
+                        for v in connections
+                        if v.target_path == anchor.path
+                        and v.target_symbol_id == sid
+                        and FILE_POLICY_REGISTRY.is_test(v.source_path)
+                        and v.source_path in by_path
+                    ]
+                    selected_test = min(
+                        test_connections,
+                        key=lambda v: (
+                            -by_path[v.source_path].bm25_score,
+                            v.source_path,
+                            v.source_symbol_id,
+                        ),
+                        default=None,
+                    )
+                    if selected_test is not None:
+                        add(
+                            by_path[selected_test.source_path],
+                            anchor,
+                            "verified-source-test",
+                            "test",
+                            selected_test.source_evidence_ids,
+                            sid,
+                        )
+                if "entrypoint" in kinds:
+                    for connection in connections:
+                        candidate = by_path.get(connection.source_path)
+                        if (
+                            connection.kind == "call"
+                            and connection.target_path == anchor.path
+                            and connection.target_symbol_id == sid
+                            and candidate is not None
+                            and "entrypoint" in candidate.structural_roles
+                        ):
+                            add(
+                                candidate,
+                                anchor,
+                                "verified-call",
+                                "entrypoint",
+                                connection.source_evidence_ids,
+                                sid,
+                            )
+                if "configuration" in kinds:
+                    for neighbor in anchor.graph_neighbors:
+                        candidate = by_path.get(neighbor.path)
+                        if candidate is not None and "config-consumer" in (
+                            _verified_neighbor_kinds(neighbor)
+                        ):
+                            add(
+                                candidate,
+                                anchor,
+                                "verified-config",
+                                "configuration",
+                                anchor_symbol_id=sid,
+                            )
+            continue
         add(
             anchor,
             anchor,

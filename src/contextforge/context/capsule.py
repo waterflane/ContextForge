@@ -824,7 +824,11 @@ def _mandatory_role_ids(ledger: CoverageLedger) -> tuple[str, ...]:
 
 
 def _automatic_material_options(
-    state: _CompilerState, candidate: CandidateCard, *, required_evidence: bool = False
+    state: _CompilerState,
+    candidate: CandidateCard,
+    *,
+    required_evidence: bool = False,
+    required_ids: frozenset[str] = frozenset(),
 ) -> tuple[CapsuleMaterial, ...]:
     """Return the cheapest verified map/slice choices for one candidate."""
 
@@ -841,7 +845,11 @@ def _automatic_material_options(
                 candidate.path,
                 RepresentationMode.SLICE,
                 candidate,
-                tuple(item.source_range for item in candidate.evidence_ranges)
+                tuple(
+                    item.source_range
+                    for item in candidate.evidence_ranges
+                    if not required_ids or item.evidence_id in required_ids
+                )
                 if required_evidence
                 or candidate.exact_group in {"exact_symbol", "exact_qualified_symbol"}
                 else _automatic_slice_ranges(state, candidate),
@@ -935,7 +943,17 @@ def _select_automatic_evidence(
         ] = []
         for candidate in remaining:
             options = _automatic_material_options(
-                state, candidate, required_evidence=required_evidence
+                state,
+                candidate,
+                required_evidence=required_evidence,
+                required_ids=frozenset(
+                    evidence_id
+                    for requirement in (
+                        () if requirements is None else requirements.source_evidence
+                    )
+                    if requirement.candidate_id == candidate.candidate_id
+                    for evidence_id in requirement.evidence_ids
+                ),
             )
             for material in options:
                 proposed = capsule.model_copy(
