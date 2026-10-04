@@ -1532,6 +1532,7 @@ async def retrieve_context_candidates(
     ranked_candidates = _restore_required_source_evidence(
         repository_root, active, index, task, ranked_candidates
     )
+    ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
     candidates = ranked_candidates[:limit]
     requirements = build_evidence_requirements(
         task, tuple(ranked_candidates[:planning_max_pool_candidates])
@@ -1549,7 +1550,7 @@ async def retrieve_context_candidates(
         coverage_history=(retrieval_ledger,),
         plan_requested=mode != ContextPlanningMode.OFF,
     )
-    if mode == ContextPlanningMode.OFF or not candidates:
+    if mode == ContextPlanningMode.OFF:
         return result
     if provider is None:
         if mode == ContextPlanningMode.REQUIRED:
@@ -1737,6 +1738,73 @@ def _rank_candidates(
     return results
 
 
+def _topical_seeds(
+    task: str, index: RetrievalIndex, ranked: list[CandidateCard]
+) -> tuple[list[CandidateCard], set[str]]:
+    """Greedily discover up to four distinct lexical facets without certifying them."""
+    instruction_terms = (
+        "a an the and or of to for in on at by with from into as is are be this that "
+        "how what where why which does do explain describe find show review trace "
+        "implement implementation implementations behavior behaviors flow flows "
+        "lifecycle caller callers callee callees call calls test tests regression "
+        "spec specs config configuration configurations setting settings "
+        "entry entrypoint start startup bootstrap launch public api interface "
+        "endpoint endpoints data model models schema schemas codec doc docs "
+        "documentation readme code source function functions method methods file files "
+        "before after when then through its their it works happen happens"
+    )
+    translated_instruction_terms = (
+        "\u043a\u0430\u043a \u0447\u0442\u043e \u0433\u0434\u0435 "
+        "\u0438 \u0432 \u043d\u0430 \u0434\u043b\u044f \u0438\u0437 "
+        "\u043f\u0440\u043e\u0441\u043b\u0435\u0434\u0438 "
+        "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f "
+        "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044e "
+        "\u043f\u043e\u0442\u043e\u043a \u0446\u0435\u043f\u043e\u0447\u043a\u0430 "
+        "\u0432\u044b\u0437\u043e\u0432 \u0432\u044b\u0437\u043e\u0432\u044b "
+        "\u0442\u0435\u0441\u0442 \u0442\u0435\u0441\u0442\u044b "
+        "\u0442\u0435\u0441\u0442\u0430\u043c\u0438 "
+        "\u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044f "
+        "\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438"
+    )
+    instructions = set(instruction_terms.split())
+    instructions.update(translated_instruction_terms.split())
+    uncovered = set(_tokens(task)) - instructions
+    document_terms = {
+        d.path: {term for f in d.fields for term in f.terms} & uncovered
+        for d in index.documents
+    }
+    frequencies = {
+        term: max(
+            (f.get(term, 0) for f in index.document_frequencies.values()), default=0
+        )
+        for term in uncovered
+    }
+    weights = {
+        term: math.log(1 + (index.document_count - freq + 0.5) / (freq + 0.5))
+        for term, freq in frequencies.items()
+    }
+    topical = {path for path, terms in document_terms.items() if terms}
+    seeds: list[CandidateCard] = []
+    remaining = [c for c in ranked if c.path in topical and c.bm25_score > 0]
+    while remaining and uncovered and len(seeds) < 4:
+        candidate = min(
+            remaining,
+            key=lambda c: (
+                -sum(weights[t] for t in document_terms[c.path] & uncovered),
+                -c.bm25_score,
+                _group_order(c.exact_group),
+                c.path,
+            ),
+        )
+        covered = document_terms[candidate.path] & uncovered
+        if not covered:
+            break
+        seeds.append(candidate)
+        uncovered -= covered
+        remaining.remove(candidate)
+    return seeds, topical
+
+
 def _complementary_candidates(
     task: str, index: RetrievalIndex, ranked: list[CandidateCard]
 ) -> list[CandidateCard]:
@@ -1745,23 +1813,32 @@ def _complementary_candidates(
     Roles determine complementary coverage, never an independent score bonus.
     The complete internal projection is used before the bounded pool is cut.
     """
-    del index
     if not ranked:
         return []
     roles = _task_evidence_roles(task, ())
     by_path = {c.path: c for c in ranked}
+    lexical_seeds, topical = _topical_seeds(task, index, ranked)
     relevant = [
         c
         for c in ranked
         if c.bm25_score > 0
+        and c.path in topical
         or c.exact_group != "approximate"
         or set(c.provenance) & {"working-set", "current-diff"}
     ]
     exact = [c for c in relevant if c.exact_group != "approximate"]
-    lexical = sorted(relevant, key=lambda c: (-c.bm25_score, c.path))
-    seeds = exact or lexical[:1]
+    explicit = [
+        c
+        for c in exact
+        if c.resolved_symbols
+        or c.exact_group == "exact_path"
+        or _exact_identifier_scope(task) != task
+    ]
+    seeds = list({c.path: c for c in (*explicit, *lexical_seeds)}.values())
     admitted = {c.path for c in relevant}
     reasons: dict[str, set[str]] = defaultdict(set)
+    for seed in lexical_seeds:
+        reasons[seed.path].add("lexical-discovery-seed")
     queue = deque((c.path, 0) for c in seeds)
     visited = {c.path for c in seeds}
     while queue:
@@ -2038,7 +2115,14 @@ def _resolve_source_symbols(
     from contextforge.intelligence.store import load_index_record
 
     scope = _exact_identifier_scope(task)
-    queries = set(scope.split()) if scope != task or len(task.split()) == 1 else set()
+    original_identifiers = {
+        value.casefold(): value for value in re.findall(r"[A-Za-z_][\w.:]*", task)
+    }
+    queries = (
+        {original_identifiers.get(value, value) for value in scope.split()}
+        if scope != task or len(task.split()) == 1
+        else set()
+    )
     queries.update(
         value
         for pair in re.findall(r"`([A-Za-z_][\w.:]*)`|<([A-Za-z_][\w.:]*)>", task)
@@ -2835,8 +2919,7 @@ async def _plan_evidence_session(
             active_request = build_active_request(candidates, previews, active_modules)
         request_tokens = _request_tokens(active_request)
         if (
-            not candidates
-            or not _planner_request_within_budget(
+            not _planner_request_within_budget(
                 active_request, provider, max_input_tokens=max_input_tokens
             )
             or input_tokens + request_tokens > max_total_input_tokens
@@ -4371,6 +4454,7 @@ def _task_evidence_roles(
     syntax_task = re.sub(
         r"`[^`]*`|[A-Za-z_]\w*[_]\w*|[A-Za-z_]\w*(?:(?:::|\.)\w+)+", " ", task
     )
+    syntax_task = re.sub(r"\b[A-Za-z_]*[a-z][A-Z]\w*\b", " ", syntax_task)
     terms = set(_tokens(syntax_task))
     normalized_roles = {
         "callers": "caller",

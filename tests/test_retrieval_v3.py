@@ -86,6 +86,86 @@ def test_complementary_pool_uses_complete_verified_projection(tmp_path: Path) ->
     assert len(result.candidates) <= 64
 
 
+def test_lexical_discovery_seeds_cover_distinct_facets(tmp_path: Path) -> None:
+    from contextforge.intelligence.retrieval import _topical_seeds
+
+    for name in ("amber", "cobalt", "ivory", "jade", "unused"):
+        _write(tmp_path, f"{name}.py", f"def {name}_stage():\n    return 1\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Explain amber cobalt ivory jade implementation tests",
+            manifest=report.manifest,
+        )
+    )
+    assert (
+        sum("lexical-discovery-seed" in c.selection_reasons for c in result.candidates)
+        == 4
+    )
+    assert "unused.py" not in {c.path for c in result.candidates}
+    assert result.requirements is not None
+    assert result.requirements.topic_grounding == "unresolved"
+    reference = report.manifest.artifacts.structural_retrieval
+    assert reference is not None
+    index = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    seeds, _ = _topical_seeds(
+        "Explain implementation tests", index, list(result.candidates)
+    )
+    assert seeds == []
+
+
+def test_planned_search_can_start_with_an_empty_lexical_pool(tmp_path: Path) -> None:
+    _write(tmp_path, "worker.py", "def hidden_flow():\n    return 1\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            assert facts["candidates"] == []
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "search", "query": "hidden_flow", "limit": 1}
+                    ],
+                }
+            )
+        candidate = facts["candidates"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "sufficiency": "insufficient",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "evidence_ids": [],
+                                "representation": "full",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "unmappedword",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode=ContextPlanningMode.AUTO,
+        )
+    )
+    assert result.provider_calls == 2
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.candidates[0].path == "worker.py"
+
+
 def test_exact_symbol_precedes_graph_related_approximate_candidates(
     tmp_path: Path,
 ) -> None:

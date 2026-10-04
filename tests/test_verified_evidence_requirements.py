@@ -127,6 +127,7 @@ def test_class_qualified_anchor_requires_unique_source_identity(
     if not ambiguous:
         anchor = next(c for c in retrieval.candidates if c.path == "widget.py")
         assert anchor.resolved_symbols[0].qualified_name == "widget.Widget.run"
+        assert anchor.resolved_symbols[0].query_identifier == "Widget.run"
         assert anchor.resolved_symbols[0].resolution == "unique-qualified-suffix"
     compiled = compile_context_capsule(
         tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8_000)
