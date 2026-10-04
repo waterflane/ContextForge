@@ -254,6 +254,40 @@
             }
           ],
           "default": null
+        },
+        "clone_repetition": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clone Repetition"
+        },
+        "phase_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RealBenchmarkPhaseUsage"
+          },
+          "title": "Phase Usage",
+          "type": "array"
+        },
+        "noop_structurally_reanalyzed_files": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noop Structurally Reanalyzed Files"
         }
       }
     },
@@ -679,6 +713,33 @@
           ],
           "default": null,
           "title": "Planner Reported Output Tokens"
+        },
+        "clone_repetition": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clone Repetition"
+        },
+        "model_repetition": {
+          "default": 1,
+          "minimum": 0,
+          "title": "Model Repetition",
+          "type": "integer"
+        },
+        "phase_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RealBenchmarkPhaseUsage"
+          },
+          "title": "Phase Usage",
+          "type": "array"
         }
       }
     },
@@ -1404,6 +1465,77 @@
         }
       },
       "title": "SemanticCoverage",
+      "type": "object"
+    },
+    "RealBenchmarkPhaseUsage": {
+      "additionalProperties": false,
+      "description": "Actual attempts retained even when a paired evaluation fails midway.",
+      "properties": {
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "provider_calls": {
+          "minimum": 0,
+          "title": "Provider Calls",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Input Tokens"
+        },
+        "reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Output Tokens"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "phase",
+        "provider_calls",
+        "estimated_input_tokens",
+        "duration_ms"
+      ],
+      "title": "RealBenchmarkPhaseUsage",
       "type": "object"
     }
   }

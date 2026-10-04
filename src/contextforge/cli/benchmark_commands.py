@@ -83,6 +83,7 @@ def benchmark_real_repositories(
         16_384
     ),
     repetitions: Annotated[int, typer.Option("--repetitions", min=1)] = 3,
+    model_repetitions: Annotated[int, typer.Option("--model-repetitions", min=1)] = 3,
     hash_seed_reloads: Annotated[
         int, typer.Option("--hash-seed-reloads", min=0, max=100)
     ] = 100,
@@ -126,27 +127,26 @@ def benchmark_real_repositories(
                 "allow_repository" if provider == CODEX_PROVIDER_ID else "deny"
             ),
         )
+        destination = output or (
+            Path.cwd()
+            / ".contextforge"
+            / "benchmark-results"
+            / f"{manifest.suite_name}-{time.time_ns()}.json"
+        )
         result = asyncio.run(
             run_pinned_real_repository_benchmark(
                 manifest,
                 parsed_sources,
                 configuration,
                 repetitions=repetitions,
+                model_repetitions=model_repetitions,
+                report_path=destination,
                 hash_seed_reloads=hash_seed_reloads,
                 semantic_max_files=semantic_max_files,
                 semantic_max_requests=semantic_max_requests,
                 progress=lambda message: typer.echo(message, err=True),
             )
         )
-        destination = output
-        if destination is None:
-            destination = (
-                Path.cwd()
-                / ".contextforge"
-                / "benchmark-results"
-                / f"{manifest.suite_name}-{time.time_ns()}.json"
-            )
-            destination.parent.mkdir(parents=True, exist_ok=True)
         write_output_atomic(destination, result.model_dump_json(indent=2) + "\n")
     except (OSError, ValueError, ValidationError, OutputWriteError) as exc:
         _exit_with_error(str(exc), code=2)

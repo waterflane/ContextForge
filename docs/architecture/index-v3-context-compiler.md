@@ -267,7 +267,14 @@ The pinned real-repository manifest uses schema 2: every required file has a
 reviewed range, and every assertion binds to source ranges and CodeMap evidence
 IDs. The built-in runner clones each pinned revision independently, records
 structural and semantic build cost separately from warm retrieval, final answers,
-and blinded judging, and requires three repetitions for a passing report. It
+and blinded judging, and requires three independent clones multiplied by three
+model repetitions in each clone for a passing report. `repetition` remains the
+clone alias for older reports; `clone_repetition` and `model_repetition` record
+the separate coordinates. `--repetitions` selects clones and
+`--model-repetitions` selects model repeats. Indexing occurs once per clone;
+planner, paired answers and judges repeat independently. The runner atomically
+checkpoints completed phases/tasks to `--output`, including failed request cost
+and estimated/reported tokens, before final aggregation. It
 also records function-description coverage, `file_only` use, no-op identity,
 active index size, and fresh-process reload stability. Callback-based
 observations remain useful for unit tests but cannot certify a live pass.

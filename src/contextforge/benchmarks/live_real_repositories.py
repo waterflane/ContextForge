@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from contextforge.benchmarks.real_repositories import (
     RealBenchmarkBuildReport,
     RealBenchmarkMode,
     RealBenchmarkObservation,
+    RealBenchmarkPhaseUsage,
     RealBenchmarkTask,
     RealBenchmarkTaskReport,
     RealRepositoryBenchmarkManifest,
@@ -75,9 +77,10 @@ class _MeasuredProvider:
         self._provider = provider
         self.configuration = provider.configuration
         self.calls = 0
-        self.reported_input = 0
-        self.reported_output = 0
+        self.reported_input: int | None = None
+        self.reported_output: int | None = None
         self.estimated_input = 0
+        self.records: list[RealBenchmarkPhaseUsage] = []
 
     @property
     def provider_id(self) -> str:
@@ -92,14 +95,21 @@ class _MeasuredProvider:
         *,
         cancellation: asyncio.Event | None = None,
     ) -> ModelResponse:
-        self.estimated_input += estimate_request_context(
+        started = time.perf_counter()
+        calls_before = self.calls
+        estimated = estimate_request_context(
             request, self.configuration
         ).estimated_input_tokens
+        self.estimated_input += estimated
+        reported_in: int | None = None
+        reported_out: int | None = None
+        error: str | None = None
         try:
             response = await self._provider.complete_structured(
                 request, cancellation=cancellation
             )
         except ModelProviderError as exc:
+            error = type(exc).__name__
             self.calls += (
                 0
                 if isinstance(
@@ -112,15 +122,32 @@ class _MeasuredProvider:
                 else exc.total_provider_http_calls
             )
             raise
-        self.calls += (
-            response.diagnostic.total_provider_http_calls
-            if response.diagnostic is not None
-            else 1
-        )
-        if response.usage is not None:
-            self.reported_input += response.usage.input_tokens or 0
-            self.reported_output += response.usage.output_tokens or 0
-        return response
+        else:
+            self.calls += (
+                response.diagnostic.total_provider_http_calls
+                if response.diagnostic is not None
+                else 1
+            )
+            if response.usage is not None:
+                reported_in = response.usage.input_tokens
+                reported_out = response.usage.output_tokens
+                if reported_in is not None:
+                    self.reported_input = (self.reported_input or 0) + reported_in
+                if reported_out is not None:
+                    self.reported_output = (self.reported_output or 0) + reported_out
+            return response
+        finally:
+            self.records.append(
+                RealBenchmarkPhaseUsage(
+                    phase=request.operation_id,
+                    provider_calls=self.calls - calls_before,
+                    estimated_input_tokens=estimated,
+                    reported_input_tokens=reported_in,
+                    reported_output_tokens=reported_out,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    error=error,
+                )
+            )
 
     async def close(self) -> None:
         await self._provider.close()
@@ -360,8 +387,10 @@ async def _evaluate_task(
     provider: _MeasuredProvider,
     *,
     repetition: int,
+    model_repetition: int = 1,
     budget: ContextBudget,
 ) -> RealBenchmarkTaskReport:
+    usage_start = len(provider.records)
     _validate_reviewed_sources(root, task)
     started = time.perf_counter()
     retrieval_started = time.perf_counter()
@@ -455,8 +484,11 @@ async def _evaluate_task(
         ),
         paired_answer=paired,
     )
-    return evaluate_real_repository_observation(
-        task, observation, repetition=repetition
+    evaluated = evaluate_real_repository_observation(
+        task, observation, repetition=repetition, model_repetition=model_repetition
+    )
+    return evaluated.model_copy(
+        update={"phase_usage": tuple(provider.records[usage_start:])}
     )
 
 
@@ -466,6 +498,8 @@ async def run_pinned_real_repository_benchmark(
     configuration: ProviderConfiguration,
     *,
     repetitions: int = 3,
+    model_repetitions: int = 3,
+    report_path: str | Path | None = None,
     budget: ContextBudget | None = None,
     hash_seed_reloads: int = 100,
     semantic_max_files: int | None = None,
@@ -476,7 +510,7 @@ async def run_pinned_real_repository_benchmark(
 
     if manifest.schema_version != 2:
         raise ValueError("official live benchmark requires a reviewed v2 manifest")
-    if repetitions < 1:
+    if repetitions < 1 or model_repetitions < 1:
         raise ValueError("repetitions must be positive")
     if hash_seed_reloads < 0 or hash_seed_reloads > 100:
         raise ValueError("hash-seed reload count must be between 0 and 100")
@@ -493,11 +527,38 @@ async def run_pinned_real_repository_benchmark(
     )
     runs: list[RealBenchmarkTaskReport] = []
     builds: list[RealBenchmarkBuildReport] = []
+    completed_phases: list[dict[str, object]] = []
 
     def announce(message: str) -> None:
         if progress is not None:
             progress(message)
 
+    def checkpoint() -> None:
+        if report_path is None:
+            return
+        destination = Path(report_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_suffix(destination.suffix + ".tmp")
+        staging.write_text(
+            json.dumps(
+                {
+                    "status": "partial",
+                    "acceptance": "unverified",
+                    "suite_name": manifest.suite_name,
+                    "requested_clone_repetitions": repetitions,
+                    "requested_model_repetitions": model_repetitions,
+                    "builds": [b.model_dump(mode="json") for b in builds],
+                    "runs": [r.model_dump(mode="json") for r in runs],
+                    "completed_phases": completed_phases,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        staging.replace(destination)
+
+    checkpoint()
     for repetition in range(1, repetitions + 1):
         for repository in manifest.repositories:
             announce(f"{repository.repository_id} repeat {repetition}: cloning")
@@ -518,8 +579,13 @@ async def run_pinned_real_repository_benchmark(
                 )
                 runs.extend(
                     _skipped(
-                        task, mode, "external_source_missing", repetition=repetition
+                        task,
+                        mode,
+                        "external_source_missing",
+                        repetition=repetition,
+                        model_repetition=model_repetition,
                     )
+                    for model_repetition in range(1, model_repetitions + 1)
                     for task in tasks
                     for mode in RealBenchmarkMode
                 )
@@ -542,6 +608,16 @@ async def run_pinned_real_repository_benchmark(
                         structural_ms = round(
                             (time.perf_counter() - structural_start) * 1_000
                         )
+                        completed_phases.append(
+                            {
+                                "repository_id": repository.repository_id,
+                                "clone_repetition": repetition,
+                                "phase": "structural_index",
+                                "duration_ms": structural_ms,
+                                "provider_calls": 0,
+                            }
+                        )
+                        checkpoint()
                         semantic_start = time.perf_counter()
                         announce(
                             f"{repository.repository_id} repeat {repetition}: semantic"
@@ -566,9 +642,24 @@ async def run_pinned_real_repository_benchmark(
                         semantic_estimated_input = provider.estimated_input
                         reported_input = provider.reported_input
                         reported_output = provider.reported_output
+                        completed_phases.append(
+                            {
+                                "repository_id": repository.repository_id,
+                                "clone_repetition": repetition,
+                                "phase": "semantic_index",
+                                "duration_ms": semantic_ms,
+                                "provider_calls": semantic_calls,
+                                "estimated_input_tokens": semantic_estimated_input,
+                                "reported_input_tokens": reported_input,
+                                "reported_output_tokens": reported_output,
+                                "partial": report.partial,
+                            }
+                        )
+                        checkpoint()
                         noop_ms: int | None = None
                         noop_calls: int | None = None
                         noop_generation_unchanged: bool | None = None
+                        noop_reanalyzed: int | None = None
                         if not report.partial:
                             noop_start = time.perf_counter()
                             before_noop_calls = provider.calls
@@ -588,6 +679,7 @@ async def run_pinned_real_repository_benchmark(
                             )
                             noop_ms = round((time.perf_counter() - noop_start) * 1_000)
                             noop_calls = provider.calls - before_noop_calls
+                            noop_reanalyzed = len(noop.structural.extracted_paths)
                             noop_generation_unchanged = (
                                 noop.manifest.generation_id
                                 == report.manifest.generation_id
@@ -676,6 +768,7 @@ async def run_pinned_real_repository_benchmark(
                                 repository_id=repository.repository_id,
                                 repetition=repetition,
                                 status="partial" if report.partial else "complete",
+                                phase_usage=tuple(provider.records),
                                 reason=(
                                     "semantic_files_failed" if report.partial else None
                                 ),
@@ -705,6 +798,7 @@ async def run_pinned_real_repository_benchmark(
                                 noop_update_ms=noop_ms,
                                 noop_provider_calls=noop_calls,
                                 noop_generation_unchanged=noop_generation_unchanged,
+                                noop_structurally_reanalyzed_files=noop_reanalyzed,
                                 active_amplification=(
                                     artifact_bytes / source_bytes
                                     if source_bytes
@@ -717,32 +811,49 @@ async def run_pinned_real_repository_benchmark(
                                 fresh_process_reload_successes=reload_successes,
                             )
                         )
-                        for task in tasks:
-                            for mode in RealBenchmarkMode:
-                                announce(
-                                    f"{repository.repository_id} repeat {repetition}: "
-                                    f"{task.task_id} {mode.value}"
-                                )
-                                try:
-                                    runs.append(
-                                        await _evaluate_task(
-                                            root,
-                                            task,
-                                            mode,
-                                            provider,
-                                            repetition=repetition,
-                                            budget=effective_budget,
-                                        )
+                        for model_repetition in range(1, model_repetitions + 1):
+                            for task in tasks:
+                                for mode in RealBenchmarkMode:
+                                    announce(
+                                        f"{repository.repository_id} "
+                                        f"clone {repetition}, "
+                                        f"model {model_repetition}: "
+                                        f"{task.task_id} {mode.value}"
                                     )
-                                except (OSError, ValueError, ModelProviderError) as exc:
-                                    runs.append(
-                                        _skipped(
-                                            task,
-                                            mode,
-                                            _failure_reason(exc),
-                                            repetition=repetition,
+                                    usage_start = len(provider.records)
+                                    try:
+                                        runs.append(
+                                            await _evaluate_task(
+                                                root,
+                                                task,
+                                                mode,
+                                                provider,
+                                                repetition=repetition,
+                                                model_repetition=model_repetition,
+                                                budget=effective_budget,
+                                            )
                                         )
-                                    )
+                                    except (
+                                        OSError,
+                                        ValueError,
+                                        ModelProviderError,
+                                    ) as exc:
+                                        runs.append(
+                                            _skipped(
+                                                task,
+                                                mode,
+                                                _failure_reason(exc),
+                                                repetition=repetition,
+                                                model_repetition=model_repetition,
+                                            ).model_copy(
+                                                update={
+                                                    "phase_usage": tuple(
+                                                        provider.records[usage_start:]
+                                                    )
+                                                }
+                                            )
+                                        )
+                                    checkpoint()
                     finally:
                         await provider.close()
             except _ExternalRepositoryUnavailable:
@@ -760,7 +871,9 @@ async def run_pinned_real_repository_benchmark(
                         mode,
                         "external_source_unavailable",
                         repetition=repetition,
+                        model_repetition=model_repetition,
                     )
+                    for model_repetition in range(1, model_repetitions + 1)
                     for task in tasks
                     for mode in RealBenchmarkMode
                 )
@@ -779,13 +892,25 @@ async def run_pinned_real_repository_benchmark(
                             reason=reason,
                         )
                     )
-                completed = {(run.task_id, run.mode, run.repetition) for run in runs}
+                completed = {
+                    (run.task_id, run.mode, run.repetition, run.model_repetition)
+                    for run in runs
+                }
                 runs.extend(
-                    _skipped(task, mode, reason, repetition=repetition)
+                    _skipped(
+                        task,
+                        mode,
+                        reason,
+                        repetition=repetition,
+                        model_repetition=model_repetition,
+                    )
+                    for model_repetition in range(1, model_repetitions + 1)
                     for task in tasks
                     for mode in RealBenchmarkMode
-                    if (task.task_id, mode, repetition) not in completed
+                    if (task.task_id, mode, repetition, model_repetition)
+                    not in completed
                 )
+            checkpoint()
     result = aggregate_real_repository_report(
         manifest, tuple(runs), verified_pipeline=True, builds=tuple(builds)
     )
@@ -794,7 +919,7 @@ async def run_pinned_real_repository_benchmark(
     if endpoint.port is not None:
         host = f"{host}:{endpoint.port}"
     safe_endpoint = urlunsplit((endpoint.scheme, host, endpoint.path, "", ""))
-    return result.model_copy(
+    result = result.model_copy(
         update={
             "provider_endpoint": safe_endpoint,
             "model_id": configuration.model_id,
@@ -802,6 +927,10 @@ async def run_pinned_real_repository_benchmark(
             "reasoning_effort": configuration.reasoning_effort,
         }
     )
+
+    if report_path is not None:
+        Path(report_path).write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    return result
 
 
 __all__ = ["run_pinned_real_repository_benchmark"]

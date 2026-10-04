@@ -774,6 +774,7 @@ def test_official_runner_requires_reviewed_manifest_and_reports_missing_source()
                 {},
                 configuration,
                 repetitions=1,
+                model_repetitions=1,
             )
         )
     with pytest.raises(ValueError, match="semantic file limit"):
@@ -810,7 +811,9 @@ def test_official_runner_requires_reviewed_manifest_and_reports_missing_source()
     reviewed = type(manifest).model_validate_json(json.dumps(payload))
 
     report = asyncio.run(
-        run_pinned_real_repository_benchmark(reviewed, {}, configuration, repetitions=1)
+        run_pinned_real_repository_benchmark(
+            reviewed, {}, configuration, repetitions=1, model_repetitions=1
+        )
     )
 
     assert report.verified_pipeline
@@ -1011,16 +1014,27 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
         context_window=16_384,
         reasoning_effort="off",
     )
+    checkpoint = tmp_path / "live-report.json"
     report = asyncio.run(
         run_pinned_real_repository_benchmark(
             manifest,
             {"fixture": source},
             configuration,
-            repetitions=1,
+            repetitions=3,
+            model_repetitions=3,
+            report_path=checkpoint,
             hash_seed_reloads=0,
         )
     )
     assert not report.passed
+    assert len(report.builds) == 3
+    assert len(report.runs) == 18
+    assert {r.model_repetition for r in report.runs} == {1, 2, 3}
+    assert {r.clone_repetition for r in report.runs} == {1, 2, 3}
+    assert all(b.noop_structurally_reanalyzed_files == 0 for b in report.builds)
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["runs"]
+    assert all(b.phase_usage for b in report.builds)
+    assert all(r.phase_usage for r in report.runs)
     assert report.builds[0].status == "complete"
     assert report.builds[0].requested_functions == 1
     assert report.builds[0].described_functions == 1
@@ -1060,6 +1074,7 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
             {"fixture": source},
             configuration,
             repetitions=1,
+            model_repetitions=1,
             hash_seed_reloads=0,
         )
     )
@@ -1091,6 +1106,7 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
             {"fixture": source},
             configuration,
             repetitions=1,
+            model_repetitions=1,
             hash_seed_reloads=0,
         )
     )
@@ -1198,15 +1214,17 @@ def test_live_harness_clones_a_pinned_repository_and_removes_the_fixture(
 
     report = asyncio.run(
         run_real_repository_benchmark(
-            manifest, {"fixture": source}, evaluator, repetitions=3
+            manifest, {"fixture": source}, evaluator, repetitions=3, model_repetitions=3
         )
     )
 
     assert report.passed is False
     assert report.verified_pipeline is False
-    assert len(observed_roots) == 3
+    assert len(observed_roots) == 9
     assert len(set(observed_roots)) == 3
-    assert tuple(run.repetition for run in report.runs) == (1, 2, 3)
+    assert tuple(run.repetition for run in report.runs) == (1, 1, 1, 2, 2, 2, 3, 3, 3)
+    assert tuple(run.model_repetition for run in report.runs) == (1, 2, 3) * 3
+    assert all(run.clone_repetition == run.repetition for run in report.runs)
     assert all(not root.exists() for root in observed_roots)
     assert (source / "alpha.py").read_text(encoding="utf-8") == "alpha\n"
 

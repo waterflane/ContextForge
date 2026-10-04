@@ -297,11 +297,26 @@ class RealBenchmarkObservation(RealBenchmarkModel):
         return self
 
 
+class RealBenchmarkPhaseUsage(RealBenchmarkModel):
+    """Actual attempts retained even when a paired evaluation fails midway."""
+
+    phase: str
+    provider_calls: NonNegativeInt
+    estimated_input_tokens: NonNegativeInt
+    reported_input_tokens: NonNegativeInt | None = None
+    reported_output_tokens: NonNegativeInt | None = None
+    duration_ms: NonNegativeInt
+    error: str | None = None
+
+
 class RealBenchmarkTaskReport(RealBenchmarkModel):
     task_id: str
     repository_id: str
     mode: RealBenchmarkMode
     repetition: NonNegativeInt = 1
+    clone_repetition: NonNegativeInt | None = None
+    model_repetition: NonNegativeInt = 1
+    phase_usage: tuple[RealBenchmarkPhaseUsage, ...] = ()
     status: Literal["complete", "skipped"]
     skip_reason: str | None = None
     retrieved_top5: tuple[RepositoryRelativePath, ...] = ()
@@ -360,6 +375,10 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
 
     @model_validator(mode="after")
     def validate_status(self) -> RealBenchmarkTaskReport:
+        if self.clone_repetition is None:
+            object.__setattr__(self, "clone_repetition", self.repetition)
+        if self.clone_repetition != self.repetition or self.model_repetition < 1:
+            raise ValueError("clone alias and model repetition must be valid")
         if self.repetition < 1:
             raise ValueError("repetition must be positive")
         if self.status == "skipped":
@@ -416,6 +435,8 @@ class RealBenchmarkBuildReport(RealBenchmarkModel):
 
     repository_id: str
     repetition: NonNegativeInt
+    clone_repetition: NonNegativeInt | None = None
+    phase_usage: tuple[RealBenchmarkPhaseUsage, ...] = ()
     status: Literal["complete", "skipped", "partial"]
     reason: str | None = None
     failed_paths: tuple[RepositoryRelativePath, ...] = ()
@@ -439,6 +460,15 @@ class RealBenchmarkBuildReport(RealBenchmarkModel):
     active_amplification: float | None = Field(default=None, ge=0)
     maximum_shard_bytes: NonNegativeInt | None = None
     fresh_process_reload_successes: NonNegativeInt | None = None
+    noop_structurally_reanalyzed_files: NonNegativeInt | None = None
+
+    @model_validator(mode="after")
+    def validate_clone_coordinate(self) -> RealBenchmarkBuildReport:
+        if self.clone_repetition is None:
+            object.__setattr__(self, "clone_repetition", self.repetition)
+        if self.repetition < 1 or self.clone_repetition != self.repetition:
+            raise ValueError("build clone repetition must match its legacy alias")
+        return self
 
 
 class RealRepositoryBenchmarkReport(RealBenchmarkModel):
@@ -466,6 +496,7 @@ def evaluate_real_repository_observation(
     observation: RealBenchmarkObservation,
     *,
     repetition: int = 1,
+    model_repetition: int = 1,
 ) -> RealBenchmarkTaskReport:
     """Score an observation with fixed evidence gates, never task-specific rules."""
 
@@ -550,6 +581,7 @@ def evaluate_real_repository_observation(
         repository_id=task.repository_id,
         mode=observation.mode,
         repetition=repetition,
+        model_repetition=model_repetition,
         status="complete",
         retrieved_top5=observation.retrieved_top5,
         materialized_files=observation.materialized_files,
@@ -670,15 +702,24 @@ def aggregate_real_repository_report(
     repetitions = {run.repetition for run in runs}
     if not repetitions or repetitions != set(range(1, max(repetitions) + 1)):
         raise ValueError("report repetitions must be contiguous from one")
+    model_repetitions = {run.model_repetition for run in runs}
+    if model_repetitions != set(range(1, max(model_repetitions) + 1)):
+        raise ValueError("model repetitions must be contiguous from one")
     modes = tuple(RealBenchmarkMode) if verified_pipeline else (None,)
     expected_keys = {
-        (task_id, repetition, mode)
+        (task_id, repetition, model_repetition, mode)
         for task_id in expected
         for repetition in repetitions
+        for model_repetition in model_repetitions
         for mode in modes
     }
     actual_keys = {
-        (run.task_id, run.repetition, run.mode if verified_pipeline else None)
+        (
+            run.task_id,
+            run.repetition,
+            run.model_repetition,
+            run.mode if verified_pipeline else None,
+        )
         for run in runs
     }
     if (
@@ -696,7 +737,15 @@ def aggregate_real_repository_report(
         verified_pipeline=verified_pipeline,
         builds=builds,
         runs=tuple(
-            sorted(runs, key=lambda item: (item.task_id, item.repetition, item.mode))
+            sorted(
+                runs,
+                key=lambda item: (
+                    item.task_id,
+                    item.repetition,
+                    item.model_repetition,
+                    item.mode,
+                ),
+            )
         ),
         aggregates=aggregates,
         passed=(
@@ -705,12 +754,14 @@ def aggregate_real_repository_report(
             and len(manifest.tasks) >= 16
             and {task.dataset_split for task in manifest.tasks} == {"tuning", "holdout"}
             and len(repetitions) >= 3
+            and len(model_repetitions) >= 3
             and len(builds) == len(manifest.repositories) * len(repetitions)
             and all(
                 build.status == "complete"
                 and build.noop_update_ms is not None
                 and build.noop_generation_unchanged is True
                 and build.noop_provider_calls == 0
+                and build.noop_structurally_reanalyzed_files == 0
                 and build.active_amplification is not None
                 and build.active_amplification <= 12
                 and build.maximum_shard_bytes is not None
@@ -906,47 +957,54 @@ async def run_real_repository_benchmark(
     evaluator: RealRepositoryEvaluator,
     *,
     repetitions: int = 1,
+    model_repetitions: int = 1,
 ) -> RealRepositoryBenchmarkReport:
-    """Opt-in live harness. Missing/corrupt sources are skips and never passes."""
-
-    if repetitions < 1:
+    """One independent clone per repository; model repeats share that index."""
+    if repetitions < 1 or model_repetitions < 1:
         raise ValueError("repetitions must be positive")
     reports: list[RealBenchmarkTaskReport] = []
-    repositories = {item.repository_id: item for item in manifest.repositories}
-    for task in manifest.tasks:
-        repository = repositories[task.repository_id]
-        source = sources.get(task.repository_id)
+    for repository in manifest.repositories:
+        tasks = tuple(
+            t for t in manifest.tasks if t.repository_id == repository.repository_id
+        )
+        source = sources.get(repository.repository_id)
         for repetition in range(1, repetitions + 1):
-            if source is None:
-                reports.append(
-                    _skipped(
-                        task,
-                        RealBenchmarkMode.DETERMINISTIC,
-                        "external_source_missing",
-                        repetition=repetition,
-                    )
-                )
-                continue
+            reason = "external_source_missing"
             try:
-                with temporary_read_only_clone(source, repository.revision) as clone:
-                    observed = evaluator(clone, task)
-                    observation = (
-                        await observed if inspect.isawaitable(observed) else observed
-                    )
-                    reports.append(
-                        evaluate_real_repository_observation(
-                            task, observation, repetition=repetition
-                        )
-                    )
+                if source is not None:
+                    with temporary_read_only_clone(
+                        source, repository.revision
+                    ) as clone:
+                        for model_repetition in range(1, model_repetitions + 1):
+                            for task in tasks:
+                                observed = evaluator(clone, task)
+                                observation = (
+                                    await observed
+                                    if inspect.isawaitable(observed)
+                                    else observed
+                                )
+                                reports.append(
+                                    evaluate_real_repository_observation(
+                                        task,
+                                        observation,
+                                        repetition=repetition,
+                                        model_repetition=model_repetition,
+                                    )
+                                )
+                    continue
             except _ExternalRepositoryUnavailable:
-                reports.append(
-                    _skipped(
-                        task,
-                        RealBenchmarkMode.DETERMINISTIC,
-                        "external_source_unavailable",
-                        repetition=repetition,
-                    )
+                reason = "external_source_unavailable"
+            reports.extend(
+                _skipped(
+                    task,
+                    RealBenchmarkMode.DETERMINISTIC,
+                    reason,
+                    repetition=repetition,
+                    model_repetition=model_repetition,
                 )
+                for model_repetition in range(1, model_repetitions + 1)
+                for task in tasks
+            )
     return aggregate_real_repository_report(manifest, tuple(reports))
 
 
@@ -956,12 +1014,14 @@ def _skipped(
     reason: str,
     *,
     repetition: int = 1,
+    model_repetition: int = 1,
 ) -> RealBenchmarkTaskReport:
     return RealBenchmarkTaskReport(
         task_id=task.task_id,
         repository_id=task.repository_id,
         mode=mode,
         repetition=repetition,
+        model_repetition=model_repetition,
         status="skipped",
         skip_reason=reason,
         quality_gate_failed=True,
