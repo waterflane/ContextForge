@@ -41,6 +41,12 @@ from contextforge.intelligence.models import (
     Sha256,
     validate_portable_relative_path,
 )
+from contextforge.intelligence.source_evidence import (
+    SourceEvidenceUnit,
+    derive_source_evidence_units,
+    select_source_evidence_units,
+    source_evidence_id,
+)
 from contextforge.models import (
     ModelProvider,
     ModelProviderError,
@@ -56,7 +62,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 11
+RETRIEVAL_BUILD_VERSION = 12
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -202,6 +208,7 @@ class RetrievalDocument(IndexModel):
     qualified_symbols: tuple[str, ...] = ()
     source_identifiers: tuple[str, ...] = ()
     positional_postings: tuple[PositionalPosting, ...] = ()
+    source_units: tuple[SourceEvidenceUnit, ...] = ()
     semantic_quality: Literal["none", "complete", "partial", "deterministic"] = "none"
     semantic_synopsis: str = ""
     semantic_concepts: tuple[str, ...] = ()
@@ -416,6 +423,7 @@ class CandidateCard(IndexModel):
     ambiguous_identifiers: tuple[str, ...] = ()
     source_connections: tuple[VerifiedSourceConnection, ...] = ()
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
+    source_units: tuple[SourceEvidenceUnit, ...] = ()
     graph_neighbors: tuple[CandidateGraphNeighbor, ...] = ()
     provenance: tuple[str, ...]
     freshness: Literal["current"] = "current"
@@ -1026,6 +1034,7 @@ def build_retrieval_index(
                 qualified_symbols=qualified,
                 source_identifiers=identifiers,
                 positional_postings=postings,
+                source_units=derive_source_evidence_units(code_map),
                 semantic_quality="none" if card is None else card.quality,
                 semantic_synopsis="" if card is None else card.synopsis.text,
                 semantic_concepts=(
@@ -1808,6 +1817,9 @@ def _rank_candidates(
                 matched_concepts=concepts,
                 matched_symbols=matched_symbols[document.path],
                 evidence_ranges=evidence,
+                source_units=select_source_evidence_units(
+                    document.source_units, tuple(e.source_range for e in evidence)
+                ),
                 graph_neighbors=tuple(
                     sorted(
                         neighbors.get(document.path, ()),
@@ -2203,14 +2215,18 @@ def _candidate_evidence(
     query_terms: tuple[str, ...],
     symbol_matches: tuple[str, ...],
 ) -> tuple[CandidateEvidenceRange, ...]:
-    values: dict[tuple[int, int], CandidateEvidenceRange] = {}
+    values: dict[tuple[int, int, str], CandidateEvidenceRange] = {}
     matched_folded = {item.casefold() for item in symbol_matches}
     query = set(query_terms)
     for posting in document.positional_postings:
         if posting.identifier.casefold() in matched_folded or (
             set(_tokens(posting.identifier)) & query
         ):
-            key = (posting.source_range.start_line, posting.source_range.end_line)
+            key = (
+                posting.source_range.start_line,
+                posting.source_range.end_line,
+                posting.evidence_id,
+            )
             values[key] = CandidateEvidenceRange(
                 path=document.path,
                 source_range=posting.source_range,
@@ -2222,7 +2238,11 @@ def _candidate_evidence(
             continue
         for evidence in claim.evidence:
             if evidence.source_range is not None:
-                key = (evidence.source_range.start_line, evidence.source_range.end_line)
+                key = (
+                    evidence.source_range.start_line,
+                    evidence.source_range.end_line,
+                    evidence.evidence_id,
+                )
                 values[key] = CandidateEvidenceRange(
                     path=document.path,
                     source_range=evidence.source_range,
@@ -5534,12 +5554,7 @@ def _structural_evidence_id_from_source(
     fact_identity: str,
     source_range: SourceRange,
 ) -> str:
-    payload = (
-        f"{path}\0{source_sha256}\0{fact_identity}\0"
-        f"{source_range.start_line}:{source_range.start_column}:"
-        f"{source_range.end_line}:{source_range.end_column}"
-    )
-    return "structural-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    return source_evidence_id(path, source_sha256, fact_identity, source_range)
 
 
 def _estimate_tokens(text: str) -> int:

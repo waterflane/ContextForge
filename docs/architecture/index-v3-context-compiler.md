@@ -378,3 +378,17 @@ origin, facet weights, and expansion reasons. Model tags contribute semantic
 ranking only when their claims retain source-bound evidence. Deterministic
 fallback prose cannot establish semantic task grounding. Several independent
 grounded topic anchors retain separate source obligations.
+
+Derived retrieval records carry source evidence units for implementations,
+observed calls/references/callbacks, and decorators. Units retain the owner
+symbol, source hash, range, stable evidence ID, and verification basis. Observed
+callback syntax does not establish an internal call target. Candidate units use
+the smallest owning implementation for an address; unrelated class members are
+optional. Distinct evidence IDs sharing one range survive discovery. Derived
+analyzer version changes rebuild these records from saved CodeMaps, without
+extracting unchanged sources again.
+
+Python analyzer version 7 additionally records lambda callback arguments as
+observed syntax. Upgrading an index with older Python facts requires Python
+reanalysis; other language facts remain reusable. A subsequent unchanged build
+is a no-op and preserves the generation.

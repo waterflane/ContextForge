@@ -817,6 +817,14 @@
           },
           "title": "Topical Term Weights",
           "type": "object"
+        },
+        "source_units": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceEvidenceUnit"
+          },
+          "title": "Source Units",
+          "type": "array"
         }
       }
     },
@@ -1196,6 +1204,61 @@
         "original_task"
       ],
       "title": "QueryIntent",
+      "type": "object"
+    },
+    "SourceEvidenceUnit": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "owner_symbol_id": {
+          "title": "Owner Symbol Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "implementation",
+            "call",
+            "reference",
+            "callback",
+            "decorator"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/range"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "verified-implementation",
+            "observed-syntax"
+          ],
+          "title": "Basis",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_sha256",
+        "owner_symbol_id",
+        "kind",
+        "source_range",
+        "evidence_id",
+        "basis"
+      ],
+      "title": "SourceEvidenceUnit",
       "type": "object"
     }
   }

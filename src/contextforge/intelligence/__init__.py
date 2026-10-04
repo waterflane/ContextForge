@@ -233,6 +233,7 @@ from contextforge.intelligence.semantics import (
     build_semantic_index,
     load_file_semantic_analysis,
 )
+from contextforge.intelligence.source_evidence import SourceEvidenceUnit
 from contextforge.intelligence.store import (
     DEFAULT_CONFIG,
     IndexLayout,
@@ -378,6 +379,7 @@ __all__ = [
     "ExactGroup",
     "RepresentationCosts",
     "ResolvedSourceSymbol",
+    "SourceEvidenceUnit",
     "QueryIntent",
     "parse_query_intent",
     "RoleEvidenceBinding",

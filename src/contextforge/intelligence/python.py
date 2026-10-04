@@ -34,7 +34,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="6",
+    analyzer_version="7",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -151,7 +151,12 @@ def _callback_arguments(node: ast.Call) -> tuple[CallbackArgument, ...]:
     values = [
         CallbackArgument(observed_name=name, source_range=_node_range(argument))
         for argument in arguments
-        if (name := _dotted_name(argument)) is not None
+        if (
+            name := "<lambda>"
+            if isinstance(argument, ast.Lambda)
+            else _dotted_name(argument)
+        )
+        is not None
     ]
     return tuple(
         sorted(
