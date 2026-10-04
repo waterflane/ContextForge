@@ -641,31 +641,6 @@ def _entrypoint_handler_candidates(
                     "entrypoint_exported_callable",
                 )
 
-    if code_map.module_has_executable_code:
-        for item in code_map.imports:
-            if (
-                item.resolution != "internal"
-                or item.target_file_path is None
-                or item.imported_name is None
-                or _containing_symbol(code_map.symbols, item.source_range) is not None
-            ):
-                continue
-            target_map = by_path.get(item.target_file_path)
-            if target_map is None:
-                continue
-            matches = [
-                symbol
-                for symbol in target_map.symbols
-                if symbol.parent_symbol_id is None
-                and symbol.name == item.imported_name
-                and _is_exported_callable(symbol, target_map)
-            ]
-            if len(matches) == 1:
-                add(
-                    item.target_file_path,
-                    item.source_range,
-                    "entrypoint_bootstrap_import",
-                )
     return tuple(
         sorted(
             candidates.values(),
@@ -719,36 +694,6 @@ def _is_exported_callable(symbol: SymbolRecord, code_map: FileCodeMap) -> bool:
                 item.target_symbol_id == symbol.symbol_id for item in code_map.exports
             )
         )
-    )
-
-
-def _containing_symbol(
-    symbols: tuple[SymbolRecord, ...], source_range: SourceRange
-) -> SymbolRecord | None:
-    candidates = [
-        symbol
-        for symbol in symbols
-        if symbol.body_range is not None
-        and _range_contains(symbol.body_range, source_range)
-    ]
-    return min(
-        candidates,
-        key=lambda symbol: (
-            (symbol.body_range or symbol.declaration_range).end_line
-            - (symbol.body_range or symbol.declaration_range).start_line,
-            symbol.qualified_name,
-        ),
-        default=None,
-    )
-
-
-def _range_contains(container: SourceRange, nested: SourceRange) -> bool:
-    return (container.start_line, container.start_column) <= (
-        nested.start_line,
-        nested.start_column,
-    ) and (nested.end_line, nested.end_column) <= (
-        container.end_line,
-        container.end_column,
     )
 
 

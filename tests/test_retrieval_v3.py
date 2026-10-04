@@ -794,14 +794,16 @@ def test_evidence_planner_retains_only_supplied_role_bindings(tmp_path: Path) ->
     _write(
         tmp_path,
         "main.py",
-        "from handler import startup\n\nif __name__ == '__main__':\n    startup()\n",
+        "from handler import startup\n\ndef boot():\n    startup()\n",
     )
     report = _build(tmp_path)
 
     def respond(request: object, call: int) -> str:
         del call
         facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
-        candidate = facts["candidates"][0]
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "main.py"
+        )
         role_ids = {item["role_id"] for item in facts["task_evidence_roles"]}
         assert {"entrypoint", "implementation"} <= role_ids
         return json.dumps(

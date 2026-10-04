@@ -290,6 +290,10 @@ neighbors remain bounded independently. Exact groups retain their ordering;
 unclosed evidence requirements precede relevance in complementary selection.
 Centrality and inferred edges cannot admit a file without a lexical/exact seed
 or a verified connection. Query instruction words do not form coverage facets.
+Entrypoint evidence belongs to the source of a captured handler/callback flow.
+An executable module plus an import cannot establish that flow. Source-test
+coverage selects a verified counterpart by relevance; other related tests stay
+available as optional context instead of becoming universal obligations.
 
 Frozen source obligations retain declaration IDs and add implementation/call-site
 addresses from digest-checked persisted CodeMaps. The compiler selects source

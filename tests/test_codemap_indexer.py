@@ -72,6 +72,40 @@ def test_structural_index_round_trip_and_unchanged_reuse(tmp_path: Path) -> None
     ) == len(first.code_maps)
 
 
+def test_derived_projection_upgrade_reuses_saved_codemap_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextforge.intelligence.indexer as indexer
+
+    initialize_index(tmp_path)
+    _write(tmp_path, "service.py", "def execute_job():\n    return 7\n")
+    snapshot = scan_repository(tmp_path)
+    with acquire_index_lock(tmp_path, "first") as lock:
+        first = build_structural_index(snapshot, lock)
+    monkeypatch.setattr(
+        indexer,
+        "RETRIEVAL_BUILD_VERSION",
+        int(vars(indexer)["RETRIEVAL_BUILD_VERSION"]) + 1,
+    )
+
+    def forbidden_extraction(*args: object, **kwargs: object) -> None:
+        pytest.fail("unchanged source must reuse its saved CodeMap")
+
+    monkeypatch.setattr(indexer, "extract_code_map", forbidden_extraction)
+    with acquire_index_lock(tmp_path, "upgrade") as lock:
+        upgraded = build_structural_index(snapshot, lock)
+    assert upgraded.extracted_paths == ()
+    assert upgraded.reused_paths == ("service.py",)
+    assert upgraded.manifest.generation_id != first.manifest.generation_id
+    assert upgraded.code_maps == first.code_maps
+    assert first.generation_path.exists()
+    with acquire_index_lock(tmp_path, "noop") as lock:
+        unchanged = build_structural_index(snapshot, lock)
+    assert unchanged.manifest.generation_id == upgraded.manifest.generation_id
+    assert unchanged.extracted_paths == ()
+
+
 def test_changed_source_invalidates_only_its_extraction_input(tmp_path: Path) -> None:
     initialize_index(tmp_path)
     _write(tmp_path, "a.py", "def a():\n    return 1\n")

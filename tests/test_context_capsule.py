@@ -438,7 +438,7 @@ def test_automatic_selection_covers_requested_roles_before_upgrades(
     _write(
         tmp_path,
         "main.py",
-        "from handler import startup\n\nif __name__ == '__main__':\n    startup()\n",
+        "from handler import startup\n\ndef boot():\n    startup()\n",
     )
     _write(tmp_path, "tests/test_main.py", "from main import startup\n")
     _write(tmp_path, "config/settings.toml", "enabled = true\n")

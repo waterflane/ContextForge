@@ -26,7 +26,7 @@ def test_structural_generation_contains_deterministic_graph_and_orientation(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "main.py").write_text(
-        "from service import handle\n\nhandle()\n", encoding="utf-8"
+        "from service import handle\n\ndef boot():\n    handle()\n", encoding="utf-8"
     )
     (tmp_path / "service.py").write_text(
         "def handle() -> str:\n    return 'ok'\n", encoding="utf-8"
@@ -106,6 +106,23 @@ def test_entrypoint_handler_edges_require_callable_evidence(tmp_path: Path) -> N
     )
 
 
+def test_executable_entrypoint_import_does_not_establish_handler_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from handlers import endpoint\nprint('ready')\n", encoding="utf-8"
+    )
+    (tmp_path / "handlers.py").write_text(
+        "def endpoint():\n    return 1\n", encoding="utf-8"
+    )
+    snapshot = scan_repository(tmp_path)
+    graph = build_relationship_graph(
+        extract_code_maps(snapshot), calculate_source_snapshot_digest(snapshot)
+    )
+    assert any(edge.kind == "import" for edge in graph.edges)
+    assert not any(edge.kind == "entrypoint-handler" for edge in graph.edges)
+
+
 def test_entrypoint_handler_edges_capture_callback_and_callable_flows(
     tmp_path: Path,
 ) -> None:
@@ -135,7 +152,9 @@ def test_entrypoint_handler_edges_capture_callback_and_callable_flows(
     assert "entrypoint_exported_callable" in {
         edge.detection_method for edge in handlers
     }
-    assert "entrypoint_bootstrap_import" in {edge.detection_method for edge in handlers}
+    assert "entrypoint_bootstrap_import" not in {
+        edge.detection_method for edge in handlers
+    }
     assert {edge.source_file_path for edge in handlers} == {"server.py"}
     assert {
         node.path

@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 9
+RETRIEVAL_BUILD_VERSION = 10
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -853,7 +853,7 @@ def _structural_roles(
         if any(
             e.kind == "entrypoint-handler"
             and e.provenance == "verified"
-            and code_map.path in {nodes[e.source_node_id], nodes[e.target_node_id]}
+            and code_map.path == nodes[e.source_node_id]
             for e in graph.edges
         ):
             roles.add("entrypoint")
@@ -4296,6 +4296,16 @@ def build_evidence_requirements(
                     visited.add(candidate.path)
                     if depth < 1:
                         queue.append((candidate, depth + 1))
+        test_neighbors = [
+            by_path[n.path]
+            for n in anchor.graph_neighbors
+            if n.path in by_path
+            and "source-test" in _verified_neighbor_kinds(n)
+            and FILE_POLICY_REGISTRY.is_test(n.path)
+        ]
+        preferred_test = min(
+            test_neighbors, key=lambda c: (-c.bm25_score, c.path), default=None
+        )
         for neighbor in anchor.graph_neighbors:
             candidate = by_path.get(neighbor.path)
             if candidate is None:
@@ -4304,7 +4314,7 @@ def build_evidence_requirements(
             if (
                 "test" in kinds
                 and "source-test" in verified
-                and FILE_POLICY_REGISTRY.is_test(candidate.path)
+                and candidate == preferred_test
             ):
                 add(candidate, anchor, "verified-source-test", "test")
             if "configuration" in kinds and "config-consumer" in verified:
