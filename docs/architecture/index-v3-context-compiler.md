@@ -369,3 +369,12 @@ is false sufficient even when no semantic judge has run. Answer evaluation adds
 citation checks and groundedness; missing answer/judge evaluation remains
 semantically unverified. All model payloads, including blinded judges, receive
 only public assertion IDs and descriptions, never reviewed support addresses.
+
+Broad discovery covers topical facets with up to four lexical seeds and verified
+two-hop expansion before the 64-candidate pool is truncated. Explicit anchors
+retain exact-group priority; complementary selections cover frozen obligations,
+then uncovered IDF-weighted facets. Diagnostics preserve field scores, match
+origin, facet weights, and expansion reasons. Model tags contribute semantic
+ranking only when their claims retain source-bound evidence. Deterministic
+fallback prose cannot establish semantic task grounding. Several independent
+grounded topic anchors retain separate source obligations.

@@ -809,6 +809,14 @@
           ],
           "title": "Match Origin",
           "type": "string"
+        },
+        "topical_term_weights": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Topical Term Weights",
+          "type": "object"
         }
       }
     },

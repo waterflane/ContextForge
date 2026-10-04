@@ -419,6 +419,55 @@ def test_grounded_topic_requires_materialized_support(
     )
 
 
+@pytest.mark.parametrize("missing", [None, "amber.py", "cobalt.py"])
+def test_grounded_facets_keep_separate_source_obligations(
+    tmp_path: Path, missing: str | None
+) -> None:
+    for name in ("amber", "cobalt"):
+        (tmp_path / f"{name}.py").write_text(
+            f"def {name}_stage():\n    return 7\n", encoding="utf-8"
+        )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, "amber cobalt", manifest=report.manifest)
+    )
+    candidates = tuple(
+        candidate.model_copy(
+            update={
+                "match_origin": "grounded-semantic",
+                "matched_concepts": (Path(candidate.path).stem,),
+                "topical_term_weights": {Path(candidate.path).stem: 1.0},
+                "evidence_ranges": tuple(
+                    evidence.model_copy(update={"strength": "grounded"})
+                    for evidence in candidate.evidence_ranges
+                ),
+            }
+        )
+        for candidate in retrieval.candidates
+    )
+    task = "Explain amber cobalt behavior"
+    requirements = build_evidence_requirements(task, candidates)
+    assert {r.path for r in requirements.source_evidence} == {"amber.py", "cobalt.py"}
+    compiled = compile_context_capsule(
+        tmp_path,
+        task,
+        retrieval.model_copy(
+            update={
+                "task": task,
+                "requirements": requirements,
+                "candidates": tuple(c for c in candidates if c.path != missing),
+            }
+        ),
+        budget=ContextBudget(context_window_tokens=8_000),
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "sufficient" if missing is None else "insufficient"
+    )
+
+
 @pytest.mark.parametrize("identifier", ["jobs.py", "jobs.execute_job", "`execute_job`"])
 def test_exact_anchor_forms_resolve_verified_source(
     tmp_path: Path, identifier: str

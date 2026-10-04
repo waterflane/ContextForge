@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 10
+RETRIEVAL_BUILD_VERSION = 11
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -407,6 +407,7 @@ class CandidateCard(IndexModel):
     score: NonNegativeFloat
     bm25_score: NonNegativeFloat
     bm25_field_scores: dict[str, NonNegativeFloat] = Field(default_factory=dict)
+    topical_term_weights: dict[str, NonNegativeFloat] = Field(default_factory=dict)
     selection_reasons: tuple[str, ...] = ()
     structural_roles: tuple[TaskEvidenceRoleKind, ...] = ()
     matched_concepts: tuple[str, ...] = ()
@@ -1007,24 +1008,9 @@ def build_retrieval_index(
                 tag.text
                 for tag in (() if card is None else card.file_tags)
                 if tag.provenance == "model"
+                and any(claim.text == tag.text for claim in semantic_claims)
             ),
-            "grounded_semantics": (
-                ""
-                if card is None
-                else "\n".join(
-                    (
-                        card.ranking_text(include_call_expressions=False),
-                        *(
-                            claim.text
-                            for claim in semantic_claims
-                            if any(
-                                item.evidence_id.startswith("lexicon-call:")
-                                for item in claim.evidence
-                            )
-                        ),
-                    )
-                )
-            ),
+            "grounded_semantics": "\n".join(claim.text for claim in semantic_claims),
         }
         fields = tuple(_retrieval_field(name, values[name]) for name in FIELD_WEIGHTS)
         documents.append(
@@ -1098,7 +1084,7 @@ def _retrieval_semantic_claims(
         *(claim for values in card.profile_facts.values() for claim in values),
     ]
     values: dict[tuple[str, tuple[str, ...]], RetrievalSemanticClaim] = {}
-    for claim in claims:
+    for claim in claims if card.provenance.method == "model" else ():
         evidence_values: list[RetrievalSemanticEvidence] = []
         for evidence_id in claim.evidence_ids:
             source_range = (
@@ -1180,6 +1166,31 @@ def _retrieval_semantic_claims(
                 values[(expression, (call_evidence.evidence_id,))] = (
                     RetrievalSemanticClaim(text=expression, evidence=(call_evidence,))
                 )
+    source_ranges = {
+        evidence.evidence_id: evidence.source_range
+        for claim in values.values()
+        for evidence in claim.evidence
+    }
+    source_ranges.update(
+        (identity, evidence.source_range)
+        for identity, evidence in known.items()
+        if evidence.source_range is not None
+    )
+    for tag in card.file_tags:
+        if (
+            tag.provenance != "model"
+            or not set(tag.evidence_ids) <= source_ranges.keys()
+        ):
+            continue
+        evidence = tuple(
+            RetrievalSemanticEvidence(
+                evidence_id=identity, source_range=source_ranges[identity]
+            )
+            for identity in tag.evidence_ids
+        )
+        values[(tag.text, tag.evidence_ids)] = RetrievalSemanticClaim(
+            text=tag.text, evidence=evidence
+        )
     return tuple(values[key] for key in sorted(values))
 
 
@@ -1655,9 +1666,21 @@ def _rank_candidates(
 
     if not isinstance(graph, (RelationshipGraph, RelationshipGraphProjection)):
         raise TypeError("relationship graph is required")
-    query_terms = _tokens(task)
     task_folded = task.casefold()
     intent = parse_query_intent(task)
+    query_terms = tuple(
+        sorted(
+            {
+                *intent.facet_terms,
+                *(
+                    term
+                    for anchor in intent.explicit_anchors
+                    for term in _tokens(anchor)
+                ),
+            }
+        )
+    ) or _tokens(task)
+    weights = _facet_weights(intent.facet_terms, index)
     identifier_task_folded = _exact_identifier_scope(task) or task_folded
     working = set(working_set)
     diff = set(diff_paths)
@@ -1731,6 +1754,11 @@ def _rank_candidates(
         evidence = _candidate_evidence(
             document, query_terms, matched_symbols[document.path]
         )
+        topical_weights = {
+            term: weight
+            for term, weight in weights.items()
+            if any(term in field.terms for field in document.fields)
+        }
         synopsis = (
             document.semantic_synopsis
             if document.semantic_synopsis
@@ -1760,10 +1788,13 @@ def _rank_candidates(
                 exact_group=exact_by_path[document.path],
                 match_origin="explicit-anchor"
                 if explicit_match
+                else "grounded-semantic"
+                if concepts and any(e.strength == "grounded" for e in evidence)
                 else "lexical-discovery",
                 score=max(score, 0.0),
                 bm25_score=max(bm25, 0.0),
                 bm25_field_scores=field_scores,
+                topical_term_weights=topical_weights,
                 structural_roles=document.structural_roles,
                 selection_reasons=tuple(
                     sorted(
@@ -1838,6 +1869,57 @@ def _topical_seeds(
     return seeds, topical
 
 
+def _facet_weights(terms: tuple[str, ...], index: RetrievalIndex) -> dict[str, float]:
+    return {
+        term: math.log(1 + (index.document_count - frequency + 0.5) / (frequency + 0.5))
+        for term in terms
+        for frequency in [
+            max(
+                (values.get(term, 0) for values in index.document_frequencies.values()),
+                default=0,
+            )
+        ]
+    }
+
+
+def _facet_gain(candidate: CandidateCard, uncovered: set[str]) -> float:
+    return sum(
+        candidate.topical_term_weights.get(term, 0.0) for term in sorted(uncovered)
+    )
+
+
+def _grounded_topic_anchors(
+    candidates: list[CandidateCard], intent: QueryIntent
+) -> tuple[CandidateCard, ...]:
+    remaining = [
+        c
+        for c in candidates
+        if c.matched_concepts
+        and any(e.strength == "grounded" for e in c.evidence_ranges)
+    ]
+    uncovered = set(intent.facet_terms)
+    selected: list[CandidateCard] = []
+
+    def gain(c: CandidateCard, terms: set[str]) -> float:
+        matched = {
+            t for concept in c.matched_concepts for t in _tokens(concept)
+        } & terms
+        return sum(c.topical_term_weights.get(t, 1.0) for t in sorted(matched))
+
+    while remaining and uncovered and len(selected) < 4:
+        candidate = min(
+            remaining, key=lambda c: (-gain(c, uncovered), -c.bm25_score, c.path)
+        )
+        if gain(candidate, uncovered) == 0:
+            break
+        selected.append(candidate)
+        uncovered -= {
+            t for concept in candidate.matched_concepts for t in _tokens(concept)
+        }
+        remaining.remove(candidate)
+    return tuple(selected)
+
+
 def _complementary_candidates(
     task: str, index: RetrievalIndex, ranked: list[CandidateCard]
 ) -> list[CandidateCard]:
@@ -1897,7 +1979,12 @@ def _complementary_candidates(
             update={
                 "selection_reasons": tuple(
                     sorted({*c.selection_reasons, *reasons[c.path]})
-                )
+                ),
+                "match_origin": "verified-expansion"
+                if reasons[c.path]
+                and c.bm25_score == 0
+                and c.match_origin == "lexical-discovery"
+                else c.match_origin,
             }
         )
         for c in ranked
@@ -1917,6 +2004,9 @@ def _complementary_candidates(
         and _binding_matches_requirements(r, c, requirements)
     }
     selected_ids = {c.candidate_id for c in selected}
+    uncovered_facets = set(parse_query_intent(task).facet_terms) - {
+        term for c in selected for term in c.topical_term_weights
+    }
     remaining = [c for c in available if c.candidate_id not in selected_ids]
     while remaining and len(selected) < PLANNING_MAX_POOL_CANDIDATES:
         candidate = min(
@@ -1932,12 +2022,14 @@ def _complementary_candidates(
                         and _binding_matches_requirements(r, c, requirements)
                     }
                 ),
+                -_facet_gain(c, uncovered_facets),
                 -c.bm25_score,
                 -c.score,
                 c.path,
             ),
         )
         selected.append(candidate)
+        uncovered_facets -= candidate.topical_term_weights.keys()
         remaining.remove(candidate)
         covered.update(
             r.role_id
@@ -2735,7 +2827,7 @@ def _matched_concepts(
     query = set(query_terms)
     return tuple(
         concept
-        for concept in document.semantic_concepts
+        for concept in sorted({claim.text for claim in document.semantic_claims})
         if set(_tokens(concept)) & query
     )
 
@@ -4800,7 +4892,7 @@ def build_evidence_requirements(
                 set(),
             )
         ]
-        anchors = tuple(
+        anchors = _grounded_topic_anchors(implementations or relevant, intent) or tuple(
             sorted(implementations or relevant, key=lambda c: (-c.bm25_score, c.path))[
                 :1
             ]
