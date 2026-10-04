@@ -1903,7 +1903,10 @@ def _complementary_candidates(
     ]
     requirements = build_evidence_requirements(task, tuple(available))
     required = {r.candidate_id for r in requirements.source_evidence}
-    selected = [c for c in available if c.exact_group != "approximate"]
+    selected = sorted(
+        (c for c in available if c.exact_group != "approximate"),
+        key=lambda c: (_group_order(c.exact_group), -c.score, c.path),
+    )
     covered = {
         r.role_id
         for r in roles
@@ -2199,9 +2202,14 @@ def _resolve_source_symbols(
                 or payload.get("source_sha256") != candidate.source_sha256
             ):
                 raise ValueError("resolved anchor CodeMap identity is stale")
-            by_name = {s["qualified_name"]: s for s in payload["symbols"]}
+            by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for symbol in payload["symbols"]:
+                by_name[symbol["qualified_name"]].append(symbol)
             for query, name, resolution in resolved[candidate.path]:
-                symbol = by_name[name]
+                if len(by_name[name]) != 1:
+                    ambiguous.add(query)
+                    continue
+                symbol = by_name[name][0]
                 declaration = SourceRange.model_validate(symbol["declaration_range"])
                 ending = SourceRange.model_validate(
                     symbol.get("body_range") or symbol["declaration_range"]
@@ -2256,6 +2264,15 @@ def _resolve_source_symbols(
             candidate.model_copy(
                 update={
                     "resolved_symbols": tuple(symbols),
+                    "exact_group": min(
+                        (candidate.exact_group, "exact_qualified_symbol"),
+                        key=_group_order,
+                    )
+                    if any(
+                        "." in s.query_identifier or "::" in s.query_identifier
+                        for s in symbols
+                    )
+                    else candidate.exact_group,
                     "ambiguous_identifiers": tuple(sorted(ambiguous)),
                     "evidence_ranges": tuple(
                         sorted(
@@ -2270,7 +2287,10 @@ def _resolve_source_symbols(
                 }
             )
         )
-    return result
+    return [
+        c.model_copy(update={"ambiguous_identifiers": tuple(sorted(ambiguous))})
+        for c in result
+    ]
 
 
 def _restore_exact_identifier_evidence(

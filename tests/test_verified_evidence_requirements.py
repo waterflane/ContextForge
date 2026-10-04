@@ -138,6 +138,42 @@ def test_class_qualified_anchor_requires_unique_source_identity(
     )
 
 
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_qualified_resolution_preserves_priority_and_symbol_ambiguity(
+    tmp_path: Path, duplicate: bool
+) -> None:
+    (tmp_path / "widget.py").write_text(
+        "class Widget:\n    def run(self):\n        return 7\n"
+        + ("    def run(self):\n        return 9\n" if duplicate else ""),
+        encoding="utf-8",
+    )
+    for i in range(70):
+        (tmp_path / f"other{i:02}.py").write_text(
+            f"class Other{i}:\n    def run(self):\n        return 0\n",
+            encoding="utf-8",
+        )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain Widget.run implementation"
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert result.requirements is not None
+    if not duplicate:
+        assert result.candidates[0].path == "widget.py"
+        assert result.candidates[0].exact_group == "exact_qualified_symbol"
+    else:
+        assert result.requirements.ambiguous_identifiers == ("Widget.run",)
+    compiled = compile_context_capsule(
+        tmp_path, task, result, budget=ContextBudget(context_window_tokens=8_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "insufficient" if duplicate else "sufficient"
+    )
+
+
 @pytest.mark.parametrize("long_method", [False, True])
 def test_required_method_does_not_require_its_large_container(
     tmp_path: Path, long_method: bool
