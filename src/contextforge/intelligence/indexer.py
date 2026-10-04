@@ -190,7 +190,9 @@ def build_structural_index(
     orientation_digest = write_index_record(
         lock, "orientation.json", orientation_content
     )
-    structural_retrieval = build_retrieval_index(code_maps, (), snapshot_digest)
+    structural_retrieval = build_retrieval_index(
+        code_maps, (), snapshot_digest, relationship_graph=graph
+    )
     structural_retrieval_digest = write_retrieval_index(
         lock, "retrieval-structural.json", structural_retrieval
     )

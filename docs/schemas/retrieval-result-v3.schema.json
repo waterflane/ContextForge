@@ -94,6 +94,17 @@
     },
     "evidence_diagnostics": {
       "$ref": "evidence-coverage-diagnostics-v1.schema.json"
+    },
+    "requirements": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceRequirements"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "$defs": {
@@ -357,6 +368,17 @@
         },
         "diagnostics": {
           "$ref": "#/$defs/planning_diagnostics"
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       }
     },
@@ -528,6 +550,25 @@
           "items": {
             "type": "string"
           }
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "missing_requirement_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Requirement Ids",
+          "type": "array"
         }
       }
     },
@@ -658,40 +699,12 @@
           }
         },
         "graph_neighbors": {
-          "type": "array",
+          "default": [],
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "path",
-              "distance",
-              "relationship_kinds",
-              "provenance"
-            ],
-            "properties": {
-              "path": {
-                "type": "string"
-              },
-              "distance": {
-                "enum": [
-                  1,
-                  2
-                ]
-              },
-              "relationship_kinds": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "provenance": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            }
-          }
+            "$ref": "#/$defs/CandidateGraphNeighbor"
+          },
+          "title": "Graph Neighbors",
+          "type": "array"
         },
         "provenance": {
           "description": "Validated ranking signals, including current-diff and working-set when applicable.",
@@ -730,8 +743,217 @@
           },
           "title": "Selection Reasons",
           "type": "array"
+        },
+        "structural_roles": {
+          "default": [],
+          "items": {
+            "enum": [
+              "entrypoint",
+              "implementation",
+              "caller",
+              "callee",
+              "configuration",
+              "test",
+              "documentation",
+              "public_api",
+              "data_model",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "title": "Structural Roles",
+          "type": "array"
         }
       }
+    },
+    "EvidenceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/task_role"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchors",
+          "type": "array"
+        },
+        "source_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "title": "Source Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "title": "EvidenceRequirements",
+      "type": "object"
+    },
+    "EvidenceRequirement": {
+      "additionalProperties": false,
+      "description": "Source-bound obligation derived locally, never from a model-created fact.",
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "role_id": {
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "basis": {
+          "enum": [
+            "exact-symbol",
+            "verified-call",
+            "verified-source-test",
+            "verified-config",
+            "task-syntax"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "anchor_candidate_id": {
+          "title": "Anchor Candidate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "role_id",
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "basis",
+        "anchor_candidate_id"
+      ],
+      "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "CandidateGraphNeighbor": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "distance": {
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Distance",
+          "type": "integer"
+        },
+        "relationship_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Relationship Kinds",
+          "type": "array"
+        },
+        "provenance": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provenance",
+          "type": "array"
+        },
+        "direction": {
+          "default": "unknown",
+          "enum": [
+            "outgoing",
+            "incoming",
+            "both",
+            "unknown"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "verified_relationship_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verified Relationship Kinds"
+        },
+        "outgoing_verified_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outgoing Verified Kinds"
+        },
+        "incoming_verified_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Incoming Verified Kinds"
+        }
+      },
+      "required": [
+        "path",
+        "distance",
+        "relationship_kinds",
+        "provenance"
+      ],
+      "title": "CandidateGraphNeighbor",
+      "type": "object"
     }
   }
 }

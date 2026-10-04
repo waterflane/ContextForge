@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from contextforge.intelligence.retrieval import CoverageLedger, RetrievalResult
+from contextforge.intelligence.retrieval import (
+    CoverageLedger,
+    EvidenceRequirements,
+    RetrievalResult,
+)
 
 if TYPE_CHECKING:
     from contextforge.context.capsule import CompilationSufficiency
@@ -61,6 +65,8 @@ class EvidenceCoverageDiagnostics(BaseModel):
     effective_reason_codes: tuple[CompilationReasonCode, ...] = ()
     planner_action_deltas: tuple[PlannerActionDelta, ...] = ()
     compact_profile: bool | None = None
+    requirements: EvidenceRequirements | None = None
+    missing_requirement_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_accounting(self) -> EvidenceCoverageDiagnostics:
@@ -152,6 +158,10 @@ def retrieval_evidence_diagnostics(
         covered_role_ids=() if ledger is None else ledger.covered_role_ids,
         missing_role_ids=() if ledger is None else ledger.missing_role_ids,
         planner_action_deltas=tuple(action_deltas),
+        requirements=result.requirements,
+        missing_requirement_ids=()
+        if ledger is None
+        else ledger.missing_requirement_ids,
     )
 
 
@@ -181,5 +191,7 @@ def compiled_evidence_diagnostics(
             ),
             "effective_reason_codes": codes,
             "compact_profile": compact_profile,
+            "requirements": ledger.requirements,
+            "missing_requirement_ids": ledger.missing_requirement_ids,
         }
     )

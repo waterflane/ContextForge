@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 8
+RETRIEVAL_BUILD_VERSION = 9
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -176,6 +176,7 @@ class RetrievalDocument(IndexModel):
     semantic_concepts: tuple[str, ...] = ()
     semantic_claims: tuple[RetrievalSemanticClaim, ...] = ()
     file_tags: tuple[FileSearchTag, ...] = ()
+    structural_roles: tuple[TaskEvidenceRoleKind, ...] = ()
 
     @field_validator("path")
     @classmethod
@@ -317,6 +318,10 @@ class CandidateGraphNeighbor(IndexModel):
     distance: Literal[1, 2]
     relationship_kinds: tuple[str, ...]
     provenance: tuple[str, ...]
+    direction: Literal["outgoing", "incoming", "both", "unknown"] = "unknown"
+    verified_relationship_kinds: tuple[str, ...] | None = None
+    outgoing_verified_kinds: tuple[str, ...] | None = None
+    incoming_verified_kinds: tuple[str, ...] | None = None
 
     @field_validator("path")
     @classmethod
@@ -343,6 +348,7 @@ class CandidateCard(IndexModel):
     bm25_score: NonNegativeFloat
     bm25_field_scores: dict[str, NonNegativeFloat] = Field(default_factory=dict)
     selection_reasons: tuple[str, ...] = ()
+    structural_roles: tuple[TaskEvidenceRoleKind, ...] = ()
     matched_concepts: tuple[str, ...] = ()
     matched_symbols: tuple[str, ...] = ()
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
@@ -363,6 +369,31 @@ class TaskEvidenceRole(IndexModel):
 
     role_id: str = Field(min_length=1, max_length=256)
     kind: TaskEvidenceRoleKind
+
+
+class EvidenceRequirement(IndexModel):
+    """Source-bound obligation derived locally, never from a model-created fact."""
+
+    requirement_id: str
+    role_id: str
+    candidate_id: str
+    path: str
+    source_sha256: Sha256
+    evidence_ids: tuple[str, ...] = ()
+    basis: Literal[
+        "exact-symbol",
+        "verified-call",
+        "verified-source-test",
+        "verified-config",
+        "task-syntax",
+    ]
+    anchor_candidate_id: str
+
+
+class EvidenceRequirements(IndexModel):
+    roles: tuple[TaskEvidenceRole, ...]
+    anchors: tuple[str, ...] = ()
+    source_evidence: tuple[EvidenceRequirement, ...] = ()
 
 
 class RoleEvidenceBinding(IndexModel):
@@ -395,6 +426,8 @@ class CoverageLedger(IndexModel):
     ranges: tuple[CandidateEvidenceRange, ...] = ()
     covered_graph_endpoints: tuple[str, ...] = ()
     missing_graph_endpoints: tuple[str, ...] = ()
+    requirements: EvidenceRequirements | None = None
+    missing_requirement_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_coverage(self) -> CoverageLedger:
@@ -536,6 +569,7 @@ class EvidencePlan(IndexModel):
     items: tuple[PlannedEvidence, ...] = Field(max_length=PLANNING_MAX_FILES)
     role_bindings: tuple[RoleEvidenceBinding, ...] = ()
     coverage_ledger: CoverageLedger | None = None
+    requirements: EvidenceRequirements | None = None
     sufficiency: Literal["sufficient", "insufficient"] = "sufficient"
     interpretation: str | None = Field(default=None, max_length=2_000)
     diagnostics: PlanningDiagnostics
@@ -564,6 +598,7 @@ class RetrievalResult(IndexModel):
     coverage_ledger: CoverageLedger | None = None
     coverage_history: tuple[CoverageLedger, ...] = ()
     plan_requested: bool | None = None
+    requirements: EvidenceRequirements | None = None
 
     @computed_field(return_type=Any)  # type: ignore[prop-decorator]
     @property
@@ -781,6 +816,50 @@ class EvidencePlanningError(RuntimeError):
         self.diagnostics = diagnostics
 
 
+def _structural_roles(
+    code_map: FileCodeMap, graph: RelationshipGraph | None
+) -> tuple[TaskEvidenceRoleKind, ...]:
+    roles: set[TaskEvidenceRoleKind] = set()
+    profile = FILE_POLICY_REGISTRY.profile(code_map.path)
+    if FILE_POLICY_REGISTRY.is_test(code_map.path):
+        roles.add("test")
+    elif profile == "code":
+        roles.add("implementation")
+    if profile == "documentation":
+        roles.add("documentation")
+    if (
+        profile == "config"
+        or code_map.configuration_key_digests
+        or any(s.configuration_keys for s in code_map.symbols)
+    ):
+        roles.add("configuration")
+    if code_map.exports or any(
+        s.visibility in {"public", "explicit_export"} for s in code_map.symbols
+    ):
+        roles.add("public_api")
+    if any(
+        s.kind.value in {"class", "interface", "struct", "enum", "type_alias", "record"}
+        for s in code_map.symbols
+    ):
+        roles.add("data_model")
+    if graph is not None:
+        nodes = {n.node_id: n.path for n in graph.nodes}
+        for edge in graph.edges:
+            if edge.kind == "call" and edge.provenance == "verified":
+                if nodes[edge.source_node_id] == code_map.path:
+                    roles.add("caller")
+                if nodes[edge.target_node_id] == code_map.path:
+                    roles.add("callee")
+        if any(
+            e.kind == "entrypoint-handler"
+            and e.provenance == "verified"
+            and code_map.path in {nodes[e.source_node_id], nodes[e.target_node_id]}
+            for e in graph.edges
+        ):
+            roles.add("entrypoint")
+    return tuple(sorted(roles))
+
+
 def build_retrieval_index(
     code_maps: tuple[FileCodeMap, ...],
     cards: tuple[SemanticCard, ...],
@@ -869,6 +948,7 @@ def build_retrieval_index(
             RetrievalDocument(
                 path=code_map.path,
                 source_sha256=code_map.source_sha256,
+                structural_roles=_structural_roles(code_map, relationship_graph),
                 source_size_bytes=code_map.source_size_bytes,
                 line_count=code_map.line_count,
                 declaration_count=len(code_map.symbols),
@@ -1416,12 +1496,18 @@ async def retrieve_context_candidates(
         ranked_candidates[:seed_limit],
     )
     candidates = ranked_candidates[:limit]
-    retrieval_ledger = build_coverage_ledger(task, tuple(candidates))
+    requirements = build_evidence_requirements(
+        task, tuple(ranked_candidates[:planning_max_pool_candidates])
+    )
+    retrieval_ledger = build_coverage_ledger(
+        task, tuple(candidates), requirements=requirements
+    )
     result = RetrievalResult(
         source_snapshot_digest=active.build.source_snapshot_digest,
         generation_id=active.generation_id,
         task=task,
         candidates=tuple(candidates),
+        requirements=requirements,
         coverage_ledger=retrieval_ledger,
         coverage_history=(retrieval_ledger,),
         plan_requested=mode != ContextPlanningMode.OFF,
@@ -1581,6 +1667,7 @@ def _rank_candidates(
                 score=max(score, 0.0),
                 bm25_score=max(bm25, 0.0),
                 bm25_field_scores=field_scores,
+                structural_roles=document.structural_roles,
                 selection_reasons=tuple(
                     sorted(
                         {exact_by_path[document.path]}
@@ -1858,6 +1945,12 @@ def _candidate_neighbors(
         grouped[(edge.source_path, edge.target_path)].append(edge)
         grouped[(edge.target_path, edge.source_path)].append(edge)
     by_path: dict[str, tuple[CandidateGraphNeighbor, ...]] = {}
+
+    def verified_kinds(edge: FileRelationshipProjection) -> tuple[str, ...]:
+        if edge.verified_relationship_kinds is not None:
+            return edge.verified_relationship_kinds
+        return edge.relationship_kinds if set(edge.provenance) == {"verified"} else ()
+
     for source in {item.path for item in projection.file_metrics}:
         values = []
         for (candidate_source, target), edges in sorted(grouped.items()):
@@ -1874,6 +1967,35 @@ def _candidate_neighbors(
                     ),
                     provenance=tuple(
                         sorted({value for edge in edges for value in edge.provenance})
+                    ),
+                    direction="both"
+                    if any(e.source_path == source for e in edges)
+                    and any(e.target_path == source for e in edges)
+                    else "outgoing"
+                    if any(e.source_path == source for e in edges)
+                    else "incoming",
+                    verified_relationship_kinds=tuple(
+                        sorted({k for e in edges for k in verified_kinds(e)})
+                    ),
+                    outgoing_verified_kinds=tuple(
+                        sorted(
+                            {
+                                k
+                                for e in edges
+                                if e.source_path == source
+                                for k in verified_kinds(e)
+                            }
+                        )
+                    ),
+                    incoming_verified_kinds=tuple(
+                        sorted(
+                            {
+                                k
+                                for e in edges
+                                if e.target_path == source
+                                for k in verified_kinds(e)
+                            }
+                        )
                     ),
                 )
             )
@@ -2464,6 +2586,7 @@ async def _plan_evidence_session(
                         working_set=working_set,
                         diff_paths=diff_paths,
                         max_pool_candidates=max_pool_candidates,
+                        requirements=result.requirements,
                     )
                     action_history.extend(history)
                     coverage_history.extend(action_ledgers)
@@ -2489,6 +2612,7 @@ async def _plan_evidence_session(
                                 working_set=working_set,
                                 diff_paths=diff_paths,
                                 max_pool_candidates=max_pool_candidates,
+                                requirements=result.requirements,
                             )
                         )
                         if not complement_ids:
@@ -2537,6 +2661,7 @@ async def _plan_evidence_session(
             rounds=round_index + 1,
             max_files=max_files,
             max_ranges_per_file=max_ranges_per_file,
+            requirements=result.requirements,
         )
         if validated is None:
             continue
@@ -2576,6 +2701,7 @@ async def _plan_evidence_session(
             selected_candidate_ids=tuple(item.candidate_id for item in validated.items),
             stage="plan",
             planner_bindings=validated.role_bindings,
+            requirements=result.requirements,
         )
         if validated.sufficiency == "sufficient" and _mandatory_missing_roles(
             plan_coverage
@@ -2646,6 +2772,7 @@ def _execute_planner_actions(
     working_set: tuple[str, ...],
     diff_paths: tuple[str, ...],
     max_pool_candidates: int,
+    requirements: EvidenceRequirements | None = None,
 ) -> tuple[
     tuple[str, ...],
     list[dict[str, object]],
@@ -2659,7 +2786,12 @@ def _execute_planner_actions(
     requires_complement = False
     vocabulary = _repository_vocabulary(index, modules, task)
     for action in actions:
-        before = build_coverage_ledger(task, tuple(pool.values()), stage="action")
+        before = build_coverage_ledger(
+            task,
+            tuple(pool.values()),
+            stage="action",
+            requirements=requirements,
+        )
         requested_limit = action.limit or 8
         paths: tuple[str, ...]
         query = task
@@ -2806,7 +2938,12 @@ def _execute_planner_actions(
                 continue
             pool[candidate.candidate_id] = candidate
             added.append(candidate.candidate_id)
-        after = build_coverage_ledger(task, tuple(pool.values()), stage="action")
+        after = build_coverage_ledger(
+            task,
+            tuple(pool.values()),
+            stage="action",
+            requirements=requirements,
+        )
         delta = _coverage_delta(before, after)
         if not delta.has_gain:
             for candidate_id in added:
@@ -2884,10 +3021,16 @@ def _deterministic_complementary_search(
     working_set: tuple[str, ...],
     diff_paths: tuple[str, ...],
     max_pool_candidates: int,
+    requirements: EvidenceRequirements | None = None,
 ) -> tuple[tuple[str, ...], CoverageLedger, CoverageDelta]:
     """Add one structurally ranked candidate only when it expands verified coverage."""
 
-    before = build_coverage_ledger(task, tuple(pool.values()), stage="action")
+    before = build_coverage_ledger(
+        task,
+        tuple(pool.values()),
+        stage="action",
+        requirements=requirements,
+    )
     if len(pool) >= max_pool_candidates:
         return (), before, _coverage_delta(before, before)
     ranked = _restore_exact_identifier_evidence(
@@ -2906,7 +3049,12 @@ def _deterministic_complementary_search(
         if candidate.candidate_id in pool:
             continue
         pool[candidate.candidate_id] = candidate
-        after = build_coverage_ledger(task, tuple(pool.values()), stage="action")
+        after = build_coverage_ledger(
+            task,
+            tuple(pool.values()),
+            stage="action",
+            requirements=requirements,
+        )
         delta = _coverage_delta(before, after)
         if delta.has_gain:
             return (candidate.candidate_id,), after, delta
@@ -2994,7 +3142,12 @@ def _planner_request(
     repair: bool,
     legacy_alias: bool,
 ) -> ModelRequest:
-    coverage = build_coverage_ledger(result.task, candidates, stage="action")
+    coverage = build_coverage_ledger(
+        result.task,
+        candidates,
+        stage="action",
+        requirements=result.requirements,
+    )
     roles = (
         ()
         if result.coverage_ledger is None
@@ -3101,6 +3254,7 @@ def _planner_request(
                 "covered_role_ids": coverage.covered_role_ids,
                 "missing_role_ids": coverage.missing_role_ids,
                 "missing_graph_endpoints": coverage.missing_graph_endpoints,
+                "missing_requirement_ids": coverage.missing_requirement_ids,
             },
             "compatibility_alias": legacy_alias,
             **(
@@ -3352,6 +3506,7 @@ def _validate_plan_response(
     rounds: int,
     max_files: int,
     max_ranges_per_file: int,
+    requirements: EvidenceRequirements | None = None,
 ) -> EvidencePlan | None:
     seen: set[str] = set()
     items: list[PlannedEvidence] = []
@@ -3428,6 +3583,8 @@ def _validate_plan_response(
         }
         if not set(requested_binding.evidence_ids) <= known_evidence:
             continue
+        if not _candidate_covers_role(candidate, role, set()):
+            continue
         role_bindings.append(
             RoleEvidenceBinding(
                 role_id=role.role_id,
@@ -3461,6 +3618,7 @@ def _validate_plan_response(
             dropped_evidence_ids=dropped_evidence,
             messages=tuple(messages),
         ),
+        requirements=requirements,
     )
 
 
@@ -3511,6 +3669,7 @@ def _finalize_insufficient(
         candidates,
         selected_candidate_ids=(),
         stage="plan",
+        requirements=result.requirements,
     )
     diagnostics = PlanningDiagnostics(
         mode=mode,
@@ -3527,6 +3686,7 @@ def _finalize_insufficient(
         coverage_ledger=coverage_ledger,
         sufficiency="insufficient",
         diagnostics=diagnostics,
+        requirements=result.requirements,
     )
     return result.model_copy(
         update={
@@ -3569,6 +3729,7 @@ def build_coverage_ledger(
     selected_candidate_ids: tuple[str, ...] | None = None,
     stage: Literal["retrieval", "action", "plan", "materialization"] = "retrieval",
     planner_bindings: tuple[RoleEvidenceBinding, ...] = (),
+    requirements: EvidenceRequirements | None = None,
 ) -> CoverageLedger:
     """Derive closed evidence coverage from supplied candidates, never ranking."""
 
@@ -3583,7 +3744,8 @@ def build_coverage_ledger(
         )
     )
     selected = tuple(by_id[candidate_id] for candidate_id in selected_ids)
-    roles = _task_evidence_roles(task, candidates)
+    requirements = requirements or build_evidence_requirements(task, candidates)
+    roles = requirements.roles
     role_by_id = {item.role_id: item for item in roles}
     bindings = list(_deterministic_role_bindings(roles, selected, task))
     for binding in planner_bindings:
@@ -3604,6 +3766,7 @@ def build_coverage_ledger(
             or role is None
             or role.kind == "unknown"
             or not set(binding.evidence_ids) <= known_evidence
+            or not _candidate_covers_role(candidate, role, set())
         ):
             continue
         bindings.append(binding)
@@ -3671,7 +3834,17 @@ def build_coverage_ledger(
             ),
         )
     )
-    endpoints = _required_graph_endpoints(candidates, task_terms)
+    endpoints = {
+        r.path
+        for r in requirements.source_evidence
+        if r.basis in {"verified-call", "verified-source-test", "verified-config"}
+    }
+    if any(r.basis == "verified-call" for r in requirements.source_evidence):
+        endpoints.update(
+            r.path
+            for r in requirements.source_evidence
+            if r.candidate_id in requirements.anchors
+        )
     covered_endpoints = tuple(
         sorted(endpoints & {item.path for item in selected}, key=canonical_casefold_key)
     )
@@ -3692,6 +3865,28 @@ def build_coverage_ledger(
         ranges=ranges,
         covered_graph_endpoints=covered_endpoints,
         missing_graph_endpoints=missing_endpoints,
+        requirements=requirements,
+        missing_requirement_ids=tuple(
+            sorted(
+                r.requirement_id
+                for r in requirements.source_evidence
+                if r.candidate_id not in selected_ids
+                or not any(
+                    c.candidate_id == r.candidate_id
+                    and c.path == r.path
+                    and c.source_sha256 == r.source_sha256
+                    for c in selected
+                )
+                or not set(r.evidence_ids)
+                <= {
+                    e.evidence_id
+                    for c in selected
+                    if c.candidate_id == r.candidate_id
+                    and c.source_sha256 == r.source_sha256
+                    for e in c.evidence_ranges
+                }
+            )
+        ),
     )
 
 
@@ -3743,16 +3938,47 @@ def _task_evidence_roles(
     terms = set(_tokens(task))
     requested: set[TaskEvidenceRoleKind] = set()
     syntax = {
-        "entrypoint": {"entry", "start", "startup", "bootstrap", "launch"},
+        "entrypoint": {
+            "entry",
+            "start",
+            "startup",
+            "bootstrap",
+            "launch",
+            "запуск",
+            "запуска",
+            "точка",
+        },
         "implementation": {
             "implement",
             "implementation",
             "behavior",
             "flow",
             "lifecycle",
+            "реализация",
+            "реализацию",
+            "поведение",
+            "поток",
+            "цепочка",
         },
-        "configuration": {"config", "configuration", "setting", "settings"},
-        "test": {"test", "tests", "regression", "spec"},
+        "configuration": {
+            "config",
+            "configuration",
+            "setting",
+            "settings",
+            "конфигурация",
+            "конфигурацию",
+            "настройки",
+        },
+        "test": {
+            "test",
+            "tests",
+            "regression",
+            "spec",
+            "тест",
+            "тесты",
+            "тестами",
+            "проверка",
+        },
         "documentation": {"doc", "docs", "documentation", "readme"},
         "public_api": {"api", "public", "interface", "endpoint"},
         "data_model": {"data", "model", "schema", "codec"},
@@ -3760,25 +3986,24 @@ def _task_evidence_roles(
     for kind, markers in syntax.items():
         if terms & markers:
             requested.add(cast(TaskEvidenceRoleKind, kind))
-    if terms & {"call", "caller", "callee", "trace", "flow", "route", "request"}:
+    if terms & {
+        "call",
+        "caller",
+        "callee",
+        "trace",
+        "flow",
+        "route",
+        "request",
+        "вызов",
+        "вызовы",
+        "поток",
+        "цепочка",
+        "запрос",
+    }:
         requested.update({"implementation", "caller", "callee"})
     values: dict[str, TaskEvidenceRole] = {
         kind: TaskEvidenceRole(role_id=kind, kind=kind) for kind in requested
     }
-    for candidate in candidates:
-        if not {
-            kind
-            for neighbor in candidate.graph_neighbors
-            for kind in neighbor.relationship_kinds
-            if kind in {"call", "import", "entrypoint-handler"}
-        }:
-            continue
-        for anchor in sorted(set(_tokens(candidate.path)) & terms):
-            for kind in ("caller", "callee"):
-                role_id = f"{kind}:{anchor}"
-                values[role_id] = TaskEvidenceRole(
-                    role_id=role_id, kind=cast(TaskEvidenceRoleKind, kind)
-                )
     if not values:
         values["unknown"] = TaskEvidenceRole(role_id="unknown", kind="unknown")
     return tuple(values[role_id] for role_id in sorted(values))
@@ -3824,25 +4049,42 @@ def _deterministic_role_bindings(
     return tuple(bindings)
 
 
+def _verified_neighbor_kinds(
+    neighbor: CandidateGraphNeighbor, direction: str | None = None
+) -> set[str]:
+    if direction == "outgoing" and neighbor.outgoing_verified_kinds is not None:
+        return set(neighbor.outgoing_verified_kinds)
+    if direction == "incoming" and neighbor.incoming_verified_kinds is not None:
+        return set(neighbor.incoming_verified_kinds)
+    if direction and neighbor.direction not in {direction, "both"}:
+        return set()
+    if neighbor.verified_relationship_kinds is not None:
+        return set(neighbor.verified_relationship_kinds)
+    return (
+        set(neighbor.relationship_kinds)
+        if set(neighbor.provenance) == {"verified"}
+        else set()
+    )
+
+
 def _candidate_covers_role(
-    candidate: CandidateCard,
-    role: TaskEvidenceRole,
-    neighbor_kinds: set[str],
+    candidate: CandidateCard, role: TaskEvidenceRole, neighbor_kinds: set[str]
 ) -> bool:
+    del neighbor_kinds
+    if role.kind in candidate.structural_roles:
+        return True
     if role.kind == "test":
         return FILE_POLICY_REGISTRY.is_test(candidate.path)
     if role.kind == "documentation":
         return FILE_POLICY_REGISTRY.profile(candidate.path) == "documentation"
     if role.kind == "configuration":
         return FILE_POLICY_REGISTRY.profile(candidate.path) == "config"
-    if role.kind == "entrypoint":
-        return "entrypoint-handler" in neighbor_kinds or bool(candidate.matched_symbols)
     if role.kind in {"caller", "callee"}:
-        return bool(neighbor_kinds & {"call", "import", "entrypoint-handler"})
-    if role.kind == "public_api":
-        return bool(candidate.matched_symbols)
-    if role.kind == "data_model":
-        return bool(candidate.matched_symbols)
+        direction = "outgoing" if role.kind == "caller" else "incoming"
+        return any(
+            _verified_neighbor_kinds(n, direction) & {"call", "entrypoint-handler"}
+            for n in candidate.graph_neighbors
+        )
     if role.kind == "implementation":
         return FILE_POLICY_REGISTRY.profile(
             candidate.path
@@ -3850,24 +4092,134 @@ def _candidate_covers_role(
     return False
 
 
+def build_evidence_requirements(
+    task: str, candidates: tuple[CandidateCard, ...]
+) -> EvidenceRequirements:
+    roles = _task_evidence_roles(task, ())
+    kinds = {r.kind for r in roles}
+    explicit = _exact_identifier_scope(task) != task or len(task.split()) == 1
+    anchors = (
+        tuple(
+            c
+            for c in candidates
+            if c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
+        )
+        if explicit
+        else ()
+    )
+    if not anchors:
+        relevant = [
+            c
+            for c in candidates
+            if c.bm25_score > 0
+            or c.exact_group != "approximate"
+            or set(_tokens(c.path)) & set(_tokens(task))
+        ]
+        implementations = [
+            c
+            for c in relevant
+            if _candidate_covers_role(
+                c,
+                TaskEvidenceRole(role_id="implementation", kind="implementation"),
+                set(),
+            )
+        ]
+        anchors = tuple(
+            sorted(implementations or relevant, key=lambda c: (-c.bm25_score, c.path))[
+                :1
+            ]
+        )
+    by_path = {c.path: c for c in candidates}
+    obligations: dict[str, EvidenceRequirement] = {}
+
+    def add(
+        candidate: CandidateCard,
+        anchor: CandidateCard,
+        basis: Literal[
+            "exact-symbol",
+            "verified-call",
+            "verified-source-test",
+            "verified-config",
+            "task-syntax",
+        ],
+        role_id: str,
+    ) -> None:
+        identity = f"{role_id}:{anchor.candidate_id}:{candidate.candidate_id}:{basis}"
+        evidence_ids = tuple(
+            sorted({e.evidence_id for e in candidate.evidence_ranges if e.evidence_id})
+        )
+        obligations[identity] = EvidenceRequirement(
+            requirement_id=identity,
+            role_id=role_id,
+            candidate_id=candidate.candidate_id,
+            path=candidate.path,
+            source_sha256=candidate.source_sha256,
+            evidence_ids=evidence_ids,
+            basis=basis,
+            anchor_candidate_id=anchor.candidate_id,
+        )
+
+    for anchor in anchors:
+        add(
+            anchor,
+            anchor,
+            "exact-symbol" if explicit else "task-syntax",
+            "implementation" if "implementation" in kinds else "unknown",
+        )
+        queue = deque([(anchor, 0)])
+        visited = {anchor.path}
+        while queue:
+            current, depth = queue.popleft()
+            for neighbor in current.graph_neighbors:
+                candidate = by_path.get(neighbor.path)
+                if candidate is None or candidate.path in visited:
+                    continue
+                verified = _verified_neighbor_kinds(neighbor)
+                if kinds & {"caller", "callee"} and verified & {
+                    "call",
+                    "entrypoint-handler",
+                }:
+                    add(
+                        candidate,
+                        anchor,
+                        "verified-call",
+                        "callee"
+                        if _verified_neighbor_kinds(neighbor, "outgoing")
+                        & {"call", "entrypoint-handler"}
+                        else "caller",
+                    )
+                    visited.add(candidate.path)
+                    if depth < 1:
+                        queue.append((candidate, depth + 1))
+        for neighbor in anchor.graph_neighbors:
+            candidate = by_path.get(neighbor.path)
+            if candidate is None:
+                continue
+            verified = _verified_neighbor_kinds(neighbor)
+            if (
+                "test" in kinds
+                and "source-test" in verified
+                and FILE_POLICY_REGISTRY.is_test(candidate.path)
+            ):
+                add(candidate, anchor, "verified-source-test", "test")
+            if "configuration" in kinds and "config-consumer" in verified:
+                add(candidate, anchor, "verified-config", "configuration")
+    return EvidenceRequirements(
+        roles=roles,
+        anchors=tuple(c.candidate_id for c in anchors),
+        source_evidence=tuple(obligations[key] for key in sorted(obligations)),
+    )
+
+
 def _required_graph_endpoints(
     candidates: tuple[CandidateCard, ...], task_terms: set[str]
 ) -> set[str]:
-    known_paths = {item.path for item in candidates}
-    endpoints: set[str] = set()
-    for candidate in candidates:
-        connected = any(
-            set(neighbor.relationship_kinds) & {"call", "import", "entrypoint-handler"}
-            for neighbor in candidate.graph_neighbors
-        )
-        if connected and set(_tokens(candidate.path)) & task_terms:
-            endpoints.add(candidate.path)
-        endpoints.update(
-            neighbor.path
-            for neighbor in candidate.graph_neighbors
-            if neighbor.path in known_paths and set(_tokens(neighbor.path)) & task_terms
-        )
-    return endpoints
+    requirements = build_evidence_requirements(" ".join(sorted(task_terms)), candidates)
+    return {
+        r.path
+        for r in requirements.source_evidence
+        if r.basis in {"verified-call", "verified-source-test", "verified-config"}
+    }
 
 
 def _tokens(text: str) -> tuple[str, ...]:

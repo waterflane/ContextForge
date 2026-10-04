@@ -29,10 +29,12 @@ from contextforge.intelligence.retrieval import (
     CandidateCard,
     CandidateEvidenceRange,
     CoverageLedger,
+    EvidenceRequirements,
     ExactGroup,
     PlannedEvidence,
     RetrievalResult,
     build_coverage_ledger,
+    build_evidence_requirements,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
@@ -317,6 +319,12 @@ def compile_context_capsule(
 
     if not isinstance(retrieval, RetrievalResult):
         raise TypeError("compiler requires a RetrievalResult")
+    if retrieval.requirements is None:
+        retrieval = retrieval.model_copy(
+            update={
+                "requirements": build_evidence_requirements(task, retrieval.candidates)
+            }
+        )
     active = manifest if manifest is not None else load_manifest(repository_root)
     if active.schema_version != 4:
         raise ContextCompilerError("Context Capsule v2 requires Index v3.1")
@@ -510,6 +518,7 @@ def compile_context_capsule(
             budget,
             selected_estimator,
             token_limit=automatic_limit,
+            requirements=retrieval.requirements,
         )
     capsule = capsule.model_copy(update={"task_context": tuple(evidence_material)})
 
@@ -600,6 +609,7 @@ def compile_context_capsule(
         selected_candidate_ids=materialized_ids,
         stage="materialization",
         planner_bindings=planner_bindings,
+        requirements=retrieval.requirements,
     )
     sufficiency = _compilation_sufficiency(
         retrieval,
@@ -692,6 +702,7 @@ def _compilation_sufficiency(
         selected_candidate_ids=selected_plan_ids,
         stage="plan",
         planner_bindings=() if plan is None else plan.role_bindings,
+        requirements=retrieval.requirements,
     )
     planned_role_ids = planned_ledger.covered_role_ids
     materialized_role_ids = materialization_ledger.covered_role_ids
@@ -759,6 +770,7 @@ def _capsule_ledger(
     task: str,
     candidates: tuple[CandidateCard, ...],
     capsule: ContextCapsule,
+    requirements: EvidenceRequirements | None = None,
 ) -> CoverageLedger:
     """Build coverage from actual material identities, never from ranking order."""
 
@@ -795,6 +807,7 @@ def _capsule_ledger(
         tuple(visible_candidates),
         selected_candidate_ids=tuple(selected_ids),
         stage="materialization",
+        requirements=requirements,
     )
 
 
@@ -882,6 +895,7 @@ def _select_automatic_evidence(
     estimator: TokenEstimator,
     *,
     token_limit: int,
+    requirements: EvidenceRequirements | None = None,
 ) -> tuple[list[CapsuleMaterial], int, ContextCapsule]:
     """Select coverage first, then independent detail, without evicting evidence.
 
@@ -890,11 +904,21 @@ def _select_automatic_evidence(
     duplicate concepts, ranges, or source-detail upgrades compete for budget.
     """
 
-    all_ledger = build_coverage_ledger(task, candidates, stage="retrieval")
+    all_ledger = build_coverage_ledger(
+        task,
+        candidates,
+        stage="retrieval",
+        requirements=requirements,
+    )
     remaining = list(eligible)
 
     def current_ledger() -> CoverageLedger:
-        return _capsule_ledger(task, candidates, capsule)
+        return _capsule_ledger(
+            task,
+            candidates,
+            capsule,
+            requirements=requirements,
+        )
 
     def append_for(predicate: object, *, required_evidence: bool = False) -> bool:
         nonlocal capsule, selected_tokens
@@ -910,7 +934,12 @@ def _select_automatic_evidence(
                 proposed = capsule.model_copy(
                     update={"task_context": tuple((*selected, material))}
                 )
-                after = _capsule_ledger(task, candidates, proposed)
+                after = _capsule_ledger(
+                    task,
+                    candidates,
+                    proposed,
+                    requirements=requirements,
+                )
                 if not callable(predicate) or not predicate(before, after, candidate):
                     continue
                 fits_limit = _fits(proposed, budget, estimator, token_limit=token_limit)

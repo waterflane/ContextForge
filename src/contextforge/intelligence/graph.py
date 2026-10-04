@@ -146,6 +146,7 @@ class FileRelationshipProjection(IndexModel):
     target_path: str
     relationship_kinds: tuple[RelationshipKind, ...]
     provenance: tuple[EdgeProvenance, ...]
+    verified_relationship_kinds: tuple[RelationshipKind, ...] | None = None
 
     @field_validator("source_path", "target_path")
     @classmethod
@@ -191,6 +192,7 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
     """Collapse symbol edges into deterministic file-to-file routing facts."""
 
     node_paths = {item.node_id: item.path for item in graph.nodes}
+    verified: dict[tuple[str, str], set[RelationshipKind]] = defaultdict(set)
     grouped: dict[
         tuple[str, str], tuple[set[RelationshipKind], set[EdgeProvenance]]
     ] = {}
@@ -204,6 +206,8 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
         )
         kinds.add(edge.kind)
         provenance.add(edge.provenance)
+        if edge.provenance == "verified":
+            verified[(source_path, target_path)].add(edge.kind)
     return RelationshipGraphProjection(
         source_snapshot_digest=graph.source_snapshot_digest,
         relationships=tuple(
@@ -212,6 +216,7 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
                 target_path=target,
                 relationship_kinds=tuple(sorted(kinds)),
                 provenance=tuple(sorted(provenance)),
+                verified_relationship_kinds=tuple(sorted(verified[(source, target)])),
             )
             for (source, target), (kinds, provenance) in sorted(grouped.items())
         ),

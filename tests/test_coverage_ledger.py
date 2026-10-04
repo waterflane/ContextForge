@@ -7,6 +7,7 @@ from contextforge.intelligence import (
     RepresentationCosts,
     RoleEvidenceBinding,
     SourceRange,
+    TaskEvidenceRoleKind,
     build_coverage_ledger,
 )
 
@@ -18,6 +19,7 @@ def _candidate(
     neighbors: tuple[CandidateGraphNeighbor, ...] = (),
     symbols: tuple[str, ...] = (),
     concepts: tuple[str, ...] = (),
+    roles: tuple[TaskEvidenceRoleKind, ...] = (),
 ) -> CandidateCard:
     return CandidateCard(
         candidate_id=f"candidate:{path}",
@@ -27,6 +29,7 @@ def _candidate(
         exact_group=exact,  # type: ignore[arg-type]
         score=99.0,
         bm25_score=0.0,
+        structural_roles=roles,
         matched_concepts=concepts,
         matched_symbols=symbols
         or (("publicEndpoint",) if exact != "approximate" else ()),
@@ -52,11 +55,17 @@ def _neighbor(path: str, *kinds: str) -> CandidateGraphNeighbor:
         distance=1,
         relationship_kinds=tuple(sorted(kinds)),
         provenance=("verified",),
+        direction="both",
     )
 
 
 def test_ledger_covers_startup_and_multiple_roles_in_one_file() -> None:
-    main = _candidate("src/main.py", exact="exact_symbol", symbols=("startup",))
+    main = _candidate(
+        "src/main.py",
+        exact="exact_symbol",
+        symbols=("startup",),
+        roles=("entrypoint", "public_api"),
+    )
 
     ledger = build_coverage_ledger(
         "Review startup implementation and public API.", (main,)
@@ -72,7 +81,7 @@ def test_ledger_covers_implementation_test_config_docs_and_api() -> None:
     implementation = _candidate("src/service.py")
     test = _candidate("tests/test_service.py")
     config = _candidate("config/settings.toml")
-    docs = _candidate("docs/api.md", exact="exact_symbol")
+    docs = _candidate("docs/api.md", exact="exact_symbol", roles=("public_api",))
 
     ledger = build_coverage_ledger(
         (
@@ -122,7 +131,7 @@ def test_cross_file_ledger_marks_unmaterialized_client_and_provider_missing() ->
         "src/client.js",
         "src/provider.js",
     }
-    assert server_only.missing_role_ids
+    assert server_only.missing_requirement_ids
 
 
 def test_centrality_without_structural_hint_does_not_cover_entrypoint() -> None:
@@ -155,3 +164,54 @@ def test_unknown_planner_binding_is_dropped_and_serialization_is_deterministic()
     assert first.concepts == ("request flow", "service")
     assert first.ranges
     assert first.model_dump_json() == second.model_dump_json()
+
+
+def test_import_and_mixed_provenance_do_not_prove_calls() -> None:
+    imported = _candidate(
+        "src/client.py", neighbors=(_neighbor("src/server.py", "import"),)
+    )
+    mixed = _neighbor("src/server.py", "call", "import").model_copy(
+        update={
+            "verified_relationship_kinds": ("import",),
+            "provenance": ("verified", "model-inferred"),
+        }
+    )
+    ledger = build_coverage_ledger(
+        "Trace implementation flow",
+        (imported, _candidate("src/other.py", neighbors=(mixed,))),
+    )
+    assert {"caller", "callee"} <= set(ledger.missing_role_ids)
+
+
+def test_direction_and_source_facts_determine_roles() -> None:
+    incoming = _neighbor("src/caller.py", "call").model_copy(
+        update={"direction": "incoming"}
+    )
+    candidate = _candidate(
+        "src/service.py", neighbors=(incoming,), roles=("configuration",)
+    )
+    ledger = build_coverage_ledger("Trace configuration flow", (candidate,))
+    assert {"callee", "configuration", "implementation"} <= set(ledger.covered_role_ids)
+    assert "caller" in ledger.missing_role_ids
+
+
+def test_requirements_remain_frozen_when_unrelated_neighbors_are_added() -> None:
+    main = _candidate("src/main.py", exact="exact_symbol", symbols=("start",))
+    first = build_coverage_ledger("Review implementation and tests", (main,))
+    extra = _candidate(
+        "src/index.py", neighbors=(_neighbor("src/random.py", "import"),)
+    )
+    second = build_coverage_ledger(
+        "Review implementation and tests",
+        (main, extra),
+        requirements=first.requirements,
+    )
+    assert first.requirements == second.requirements
+    assert second.roles == first.roles
+    assert not second.missing_graph_endpoints
+
+
+def test_matched_symbol_alone_does_not_prove_entrypoint_or_api() -> None:
+    symbol = _candidate("src/service.py", exact="exact_symbol", symbols=("startup",))
+    ledger = build_coverage_ledger("Review startup API", (symbol,))
+    assert {"entrypoint", "public_api"} <= set(ledger.missing_role_ids)

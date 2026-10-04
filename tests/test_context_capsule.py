@@ -430,7 +430,16 @@ def test_startup_one_of_four_cannot_be_effectively_sufficient(tmp_path: Path) ->
 def test_automatic_selection_covers_requested_roles_before_upgrades(
     tmp_path: Path,
 ) -> None:
-    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(
+        tmp_path,
+        "handler.py",
+        "__all__ = ['startup']\ndef startup() -> None:\n    return None\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "from handler import startup\n\nif __name__ == '__main__':\n    startup()\n",
+    )
     _write(tmp_path, "tests/test_main.py", "from main import startup\n")
     _write(tmp_path, "config/settings.toml", "enabled = true\n")
     _write(tmp_path, "docs/api.md", "# API\n")

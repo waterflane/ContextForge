@@ -755,7 +755,16 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
 
 
 def test_evidence_planner_retains_only_supplied_role_bindings(tmp_path: Path) -> None:
-    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(
+        tmp_path,
+        "handler.py",
+        "__all__ = ['startup']\ndef startup() -> None:\n    return None\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "from handler import startup\n\nif __name__ == '__main__':\n    startup()\n",
+    )
     report = _build(tmp_path)
 
     def respond(request: object, call: int) -> str:

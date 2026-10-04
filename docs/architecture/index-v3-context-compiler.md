@@ -76,6 +76,17 @@ overlay is bound to the structural manifest digest; a corrupt overlay produces
 
 ## Retrieval and evidence planning
 
+An immutable EvidenceRequirements record carries task roles, source-bound
+anchors, required evidence IDs, and the verified basis of graph endpoints
+through retrieval, planning, and compilation. Selected representations cannot
+change those requirements. Caller/callee bindings require directed verified
+calls (or entrypoint-handler flows); imports alone do not prove calls. CodeMaps
+supply configuration/public API/entrypoint facts, rather than arbitrary symbol
+matches or words in filenames. General Russian task syntax uses the same closed
+roles; domain vocabulary comes only from repository postings or grounded query
+expansion. Retrieval build version 9 adds structural role facts to derived
+documents; unchanged CodeMaps remain reusable.
+
 Candidate diagnostics retain weighted BM25 field contributions and closed
 selection reasons. Reviewed benchmark reports separately trace source evidence
 through retrieval, planning, and materialization and classify pool, selection,
