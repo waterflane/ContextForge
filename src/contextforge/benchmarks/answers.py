@@ -19,6 +19,10 @@ from contextforge.benchmarks.models import (
     BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
 )
+from contextforge.benchmarks.support import (
+    assertion_support_is_materialized,
+    public_assertions,
+)
 from contextforge.context import CompiledContextCapsule, RepresentationMode
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.indexer import load_file_code_map
@@ -249,11 +253,13 @@ async def _run_groundedness_judge(
             "answer": answer.answer,
             "assertion_ids": answer.assertion_ids,
             "citations": [item.model_dump(mode="json") for item in answer.citations],
-            "assertions": [
-                item.model_dump(mode="json")
-                for item in assertions
-                if item.assertion_id in answer.assertion_ids
-            ],
+            "assertions": public_assertions(
+                tuple(
+                    item
+                    for item in assertions
+                    if item.assertion_id in answer.assertion_ids
+                )
+            ),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -454,10 +460,7 @@ def _answer_request(
         ),
         analysis_task=task,
         trusted_code_map_facts={
-            "assertions": [
-                {"assertion_id": item.assertion_id, "description": item.description}
-                for item in assertions
-            ],
+            "assertions": public_assertions(assertions),
             "allowed_citation_ranges": [
                 item.model_dump(mode="json") for item in allowed_ranges
             ],
@@ -563,6 +566,8 @@ def _assertion_has_evidence_support(
 ) -> bool:
     if not assertion.support:
         return any(item.assertion_id == assertion.assertion_id for item in citations)
+    if not assertion_support_is_materialized(assertion, material_evidence):
+        return False
     return all(
         any(
             citation.assertion_id == assertion.assertion_id

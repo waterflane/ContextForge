@@ -36,6 +36,72 @@ from contextforge.models import (
 MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
 
 
+@pytest.mark.parametrize("missing", [None, 0, 1])
+def test_compilation_audit_requires_all_supports_without_model_judges(
+    missing: int | None,
+) -> None:
+    from contextforge.benchmarks import (
+        BenchmarkAssertionSupport,
+        BenchmarkExpectedAssertion,
+    )
+    from contextforge.context.capsule import CompilationSufficiency
+    from contextforge.intelligence.retrieval import CoverageLedger, EvidenceRequirements
+
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    ranges = task.required_ranges[:2]
+    assert len(ranges) == 2
+    supports = tuple(
+        BenchmarkAssertionSupport(
+            citation=source, material_evidence_ids=(f"source-{i}",)
+        )
+        for i, source in enumerate(ranges)
+    )
+    task = task.model_copy(
+        update={
+            "answer_assertions": (
+                BenchmarkExpectedAssertion(
+                    assertion_id="both",
+                    description="Both operations are present",
+                    support=supports,
+                ),
+            )
+        }
+    )
+    visible = tuple(source for i, source in enumerate(ranges) if i != missing)
+    observation = RealBenchmarkObservation(
+        mode=RealBenchmarkMode.DETERMINISTIC,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        materialized_ranges=visible,
+        material_evidence_ids={
+            source.path: tuple(
+                f"source-{i}"
+                for i, value in enumerate(ranges)
+                if value.path == source.path and i != missing
+            )
+            for source in ranges
+        },
+        capsule_tokens=1,
+        ordinary_tokens=10,
+        compilation_sufficiency=CompilationSufficiency(
+            declared_status="sufficient", effective_status="sufficient"
+        ),
+        materialization_coverage=CoverageLedger(
+            stage="materialization",
+            roles=(),
+            bindings=(),
+            requirements=EvidenceRequirements(
+                roles=(), topic_grounding="exact-identifier"
+            ),
+        ),
+    )
+    audited = evaluate_real_repository_observation(task, observation)
+    assert audited.compilation_calibration == (
+        "unverified" if missing is None else "false_sufficient"
+    )
+    assert audited.semantic_calibration == "unverified"
+
+
 @pytest.mark.parametrize("mode", list(RealBenchmarkMode))
 @pytest.mark.parametrize("status", ["sufficient", "insufficient"])
 @pytest.mark.parametrize("missing", [False, True])

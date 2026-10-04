@@ -33,6 +33,7 @@ from contextforge.benchmarks.models import (
     BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
 )
+from contextforge.benchmarks.support import assertion_support_is_materialized
 from contextforge.context.capsule import CompilationSufficiency
 from contextforge.core.validation import validate_portable_relative_path
 from contextforge.intelligence.cards import SemanticCoverage
@@ -952,11 +953,13 @@ def _audit_compilation(
                 reasons.append("mandatory_material_missing")
                 break
     for assertion in task.answer_assertions:
-        if assertion.support and not any(
-            _range_recall((support.citation,), observation.materialized_ranges) == 1.0
-            and set(support.material_evidence_ids)
-            <= set(observation.material_evidence_ids.get(support.citation.path, ()))
-            for support in assertion.support
+        if not assertion_support_is_materialized(
+            assertion,
+            tuple(
+                (source, observation.material_evidence_ids.get(source.path, ()))
+                for source in observation.materialized_ranges
+                if source.path in observation.materialized_files
+            ),
         ):
             reasons.append("reviewed_assertion_material_missing")
             break

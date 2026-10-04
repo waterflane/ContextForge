@@ -352,3 +352,13 @@ source, invoke a shell, or mutate Git.
 exposes the same pinned artifacts. Normative schemas are
 [`orientation-map-v3.schema.json`](../schemas/orientation-map-v3.schema.json)
 and [`repository-map-v3.schema.json`](../schemas/repository-map-v3.schema.json).
+# Complete assertion support auditing
+
+Reviewed support is evaluator-only. Compilation and answer audits share the
+material-presence predicate: every support of an assertion needs its complete
+source range and known material IDs. One present support cannot substitute for
+another missing support. A sufficient compilation with missing reviewed support
+is false sufficient even when no semantic judge has run. Answer evaluation adds
+citation checks and groundedness; missing answer/judge evaluation remains
+semantically unverified. All model payloads, including blinded judges, receive
+only public assertion IDs and descriptions, never reviewed support addresses.

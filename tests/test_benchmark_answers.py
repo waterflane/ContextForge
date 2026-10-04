@@ -366,3 +366,52 @@ def test_dispose_body_is_required_for_blinded_groundedness(tmp_path: Path) -> No
     assert not header_only.passed
     assert body_present.votes == (True, True, True)
     assert body_present.passed
+
+
+def test_judge_request_isolates_reviewed_support() -> None:
+    assertion = BenchmarkExpectedAssertion(
+        assertion_id="behavior",
+        description="The operation returns the value",
+        support=(
+            BenchmarkAssertionSupport(
+                citation=BenchmarkSourceRange(
+                    path="secret.py", start_line=100, end_line=120
+                ),
+                material_evidence_ids=("secret-reviewed-id",),
+            ),
+        ),
+    )
+    answer = BenchmarkAnswerEvaluation(
+        answer="The operation returns the value.",
+        assertion_ids=("behavior",),
+        citations=(),
+        valid_citation_count=0,
+        assertion_recall=1.0,
+        citation_validity=0.0,
+    )
+
+    def respond(request: ModelRequest, _: int) -> str:
+        payload = json.loads(request.untrusted_sources[0].text)
+        assert payload["assertions"] == [
+            {"assertion_id": "behavior", "description": assertion.description}
+        ]
+        serialized = json.dumps(payload)
+        assert "secret-reviewed-id" not in serialized
+        assert "secret.py" not in serialized
+        assert "support" not in serialized
+        return '{"schema_version":1,"grounded":false}'
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="judge-isolation",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=respond,
+    )
+    judged = asyncio.run(
+        _run_groundedness_judge(provider, (assertion,), answer, "visible source")
+    )
+    assert judged.votes == (False, False, False)
