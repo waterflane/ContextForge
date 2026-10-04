@@ -57,6 +57,35 @@ def _provider(responder: object) -> FakeModelProvider:
     return FakeModelProvider(configuration, responder=responder)  # type: ignore[arg-type]
 
 
+def test_complementary_pool_uses_complete_verified_projection(tmp_path: Path) -> None:
+    _write(tmp_path, "core.py", "def dispatch_job():\n    return 1\n")
+    for ordinal in range(18):
+        _write(tmp_path, f"consumer{ordinal:02}.py", "from core import dispatch_job\n")
+    _write(
+        tmp_path,
+        "tests/test_core.py",
+        "from core import dispatch_job\ndef test_result():\n"
+        "    assert dispatch_job() == 1\n",
+    )
+    _write(tmp_path, "unrelated.py", "def unused():\n    return 0\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "dispatch_job implementation tests",
+            manifest=report.manifest,
+        )
+    )
+    core = next(c for c in result.candidates if c.path == "core.py")
+    assert len(core.graph_neighbors) > 12
+    test = next(c for c in result.candidates if c.path == "tests/test_core.py")
+    assert any(
+        reason.startswith("verified-source-test:") for reason in test.selection_reasons
+    )
+    assert "unrelated.py" not in {c.path for c in result.candidates}
+    assert len(result.candidates) <= 64
+
+
 def test_exact_symbol_precedes_graph_related_approximate_candidates(
     tmp_path: Path,
 ) -> None:
@@ -263,7 +292,7 @@ def test_rerank_rejects_unknown_ids_after_one_repair(tmp_path: Path) -> None:
     result = asyncio.run(
         retrieve_context_candidates(
             tmp_path,
-            "change functions",
+            "change one two functions",
             manifest=report.manifest,
             provider=provider,
             rerank=True,
@@ -367,12 +396,14 @@ def test_valid_rerank_can_only_reorder_and_represent_supplied_candidates(
 
     provider = _provider(respond)
     deterministic = asyncio.run(
-        retrieve_context_candidates(tmp_path, "functions", manifest=report.manifest)
+        retrieve_context_candidates(
+            tmp_path, "one two functions", manifest=report.manifest
+        )
     )
     reranked = asyncio.run(
         retrieve_context_candidates(
             tmp_path,
-            "functions",
+            "one two functions",
             manifest=report.manifest,
             provider=provider,
             rerank=True,

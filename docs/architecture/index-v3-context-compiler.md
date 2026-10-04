@@ -276,6 +276,14 @@ over 90 seconds fails its task quality gate.
 
 ## Public surface
 
+Complementary discovery uses the complete directed verified graph projection,
+including call/import, source-test and config-consumer edges, before the pool is
+bounded to 64 candidates. Traversal stops after two hops. Displayed planner
+neighbors remain bounded independently. Exact groups retain their ordering;
+unclosed evidence requirements precede relevance in complementary selection.
+Centrality and inferred edges cannot admit a file without a lexical/exact seed
+or a verified connection. Query instruction words do not form coverage facets.
+
 Python exports `load_relationship_graph()`, `load_orientation_map()`,
 `retrieve_context_candidates()`, and `compile_context_capsule()` plus the
 public card/candidate/capsule/budget/estimator types. Bridge 2.1, MCP, and the

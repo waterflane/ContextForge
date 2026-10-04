@@ -1485,15 +1485,11 @@ async def retrieve_context_candidates(
         diff_paths=diff_paths,
     )
     ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
-    seed_limit = max(
-        limit,
-        min(planning_max_candidates, planning_max_pool_candidates),
-    )
     ranked_candidates = _restore_exact_identifier_evidence(
         repository_root,
         active,
         index,
-        ranked_candidates[:seed_limit],
+        ranked_candidates[:planning_max_pool_candidates],
     )
     candidates = ranked_candidates[:limit]
     requirements = build_evidence_requirements(
@@ -1688,7 +1684,7 @@ def _rank_candidates(
                             -len(set(_tokens(neighbor.path)) & set(query_terms)),
                             neighbor.path,
                         ),
-                    )[:12]
+                    )
                 ),
                 provenance=tuple(provenance),
                 estimated_cost=_representation_costs(document, evidence),
@@ -1703,146 +1699,95 @@ def _rank_candidates(
 def _complementary_candidates(
     task: str, index: RetrievalIndex, ranked: list[CandidateCard]
 ) -> list[CandidateCard]:
-    """Satisfy broad evidence requirements before cutting the candidate pool.
+    """Admit lexical/exact seeds and their verified two-hop counterparts.
 
-    Scores and exact lookup remain untouched. Explicit identifiers retain their
-    exact ordering; natural-language flows use lexical order inside the coverage
-    selection so incidental prose identifiers cannot consume every slot.
+    Roles determine complementary coverage, never an independent score bonus.
+    The complete internal projection is used before the bounded pool is cut.
     """
-
+    del index
+    if not ranked:
+        return []
     roles = _task_evidence_roles(task, ())
-    kinds = {str(role.kind) for role in roles} - {"unknown"}
-    if not ranked or not kinds:
-        return ranked
-    explicit = _exact_identifier_scope(task) != task
-    if len(task.split()) == 1:
-        return ranked
-    terms = set(_tokens(task))
-    # Only discriminative repository vocabulary forms lexical coverage facets.
-    frequencies: Counter[str] = Counter()
-    document_terms: dict[str, set[str]] = {}
-    for document in index.documents:
-        present = {
-            term for field in document.fields for term in field.terms if term in terms
-        }
-        document_terms[document.path] = present
-        frequencies.update(present)
-    facets = {
-        term
-        for term in terms
-        if 0 < frequencies[term] <= max(1, index.document_count // 2)
-    }
+    by_path = {c.path: c for c in ranked}
     relevant = [
-        candidate
-        for candidate in ranked
-        if candidate.bm25_score > 0
-        or candidate.exact_group != "approximate"
-        or "working-set" in candidate.provenance
-        or "current-diff" in candidate.provenance
+        c
+        for c in ranked
+        if c.bm25_score > 0
+        or c.exact_group != "approximate"
+        or set(c.provenance) & {"working-set", "current-diff"}
     ]
-    if explicit:
-        selected = [
-            candidate
-            for candidate in relevant
-            if candidate.exact_group != "approximate"
-        ][:1]
-    else:
-        selected = []
-        relevant.sort(key=lambda candidate: (-candidate.bm25_score, candidate.path))
-    covered: set[str] = set()
-    covered_roles: set[str] = set()
-
-    def candidate_roles(candidate: CandidateCard) -> set[str]:
-        neighbors = {
-            kind
-            for neighbor in candidate.graph_neighbors
-            for kind in neighbor.relationship_kinds
-        }
-        return {
-            role.kind
-            for role in roles
-            if _candidate_covers_role(candidate, role, neighbors)
-        }
-
-    def add(candidate: CandidateCard) -> None:
-        selected.append(candidate)
-        covered.update(document_terms[candidate.path] & facets)
-        covered_roles.update(candidate_roles(candidate))
-
-    for candidate in selected:
-        covered.update(document_terms[candidate.path] & facets)
-        covered_roles.update(candidate_roles(candidate))
-    if not selected:
-        anchors = [
-            candidate
-            for candidate in relevant
-            if "implementation" in candidate_roles(candidate)
-        ]
-        if not anchors:
-            anchors = relevant
-        if anchors:
-            add(anchors[0])
-    while len(selected) < 5:
-        selected_paths = {candidate.path for candidate in selected}
-        complementary_paths = {
-            neighbor.path
-            for candidate in selected
-            for neighbor in candidate.graph_neighbors
-            if "verified" in neighbor.provenance
-            and (
-                ("test" in kinds and "source-test" in neighbor.relationship_kinds)
-                or (
-                    "configuration" in kinds
-                    and "config-consumer" in neighbor.relationship_kinds
+    exact = [c for c in relevant if c.exact_group != "approximate"]
+    lexical = sorted(relevant, key=lambda c: (-c.bm25_score, c.path))
+    seeds = exact or lexical[:1]
+    admitted = {c.path for c in relevant}
+    reasons: dict[str, set[str]] = defaultdict(set)
+    queue = deque((c.path, 0) for c in seeds)
+    visited = {c.path for c in seeds}
+    while queue:
+        path, depth = queue.popleft()
+        if depth >= 2:
+            continue
+        for neighbor in by_path[path].graph_neighbors:
+            kinds = _verified_neighbor_kinds(neighbor) & {
+                "call",
+                "import",
+                "source-test",
+                "config-consumer",
+                "entrypoint-handler",
+            }
+            if not kinds or neighbor.path not in by_path:
+                continue
+            admitted.add(neighbor.path)
+            reasons[neighbor.path].update(f"verified-{k}:{path}" for k in kinds)
+            if neighbor.path not in visited:
+                visited.add(neighbor.path)
+                queue.append((neighbor.path, depth + 1))
+    available = [
+        c.model_copy(
+            update={
+                "selection_reasons": tuple(
+                    sorted({*c.selection_reasons, *reasons[c.path]})
                 )
-            )
-        }
-        relevant_ids = {candidate.candidate_id for candidate in relevant}
-        relevant.extend(
-            candidate
-            for candidate in ranked
-            if candidate.path in complementary_paths
-            and candidate.candidate_id not in relevant_ids
+            }
         )
-        available = [candidate for candidate in relevant if candidate not in selected]
-        missing_roles = kinds - covered_roles
-        choices = [
-            candidate
-            for candidate in available
-            if candidate_roles(candidate) & missing_roles
-        ]
-        if not choices:
-            choices = [
-                candidate
-                for candidate in available
-                if document_terms[candidate.path] & (facets - covered)
-                and (
-                    "test" in kinds or not FILE_POLICY_REGISTRY.is_test(candidate.path)
-                )
-            ]
-        if not choices:
-            break
-
-        def order(
-            candidate: CandidateCard, selected_paths: set[str] = selected_paths
-        ) -> tuple[int, int, float, str]:
-            connected = any(
-                neighbor.path in selected_paths and "verified" in neighbor.provenance
-                for neighbor in candidate.graph_neighbors
-            )
-            return (
-                -int(connected),
-                -len(document_terms[candidate.path] & (facets - covered)),
-                -candidate.bm25_score,
-                candidate.path,
-            )
-
-        add(min(choices, key=order))
-    ids = {candidate.candidate_id for candidate in selected}
-    return [
-        *selected,
-        *(candidate for candidate in ranked if candidate.candidate_id not in ids),
+        for c in ranked
+        if c.path in admitted
     ]
+    requirements = build_evidence_requirements(task, tuple(available))
+    required = {r.candidate_id for r in requirements.source_evidence}
+    selected = [c for c in available if c.exact_group != "approximate"]
+    covered = {
+        r.role_id
+        for r in roles
+        for c in selected
+        if _candidate_covers_role(c, r, set())
+    }
+    selected_ids = {c.candidate_id for c in selected}
+    remaining = [c for c in available if c.candidate_id not in selected_ids]
+    while remaining and len(selected) < PLANNING_MAX_POOL_CANDIDATES:
+        candidate = min(
+            remaining,
+            key=lambda c: (
+                -int(c.candidate_id in required),
+                -len(
+                    {
+                        r.role_id
+                        for r in roles
+                        if r.role_id not in covered
+                        and _candidate_covers_role(c, r, set())
+                    }
+                ),
+                -c.bm25_score,
+                -c.score,
+                c.path,
+            ),
+        )
+        selected.append(candidate)
+        remaining.remove(candidate)
+        covered.update(
+            r.role_id for r in roles if _candidate_covers_role(candidate, r, set())
+        )
+    return selected[:PLANNING_MAX_POOL_CANDIDATES]
 
 
 def _bm25(
