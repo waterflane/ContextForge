@@ -9,6 +9,7 @@ import math
 import re
 import threading
 from collections import Counter, OrderedDict, defaultdict, deque
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -2131,6 +2132,7 @@ class _PlanningMeter:
     async def complete_structured(
         self, request: ModelRequest, *, cancellation: asyncio.Event | None = None
     ) -> ModelResponse:
+        request = replace(request, scheduler_owned_attempts=True)
         self.estimated += _request_tokens(request)
         try:
             response = await self.provider.complete_structured(

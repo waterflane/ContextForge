@@ -424,6 +424,7 @@ class ModelRequest:
     allowed_response_paths: frozenset[str] = frozenset()
     response_path_pointers: tuple[str, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
+    scheduler_owned_attempts: bool = False
     top_level_operation_id: str | None = None
     parent_operation_id: str | None = None
     phase_id: str | None = None
@@ -1213,6 +1214,9 @@ class ProviderRuntime:
         )
         transport_max = self.configuration.retry_limit + 1
         repair_max = self.configuration.max_json_repair_attempts
+        if request.scheduler_owned_attempts:
+            transport_max = 1
+            repair_max = 0
         transport_attempt = 1
         repair_attempt = 0
         model_generations = 0

@@ -146,6 +146,11 @@ class IndexBuildReport:
     @property
     def partial(self) -> bool:
         semantic_failed = bool(self.semantic and self.semantic.failed_paths)
+        if (
+            isinstance(self.semantic, SemanticCardBuildResult)
+            and self.semantic.coverage is not None
+        ):
+            semantic_failed = semantic_failed or self.semantic.coverage.partial
         maps_failed = bool(
             self.maps
             and any(

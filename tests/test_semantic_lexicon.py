@@ -133,6 +133,42 @@ def _response(request: ModelRequest, *, invented: bool = False) -> str:
     )
 
 
+def test_resume_missing_calls_preserves_existing_functions(tmp_path: Path) -> None:
+    maps, graph, sources = _fixture(tmp_path)
+    requests: list[ModelRequest] = []
+
+    def responder(request: ModelRequest, call: int) -> str:
+        del call
+        requests.append(request)
+        return _response(request)
+
+    provider = _provider(responder)
+    initial = asyncio.run(
+        analyze_file_lexicon(
+            provider, maps["app.py"], sources["app.py"], graph, maps, sources
+        )
+    )
+    assert initial.calls
+    previous = initial.model_copy(update={"calls": ()})
+    requests.clear()
+    resumed = asyncio.run(
+        analyze_file_lexicon_resumable(
+            provider,
+            maps["app.py"],
+            sources["app.py"],
+            graph,
+            maps,
+            sources,
+            previous=previous,
+        )
+    )
+    assert resumed.functions == initial.functions
+    assert resumed.calls == initial.calls
+    assert resumed.missing_symbol_ids == resumed.missing_call_ids == ()
+    assert requests[0].trusted_code_map_facts["target_functions"] == []
+    assert requests[0].trusted_code_map_facts["target_calls"]
+
+
 def test_full_file_and_direct_callee_code_are_sent(tmp_path: Path) -> None:
     maps, graph, sources = _fixture(tmp_path)
     requests = []
@@ -473,6 +509,16 @@ def test_full_scope_shares_file_limit_between_cards_and_functions(
     )
     assert len(card_paths) == expected
     assert card_paths == function_paths
+    assert report.semantic is not None
+    from contextforge.intelligence.cards import SemanticCardBuildResult
+
+    assert isinstance(report.semantic, SemanticCardBuildResult)
+    assert report.semantic.coverage is not None
+    assert len(report.semantic.coverage.eligible_files) == 2
+    assert len(report.semantic.coverage.selected_files) == expected
+    if max_files == 1:
+        assert report.partial
+        assert "file_limit" in report.semantic.coverage.reason_codes
     from contextforge.intelligence import load_semantic_card
 
     for state in report.manifest.files:
@@ -525,6 +571,12 @@ def test_index_update_resumes_only_missing_function_ids(tmp_path: Path) -> None:
     pending = card.lexicon.missing_symbol_ids
     assert len(pending) == 1
     assert first.semantic is not None and first.semantic.request_count == 4
+    from contextforge.intelligence.cards import SemanticCardBuildResult
+
+    assert isinstance(first.semantic, SemanticCardBuildResult)
+    assert first.semantic.coverage is not None
+    assert first.semantic.coverage.missing_function_ids == pending
+    assert "request_limit" in first.semantic.coverage.reason_codes
     requests.clear()
     second = asyncio.run(
         build_repository_index(

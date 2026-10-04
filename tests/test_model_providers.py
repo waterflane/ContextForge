@@ -374,6 +374,21 @@ def test_structured_repair_retry_changes_the_payload_once() -> None:
     assert "Correction:" in tasks[1]
 
 
+def test_scheduler_owned_request_disables_hidden_provider_repairs() -> None:
+    provider = FakeModelProvider(
+        _configuration(retry_limit=2),
+        responder=lambda request, index: "malformed" if index == 0 else _valid_json(),
+        retry_delays=(0, 0),
+    )
+    with pytest.raises(StructuredResponseError):
+        asyncio.run(
+            provider.complete_structured(
+                replace(_request(), scheduler_owned_attempts=True)
+            )
+        )
+    assert provider.call_count == 1
+
+
 def test_oversized_response_is_rejected_before_json_parsing() -> None:
     response = _valid_json("x" * 300)
 

@@ -243,6 +243,17 @@
             "null"
           ],
           "minimum": 0
+        },
+        "semantic_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SemanticCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       }
     },
@@ -1305,6 +1316,94 @@
         "end_line"
       ],
       "title": "BenchmarkSourceRange",
+      "type": "object"
+    },
+    "SemanticCoverage": {
+      "additionalProperties": false,
+      "description": "Completeness of requested enrichment, independently of provider errors.",
+      "properties": {
+        "eligible_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Eligible Files",
+          "type": "array"
+        },
+        "selected_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Files",
+          "type": "array"
+        },
+        "completed_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Files",
+          "type": "array"
+        },
+        "requested_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested Function Ids",
+          "type": "array"
+        },
+        "completed_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Function Ids",
+          "type": "array"
+        },
+        "requested_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested Call Ids",
+          "type": "array"
+        },
+        "completed_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Call Ids",
+          "type": "array"
+        },
+        "missing_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Function Ids",
+          "type": "array"
+        },
+        "missing_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Call Ids",
+          "type": "array"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "title": "SemanticCoverage",
       "type": "object"
     }
   }

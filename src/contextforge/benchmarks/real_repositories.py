@@ -34,6 +34,7 @@ from contextforge.benchmarks.models import (
     BenchmarkSourceRange,
 )
 from contextforge.core.validation import validate_portable_relative_path
+from contextforge.intelligence.cards import SemanticCoverage
 
 REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[2] = 2
 MAX_FINAL_ANSWER_MS = 90_000
@@ -419,6 +420,7 @@ class RealBenchmarkBuildReport(RealBenchmarkModel):
     reason: str | None = None
     failed_paths: tuple[RepositoryRelativePath, ...] = ()
     failure_code_counts: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    semantic_coverage: SemanticCoverage | None = None
     cold_structural_ms: NonNegativeInt | None = None
     semantic_offline_ms: NonNegativeInt | None = None
     semantic_provider_calls: NonNegativeInt | None = None

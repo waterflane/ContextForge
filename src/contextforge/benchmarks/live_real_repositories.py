@@ -685,6 +685,9 @@ async def run_pinned_real_repository_benchmark(
                                     else report.semantic.failed_paths
                                 ),
                                 failure_code_counts=dict(sorted(failure_codes.items())),
+                                semantic_coverage=report.semantic.coverage
+                                if isinstance(report.semantic, SemanticCardBuildResult)
+                                else None,
                                 cold_structural_ms=structural_ms,
                                 semantic_offline_ms=semantic_ms,
                                 semantic_provider_calls=semantic_calls,

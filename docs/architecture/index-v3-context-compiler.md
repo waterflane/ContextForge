@@ -55,6 +55,10 @@ coverage while the model analysis remains partial. Function descriptions and
 direct-call expressions retain stable symbol/edge identities. Successfully
 verified function groups survive a later failure and an update retries missing
 IDs. Every function request carries the full file and outgoing call table;
+Requested semantic coverage is reported independently of provider failures.
+File/request/token limits, missing function/call IDs, validation failures, and
+context overflow keep requested full enrichment partial. Updates also resume
+missing call expressions without replacing verified function descriptions.
 `file_only` omits external callee code if the request exceeds the actual window.
 
 Graph nodes, edges, metrics, and file projections are stored in digest-bound

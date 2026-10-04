@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -52,6 +52,7 @@ from contextforge.intelligence.semantic_lexicon import (
     SemanticContextOverflow,
     analyze_file_lexicon_resumable,
     callable_symbols,
+    missing_call_ids,
 )
 from contextforge.intelligence.store import (
     IndexWriteLock,
@@ -62,6 +63,7 @@ from contextforge.intelligence.store import (
 )
 from contextforge.models import (
     ModelProvider,
+    ModelProviderError,
     ModelRequest,
     UntrustedSource,
     estimate_request_context,
@@ -416,6 +418,29 @@ class SemanticModelFileOutcome:
     status: Literal["complete", "partial", "fallback"]
 
 
+class SemanticCoverage(IndexModel):
+    """Completeness of requested enrichment, independently of provider errors."""
+
+    eligible_files: tuple[str, ...] = ()
+    selected_files: tuple[str, ...] = ()
+    completed_files: tuple[str, ...] = ()
+    requested_function_ids: tuple[str, ...] = ()
+    completed_function_ids: tuple[str, ...] = ()
+    requested_call_ids: tuple[str, ...] = ()
+    completed_call_ids: tuple[str, ...] = ()
+    missing_function_ids: tuple[str, ...] = ()
+    missing_call_ids: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+
+    @property
+    def partial(self) -> bool:
+        return bool(
+            set(self.eligible_files) - set(self.completed_files)
+            or self.missing_function_ids
+            or self.missing_call_ids
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticCardBuildResult:
     manifest: IndexManifest
@@ -427,6 +452,7 @@ class SemanticCardBuildResult:
     failed_paths: tuple[str, ...]
     reused_card_paths: tuple[str, ...] = ()
     model_file_outcomes: tuple[SemanticModelFileOutcome, ...] = ()
+    coverage: SemanticCoverage | None = None
 
     @property
     def analyzed_paths(self) -> tuple[str, ...]:
@@ -444,6 +470,93 @@ class SemanticCardBuildResult:
                 }
             )
         )
+
+
+def _semantic_coverage(
+    code_maps: tuple[FileCodeMap, ...],
+    cards: tuple[SemanticCard, ...],
+    graph: RelationshipGraph,
+    selected: set[str],
+    options: SemanticCardOptions,
+    provider: ModelProvider | None,
+    request_count: int,
+    estimated_tokens: int,
+) -> SemanticCoverage | None:
+    if provider is None or options.scope == "none":
+        return None
+    eligible = {m.path for m in code_maps if not _requires_deterministic_card(m)}
+    requested_paths = eligible if options.scope == "all" else selected
+    functions = (
+        {
+            s.symbol_id
+            for m in code_maps
+            if m.path in requested_paths
+            for s in callable_symbols(m)
+        }
+        if options.scope == "all"
+        else set()
+    )
+    nodes = {n.node_id for n in graph.nodes if n.symbol_id in functions}
+    calls = {
+        e.edge_id
+        for e in graph.edges
+        if e.kind == "call"
+        and e.provenance != "model-inferred"
+        and e.source_node_id in nodes
+    }
+    completed_functions = {
+        f.symbol_id for c in cards if c.lexicon for f in c.lexicon.functions
+    } & functions
+    completed_calls = {
+        e.edge_id for c in cards if c.lexicon for e in c.lexicon.calls if e.expressions
+    } & calls
+    completed_files = {
+        c.path
+        for c in cards
+        if c.path in requested_paths
+        and c.provenance.method == "model"
+        and c.quality == "complete"
+    }
+    reasons: set[str] = set()
+    if requested_paths - selected:
+        reasons.add("file_limit")
+    if request_count >= options.max_requests and requested_paths - completed_files:
+        reasons.add("request_limit")
+    if (
+        estimated_tokens >= options.max_estimated_input_tokens
+        and requested_paths - completed_files
+    ):
+        reasons.add("token_limit")
+    for card in cards:
+        for code in () if card.lexicon is None else card.lexicon.failure_codes:
+            if (
+                "Budget" in code
+                and card.lexicon is not None
+                and card.lexicon.budget_reason
+            ):
+                reasons.add(card.lexicon.budget_reason)
+            elif "Budget" not in code:
+                reasons.add(
+                    "context_overflow"
+                    if "Overflow" in code
+                    else "provider_failure"
+                    if "Provider" in code
+                    else "validation_failure"
+                )
+        if card.path in selected and card.quality == "partial" and not reasons:
+            reasons.add("validation_failure")
+    return SemanticCoverage(
+        eligible_files=tuple(sorted(requested_paths)),
+        selected_files=tuple(sorted(selected)),
+        completed_files=tuple(sorted(completed_files)),
+        requested_function_ids=tuple(sorted(functions)),
+        completed_function_ids=tuple(sorted(completed_functions)),
+        requested_call_ids=tuple(sorted(calls)),
+        completed_call_ids=tuple(sorted(completed_calls)),
+        missing_function_ids=tuple(sorted(functions - completed_functions)),
+        missing_call_ids=tuple(sorted(calls - completed_calls)),
+        reason_codes=tuple(sorted(reasons)),
+    )
 
 
 async def build_semantic_card_index(
@@ -696,7 +809,12 @@ async def build_semantic_card_index(
             and active_options.scope == "all"
             and path in selected
             and callable_symbols(code_map)
-            and (card.lexicon is None or card.lexicon.missing_symbol_ids)
+            and (
+                card.lexicon is None
+                or card.lexicon.missing_symbol_ids
+                or card.lexicon.missing_call_ids
+                or missing_call_ids(code_map, graph, card.lexicon)
+            )
         ):
             lexicon_calls = [0]
             lexicon_tokens = [0]
@@ -744,7 +862,7 @@ async def build_semantic_card_index(
                     )
                 card = SemanticCard.model_validate(payload)
                 analyzers.add(_model_analyzer(provider))
-                if lexicon.missing_symbol_ids:
+                if lexicon.missing_symbol_ids or lexicon.missing_call_ids:
                     failed.append(path)
                     card = card.model_copy(
                         update={
@@ -993,6 +1111,16 @@ async def build_semantic_card_index(
             failed_paths=tuple(sorted(set(failed))),
             reused_card_paths=tuple(sorted(reused_card_paths)),
             model_file_outcomes=tuple(model_file_outcomes),
+            coverage=_semantic_coverage(
+                code_maps,
+                tuple(cards),
+                graph,
+                selected,
+                active_options,
+                provider,
+                request_count,
+                estimated_tokens,
+            ),
         )
     build = IndexBuildState(
         source_snapshot_digest=structural.build.source_snapshot_digest,
@@ -1022,6 +1150,16 @@ async def build_semantic_card_index(
         failed_paths=tuple(sorted(set(failed))),
         reused_card_paths=tuple(sorted(reused_card_paths)),
         model_file_outcomes=tuple(model_file_outcomes),
+        coverage=_semantic_coverage(
+            code_maps,
+            tuple(cards),
+            graph,
+            selected,
+            active_options,
+            provider,
+            request_count,
+            estimated_tokens,
+        ),
     )
 
 
@@ -1102,7 +1240,11 @@ def _reusable_cards(
             and options.scope == "all"
             and state.path in selected
             and callable_symbols(code_maps[state.path])
-            and (card.lexicon is None or card.lexicon.missing_symbol_ids)
+            and (
+                card.lexicon is None
+                or card.lexicon.missing_symbol_ids
+                or card.lexicon.missing_call_ids
+            )
         ):
             return None
         analyzer = card.provenance.analyzer
@@ -1276,6 +1418,7 @@ async def _request_card(
                 chunk_index=chunk_index,
                 chunk_count=len(chunks),
             )
+            request = replace(request, scheduler_owned_attempts=True)
             budget = estimate_request_context(request, provider.configuration)
             cost = _card_request_token_cost(request, provider)
             if not budget.fits or used_tokens + cost > remaining_tokens:
@@ -1287,11 +1430,17 @@ async def _request_card(
                 response = await provider.complete_structured(
                     request, cancellation=cancellation
                 )
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, ModelProviderError):
+                    used_requests += max(exc.total_provider_http_calls - 1, 0)
                 if attempt == 0 and used_requests < remaining_requests:
                     repair_attempted = True
                     continue
                 break
+            if response.diagnostic is not None:
+                used_requests += max(
+                    response.diagnostic.total_provider_http_calls - 1, 0
+                )
             if isinstance(
                 response.value, _RawSemanticCard
             ) and _mandatory_grounding_valid(
