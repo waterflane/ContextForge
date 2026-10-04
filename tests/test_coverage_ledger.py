@@ -77,7 +77,7 @@ def test_ledger_covers_startup_and_multiple_roles_in_one_file() -> None:
     assert {binding.candidate_id for binding in ledger.bindings} == {main.candidate_id}
 
 
-def test_ledger_covers_implementation_test_config_docs_and_api() -> None:
+def test_unrelated_file_categories_do_not_close_task_roles() -> None:
     implementation = _candidate("src/service.py")
     test = _candidate("tests/test_service.py")
     config = _candidate("config/settings.toml")
@@ -92,12 +92,10 @@ def test_ledger_covers_implementation_test_config_docs_and_api() -> None:
     )
 
     assert {
-        "implementation",
         "test",
         "configuration",
-        "documentation",
-        "public_api",
-    } <= set(ledger.covered_role_ids)
+    } <= set(ledger.missing_role_ids)
+    assert {"documentation", "public_api"} <= set(ledger.covered_role_ids)
 
 
 def test_cross_file_ledger_marks_unmaterialized_client_and_provider_missing() -> None:
@@ -190,9 +188,9 @@ def test_direction_and_source_facts_determine_roles() -> None:
     candidate = _candidate(
         "src/service.py", neighbors=(incoming,), roles=("configuration",)
     )
-    ledger = build_coverage_ledger("Trace configuration flow", (candidate,))
-    assert {"callee", "configuration", "implementation"} <= set(ledger.covered_role_ids)
-    assert "caller" in ledger.missing_role_ids
+    ledger = build_coverage_ledger("Trace service configuration flow", (candidate,))
+    assert {"configuration", "implementation"} <= set(ledger.covered_role_ids)
+    assert {"caller", "callee"} <= set(ledger.missing_role_ids)
 
 
 def test_requirements_remain_frozen_when_unrelated_neighbors_are_added() -> None:
@@ -215,3 +213,43 @@ def test_matched_symbol_alone_does_not_prove_entrypoint_or_api() -> None:
     symbol = _candidate("src/service.py", exact="exact_symbol", symbols=("startup",))
     ledger = build_coverage_ledger("Review startup API", (symbol,))
     assert {"entrypoint", "public_api"} <= set(ledger.missing_role_ids)
+
+
+def test_each_explicit_implementation_anchor_needs_its_own_test_binding() -> None:
+    first = _candidate(
+        "src/first.py",
+        exact="exact_symbol",
+        symbols=("first_job",),
+        neighbors=(_neighbor("tests/test_first.py", "call"),),
+    )
+    second = _candidate(
+        "src/second.py",
+        exact="exact_symbol",
+        symbols=("second_job",),
+    )
+    first_test = _candidate("tests/test_first.py")
+    task = "Review `first_job` and `second_job` implementation and tests"
+    incomplete = build_coverage_ledger(task, (first, second, first_test))
+    assert "test" in incomplete.missing_role_ids
+    assert any(b.role_id == "test" for b in incomplete.bindings)
+    second = second.model_copy(
+        update={
+            "graph_neighbors": (_neighbor("tests/test_second.py", "call"),),
+        }
+    )
+    complete = build_coverage_ledger(
+        task,
+        (first, second, first_test, _candidate("tests/test_second.py")),
+    )
+    assert "test" in complete.covered_role_ids
+
+
+def test_unrelated_call_pair_cannot_close_explicit_anchor_flow() -> None:
+    anchor = _candidate("src/jobs.py", exact="exact_symbol", symbols=("execute_job",))
+    caller = _candidate("src/other.py", neighbors=(_neighbor("src/leaf.py", "call"),))
+    callee = _candidate("src/leaf.py", neighbors=(_neighbor("src/other.py", "call"),))
+    ledger = build_coverage_ledger(
+        "Trace execute_job implementation flow", (anchor, caller, callee)
+    )
+    assert "implementation" in ledger.covered_role_ids
+    assert {"caller", "callee"} <= set(ledger.missing_role_ids)

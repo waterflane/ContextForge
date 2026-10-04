@@ -264,3 +264,107 @@ def test_map_planner_claim_and_unrelated_neighbor_do_not_prove_source(
         "required_source_evidence_missing"
         in missing.compilation_sufficiency.reason_codes
     )
+
+
+@pytest.mark.parametrize("link", ["call", "import", "unrelated"])
+@pytest.mark.parametrize("planner_claim", [False, True])
+def test_requested_test_must_be_bound_to_the_implementation(
+    tmp_path: Path, link: str, planner_claim: bool
+) -> None:
+    sources = {
+        "jobs.py": "def execute_job():\n    return 7\n",
+        "checks/test_focus.py": (
+            "from jobs import execute_job\ndef test_focus():\n"
+            + (
+                "    assert execute_job() == 7\n"
+                if link == "call"
+                else "    assert True\n"
+            )
+        ),
+        "checks/test_unrelated.py": "def test_unrelated():\n    assert True\n",
+    }
+    if link == "unrelated":
+        sources["checks/test_focus.py"] = "def test_focus():\n    assert True\n"
+    for path, source in sources.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Review execute_job implementation and tests"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    # Supply all source candidates so absence from lexical search cannot hide the bug.
+    all_candidates = {
+        c.path: c
+        for query in ("execute_job", "test_focus", "test_unrelated")
+        for c in asyncio.run(
+            retrieve_context_candidates(tmp_path, query, manifest=report.manifest)
+        ).candidates
+    }
+    all_candidates.update({c.path: c for c in retrieval.candidates})
+    candidates = tuple(all_candidates[path] for path in sorted(all_candidates))
+    requirements = build_evidence_requirements(task, candidates)
+    retrieval = retrieval.model_copy(
+        update={"candidates": candidates, "requirements": requirements}
+    )
+    if planner_claim:
+        retrieval = retrieval.model_copy(
+            update={
+                "evidence_plan": EvidencePlan(
+                    source_snapshot_digest=retrieval.source_snapshot_digest,
+                    items=tuple(
+                        PlannedEvidence(
+                            candidate_id=c.candidate_id,
+                            path=c.path,
+                            source_sha256=c.source_sha256,
+                            evidence_ids=tuple(
+                                sorted(
+                                    e.evidence_id
+                                    for e in c.evidence_ranges
+                                    if e.evidence_id
+                                )
+                            ),
+                            representation="full",
+                        )
+                        for c in candidates
+                    ),
+                    sufficiency="sufficient",
+                    diagnostics=PlanningDiagnostics(
+                        mode=ContextPlanningMode.AUTO, status="planned"
+                    ),
+                    requirements=requirements,
+                )
+            }
+        )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=16_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "sufficient" if link == "call" else "insufficient"
+    )
+    assert compiled.coverage_ledger is not None
+    assert ("test" in compiled.coverage_ledger.covered_role_ids) == (link == "call")
+    if link == "call":
+        assert any(
+            r.path == "checks/test_focus.py" and r.role_id == "test"
+            for r in requirements.source_evidence
+        )
+        damaged = compile_context_capsule(
+            tmp_path,
+            task,
+            retrieval.model_copy(
+                update={
+                    "candidates": tuple(
+                        c for c in candidates if c.path != "checks/test_focus.py"
+                    ),
+                    "evidence_plan": None,
+                }
+            ),
+            budget=ContextBudget(context_window_tokens=16_000),
+        )
+        assert damaged.compilation_sufficiency is not None
+        assert damaged.compilation_sufficiency.effective_status == "insufficient"

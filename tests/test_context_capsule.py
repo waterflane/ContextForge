@@ -427,7 +427,7 @@ def test_startup_one_of_four_cannot_be_effectively_sufficient(tmp_path: Path) ->
     }
 
 
-def test_automatic_selection_covers_requested_roles_before_upgrades(
+def test_automatic_selection_does_not_certify_unrelated_role_files(
     tmp_path: Path,
 ) -> None:
     _write(
@@ -453,13 +453,14 @@ def test_automatic_selection_covers_requested_roles_before_upgrades(
     )
 
     assert compiled.coverage_ledger is not None
+    assert {"entrypoint", "implementation"} <= set(
+        compiled.coverage_ledger.covered_role_ids
+    )
     assert {
-        "entrypoint",
-        "implementation",
         "test",
         "configuration",
         "documentation",
-    } <= set(compiled.coverage_ledger.covered_role_ids)
+    } <= set(compiled.coverage_ledger.missing_role_ids)
 
 
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(

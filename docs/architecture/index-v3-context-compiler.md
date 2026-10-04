@@ -292,8 +292,14 @@ Centrality and inferred edges cannot admit a file without a lexical/exact seed
 or a verified connection. Query instruction words do not form coverage facets.
 Entrypoint evidence belongs to the source of a captured handler/callback flow.
 An executable module plus an import cannot establish that flow. Source-test
-coverage selects a verified counterpart by relevance; other related tests stay
-available as optional context instead of becoming universal obligations.
+coverage selects a counterpart with a verified incoming call or reference by
+relevance. Import-only and naming links remain discovery hints. Other related
+tests stay available as optional context instead of becoming universal obligations.
+Role bindings must belong to a task anchor or an explicit source obligation;
+an unrelated file of the same category cannot close a requested role. Each
+explicit implementation anchor needs its own test binding when tests are
+requested. Directed call endpoints and connected entrypoint facts retain their
+source obligations through selection and compilation.
 
 Frozen source obligations retain declaration IDs and add implementation/call-site
 addresses from digest-checked persisted CodeMaps. The compiler selects source

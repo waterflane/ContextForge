@@ -450,6 +450,10 @@ class CoverageLedger(IndexModel):
         ):
             raise ValueError("ledger bindings require a known role")
         covered = tuple(sorted({item.role_id for item in self.bindings}))
+        if self.requirements is not None and not _test_bindings_cover_anchors(
+            self.requirements, self.bindings
+        ):
+            covered = tuple(role_id for role_id in covered if role_id != "test")
         if self.covered_role_ids != covered:
             raise ValueError("ledger covered roles must match bindings")
         if self.missing_role_ids != tuple(
@@ -1767,6 +1771,7 @@ def _complementary_candidates(
         for r in roles
         for c in selected
         if _candidate_covers_role(c, r, set())
+        and _binding_matches_requirements(r, c, requirements)
     }
     selected_ids = {c.candidate_id for c in selected}
     remaining = [c for c in available if c.candidate_id not in selected_ids]
@@ -1781,6 +1786,7 @@ def _complementary_candidates(
                         for r in roles
                         if r.role_id not in covered
                         and _candidate_covers_role(c, r, set())
+                        and _binding_matches_requirements(r, c, requirements)
                     }
                 ),
                 -c.bm25_score,
@@ -1791,7 +1797,10 @@ def _complementary_candidates(
         selected.append(candidate)
         remaining.remove(candidate)
         covered.update(
-            r.role_id for r in roles if _candidate_covers_role(candidate, r, set())
+            r.role_id
+            for r in roles
+            if _candidate_covers_role(candidate, r, set())
+            and _binding_matches_requirements(r, candidate, requirements)
         )
     return selected[:PLANNING_MAX_POOL_CANDIDATES]
 
@@ -3846,7 +3855,13 @@ def build_coverage_ledger(
     requirements = requirements or build_evidence_requirements(task, candidates)
     roles = requirements.roles
     role_by_id = {item.role_id: item for item in roles}
-    bindings = list(_deterministic_role_bindings(roles, selected, task))
+    bindings = [
+        binding
+        for binding in _deterministic_role_bindings(roles, selected, task)
+        if _binding_matches_requirements(
+            role_by_id[binding.role_id], by_id[binding.candidate_id], requirements
+        )
+    ]
     for binding in planner_bindings:
         candidate = by_id.get(binding.candidate_id)
         role = role_by_id.get(binding.role_id)
@@ -3866,6 +3881,7 @@ def build_coverage_ledger(
             or role.kind == "unknown"
             or not set(binding.evidence_ids) <= known_evidence
             or not _candidate_covers_role(candidate, role, set())
+            or not _binding_matches_requirements(role, candidate, requirements)
         ):
             continue
         bindings.append(binding)
@@ -3950,7 +3966,17 @@ def build_coverage_ledger(
     missing_endpoints = tuple(
         sorted(endpoints - set(covered_endpoints), key=canonical_casefold_key)
     )
-    covered = tuple(sorted({item.role_id for item in canonical_bindings}))
+    covered = tuple(
+        sorted(
+            role.role_id
+            for role in roles
+            if any(b.role_id == role.role_id for b in canonical_bindings)
+            and (
+                role.kind != "test"
+                or _test_bindings_cover_anchors(requirements, canonical_bindings)
+            )
+        )
+    )
     return CoverageLedger(
         stage=stage,
         roles=roles,
@@ -4195,6 +4221,65 @@ def _candidate_covers_role(
     return False
 
 
+def _binding_matches_requirements(
+    role: TaskEvidenceRole,
+    candidate: CandidateCard,
+    requirements: EvidenceRequirements,
+) -> bool:
+    """A file category cannot substitute for evidence linked to the task anchor."""
+
+    obligations = requirements.source_evidence
+    if any(
+        r.role_id == role.role_id
+        and r.candidate_id == candidate.candidate_id
+        and r.path == candidate.path
+        and r.source_sha256 == candidate.source_sha256
+        for r in obligations
+    ):
+        return True
+    if candidate.candidate_id not in requirements.anchors:
+        return False
+    if role.kind in {"caller", "callee"}:
+        direction = "outgoing" if role.kind == "caller" else "incoming"
+        endpoints = {
+            r.path
+            for r in obligations
+            if r.anchor_candidate_id == candidate.candidate_id
+            and r.basis == "verified-call"
+        }
+        return any(
+            n.path in endpoints
+            and _verified_neighbor_kinds(n, direction) & {"call", "entrypoint-handler"}
+            for n in candidate.graph_neighbors
+        )
+    return True
+
+
+def _test_bindings_cover_anchors(
+    requirements: EvidenceRequirements, bindings: tuple[RoleEvidenceBinding, ...]
+) -> bool:
+    test_ids = {b.candidate_id for b in bindings if b.role_id == "test"}
+    code_anchors = {
+        r.candidate_id
+        for r in requirements.source_evidence
+        if r.candidate_id in requirements.anchors
+        and (
+            FILE_POLICY_REGISTRY.profile(r.path) == "code"
+            or FILE_POLICY_REGISTRY.is_test(r.path)
+        )
+    }
+    return all(
+        anchor in test_ids
+        or any(
+            r.anchor_candidate_id == anchor
+            and r.role_id == "test"
+            and r.candidate_id in test_ids
+            for r in requirements.source_evidence
+        )
+        for anchor in code_anchors
+    )
+
+
 def build_evidence_requirements(
     task: str, candidates: tuple[CandidateCard, ...]
 ) -> EvidenceRequirements:
@@ -4306,19 +4391,22 @@ def build_evidence_requirements(
                 candidate = by_path.get(neighbor.path)
                 if candidate is None or candidate.path in visited:
                     continue
-                verified = _verified_neighbor_kinds(neighbor)
-                if kinds & {"caller", "callee"} and verified & {
+                outgoing_call = _verified_neighbor_kinds(neighbor, "outgoing") & {
                     "call",
                     "entrypoint-handler",
-                }:
+                }
+                incoming_call = _verified_neighbor_kinds(neighbor, "incoming") & {
+                    "call",
+                    "entrypoint-handler",
+                }
+                if ("callee" in kinds and outgoing_call) or (
+                    "caller" in kinds and incoming_call
+                ):
                     add(
                         candidate,
                         anchor,
                         "verified-call",
-                        "callee"
-                        if _verified_neighbor_kinds(neighbor, "outgoing")
-                        & {"call", "entrypoint-handler"}
-                        else "caller",
+                        "callee" if "callee" in kinds and outgoing_call else "caller",
                     )
                     visited.add(candidate.path)
                     if depth < 1:
@@ -4327,23 +4415,26 @@ def build_evidence_requirements(
             by_path[n.path]
             for n in anchor.graph_neighbors
             if n.path in by_path
-            and "source-test" in _verified_neighbor_kinds(n)
+            and _verified_neighbor_kinds(n, "incoming") & {"call", "reference"}
             and FILE_POLICY_REGISTRY.is_test(n.path)
         ]
         preferred_test = min(
             test_neighbors, key=lambda c: (-c.bm25_score, c.path), default=None
         )
+        if "test" in kinds and preferred_test is not None:
+            add(preferred_test, anchor, "verified-source-test", "test")
         for neighbor in anchor.graph_neighbors:
             candidate = by_path.get(neighbor.path)
             if candidate is None:
                 continue
             verified = _verified_neighbor_kinds(neighbor)
             if (
-                "test" in kinds
-                and "source-test" in verified
-                and candidate == preferred_test
+                "entrypoint" in kinds
+                and "entrypoint" in candidate.structural_roles
+                and _verified_neighbor_kinds(neighbor, "incoming")
+                & {"call", "entrypoint-handler"}
             ):
-                add(candidate, anchor, "verified-source-test", "test")
+                add(candidate, anchor, "verified-call", "entrypoint")
             if "configuration" in kinds and "config-consumer" in verified:
                 add(candidate, anchor, "verified-config", "configuration")
     return EvidenceRequirements(
