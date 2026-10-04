@@ -1,0 +1,1373 @@
+{
+  "schema_version": 2,
+  "suite_name": "index-v3.2-independent-holdout",
+  "repositories": [
+    {
+      "repository_id": "contextforge",
+      "revision": "bacf0e90253ead68f5ff886f47e7c81e479169f3"
+    },
+    {
+      "repository_id": "dsh-contextforge",
+      "revision": "38ed6afb219b97b5f4b609555fe185df28f01fc0"
+    },
+    {
+      "repository_id": "planup",
+      "revision": "750c8bf406b85be980595e56597aceb05603d904"
+    },
+    {
+      "repository_id": "syncplayer",
+      "revision": "6e7154b6b0148a5a595e317ca78fa632ecf9f243"
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "contextforge-nested-ignore-precedence-independent",
+      "repository_id": "contextforge",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Explain how repository scanning applies nested ignore files, project override rules, and protected metadata exclusions; include the focused regression that verifies a project override wins over a nested ignore file.",
+      "required_files": [
+        "src/contextforge/repositories/ignore.py",
+        "src/contextforge/repositories/scanner.py",
+        "tests/test_nested_gitignore.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/repositories/ignore.py",
+        "src/contextforge/repositories/scanner.py",
+        "tests/test_nested_gitignore.py"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 88,
+          "end_line": 107
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 109,
+          "end_line": 145
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 148,
+          "end_line": 197
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 209,
+          "end_line": 250
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 91,
+          "end_line": 102
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 133,
+          "end_line": 168
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 197,
+          "end_line": 214
+        },
+        {
+          "path": "tests/test_nested_gitignore.py",
+          "start_line": 127,
+          "end_line": 143
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 88,
+          "end_line": 107
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 109,
+          "end_line": 145
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 148,
+          "end_line": 197
+        },
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "start_line": 209,
+          "end_line": 250
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 91,
+          "end_line": 102
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 133,
+          "end_line": 168
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "start_line": 197,
+          "end_line": 214
+        },
+        {
+          "path": "tests/test_nested_gitignore.py",
+          "start_line": 127,
+          "end_line": 143
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Traversal applies inherited rules.",
+          "required_paths": [
+            "src/contextforge/repositories/scanner.py"
+          ]
+        },
+        {
+          "role_id": "configuration",
+          "description": "Ignore rule precedence and protected exclusions.",
+          "required_paths": [
+            "src/contextforge/repositories/ignore.py"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Nested override regression.",
+          "required_paths": [
+            "tests/test_nested_gitignore.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "nested-scope",
+          "description": "The scanner extends inherited rules for each reached directory; nested ignore files apply only below their directory and are read after that directory is reachable.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/scanner.py",
+                "start_line": 91,
+                "end_line": 102
+              },
+              "material_evidence_ids": [
+                "structural-b5b3bf4843f61aa191e9e9ec8f2ce0e2"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 109,
+                "end_line": 145
+              },
+              "material_evidence_ids": [
+                "structural-906611fdd79f15d46ec74ed98a950f22"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "override-regression",
+          "description": "The focused test keeps pkg/keep.log despite a nested *.log exclusion and excludes pkg/blocked.py despite a nested negation, reporting the project override as the exclusion source.",
+          "support": [
+            {
+              "citation": {
+                "path": "tests/test_nested_gitignore.py",
+                "start_line": 127,
+                "end_line": 143
+              },
+              "material_evidence_ids": [
+                "structural-e07bfa418b0b5cc358571856b55e19a2"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "precedence",
+          "description": "Ordinary rules run in default, inherited Git, then project override order with later matches winning; protected metadata is checked first and cannot be negated.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 88,
+                "end_line": 107
+              },
+              "material_evidence_ids": [
+                "structural-2be97157978b79c1e1a7f30ea34c32c1"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 209,
+                "end_line": 250
+              },
+              "material_evidence_ids": [
+                "structural-b005558b93c02d088bc19b9031c6a4cc"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-symbol-path-normalization-independent",
+      "repository_id": "contextforge",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Review normalize_relative_path and its focused tests: explain separator normalization, dot segments, and rejection of absolute or escaping paths.",
+      "required_files": [
+        "src/contextforge/repositories/files.py",
+        "tests/test_repository_files.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/repositories/files.py",
+        "tests/test_repository_files.py"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/repositories/files.py",
+          "start_line": 33,
+          "end_line": 63
+        },
+        {
+          "path": "tests/test_repository_files.py",
+          "start_line": 18,
+          "end_line": 36
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/repositories/files.py",
+          "start_line": 33,
+          "end_line": 63
+        },
+        {
+          "path": "tests/test_repository_files.py",
+          "start_line": 18,
+          "end_line": 36
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Portable path normalization.",
+          "required_paths": [
+            "src/contextforge/repositories/files.py"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Acceptance and rejection examples.",
+          "required_paths": [
+            "tests/test_repository_files.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "accepted-paths",
+          "description": "normalize_relative_path converts backslashes to slashes, drops empty and dot segments, resolves internal parent segments, and preserves Unicode components.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/files.py",
+                "start_line": 33,
+                "end_line": 63
+              },
+              "material_evidence_ids": [
+                "structural-eccc51b8e0ed36f598e759d7dc083dae"
+              ]
+            },
+            {
+              "citation": {
+                "path": "tests/test_repository_files.py",
+                "start_line": 18,
+                "end_line": 28
+              },
+              "material_evidence_ids": [
+                "structural-78503a06ca3829c4ccf0cf0e3f698f8b"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "rejected-paths",
+          "description": "Empty, root-only, drive-qualified, absolute, and above-root paths raise ValueError; a normalized path must retain a component.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/repositories/files.py",
+                "start_line": 33,
+                "end_line": 63
+              },
+              "material_evidence_ids": [
+                "structural-eccc51b8e0ed36f598e759d7dc083dae"
+              ]
+            },
+            {
+              "citation": {
+                "path": "tests/test_repository_files.py",
+                "start_line": 31,
+                "end_line": 36
+              },
+              "material_evidence_ids": [
+                "structural-6e16497ff48469aed3bf0dbc7d8b5987"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-bounded-private-memory-independent",
+      "repository_id": "dsh-contextforge",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Explain how consolidated session notes are sanitized before storage and how retained working-set context is bounded and evicted; include the focused privacy and growth tests.",
+      "required_files": [
+        "src/privacy.ts",
+        "src/working-set.ts",
+        "tests/working-set.spec.ts"
+      ],
+      "relevant_top5": [
+        "src/privacy.ts",
+        "src/working-set.ts",
+        "tests/working-set.spec.ts"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/privacy.ts",
+          "start_line": 10,
+          "end_line": 27
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 7,
+          "end_line": 13
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 252,
+          "end_line": 272
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 274,
+          "end_line": 296
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 383,
+          "end_line": 395
+        },
+        {
+          "path": "tests/working-set.spec.ts",
+          "start_line": 50,
+          "end_line": 65
+        },
+        {
+          "path": "tests/working-set.spec.ts",
+          "start_line": 76,
+          "end_line": 91
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/privacy.ts",
+          "start_line": 10,
+          "end_line": 27
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 7,
+          "end_line": 13
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 252,
+          "end_line": 272
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 274,
+          "end_line": 296
+        },
+        {
+          "path": "src/working-set.ts",
+          "start_line": 383,
+          "end_line": 395
+        },
+        {
+          "path": "tests/working-set.spec.ts",
+          "start_line": 50,
+          "end_line": 65
+        },
+        {
+          "path": "tests/working-set.spec.ts",
+          "start_line": 76,
+          "end_line": 91
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Memory merge and bounded retention.",
+          "required_paths": [
+            "src/working-set.ts"
+          ]
+        },
+        {
+          "role_id": "sanitization",
+          "description": "Credential redaction.",
+          "required_paths": [
+            "src/privacy.ts"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Privacy and growth regressions.",
+          "required_paths": [
+            "tests/working-set.spec.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "credential-redaction",
+          "description": "Credential-shaped text is replaced with [REDACTED]; merged active tasks, priorities and note text are redacted before storage.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/privacy.ts",
+                "start_line": 10,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-2a28b3fd9e4ea029116ddfa33a512e14"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/working-set.ts",
+                "start_line": 252,
+                "end_line": 272
+              },
+              "material_evidence_ids": [
+                "structural-3d7b4198c6b57770b351ffd568b71d75"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/working-set.ts",
+                "start_line": 383,
+                "end_line": 390
+              },
+              "material_evidence_ids": [
+                "structural-496db32934a39d9e38917e3e8fb51b00"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "privacy-tests",
+          "description": "Tests verify bucket lengths and summary tokens while preserving a pinned path, and retain provenance while removing supplied API-key and password values.",
+          "support": [
+            {
+              "citation": {
+                "path": "tests/working-set.spec.ts",
+                "start_line": 50,
+                "end_line": 65
+              },
+              "material_evidence_ids": [
+                "structural-ea29852095c523e3ce1570b04a43c306"
+              ]
+            },
+            {
+              "citation": {
+                "path": "tests/working-set.spec.ts",
+                "start_line": 76,
+                "end_line": 91
+              },
+              "material_evidence_ids": [
+                "structural-b742fd113bdaa61218882293d2293d96"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "retention-order",
+          "description": "Buckets are deduplicated and capped; retention orders pinned, relevant, recent turn, then priority, with further eviction above 4000 estimated summary tokens.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/working-set.ts",
+                "start_line": 7,
+                "end_line": 13
+              },
+              "material_evidence_ids": [
+                "structural-04c25d1fab4b164194fca2ed48124187"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/working-set.ts",
+                "start_line": 274,
+                "end_line": 296
+              },
+              "material_evidence_ids": [
+                "structural-3bfde5e709bdc42c8bb39a1c5b69c712"
+              ]
+            },
+            {
+              "citation": {
+                "path": "src/working-set.ts",
+                "start_line": 393,
+                "end_line": 395
+              },
+              "material_evidence_ids": [
+                "structural-700a42b2ca2e8acc40f04ca8e88f7fe0"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-symbol-auth-expiry-recovery-independent",
+      "repository_id": "dsh-contextforge",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Review createActiveModelAuthenticationRecovery and its focused tests. Which failures trigger recovery, what credential state changes, and how are other providers and token values handled?",
+      "required_files": [
+        "src/active-model-auth-recovery.ts",
+        "tests/active-model-auth-recovery.spec.ts"
+      ],
+      "relevant_top5": [
+        "src/active-model-auth-recovery.ts",
+        "tests/active-model-auth-recovery.spec.ts"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/active-model-auth-recovery.ts",
+          "start_line": 21,
+          "end_line": 47
+        },
+        {
+          "path": "tests/active-model-auth-recovery.spec.ts",
+          "start_line": 4,
+          "end_line": 35
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/active-model-auth-recovery.ts",
+          "start_line": 21,
+          "end_line": 47
+        },
+        {
+          "path": "tests/active-model-auth-recovery.spec.ts",
+          "start_line": 4,
+          "end_line": 35
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Provider-owned OAuth recovery hook.",
+          "required_paths": [
+            "src/active-model-auth-recovery.ts"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Revocation and other-provider tests.",
+          "required_paths": [
+            "tests/active-model-auth-recovery.spec.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "expiry-marker",
+          "description": "OAuth credentials with numeric expiry get only a lowered expires marker; the hook returns whether a credential was marked.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/active-model-auth-recovery.ts",
+                "start_line": 31,
+                "end_line": 42
+              },
+              "material_evidence_ids": [
+                "structural-01a48f347398014f63ece291b168925c"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "recovery-guards",
+          "description": "Recovery proceeds only for openai-codex AUTH failures with a credential service modify method; abort checks precede service access and credential mutation.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/active-model-auth-recovery.ts",
+                "start_line": 21,
+                "end_line": 40
+              },
+              "material_evidence_ids": [
+                "structural-88be89911bf2e634db323721aece3dbf"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "secret-boundary-tests",
+          "description": "Tests verify early-revoked expiry recovery preserves access/refresh values, and another provider does not invoke credential modification.",
+          "support": [
+            {
+              "citation": {
+                "path": "tests/active-model-auth-recovery.spec.ts",
+                "start_line": 4,
+                "end_line": 35
+              },
+              "material_evidence_ids": [
+                "structural-abede525365009d72d5a3f1a0506e199"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "planup-completion-reminder-flow-independent",
+      "repository_id": "planup",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Проследи, как переключение завершённости задачи проходит через сохранение и меняет напоминания. Объясни порядок действий, реальное хранение данных и ограничения текущего планировщика уведомлений.",
+      "required_files": [
+        "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+        "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+        "app/src/main/java/com/planup/di/AppContainer.kt",
+        "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+        "app/src/main/java/com/planup/ui/PlanUpViewModel.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+        "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+        "app/src/main/java/com/planup/di/AppContainer.kt",
+        "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+        "app/src/main/java/com/planup/ui/PlanUpViewModel.kt"
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+          "start_line": 6,
+          "end_line": 10
+        },
+        {
+          "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+          "start_line": 13,
+          "end_line": 18
+        },
+        {
+          "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+          "start_line": 27,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 27,
+          "end_line": 30
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+          "start_line": 7,
+          "end_line": 16
+        },
+        {
+          "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+          "start_line": 56,
+          "end_line": 67
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+          "start_line": 6,
+          "end_line": 10
+        },
+        {
+          "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+          "start_line": 13,
+          "end_line": 18
+        },
+        {
+          "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+          "start_line": 27,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 27,
+          "end_line": 30
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+          "start_line": 7,
+          "end_line": 16
+        },
+        {
+          "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+          "start_line": 56,
+          "end_line": 67
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "caller",
+          "description": "Completion toggle enters asynchronous saving.",
+          "required_paths": [
+            "app/src/main/java/com/planup/ui/PlanUpViewModel.kt"
+          ]
+        },
+        {
+          "role_id": "configuration",
+          "description": "Concrete repository and scheduler wiring.",
+          "required_paths": [
+            "app/src/main/java/com/planup/di/AppContainer.kt"
+          ]
+        },
+        {
+          "role_id": "implementation",
+          "description": "Saving and reminder rules.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/usecase/SaveTask.kt"
+          ]
+        },
+        {
+          "role_id": "storage",
+          "description": "Repository update semantics.",
+          "required_paths": [
+            "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt"
+          ]
+        },
+        {
+          "role_id": "callee",
+          "description": "Actual reminder behavior.",
+          "required_paths": [
+            "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "completion-save",
+          "description": "Completion toggle inverts isCompleted and calls the ViewModel save method, which launches container.saveTask in viewModelScope.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+                "start_line": 56,
+                "end_line": 67
+              },
+              "material_evidence_ids": [
+                "structural-05d33bbe4fe0320e8a385526deff7679"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "container-storage",
+          "description": "The container supplies an in-memory repository and demo reminder scheduler to SaveTask; saving replaces the same task ID and data lasts only for process lifetime.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+                "start_line": 27,
+                "end_line": 30
+              },
+              "material_evidence_ids": [
+                "structural-699b19fb95acfe201b2a50182a6ca289"
+              ]
+            },
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+                "start_line": 13,
+                "end_line": 18
+              },
+              "material_evidence_ids": [
+                "structural-8611492e8aed3fb45249e78173906c74"
+              ]
+            },
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+                "start_line": 27,
+                "end_line": 29
+              },
+              "material_evidence_ids": [
+                "structural-1f7ca2c34e7428077de78eb4d5d8020c"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "notification-placeholder",
+          "description": "DemoReminderScheduler schedule and cancel return Unit and create no system notifications.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+                "start_line": 6,
+                "end_line": 10
+              },
+              "material_evidence_ids": [
+                "structural-e785ef47edb74cde6e37e01b16c36dc8"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "reminder-order",
+          "description": "SaveTask saves the task, cancels its previous reminder, then schedules only an incomplete task with a non-null reminderAt.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+                "start_line": 7,
+                "end_line": 16
+              },
+              "material_evidence_ids": [
+                "structural-9beb256cf30e4dca4d66cd8a94c8d0d9"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "planup-symbol-translations-fallback-independent",
+      "repository_id": "planup",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Review Translations.text and Translations.quantity with their focused tests. Explain missing or malformed translation fallback, plural locale selection, and handling of placeholders inside user-provided text.",
+      "required_files": [
+        "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+        "app/src/test/java/com/planup/i18n/LanguageTest.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+        "app/src/test/java/com/planup/i18n/LanguageTest.kt"
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+          "start_line": 47,
+          "end_line": 88
+        },
+        {
+          "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+          "start_line": 60,
+          "end_line": 93
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+          "start_line": 47,
+          "end_line": 88
+        },
+        {
+          "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+          "start_line": 60,
+          "end_line": 93
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Fallback and substitution.",
+          "required_paths": [
+            "app/src/main/java/com/planup/i18n/TranslationCatalog.kt"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Plural, fallback and literal user-text tests.",
+          "required_paths": [
+            "app/src/test/java/com/planup/i18n/LanguageTest.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "plural-locale",
+          "description": "Missing or incompatible plural groups use English group and locale; quantity rejects negative counts and uses a category with other fallback.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 58,
+                "end_line": 78
+              },
+              "material_evidence_ids": [
+                "structural-9a6e775d3c9ddb269d08b1d367bcd166"
+              ]
+            },
+            {
+              "citation": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 60,
+                "end_line": 69
+              },
+              "material_evidence_ids": [
+                "structural-b42d3242c4d5e12eb4181ef790e7b616"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "string-fallback",
+          "description": "Translations with mismatched placeholders fall back to English; missing strings use English, while unknown string keys are returned as keys.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 55,
+                "end_line": 68
+              },
+              "material_evidence_ids": [
+                "structural-6533186b970fb7e2453a8462ed5f7132"
+              ]
+            },
+            {
+              "citation": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 82,
+                "end_line": 87
+              },
+              "material_evidence_ids": [
+                "structural-1ebf521c2b853e78ee196cbd195f7e20"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "user-placeholder-test",
+          "description": "Template substitution runs once, preserving braces introduced by user argument text; the test retains {title} in a supplied title.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 80,
+                "end_line": 88
+              },
+              "material_evidence_ids": [
+                "structural-ed06a13674d47603551d614ddeaddb9a"
+              ]
+            },
+            {
+              "citation": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 89,
+                "end_line": 93
+              },
+              "material_evidence_ids": [
+                "structural-b728b581c19e5e93100bf1c5249142c9"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-ban-persistence-reconnect-independent",
+      "repository_id": "syncplayer",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Trace how an administrator ban is persisted and prevents a room participant from reconnecting. Explain matching by profile or IP, the storage update boundary, and the focused persistence regression.",
+      "required_files": [
+        "moderation.js",
+        "persistent-state.js",
+        "server.js",
+        "test/moderation.test.js"
+      ],
+      "relevant_top5": [
+        "moderation.js",
+        "persistent-state.js",
+        "server.js",
+        "test/moderation.test.js"
+      ],
+      "required_ranges": [
+        {
+          "path": "moderation.js",
+          "start_line": 16,
+          "end_line": 18
+        },
+        {
+          "path": "persistent-state.js",
+          "start_line": 22,
+          "end_line": 59
+        },
+        {
+          "path": "server.js",
+          "start_line": 580,
+          "end_line": 594
+        },
+        {
+          "path": "server.js",
+          "start_line": 676,
+          "end_line": 704
+        },
+        {
+          "path": "server.js",
+          "start_line": 1076,
+          "end_line": 1087
+        },
+        {
+          "path": "test/moderation.test.js",
+          "start_line": 16,
+          "end_line": 26
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "moderation.js",
+          "start_line": 16,
+          "end_line": 18
+        },
+        {
+          "path": "persistent-state.js",
+          "start_line": 22,
+          "end_line": 59
+        },
+        {
+          "path": "server.js",
+          "start_line": 580,
+          "end_line": 594
+        },
+        {
+          "path": "server.js",
+          "start_line": 676,
+          "end_line": 704
+        },
+        {
+          "path": "server.js",
+          "start_line": 1076,
+          "end_line": 1087
+        },
+        {
+          "path": "test/moderation.test.js",
+          "start_line": 16,
+          "end_line": 26
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "entrypoint",
+          "description": "Admin ban and room connection guard.",
+          "required_paths": [
+            "server.js"
+          ]
+        },
+        {
+          "role_id": "implementation",
+          "description": "Ban identity matching.",
+          "required_paths": [
+            "moderation.js"
+          ]
+        },
+        {
+          "role_id": "storage",
+          "description": "Persistent state updates.",
+          "required_paths": [
+            "persistent-state.js"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Ban persistence regression.",
+          "required_paths": [
+            "test/moderation.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "admin-ban",
+          "description": "The guarded admin route validates action and profile ID, protects administrator targets, persists a generated ban, broadcasts the change and disconnects affected sockets.",
+          "support": [
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 676,
+                "end_line": 704
+              },
+              "material_evidence_ids": [
+                "structural-5d3f50004520167795e519138c5ba2bc"
+              ]
+            },
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 587,
+                "end_line": 594
+              },
+              "material_evidence_ids": [
+                "structural-150ac35818e329f716c0222145edc749"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "atomic-storage",
+          "description": "Updates serialize through pendingWrite, clone current state, write a unique temporary file and rename it before publishing normalized state.",
+          "support": [
+            {
+              "citation": {
+                "path": "persistent-state.js",
+                "start_line": 22,
+                "end_line": 59
+              },
+              "material_evidence_ids": [
+                "structural-78b37bc65bc65cba9c29def0698394cd"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "persistence-test",
+          "description": "The regression creates a ban, reopens storage, finds the ban by profile ID and verifies only state.json remains.",
+          "support": [
+            {
+              "citation": {
+                "path": "test/moderation.test.js",
+                "start_line": 16,
+                "end_line": 26
+              },
+              "material_evidence_ids": [
+                "structural-37f5d4277ed11877efae0cbf18a9857a"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "reconnect-match",
+          "description": "Room middleware resolves IP and profile ID, invokes moderationBlock and rejects matching bans; matchingBan accepts either a nonempty profile ID or IP match.",
+          "support": [
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 580,
+                "end_line": 585
+              },
+              "material_evidence_ids": [
+                "structural-3f79b2c8b7920e058dd388de847b005a"
+              ]
+            },
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 1076,
+                "end_line": 1087
+              },
+              "material_evidence_ids": [
+                "structural-3ba1104df067d2c61ac4faf01a134682"
+              ]
+            },
+            {
+              "citation": {
+                "path": "moderation.js",
+                "start_line": 16,
+                "end_line": 18
+              },
+              "material_evidence_ids": [
+                "structural-7afd4767a7de530b0787bba6c6ac24f4"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-symbol-compatible-plan-independent",
+      "repository_id": "syncplayer",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Review compatiblePlaybackPlan and its focused tests: when does browser fallback become required, how is the audio track chosen, and when is audio copied rather than transcoded?",
+      "required_files": [
+        "compatible-playback.js",
+        "test/compatible-playback.test.js"
+      ],
+      "relevant_top5": [
+        "compatible-playback.js",
+        "test/compatible-playback.test.js"
+      ],
+      "required_ranges": [
+        {
+          "path": "compatible-playback.js",
+          "start_line": 10,
+          "end_line": 20
+        },
+        {
+          "path": "compatible-playback.js",
+          "start_line": 33,
+          "end_line": 61
+        },
+        {
+          "path": "test/compatible-playback.test.js",
+          "start_line": 19,
+          "end_line": 82
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "compatible-playback.js",
+          "start_line": 10,
+          "end_line": 20
+        },
+        {
+          "path": "compatible-playback.js",
+          "start_line": 33,
+          "end_line": 61
+        },
+        {
+          "path": "test/compatible-playback.test.js",
+          "start_line": 19,
+          "end_line": 82
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "implementation",
+          "description": "Browser compatible playback planning.",
+          "required_paths": [
+            "compatible-playback.js"
+          ]
+        },
+        {
+          "role_id": "test",
+          "description": "Codec and audio selection tests.",
+          "required_paths": [
+            "test/compatible-playback.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "fallback-triggers",
+          "description": "Fallback is required for High 10 H.264 or any FLAC audio stream in Matroska; normal H.264/AAC MP4 returns required false.",
+          "support": [
+            {
+              "citation": {
+                "path": "compatible-playback.js",
+                "start_line": 16,
+                "end_line": 20
+              },
+              "material_evidence_ids": [
+                "structural-19c9ef8da8fdcb19d953adb5894203f4"
+              ]
+            },
+            {
+              "citation": {
+                "path": "compatible-playback.js",
+                "start_line": 33,
+                "end_line": 61
+              },
+              "material_evidence_ids": [
+                "structural-b7a3066c9eea208a4884866e454f2c42"
+              ]
+            },
+            {
+              "citation": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 72,
+                "end_line": 82
+              },
+              "material_evidence_ids": [
+                "structural-88d5c3bfe7b3979c91f663bad5388a10"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "output-modes",
+          "description": "Required fallback uses client-error trigger, video transcode and HLS output; selected AAC/MP3 audio is copied, other audio transcoded, absent audio none.",
+          "support": [
+            {
+              "citation": {
+                "path": "compatible-playback.js",
+                "start_line": 10,
+                "end_line": 10
+              },
+              "material_evidence_ids": [
+                "structural-fe270a5ac70ec745170aeb4dfd7de063"
+              ]
+            },
+            {
+              "citation": {
+                "path": "compatible-playback.js",
+                "start_line": 47,
+                "end_line": 60
+              },
+              "material_evidence_ids": [
+                "structural-4e98da4024080bada4de94b3bf954178"
+              ]
+            },
+            {
+              "citation": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 19,
+                "end_line": 40
+              },
+              "material_evidence_ids": [
+                "structural-51495c2699896d5a89464bc4d6624b6c"
+              ]
+            },
+            {
+              "citation": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 57,
+                "end_line": 70
+              },
+              "material_evidence_ids": [
+                "structural-cf06072ff58006b47f007b07921f9189"
+              ]
+            }
+          ]
+        },
+        {
+          "assertion_id": "selected-audio",
+          "description": "Default-marked audio wins over first audio; FLAC detection checks every audio stream, and the non-default FLAC test still selects default AAC.",
+          "support": [
+            {
+              "citation": {
+                "path": "compatible-playback.js",
+                "start_line": 33,
+                "end_line": 61
+              },
+              "material_evidence_ids": [
+                "structural-b7a3066c9eea208a4884866e454f2c42"
+              ]
+            },
+            {
+              "citation": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 57,
+                "end_line": 70
+              },
+              "material_evidence_ids": [
+                "structural-cf06072ff58006b47f007b07921f9189"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1896 @@
+{
+  "schema_version": 1,
+  "authored_at": "2026-10-04T12:56:23.298680+00:00",
+  "frozen_implementation_commit": "bf958009c21e1bb2aff7576e5cabac5a8c062d48",
+  "freeze_commit": "0192605",
+  "manifest_path": "benchmarks/real-repository-v32-holdout.json",
+  "manifest_sha256": "76eab346e5b0c68a48d548c6e02102071e35a55726bdb005a349cf40bf2aa907",
+  "source_manifest_sha256": "03d3025af7e3f77a32babbb77a77e77ce7a8e419dcd80bc6a509c064c1cb098d",
+  "authorship_method": "Independent manual source review after implementation freeze; no retrieval/compiler/planner/answers/judges or diagnostic reports inspected. Structural index used only for CodeMaps and source-ID validation.",
+  "provider_calls": 0,
+  "validation": {
+    "schema_loader": "load_real_repository_benchmark_manifest",
+    "source_validator": "_validate_reviewed_sources",
+    "validated_tasks": 8,
+    "repositories": 4,
+    "required_max_files": 5,
+    "nonempty_source_bound_support": true
+  },
+  "temporary_clone_cleanup": {
+    "all_removed": true,
+    "validation_clones_used": 4,
+    "source_review_clones": "All source review contexts exited and removed their temporary directories, including the interrupted first validation."
+  },
+  "tasks": [
+    {
+      "task_id": "contextforge-nested-ignore-precedence-independent",
+      "repository_id": "contextforge",
+      "pinned_revision": "bacf0e90253ead68f5ff886f47e7c81e479169f3",
+      "source_files": [
+        {
+          "path": "src/contextforge/repositories/ignore.py",
+          "source_sha256": "2d1fa73b4636ac374ce457b145fa53e0db32609fa5f65b2003066952da4ab6fc",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 88,
+              "end_line": 107
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 109,
+              "end_line": 145
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 148,
+              "end_line": 197
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 209,
+              "end_line": 250
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 88,
+              "end_line": 107
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 109,
+              "end_line": 145
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 148,
+              "end_line": 197
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "start_line": 209,
+              "end_line": 250
+            }
+          ]
+        },
+        {
+          "path": "src/contextforge/repositories/scanner.py",
+          "source_sha256": "e4ebd8b3358e53cb2a76b0eec7f6366bdf59be0e3ad04183ff676b647801fb3d",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 91,
+              "end_line": 102
+            },
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 133,
+              "end_line": 168
+            },
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 197,
+              "end_line": 214
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 91,
+              "end_line": 102
+            },
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 133,
+              "end_line": 168
+            },
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "start_line": 197,
+              "end_line": 214
+            }
+          ]
+        },
+        {
+          "path": "tests/test_nested_gitignore.py",
+          "source_sha256": "2e3a91917e2149a3dc310512f9cea65393a34e9b361f2cae61b4857b912ccbb6",
+          "reviewed_required_ranges": [
+            {
+              "path": "tests/test_nested_gitignore.py",
+              "start_line": 127,
+              "end_line": 143
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "tests/test_nested_gitignore.py",
+              "start_line": 127,
+              "end_line": 143
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "nested-scope",
+          "manual_verification": "Read traversal and relative scope construction, including root/disabled early returns.",
+          "source_facts": [
+            {
+              "path": "src/contextforge/repositories/scanner.py",
+              "source_sha256": "e4ebd8b3358e53cb2a76b0eec7f6366bdf59be0e3ad04183ff676b647801fb3d",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/scanner.py",
+                "start_line": 91,
+                "end_line": 102
+              },
+              "material_evidence_ids": [
+                "structural-b5b3bf4843f61aa191e9e9ec8f2ce0e2"
+              ],
+              "structural_fact": {
+                "identifier": "for_directory",
+                "fact_kind": "call",
+                "fact_id": "590d242cbe1b3739d40e8d702965243f31f3a7b3b55e764764abe3e158128e49",
+                "source_range": {
+                  "start_line": 101,
+                  "start_column": 26,
+                  "end_line": 101,
+                  "end_column": 55
+                }
+              }
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "source_sha256": "2d1fa73b4636ac374ce457b145fa53e0db32609fa5f65b2003066952da4ab6fc",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 109,
+                "end_line": 145
+              },
+              "material_evidence_ids": [
+                "structural-906611fdd79f15d46ec74ed98a950f22"
+              ],
+              "structural_fact": {
+                "identifier": "for_directory",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:61bf7f326f2a4c7cbc697ba8e1fe00434e8ccee034f03f6ce68d54dfeb8ec259",
+                "source_range": {
+                  "start_line": 109,
+                  "start_column": 4,
+                  "end_line": 145,
+                  "end_column": 9
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "override-regression",
+          "manual_verification": "Read conflicting rule files and exact inclusion/exclusion assertions.",
+          "source_facts": [
+            {
+              "path": "tests/test_nested_gitignore.py",
+              "source_sha256": "2e3a91917e2149a3dc310512f9cea65393a34e9b361f2cae61b4857b912ccbb6",
+              "reviewed_range": {
+                "path": "tests/test_nested_gitignore.py",
+                "start_line": 127,
+                "end_line": 143
+              },
+              "material_evidence_ids": [
+                "structural-e07bfa418b0b5cc358571856b55e19a2"
+              ],
+              "structural_fact": {
+                "identifier": "test_contextforgeignore_keeps_precedence_over_nested_gitignore",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:9e751c7cb3acceea7e882067443a50684367ca8d9212547705b108fe18f92b14",
+                "source_range": {
+                  "start_line": 127,
+                  "start_column": 0,
+                  "end_line": 143,
+                  "end_column": 67
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "precedence",
+          "manual_verification": "Read ordered scope tuple, protected early return, last include assignment.",
+          "source_facts": [
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "source_sha256": "2d1fa73b4636ac374ce457b145fa53e0db32609fa5f65b2003066952da4ab6fc",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 88,
+                "end_line": 107
+              },
+              "material_evidence_ids": [
+                "structural-2be97157978b79c1e1a7f30ea34c32c1"
+              ],
+              "structural_fact": {
+                "identifier": "match",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:90562d0ad5c3eaa8fe200de5a638f6994fde3baed5ea94e13900e74392ea9991",
+                "source_range": {
+                  "start_line": 88,
+                  "start_column": 4,
+                  "end_line": 107,
+                  "end_column": 9
+                }
+              }
+            },
+            {
+              "path": "src/contextforge/repositories/ignore.py",
+              "source_sha256": "2d1fa73b4636ac374ce457b145fa53e0db32609fa5f65b2003066952da4ab6fc",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/ignore.py",
+                "start_line": 209,
+                "end_line": 250
+              },
+              "material_evidence_ids": [
+                "structural-b005558b93c02d088bc19b9031c6a4cc"
+              ],
+              "structural_fact": {
+                "identifier": "_match_ordinary",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:6a721473889df6a361a3a71d49e94ce19dab53b2253fda5c47b4582bbac3dbc7",
+                "source_range": {
+                  "start_line": 209,
+                  "start_column": 0,
+                  "end_line": 223,
+                  "end_column": 37
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-symbol-path-normalization-independent",
+      "repository_id": "contextforge",
+      "pinned_revision": "bacf0e90253ead68f5ff886f47e7c81e479169f3",
+      "source_files": [
+        {
+          "path": "src/contextforge/repositories/files.py",
+          "source_sha256": "ba22a17f526cbaef9723c3bb1aeb6df13bcc2d51d2d970f705eecb75788e712a",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/contextforge/repositories/files.py",
+              "start_line": 33,
+              "end_line": 63
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/contextforge/repositories/files.py",
+              "start_line": 33,
+              "end_line": 63
+            }
+          ]
+        },
+        {
+          "path": "tests/test_repository_files.py",
+          "source_sha256": "66605c3bd8eb8f4303d60623f64a999d9587311e0dc5a79bdf74d68be97f4bef",
+          "reviewed_required_ranges": [
+            {
+              "path": "tests/test_repository_files.py",
+              "start_line": 18,
+              "end_line": 36
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "tests/test_repository_files.py",
+              "start_line": 18,
+              "end_line": 36
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "accepted-paths",
+          "manual_verification": "Read segment stack and four expected parameterized outputs.",
+          "source_facts": [
+            {
+              "path": "src/contextforge/repositories/files.py",
+              "source_sha256": "ba22a17f526cbaef9723c3bb1aeb6df13bcc2d51d2d970f705eecb75788e712a",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/files.py",
+                "start_line": 33,
+                "end_line": 63
+              },
+              "material_evidence_ids": [
+                "structural-eccc51b8e0ed36f598e759d7dc083dae"
+              ],
+              "structural_fact": {
+                "identifier": "normalize_relative_path",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:1a9c931a333081788aae61a065e28ccd2d679827b351892d3c6e13fb28b4e294",
+                "source_range": {
+                  "start_line": 33,
+                  "start_column": 0,
+                  "end_line": 63,
+                  "end_column": 37
+                }
+              }
+            },
+            {
+              "path": "tests/test_repository_files.py",
+              "source_sha256": "66605c3bd8eb8f4303d60623f64a999d9587311e0dc5a79bdf74d68be97f4bef",
+              "reviewed_range": {
+                "path": "tests/test_repository_files.py",
+                "start_line": 18,
+                "end_line": 28
+              },
+              "material_evidence_ids": [
+                "structural-78503a06ca3829c4ccf0cf0e3f698f8b"
+              ],
+              "structural_fact": {
+                "identifier": "test_normalize_relative_path",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:04dabdc1c780b3caf252b6047a62c252d649465fb644bac4a3373e46ecc6299f",
+                "source_range": {
+                  "start_line": 27,
+                  "start_column": 0,
+                  "end_line": 28,
+                  "end_column": 52
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "rejected-paths",
+          "manual_verification": "Read leading checks, parent-empty-stack rejection, final nonempty check and rejection cases.",
+          "source_facts": [
+            {
+              "path": "src/contextforge/repositories/files.py",
+              "source_sha256": "ba22a17f526cbaef9723c3bb1aeb6df13bcc2d51d2d970f705eecb75788e712a",
+              "reviewed_range": {
+                "path": "src/contextforge/repositories/files.py",
+                "start_line": 33,
+                "end_line": 63
+              },
+              "material_evidence_ids": [
+                "structural-eccc51b8e0ed36f598e759d7dc083dae"
+              ],
+              "structural_fact": {
+                "identifier": "normalize_relative_path",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:1a9c931a333081788aae61a065e28ccd2d679827b351892d3c6e13fb28b4e294",
+                "source_range": {
+                  "start_line": 33,
+                  "start_column": 0,
+                  "end_line": 63,
+                  "end_column": 37
+                }
+              }
+            },
+            {
+              "path": "tests/test_repository_files.py",
+              "source_sha256": "66605c3bd8eb8f4303d60623f64a999d9587311e0dc5a79bdf74d68be97f4bef",
+              "reviewed_range": {
+                "path": "tests/test_repository_files.py",
+                "start_line": 31,
+                "end_line": 36
+              },
+              "material_evidence_ids": [
+                "structural-6e16497ff48469aed3bf0dbc7d8b5987"
+              ],
+              "structural_fact": {
+                "identifier": "test_normalize_relative_path_rejects_non_relative_paths",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:ebff7826f7c1bcf392d7eb34f135426be1a46ecba08e35d756d5bce89f82a976",
+                "source_range": {
+                  "start_line": 34,
+                  "start_column": 0,
+                  "end_line": 36,
+                  "end_column": 37
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-bounded-private-memory-independent",
+      "repository_id": "dsh-contextforge",
+      "pinned_revision": "38ed6afb219b97b5f4b609555fe185df28f01fc0",
+      "source_files": [
+        {
+          "path": "src/privacy.ts",
+          "source_sha256": "d979708d8e0a1ec15eef4b10816302713a74a37e17eb7547e55eedf6140d6f5c",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/privacy.ts",
+              "start_line": 10,
+              "end_line": 27
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/privacy.ts",
+              "start_line": 10,
+              "end_line": 27
+            }
+          ]
+        },
+        {
+          "path": "src/working-set.ts",
+          "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/working-set.ts",
+              "start_line": 7,
+              "end_line": 13
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 252,
+              "end_line": 272
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 274,
+              "end_line": 296
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 383,
+              "end_line": 395
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/working-set.ts",
+              "start_line": 7,
+              "end_line": 13
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 252,
+              "end_line": 272
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 274,
+              "end_line": 296
+            },
+            {
+              "path": "src/working-set.ts",
+              "start_line": 383,
+              "end_line": 395
+            }
+          ]
+        },
+        {
+          "path": "tests/working-set.spec.ts",
+          "source_sha256": "8478d7e57742b15fbd81ca652eaf35bf5efa42a4773d046b489d009ee6c3850c",
+          "reviewed_required_ranges": [
+            {
+              "path": "tests/working-set.spec.ts",
+              "start_line": 50,
+              "end_line": 65
+            },
+            {
+              "path": "tests/working-set.spec.ts",
+              "start_line": 76,
+              "end_line": 91
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "tests/working-set.spec.ts",
+              "start_line": 50,
+              "end_line": 65
+            },
+            {
+              "path": "tests/working-set.spec.ts",
+              "start_line": 76,
+              "end_line": 91
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "credential-redaction",
+          "manual_verification": "Read credential patterns and merge-time redaction, including note truncation.",
+          "source_facts": [
+            {
+              "path": "src/privacy.ts",
+              "source_sha256": "d979708d8e0a1ec15eef4b10816302713a74a37e17eb7547e55eedf6140d6f5c",
+              "reviewed_range": {
+                "path": "src/privacy.ts",
+                "start_line": 10,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-2a28b3fd9e4ea029116ddfa33a512e14"
+              ],
+              "structural_fact": {
+                "identifier": "redactCredentials",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:8b9448bba5534345ed079ee70a92c1621921b457f1ce7c9df2387ee91603da5c",
+                "source_range": {
+                  "start_line": 20,
+                  "start_column": 7,
+                  "end_line": 24,
+                  "end_column": 1
+                }
+              }
+            },
+            {
+              "path": "src/working-set.ts",
+              "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+              "reviewed_range": {
+                "path": "src/working-set.ts",
+                "start_line": 252,
+                "end_line": 272
+              },
+              "material_evidence_ids": [
+                "structural-3d7b4198c6b57770b351ffd568b71d75"
+              ],
+              "structural_fact": {
+                "identifier": "redactCredentials",
+                "fact_kind": "call",
+                "fact_id": "08f7215af2d23aa4980b5941925ab98f07e539e5897432d2281fa0ad34d9f0c2",
+                "source_range": {
+                  "start_line": 254,
+                  "start_column": 21,
+                  "end_line": 254,
+                  "end_column": 86
+                }
+              }
+            },
+            {
+              "path": "src/working-set.ts",
+              "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+              "reviewed_range": {
+                "path": "src/working-set.ts",
+                "start_line": 383,
+                "end_line": 390
+              },
+              "material_evidence_ids": [
+                "structural-496db32934a39d9e38917e3e8fb51b00"
+              ],
+              "structural_fact": {
+                "identifier": "redactCredentials",
+                "fact_kind": "call",
+                "fact_id": "dfaf530a9515a3081fdba0d6d3728216b030dbeefff0a806ca17bbd87a6e1d82",
+                "source_range": {
+                  "start_line": 385,
+                  "start_column": 17,
+                  "end_line": 385,
+                  "end_column": 34
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "privacy-tests",
+          "manual_verification": "Read oversized input, pinned retention, supplied credentials and negative persisted-string assertions.",
+          "source_facts": [
+            {
+              "path": "tests/working-set.spec.ts",
+              "source_sha256": "8478d7e57742b15fbd81ca652eaf35bf5efa42a4773d046b489d009ee6c3850c",
+              "reviewed_range": {
+                "path": "tests/working-set.spec.ts",
+                "start_line": 50,
+                "end_line": 65
+              },
+              "material_evidence_ids": [
+                "structural-ea29852095c523e3ce1570b04a43c306"
+              ],
+              "structural_fact": {
+                "identifier": "boundWorkingSet",
+                "fact_kind": "call",
+                "fact_id": "bfa037429a2b0bd4fc5230f9255e1ddf19222156791ec4e2ea04f823a490fa3c",
+                "source_range": {
+                  "start_line": 58,
+                  "start_column": 20,
+                  "end_line": 58,
+                  "end_column": 35
+                }
+              }
+            },
+            {
+              "path": "tests/working-set.spec.ts",
+              "source_sha256": "8478d7e57742b15fbd81ca652eaf35bf5efa42a4773d046b489d009ee6c3850c",
+              "reviewed_range": {
+                "path": "tests/working-set.spec.ts",
+                "start_line": 76,
+                "end_line": 91
+              },
+              "material_evidence_ids": [
+                "structural-b742fd113bdaa61218882293d2293d96"
+              ],
+              "structural_fact": {
+                "identifier": "mergeWorkingSet",
+                "fact_kind": "call",
+                "fact_id": "6787522033da669b67d525c513814dfe9a64d2513b6f39d0bea11c22d43f73a4",
+                "source_range": {
+                  "start_line": 77,
+                  "start_column": 18,
+                  "end_line": 77,
+                  "end_column": 33
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "retention-order",
+          "manual_verification": "Read limits, bucket truncation, comparator and token eviction loop.",
+          "source_facts": [
+            {
+              "path": "src/working-set.ts",
+              "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+              "reviewed_range": {
+                "path": "src/working-set.ts",
+                "start_line": 7,
+                "end_line": 13
+              },
+              "material_evidence_ids": [
+                "structural-04c25d1fab4b164194fca2ed48124187"
+              ],
+              "structural_fact": {
+                "identifier": "WORKING_SET_LIMITS",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:ee7d5b3c5c533d1b3490cee136c7fba4ccbaf24ef302f62416ded289f76469c7",
+                "source_range": {
+                  "start_line": 7,
+                  "start_column": 13,
+                  "end_line": 13,
+                  "end_column": 2
+                }
+              }
+            },
+            {
+              "path": "src/working-set.ts",
+              "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+              "reviewed_range": {
+                "path": "src/working-set.ts",
+                "start_line": 274,
+                "end_line": 296
+              },
+              "material_evidence_ids": [
+                "structural-3bfde5e709bdc42c8bb39a1c5b69c712"
+              ],
+              "structural_fact": {
+                "identifier": "boundWorkingSet",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:4da577896716cbed52dd53c6f8fa8984ff5381914e31718afb327ce729398176",
+                "source_range": {
+                  "start_line": 274,
+                  "start_column": 7,
+                  "end_line": 296,
+                  "end_column": 1
+                }
+              }
+            },
+            {
+              "path": "src/working-set.ts",
+              "source_sha256": "32097aacdaf33fed18d88b43bcbdeb873de6fa832c3d895ddf0f7fce60485276",
+              "reviewed_range": {
+                "path": "src/working-set.ts",
+                "start_line": 393,
+                "end_line": 395
+              },
+              "material_evidence_ids": [
+                "structural-700a42b2ca2e8acc40f04ca8e88f7fe0"
+              ],
+              "structural_fact": {
+                "identifier": "retentionOrder",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:e9c21bf17a51b50ff402505fbbb9a727369badf79971f6ddaaf223e91327a8e5",
+                "source_range": {
+                  "start_line": 393,
+                  "start_column": 0,
+                  "end_line": 395,
+                  "end_column": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-symbol-auth-expiry-recovery-independent",
+      "repository_id": "dsh-contextforge",
+      "pinned_revision": "38ed6afb219b97b5f4b609555fe185df28f01fc0",
+      "source_files": [
+        {
+          "path": "src/active-model-auth-recovery.ts",
+          "source_sha256": "231d955804a2ecfd53ead8e511c84a2eaea86fcdefc0bef653330de2f34ad605",
+          "reviewed_required_ranges": [
+            {
+              "path": "src/active-model-auth-recovery.ts",
+              "start_line": 21,
+              "end_line": 47
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "src/active-model-auth-recovery.ts",
+              "start_line": 21,
+              "end_line": 47
+            }
+          ]
+        },
+        {
+          "path": "tests/active-model-auth-recovery.spec.ts",
+          "source_sha256": "da4fffcf13a58e992c44a4fe793f0c141081ec883ddc286879722285bc6462f6",
+          "reviewed_required_ranges": [
+            {
+              "path": "tests/active-model-auth-recovery.spec.ts",
+              "start_line": 4,
+              "end_line": 35
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "tests/active-model-auth-recovery.spec.ts",
+              "start_line": 4,
+              "end_line": 35
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "expiry-marker",
+          "manual_verification": "Read OAuth/type checks and minimum expiry calculation; access/refresh fields are not inspected or assigned.",
+          "source_facts": [
+            {
+              "path": "src/active-model-auth-recovery.ts",
+              "source_sha256": "231d955804a2ecfd53ead8e511c84a2eaea86fcdefc0bef653330de2f34ad605",
+              "reviewed_range": {
+                "path": "src/active-model-auth-recovery.ts",
+                "start_line": 31,
+                "end_line": 42
+              },
+              "material_evidence_ids": [
+                "structural-01a48f347398014f63ece291b168925c"
+              ],
+              "structural_fact": {
+                "identifier": "Math",
+                "fact_kind": "call",
+                "fact_id": "3eadfae8ca555375e6329bd2e8178a71807974ef811ba9fbb3d776fb5ec820c4",
+                "source_range": {
+                  "start_line": 37,
+                  "start_column": 50,
+                  "end_line": 37,
+                  "end_column": 58
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "recovery-guards",
+          "manual_verification": "Read provider/error guards, service shape checks and both abort checks.",
+          "source_facts": [
+            {
+              "path": "src/active-model-auth-recovery.ts",
+              "source_sha256": "231d955804a2ecfd53ead8e511c84a2eaea86fcdefc0bef653330de2f34ad605",
+              "reviewed_range": {
+                "path": "src/active-model-auth-recovery.ts",
+                "start_line": 21,
+                "end_line": 40
+              },
+              "material_evidence_ids": [
+                "structural-88be89911bf2e634db323721aece3dbf"
+              ],
+              "structural_fact": {
+                "identifier": "createActiveModelAuthenticationRecovery",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:5e786cc6b717a79289955dbe31365abb6d349e705f3b6c6a519612ac86035df4",
+                "source_range": {
+                  "start_line": 27,
+                  "start_column": 10,
+                  "end_line": 27,
+                  "end_column": 47
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "secret-boundary-tests",
+          "manual_verification": "Read token preservation assertions and openrouter modify-not-called check.",
+          "source_facts": [
+            {
+              "path": "tests/active-model-auth-recovery.spec.ts",
+              "source_sha256": "da4fffcf13a58e992c44a4fe793f0c141081ec883ddc286879722285bc6462f6",
+              "reviewed_range": {
+                "path": "tests/active-model-auth-recovery.spec.ts",
+                "start_line": 4,
+                "end_line": 35
+              },
+              "material_evidence_ids": [
+                "structural-abede525365009d72d5a3f1a0506e199"
+              ],
+              "structural_fact": {
+                "identifier": "createActiveModelAuthenticationRecovery",
+                "fact_kind": "call",
+                "fact_id": "b7ebd54012931a8ecb11e3a6d497fa2f6874af29e858464a4eab17bafaeba8e2",
+                "source_range": {
+                  "start_line": 11,
+                  "start_column": 20,
+                  "end_line": 11,
+                  "end_column": 59
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "planup-completion-reminder-flow-independent",
+      "repository_id": "planup",
+      "pinned_revision": "750c8bf406b85be980595e56597aceb05603d904",
+      "source_files": [
+        {
+          "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+          "source_sha256": "d1fa82e36f229741612a488c87f4988f67b6ad57a4ddb9f70b1d55af78268928",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+              "start_line": 6,
+              "end_line": 10
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+              "start_line": 6,
+              "end_line": 10
+            }
+          ]
+        },
+        {
+          "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+          "source_sha256": "0b36822fe5a3e98af31dd466a000b96068226d0583ff3fb3fa9b670227171607",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "start_line": 13,
+              "end_line": 18
+            },
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "start_line": 27,
+              "end_line": 29
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "start_line": 13,
+              "end_line": 18
+            },
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "start_line": 27,
+              "end_line": 29
+            }
+          ]
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "source_sha256": "2b270d269894a1a2a422bbdc2e6f7f5a873d2a2cdba4c05454ecb2f28ce9ffff",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+              "start_line": 27,
+              "end_line": 30
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+              "start_line": 27,
+              "end_line": 30
+            }
+          ]
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+          "source_sha256": "8424c6380379d9ce60169530b96577c1a85917cc6eabb40c1d01e75ced5bb924",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+              "start_line": 7,
+              "end_line": 16
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+              "start_line": 7,
+              "end_line": 16
+            }
+          ]
+        },
+        {
+          "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+          "source_sha256": "34273d1cb3789f7382f9b113c6e00ada30a84a34b86a78a4787fc29df524a0eb",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+              "start_line": 56,
+              "end_line": 67
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+              "start_line": 56,
+              "end_line": 67
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "completion-save",
+          "manual_verification": "Read toggleTask and asynchronous saveTask call; attachment cleanup follows separately.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+              "source_sha256": "34273d1cb3789f7382f9b113c6e00ada30a84a34b86a78a4787fc29df524a0eb",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/ui/PlanUpViewModel.kt",
+                "start_line": 56,
+                "end_line": 67
+              },
+              "material_evidence_ids": [
+                "structural-05d33bbe4fe0320e8a385526deff7679"
+              ],
+              "structural_fact": {
+                "identifier": "saveTask",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:b35fe71a7e25f975efc5ff3877255590bbbbe1bcd22629c4e6582376db6d55c9",
+                "source_range": {
+                  "start_line": 56,
+                  "start_column": 4,
+                  "end_line": 62,
+                  "end_column": 7
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "container-storage",
+          "manual_verification": "Read concrete constructors, repository lifetime comment and filterNot-plus-task replacement.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+              "source_sha256": "2b270d269894a1a2a422bbdc2e6f7f5a873d2a2cdba4c05454ecb2f28ce9ffff",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+                "start_line": 27,
+                "end_line": 30
+              },
+              "material_evidence_ids": [
+                "structural-699b19fb95acfe201b2a50182a6ca289"
+              ],
+              "structural_fact": {
+                "identifier": "SaveTask",
+                "fact_kind": "call",
+                "fact_id": "020e629d7d4afa53e4adf96cdb930b8ca81625b8db8f6695a7159498b6d8ca79",
+                "source_range": {
+                  "start_line": 30,
+                  "start_column": 19,
+                  "end_line": 30,
+                  "end_column": 27
+                }
+              }
+            },
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "source_sha256": "0b36822fe5a3e98af31dd466a000b96068226d0583ff3fb3fa9b670227171607",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+                "start_line": 13,
+                "end_line": 18
+              },
+              "material_evidence_ids": [
+                "structural-8611492e8aed3fb45249e78173906c74"
+              ],
+              "structural_fact": {
+                "identifier": "InMemoryPlanRepository",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:a25956d76d36ed3c81a26336aad8668e494714959c7763bf6a2e6ff86cc923ac",
+                "source_range": {
+                  "start_line": 15,
+                  "start_column": 4,
+                  "end_line": 15,
+                  "end_column": 100
+                }
+              }
+            },
+            {
+              "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+              "source_sha256": "0b36822fe5a3e98af31dd466a000b96068226d0583ff3fb3fa9b670227171607",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/data/repository/InMemoryPlanRepository.kt",
+                "start_line": 27,
+                "end_line": 29
+              },
+              "material_evidence_ids": [
+                "structural-1f7ca2c34e7428077de78eb4d5d8020c"
+              ],
+              "structural_fact": {
+                "identifier": "saveTask",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:27a2e520331458ba5ef636e11eea27bbda08300d35c6084703e9d4ab295fe0b3",
+                "source_range": {
+                  "start_line": 27,
+                  "start_column": 4,
+                  "end_line": 29,
+                  "end_column": 5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "notification-placeholder",
+          "manual_verification": "Read explicit placeholder comment and both no-op overrides.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+              "source_sha256": "d1fa82e36f229741612a488c87f4988f67b6ad57a4ddb9f70b1d55af78268928",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/data/reminder/DemoReminderScheduler.kt",
+                "start_line": 6,
+                "end_line": 10
+              },
+              "material_evidence_ids": [
+                "structural-e785ef47edb74cde6e37e01b16c36dc8"
+              ],
+              "structural_fact": {
+                "identifier": "DemoReminderScheduler",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:e22f49b07a852e57764857e88a7a6ae4d05a53c235d3c0f4ef6fa43919f41feb",
+                "source_range": {
+                  "start_line": 7,
+                  "start_column": 0,
+                  "end_line": 10,
+                  "end_column": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "reminder-order",
+          "manual_verification": "Read the three statements and both schedule guard conditions.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+              "source_sha256": "8424c6380379d9ce60169530b96577c1a85917cc6eabb40c1d01e75ced5bb924",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/domain/usecase/SaveTask.kt",
+                "start_line": 7,
+                "end_line": 16
+              },
+              "material_evidence_ids": [
+                "structural-9beb256cf30e4dca4d66cd8a94c8d0d9"
+              ],
+              "structural_fact": {
+                "identifier": "SaveTask",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:a51d62eb5e915e5930b9036ff37ff33ea8ae19f8a5866c131743d6fd25c22824",
+                "source_range": {
+                  "start_line": 7,
+                  "start_column": 0,
+                  "end_line": 16,
+                  "end_column": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "planup-symbol-translations-fallback-independent",
+      "repository_id": "planup",
+      "pinned_revision": "750c8bf406b85be980595e56597aceb05603d904",
+      "source_files": [
+        {
+          "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+          "source_sha256": "f3f59281e558b4874fc327d2877a55ba12125a66fea3b6065076f0a1dfab9ca4",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+              "start_line": 47,
+              "end_line": 88
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+              "start_line": 47,
+              "end_line": 88
+            }
+          ]
+        },
+        {
+          "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+          "source_sha256": "0f771d3b7f154d40bde4b3983ee575aaa068109de5d95555b28926ba54db42a0",
+          "reviewed_required_ranges": [
+            {
+              "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+              "start_line": 60,
+              "end_line": 93
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+              "start_line": 60,
+              "end_line": 93
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "plural-locale",
+          "manual_verification": "Read group/locale resolution, nonnegative guard, category lookup and French missing-plural zero-count case.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+              "source_sha256": "f3f59281e558b4874fc327d2877a55ba12125a66fea3b6065076f0a1dfab9ca4",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 58,
+                "end_line": 78
+              },
+              "material_evidence_ids": [
+                "structural-9a6e775d3c9ddb269d08b1d367bcd166"
+              ],
+              "structural_fact": {
+                "identifier": "quantity",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:d0202ef08cbc990613478a4c562c0555ee294e344f5c6c1532baa6db2e5f51e2",
+                "source_range": {
+                  "start_line": 73,
+                  "start_column": 4,
+                  "end_line": 78,
+                  "end_column": 5
+                }
+              }
+            },
+            {
+              "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+              "source_sha256": "0f771d3b7f154d40bde4b3983ee575aaa068109de5d95555b28926ba54db42a0",
+              "reviewed_range": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 60,
+                "end_line": 69
+              },
+              "material_evidence_ids": [
+                "structural-b42d3242c4d5e12eb4181ef790e7b616"
+              ],
+              "structural_fact": {
+                "identifier": "quantity",
+                "fact_kind": "call",
+                "fact_id": "8cb5c5b2d37db2dd644e2ebdf98e9d015bc44b65b348180295d558cf35e16963",
+                "source_range": {
+                  "start_line": 68,
+                  "start_column": 33,
+                  "end_line": 68,
+                  "end_column": 49
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "string-fallback",
+          "manual_verification": "Read placeholder set equality and text lookup; test supplies {wrong} and checks English interpolation.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+              "source_sha256": "f3f59281e558b4874fc327d2877a55ba12125a66fea3b6065076f0a1dfab9ca4",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 55,
+                "end_line": 68
+              },
+              "material_evidence_ids": [
+                "structural-6533186b970fb7e2453a8462ed5f7132"
+              ],
+              "structural_fact": {
+                "identifier": "text",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:3d8d117bd95e39e3740316861ac6f65758deb55b196683a8b7068e30f7efa67d",
+                "source_range": {
+                  "start_line": 65,
+                  "start_column": 4,
+                  "end_line": 68,
+                  "end_column": 5
+                }
+              }
+            },
+            {
+              "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+              "source_sha256": "0f771d3b7f154d40bde4b3983ee575aaa068109de5d95555b28926ba54db42a0",
+              "reviewed_range": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 82,
+                "end_line": 87
+              },
+              "material_evidence_ids": [
+                "structural-1ebf521c2b853e78ee196cbd195f7e20"
+              ],
+              "structural_fact": {
+                "identifier": "Translations",
+                "fact_kind": "call",
+                "fact_id": "465f82883896b0688dce43668181774721a046a1932fd61cd52a6ecb04b254d4",
+                "source_range": {
+                  "start_line": 84,
+                  "start_column": 22,
+                  "end_line": 84,
+                  "end_column": 34
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "user-placeholder-test",
+          "manual_verification": "Read regex replacement callback and exact literal-braces expected result.",
+          "source_facts": [
+            {
+              "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+              "source_sha256": "f3f59281e558b4874fc327d2877a55ba12125a66fea3b6065076f0a1dfab9ca4",
+              "reviewed_range": {
+                "path": "app/src/main/java/com/planup/i18n/TranslationCatalog.kt",
+                "start_line": 80,
+                "end_line": 88
+              },
+              "material_evidence_ids": [
+                "structural-ed06a13674d47603551d614ddeaddb9a"
+              ],
+              "structural_fact": {
+                "identifier": "format",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:f0562ca335d51ec1e10d541ba1f8aa28b5f626889bfa70f313b17efa76db6197",
+                "source_range": {
+                  "start_line": 80,
+                  "start_column": 4,
+                  "end_line": 82,
+                  "end_column": 5
+                }
+              }
+            },
+            {
+              "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+              "source_sha256": "0f771d3b7f154d40bde4b3983ee575aaa068109de5d95555b28926ba54db42a0",
+              "reviewed_range": {
+                "path": "app/src/test/java/com/planup/i18n/LanguageTest.kt",
+                "start_line": 89,
+                "end_line": 93
+              },
+              "material_evidence_ids": [
+                "structural-b728b581c19e5e93100bf1c5249142c9"
+              ],
+              "structural_fact": {
+                "identifier": "text",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:22a0988e34052cf079e8ca6d1c12d97653fe1f0836cedc08fcafbb8785eefd28",
+                "source_range": {
+                  "start_line": 89,
+                  "start_column": 4,
+                  "end_line": 93,
+                  "end_column": 5
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-ban-persistence-reconnect-independent",
+      "repository_id": "syncplayer",
+      "pinned_revision": "6e7154b6b0148a5a595e317ca78fa632ecf9f243",
+      "source_files": [
+        {
+          "path": "moderation.js",
+          "source_sha256": "5858738e726f336d33a5f912eedd7e84edce073a98a59c1fbd07f06031b1b2a8",
+          "reviewed_required_ranges": [
+            {
+              "path": "moderation.js",
+              "start_line": 16,
+              "end_line": 18
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "moderation.js",
+              "start_line": 16,
+              "end_line": 18
+            }
+          ]
+        },
+        {
+          "path": "persistent-state.js",
+          "source_sha256": "39c55e712462f543028e9e9a9492ad8fefa6574973d53c2bb8c239ef062d56de",
+          "reviewed_required_ranges": [
+            {
+              "path": "persistent-state.js",
+              "start_line": 22,
+              "end_line": 59
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "persistent-state.js",
+              "start_line": 22,
+              "end_line": 59
+            }
+          ]
+        },
+        {
+          "path": "server.js",
+          "source_sha256": "f51434124ea74c9f25ef4c090c2d6c7548027f81e3dd3d24cd8467b3dad41fe7",
+          "reviewed_required_ranges": [
+            {
+              "path": "server.js",
+              "start_line": 580,
+              "end_line": 594
+            },
+            {
+              "path": "server.js",
+              "start_line": 676,
+              "end_line": 704
+            },
+            {
+              "path": "server.js",
+              "start_line": 1076,
+              "end_line": 1087
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "server.js",
+              "start_line": 580,
+              "end_line": 594
+            },
+            {
+              "path": "server.js",
+              "start_line": 676,
+              "end_line": 704
+            },
+            {
+              "path": "server.js",
+              "start_line": 1076,
+              "end_line": 1087
+            }
+          ]
+        },
+        {
+          "path": "test/moderation.test.js",
+          "source_sha256": "ac12f89a8fe855dcf5a96e722cba0310b765658eab4327c7c71654fd53036ab6",
+          "reviewed_required_ranges": [
+            {
+              "path": "test/moderation.test.js",
+              "start_line": 16,
+              "end_line": 26
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "test/moderation.test.js",
+              "start_line": 16,
+              "end_line": 26
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "admin-ban",
+          "manual_verification": "Read guards, generated record, state update then broadcast/disconnect. Route identifier anchors the generated ban record; callback calls omitted by extraction are verified directly from source.",
+          "source_facts": [
+            {
+              "path": "server.js",
+              "source_sha256": "f51434124ea74c9f25ef4c090c2d6c7548027f81e3dd3d24cd8467b3dad41fe7",
+              "reviewed_range": {
+                "path": "server.js",
+                "start_line": 676,
+                "end_line": 704
+              },
+              "material_evidence_ids": [
+                "structural-5d3f50004520167795e519138c5ba2bc"
+              ],
+              "structural_fact": {
+                "identifier": "randomUUID",
+                "fact_kind": "call",
+                "fact_id": "425cbdbd1ed3b33009c7ef5a761e9db5e299075e9176c58488e36662107f4361",
+                "source_range": {
+                  "start_line": 696,
+                  "start_column": 22,
+                  "end_line": 696,
+                  "end_column": 39
+                }
+              }
+            },
+            {
+              "path": "server.js",
+              "source_sha256": "f51434124ea74c9f25ef4c090c2d6c7548027f81e3dd3d24cd8467b3dad41fe7",
+              "reviewed_range": {
+                "path": "server.js",
+                "start_line": 587,
+                "end_line": 594
+              },
+              "material_evidence_ids": [
+                "structural-150ac35818e329f716c0222145edc749"
+              ],
+              "structural_fact": {
+                "identifier": "disconnectModeratedUser",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:312b73ceccfb57af57ed34af8c3cd140209d9c81d9009e993493d075d67906bd",
+                "source_range": {
+                  "start_line": 587,
+                  "start_column": 0,
+                  "end_line": 594,
+                  "end_column": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "atomic-storage",
+          "manual_verification": "Read chained update, structuredClone, exclusive temporary write, rename and state assignment.",
+          "source_facts": [
+            {
+              "path": "persistent-state.js",
+              "source_sha256": "39c55e712462f543028e9e9a9492ad8fefa6574973d53c2bb8c239ef062d56de",
+              "reviewed_range": {
+                "path": "persistent-state.js",
+                "start_line": 22,
+                "end_line": 59
+              },
+              "material_evidence_ids": [
+                "structural-78b37bc65bc65cba9c29def0698394cd"
+              ],
+              "structural_fact": {
+                "identifier": "createStateStore",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:37fc524122f1174b919069e131ff9f93f51bf872d19219145f0b38e1b6f7009d",
+                "source_range": {
+                  "start_line": 23,
+                  "start_column": 8,
+                  "end_line": 23,
+                  "end_column": 45
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "persistence-test",
+          "manual_verification": "Read saved ban, recreated store, matchingBan result and directory contents assertion.",
+          "source_facts": [
+            {
+              "path": "test/moderation.test.js",
+              "source_sha256": "ac12f89a8fe855dcf5a96e722cba0310b765658eab4327c7c71654fd53036ab6",
+              "reviewed_range": {
+                "path": "test/moderation.test.js",
+                "start_line": 16,
+                "end_line": 26
+              },
+              "material_evidence_ids": [
+                "structural-37f5d4277ed11877efae0cbf18a9857a"
+              ],
+              "structural_fact": {
+                "identifier": "createStateStore",
+                "fact_kind": "call",
+                "fact_id": "62fc5bb3c3d87c8c3b7eb70a244518626de314350e5d0abc742357199f7552c4",
+                "source_range": {
+                  "start_line": 20,
+                  "start_column": 16,
+                  "end_line": 20,
+                  "end_column": 32
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "reconnect-match",
+          "manual_verification": "Read room guard and OR predicate; library-context connections bypass this room check.",
+          "source_facts": [
+            {
+              "path": "server.js",
+              "source_sha256": "f51434124ea74c9f25ef4c090c2d6c7548027f81e3dd3d24cd8467b3dad41fe7",
+              "reviewed_range": {
+                "path": "server.js",
+                "start_line": 580,
+                "end_line": 585
+              },
+              "material_evidence_ids": [
+                "structural-3f79b2c8b7920e058dd388de847b005a"
+              ],
+              "structural_fact": {
+                "identifier": "moderationBlock",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:3c62e8fc54c2dd36a9399d81033466e571c32b160cc5454c361fa3adda6684de",
+                "source_range": {
+                  "start_line": 580,
+                  "start_column": 0,
+                  "end_line": 585,
+                  "end_column": 1
+                }
+              }
+            },
+            {
+              "path": "server.js",
+              "source_sha256": "f51434124ea74c9f25ef4c090c2d6c7548027f81e3dd3d24cd8467b3dad41fe7",
+              "reviewed_range": {
+                "path": "server.js",
+                "start_line": 1076,
+                "end_line": 1087
+              },
+              "material_evidence_ids": [
+                "structural-3ba1104df067d2c61ac4faf01a134682"
+              ],
+              "structural_fact": {
+                "identifier": "moderationBlock",
+                "fact_kind": "call",
+                "fact_id": "ec29b170ec0d76ef42f8332f8bf7166192402762d04fda5a8c2371cf349ed2d0",
+                "source_range": {
+                  "start_line": 1082,
+                  "start_column": 16,
+                  "end_line": 1082,
+                  "end_column": 31
+                }
+              }
+            },
+            {
+              "path": "moderation.js",
+              "source_sha256": "5858738e726f336d33a5f912eedd7e84edce073a98a59c1fbd07f06031b1b2a8",
+              "reviewed_range": {
+                "path": "moderation.js",
+                "start_line": 16,
+                "end_line": 18
+              },
+              "material_evidence_ids": [
+                "structural-7afd4767a7de530b0787bba6c6ac24f4"
+              ],
+              "structural_fact": {
+                "identifier": "matchingBan",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:28f0539e49f87a5332709ce3ebb900acbb0ed53181fe50a6be3464d350b2866d",
+                "source_range": {
+                  "start_line": 16,
+                  "start_column": 0,
+                  "end_line": 18,
+                  "end_column": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-symbol-compatible-plan-independent",
+      "repository_id": "syncplayer",
+      "pinned_revision": "6e7154b6b0148a5a595e317ca78fa632ecf9f243",
+      "source_files": [
+        {
+          "path": "compatible-playback.js",
+          "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+          "reviewed_required_ranges": [
+            {
+              "path": "compatible-playback.js",
+              "start_line": 10,
+              "end_line": 20
+            },
+            {
+              "path": "compatible-playback.js",
+              "start_line": 33,
+              "end_line": 61
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "compatible-playback.js",
+              "start_line": 10,
+              "end_line": 20
+            },
+            {
+              "path": "compatible-playback.js",
+              "start_line": 33,
+              "end_line": 61
+            }
+          ]
+        },
+        {
+          "path": "test/compatible-playback.test.js",
+          "source_sha256": "d0947994765354087f19aff34d6ebe55be9b97dd49eecf9ed2870052fbee08ce",
+          "reviewed_required_ranges": [
+            {
+              "path": "test/compatible-playback.test.js",
+              "start_line": 19,
+              "end_line": 82
+            }
+          ],
+          "reviewed_oracle_ranges": [
+            {
+              "path": "test/compatible-playback.test.js",
+              "start_line": 19,
+              "end_line": 82
+            }
+          ]
+        }
+      ],
+      "assertion_verifications": [
+        {
+          "assertion_id": "fallback-triggers",
+          "manual_verification": "Read profile/pixel detection, Matroska FLAC issues, empty-issues return and normal MP4 regression.",
+          "source_facts": [
+            {
+              "path": "compatible-playback.js",
+              "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+              "reviewed_range": {
+                "path": "compatible-playback.js",
+                "start_line": 16,
+                "end_line": 20
+              },
+              "material_evidence_ids": [
+                "structural-19c9ef8da8fdcb19d953adb5894203f4"
+              ],
+              "structural_fact": {
+                "identifier": "isHigh10H264",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:14614c7ce684c7bf487093a726927cc2fa9ed96ecb0fa2adc4b80f6ab1a185fc",
+                "source_range": {
+                  "start_line": 18,
+                  "start_column": 8,
+                  "end_line": 18,
+                  "end_column": 73
+                }
+              }
+            },
+            {
+              "path": "compatible-playback.js",
+              "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+              "reviewed_range": {
+                "path": "compatible-playback.js",
+                "start_line": 33,
+                "end_line": 61
+              },
+              "material_evidence_ids": [
+                "structural-b7a3066c9eea208a4884866e454f2c42"
+              ],
+              "structural_fact": {
+                "identifier": "compatiblePlaybackPlan",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:3148f90e64cb7f2604efc7ad1d6e374918e2516779ef97e26bd458aead582aa4",
+                "source_range": {
+                  "start_line": 33,
+                  "start_column": 0,
+                  "end_line": 61,
+                  "end_column": 1
+                }
+              }
+            },
+            {
+              "path": "test/compatible-playback.test.js",
+              "source_sha256": "d0947994765354087f19aff34d6ebe55be9b97dd49eecf9ed2870052fbee08ce",
+              "reviewed_range": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 72,
+                "end_line": 82
+              },
+              "material_evidence_ids": [
+                "structural-88d5c3bfe7b3979c91f663bad5388a10"
+              ],
+              "structural_fact": {
+                "identifier": "compatiblePlaybackPlan",
+                "fact_kind": "call",
+                "fact_id": "f3bc6c089379a28b5887ae1d874fdf1041d64e629b721c3b55a7a342f652650a",
+                "source_range": {
+                  "start_line": 73,
+                  "start_column": 15,
+                  "end_line": 73,
+                  "end_column": 37
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "output-modes",
+          "manual_verification": "Read copy codec set and output modes. Test probe declaration anchors the reviewed FLAC fixture because nested assertion calls are absent from structural extraction; assertions themselves are manually read.",
+          "source_facts": [
+            {
+              "path": "compatible-playback.js",
+              "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+              "reviewed_range": {
+                "path": "compatible-playback.js",
+                "start_line": 10,
+                "end_line": 10
+              },
+              "material_evidence_ids": [
+                "structural-fe270a5ac70ec745170aeb4dfd7de063"
+              ],
+              "structural_fact": {
+                "identifier": "MPEG_TS_COPY_AUDIO_CODECS",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:c1acb51ae967d9b632e4f191f6d8bfb27283cf4ae893663117ecd41a66b27081",
+                "source_range": {
+                  "start_line": 10,
+                  "start_column": 6,
+                  "end_line": 10,
+                  "end_column": 57
+                }
+              }
+            },
+            {
+              "path": "compatible-playback.js",
+              "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+              "reviewed_range": {
+                "path": "compatible-playback.js",
+                "start_line": 47,
+                "end_line": 60
+              },
+              "material_evidence_ids": [
+                "structural-4e98da4024080bada4de94b3bf954178"
+              ],
+              "structural_fact": {
+                "identifier": "MPEG_TS_COPY_AUDIO_CODECS",
+                "fact_kind": "call",
+                "fact_id": "1a1f3a85bedfe72e3c0176e9d2f1fbcccbb632b2e6f58db0ec47a4170e7924cb",
+                "source_range": {
+                  "start_line": 58,
+                  "start_column": 24,
+                  "end_line": 58,
+                  "end_column": 53
+                }
+              }
+            },
+            {
+              "path": "test/compatible-playback.test.js",
+              "source_sha256": "d0947994765354087f19aff34d6ebe55be9b97dd49eecf9ed2870052fbee08ce",
+              "reviewed_range": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 19,
+                "end_line": 40
+              },
+              "material_evidence_ids": [
+                "structural-51495c2699896d5a89464bc4d6624b6c"
+              ],
+              "structural_fact": {
+                "identifier": "probe",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:c46902101d14d5a8b815c6f86ed7afbc17a2ae67f3ff67c902d298db22074a21",
+                "source_range": {
+                  "start_line": 20,
+                  "start_column": 8,
+                  "end_line": 26,
+                  "end_column": 3
+                }
+              }
+            },
+            {
+              "path": "test/compatible-playback.test.js",
+              "source_sha256": "d0947994765354087f19aff34d6ebe55be9b97dd49eecf9ed2870052fbee08ce",
+              "reviewed_range": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 57,
+                "end_line": 70
+              },
+              "material_evidence_ids": [
+                "structural-cf06072ff58006b47f007b07921f9189"
+              ],
+              "structural_fact": {
+                "identifier": "compatiblePlaybackPlan",
+                "fact_kind": "call",
+                "fact_id": "d5a79c43757630e9249956e355b0fa9b6c298260b451f2e8b85643f51c6767ab",
+                "source_range": {
+                  "start_line": 58,
+                  "start_column": 15,
+                  "end_line": 58,
+                  "end_column": 37
+                }
+              }
+            }
+          ]
+        },
+        {
+          "assertion_id": "selected-audio",
+          "manual_verification": "Read default disposition selection separately from some-FLAC and test stream-index assertions.",
+          "source_facts": [
+            {
+              "path": "compatible-playback.js",
+              "source_sha256": "d3f259405cecd27d9249438d08f36070bd561159c016c69f5c97926bf8f422b2",
+              "reviewed_range": {
+                "path": "compatible-playback.js",
+                "start_line": 33,
+                "end_line": 61
+              },
+              "material_evidence_ids": [
+                "structural-b7a3066c9eea208a4884866e454f2c42"
+              ],
+              "structural_fact": {
+                "identifier": "compatiblePlaybackPlan",
+                "fact_kind": "declaration",
+                "fact_id": "symbol:3148f90e64cb7f2604efc7ad1d6e374918e2516779ef97e26bd458aead582aa4",
+                "source_range": {
+                  "start_line": 33,
+                  "start_column": 0,
+                  "end_line": 61,
+                  "end_column": 1
+                }
+              }
+            },
+            {
+              "path": "test/compatible-playback.test.js",
+              "source_sha256": "d0947994765354087f19aff34d6ebe55be9b97dd49eecf9ed2870052fbee08ce",
+              "reviewed_range": {
+                "path": "test/compatible-playback.test.js",
+                "start_line": 57,
+                "end_line": 70
+              },
+              "material_evidence_ids": [
+                "structural-cf06072ff58006b47f007b07921f9189"
+              ],
+              "structural_fact": {
+                "identifier": "compatiblePlaybackPlan",
+                "fact_kind": "call",
+                "fact_id": "d5a79c43757630e9249956e355b0fa9b6c298260b451f2e8b85643f51c6767ab",
+                "source_range": {
+                  "start_line": 58,
+                  "start_column": 15,
+                  "end_line": 58,
+                  "end_column": 37
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
