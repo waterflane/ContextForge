@@ -16,6 +16,52 @@ from contextforge.intelligence import (
 from contextforge.intelligence.retrieval import build_evidence_requirements
 
 
+@pytest.mark.parametrize("direction", ["caller", "callers", "callee", "callees"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_directed_role_requests_require_the_requested_endpoint(
+    tmp_path: Path, direction: str, missing: bool
+) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "from leaf import finish_job\ndef execute_job():\n    return finish_job()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "client.py").write_text(
+        "from jobs import execute_job\ndef invoke_job():\n    return execute_job()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "leaf.py").write_text(
+        "def finish_job():\n    return 7\n", encoding="utf-8"
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = f"Find {direction} of execute_job"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    kind = "caller" if direction.startswith("caller") else "callee"
+    other = "callee" if kind == "caller" else "caller"
+    assert kind in {r.kind for r in retrieval.requirements.roles}
+    assert other not in {r.kind for r in retrieval.requirements.roles}
+    endpoint = "client.py" if kind == "caller" else "leaf.py"
+    if missing:
+        retrieval = retrieval.model_copy(
+            update={
+                "candidates": tuple(
+                    c for c in retrieval.candidates if c.path != endpoint
+                )
+            }
+        )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=16_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "insufficient" if missing else "sufficient"
+    )
+
+
 @pytest.mark.parametrize(
     "task",
     [

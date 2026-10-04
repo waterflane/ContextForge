@@ -4065,6 +4065,21 @@ def _task_evidence_roles(
         r"`[^`]*`|[A-Za-z_]\w*[_]\w*|[A-Za-z_]\w*(?:(?:::|\.)\w+)+", " ", task
     )
     terms = set(_tokens(syntax_task))
+    normalized_roles = {
+        "callers": "caller",
+        "callees": "callee",
+        "calls": "call",
+        "implementations": "implementation",
+        "behaviors": "behavior",
+        "flows": "flow",
+        "configurations": "configuration",
+        "regressions": "regression",
+        "specs": "spec",
+        "endpoints": "endpoint",
+        "schemas": "schema",
+        "models": "model",
+    }
+    terms = {normalized_roles.get(term, term) for term in terms}
     requested: set[TaskEvidenceRoleKind] = set()
     syntax = {
         "entrypoint": {
@@ -4117,8 +4132,6 @@ def _task_evidence_roles(
             requested.add(cast(TaskEvidenceRoleKind, kind))
     if terms & {
         "call",
-        "caller",
-        "callee",
         "trace",
         "flow",
         "route",
@@ -4130,6 +4143,10 @@ def _task_evidence_roles(
         "запрос",
     }:
         requested.update({"implementation", "caller", "callee"})
+    if "caller" in terms:
+        requested.update({"implementation", "caller"})
+    if "callee" in terms:
+        requested.update({"implementation", "callee"})
     values: dict[str, TaskEvidenceRole] = {
         kind: TaskEvidenceRole(role_id=kind, kind=kind) for kind in requested
     }
