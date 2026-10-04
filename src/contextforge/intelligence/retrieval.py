@@ -3968,10 +3968,8 @@ def _validate_plan_response(
     messages = []
     if dropped_evidence:
         messages.append("planner_dropped_unknown_or_duplicate_evidence")
-    known_roles = {
-        item.role_id: item
-        for item in _task_evidence_roles(task, tuple(supplied.values()))
-    }
+    frozen = requirements or build_evidence_requirements(task, tuple(supplied.values()))
+    known_roles = {item.role_id: item for item in frozen.roles}
     role_bindings: list[RoleEvidenceBinding] = []
     selected_ids = {item.candidate_id for item in items}
     for requested_binding in response.role_bindings:
@@ -3983,6 +3981,7 @@ def _validate_plan_response(
             or role is None
             or role.kind == "unknown"
         ):
+            messages.append("planner_dropped_unbound_role_binding")
             continue
         known_evidence = {
             item.evidence_id
@@ -3990,8 +3989,14 @@ def _validate_plan_response(
             if item.evidence_id is not None
         }
         if not set(requested_binding.evidence_ids) <= known_evidence:
+            messages.append("planner_dropped_unknown_binding_evidence")
             continue
-        if not _candidate_covers_role(candidate, role, set()):
+        if not _candidate_covers_role(candidate, role, set()) or not (
+            _binding_matches_requirements(
+                role, candidate, frozen, evidence_ids=requested_binding.evidence_ids
+            )
+        ):
+            messages.append("planner_dropped_unbound_role_binding")
             continue
         role_bindings.append(
             RoleEvidenceBinding(
@@ -4181,7 +4186,9 @@ def build_coverage_ledger(
             or role.kind == "unknown"
             or not set(binding.evidence_ids) <= known_evidence
             or not _candidate_covers_role(candidate, role, set())
-            or not _binding_matches_requirements(role, candidate, requirements)
+            or not _binding_matches_requirements(
+                role, candidate, requirements, evidence_ids=binding.evidence_ids
+            )
         ):
             continue
         bindings.append(binding)
@@ -4542,19 +4549,29 @@ def _binding_matches_requirements(
     role: TaskEvidenceRole,
     candidate: CandidateCard,
     requirements: EvidenceRequirements,
+    *,
+    evidence_ids: tuple[str, ...] | None = None,
 ) -> bool:
     """A file category cannot substitute for evidence linked to the task anchor."""
 
     obligations = requirements.source_evidence
-    if any(
-        r.role_id == role.role_id
-        and r.candidate_id == candidate.candidate_id
+    matching_source = tuple(
+        r
+        for r in obligations
+        if r.candidate_id == candidate.candidate_id
         and r.path == candidate.path
         and r.source_sha256 == candidate.source_sha256
-        for r in obligations
+    )
+    known_ids = {e.evidence_id for e in candidate.evidence_ranges if e.evidence_id}
+    if evidence_ids is not None and not set(evidence_ids) <= known_ids:
+        return False
+    if any(
+        r.role_id == role.role_id
+        and (not evidence_ids or set(evidence_ids) & set(r.evidence_ids))
+        for r in matching_source
     ):
         return True
-    if candidate.candidate_id not in requirements.anchors:
+    if candidate.candidate_id not in requirements.anchors or not matching_source:
         return False
     if role.kind in {"caller", "callee"}:
         direction = "outgoing" if role.kind == "caller" else "incoming"

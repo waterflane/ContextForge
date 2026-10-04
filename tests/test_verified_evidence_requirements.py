@@ -16,6 +16,94 @@ from contextforge.intelligence import (
 from contextforge.intelligence.retrieval import build_evidence_requirements
 
 
+@pytest.mark.parametrize("damage", ["none", "unrelated", "sha", "id", "unselected"])
+def test_planner_binding_uses_the_frozen_source_requirement(
+    tmp_path: Path, damage: str
+) -> None:
+    from contextforge.intelligence.retrieval import (
+        _PlanResponse,
+        _validate_plan_response,
+        build_coverage_ledger,
+    )
+
+    sources = {
+        "jobs.py": "def execute_job():\n    return 7\n",
+        "tests/test_jobs.py": "from jobs import execute_job\ndef test_job():\n"
+        "    assert execute_job() == 7\n",
+        "tests/test_other.py": "def test_unrelated():\n    assert True\n",
+    }
+    for path, source in sources.items():
+        destination = tmp_path / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Review execute_job implementation tests"
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    unrelated = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path, "test_unrelated", manifest=report.manifest
+        )
+    )
+    supplied = {c.candidate_id: c for c in (*unrelated.candidates, *result.candidates)}
+    target = next(c for c in supplied.values() if c.path == "tests/test_jobs.py")
+    if damage == "unrelated":
+        target = next(c for c in supplied.values() if c.path == "tests/test_other.py")
+    if damage == "sha":
+        target = target.model_copy(update={"source_sha256": "0" * 64})
+        supplied[target.candidate_id] = target
+    ids = tuple(e.evidence_id for e in target.evidence_ranges if e.evidence_id)
+    if damage == "id":
+        ids = ("unknown-evidence",)
+    selected = tuple(
+        {"candidate_id": c.candidate_id, "representation": "full"}
+        for c in supplied.values()
+        if damage != "unselected" or c.candidate_id != target.candidate_id
+    )
+    response = _PlanResponse.model_validate(
+        {
+            "selected": selected,
+            "sufficiency": "sufficient",
+            "role_bindings": [
+                {
+                    "role_id": "test",
+                    "candidate_id": target.candidate_id,
+                    "evidence_ids": ids,
+                }
+            ],
+        }
+    )
+    plan = _validate_plan_response(
+        response,
+        supplied,
+        result.source_snapshot_digest,
+        task=task,
+        mode=ContextPlanningMode.AUTO,
+        provider_calls=1,
+        input_tokens=1,
+        output_tokens=1,
+        rounds=1,
+        max_files=12,
+        max_ranges_per_file=16,
+        requirements=result.requirements,
+    )
+    assert plan is not None
+    assert bool(plan.role_bindings) == (damage == "none")
+    ledger = build_coverage_ledger(
+        task,
+        tuple(supplied.values()),
+        selected_candidate_ids=tuple(i.candidate_id for i in plan.items),
+        planner_bindings=plan.role_bindings,
+        requirements=result.requirements,
+    )
+    assert tuple(b for b in ledger.bindings if b.source == "planner") == (
+        plan.role_bindings
+    )
+
+
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_class_qualified_anchor_requires_unique_source_identity(
     tmp_path: Path, ambiguous: bool
