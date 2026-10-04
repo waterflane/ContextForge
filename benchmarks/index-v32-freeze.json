@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-10-04T12:34:55.719003+00:00",
+  "implementation_commit": "7ce0c65e5942311a851f48bf9cfcfa26ac1d0ad6",
+  "original_manifest": "benchmarks/real-repository-v31.json",
+  "original_manifest_sha256": "03d3025af7e3f77a32babbb77a77e77ce7a8e419dcd80bc6a509c064c1cb098d",
+  "tuning_report_sha256": "4f7e690dd5731757256469cd907cbbdec825e6c65d255dbd50255b89b3efc1f0",
+  "new_holdout_tasks": 8,
+  "clone_repetitions": 3,
+  "model_repetitions": 3,
+  "provider": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "off",
+    "context_window": 196608,
+    "transport_retries": 0,
+    "json_repairs": 0
+  },
+  "common_rules": [
+    "Immutable source-bound CodeMaps and evidence IDs; semantic prose cannot create facts.",
+    "One frozen task requirement set throughout retrieval, planning and compilation.",
+    "All exact groups keep priority; complementary pool is capped at 64 and two verified graph hops.",
+    "Call roles require directed callable evidence; imports cannot establish entrypoint handlers.",
+    "Source-test obligations choose a verified counterpart by relevance; other neighbors remain optional.",
+    "Mandatory source ranges precede optional representations and survive upgrades and downgrades.",
+    "Heuristic role coverage without an exact or grounded semantic anchor remains insufficient.",
+    "Provider-free deterministic search; hard budgets; source SHA validation."
+  ],
+  "profile_checks": "Ruff format/check, full mypy, 99 focused tests and git diff --check passed.",
+  "full_pytest_status": "running; must pass before completion",
+  "acceptance": "unverified",
+  "full_live_launch_requires": "Known sufficient allowance including 25 percent reserve; current quota percentages do not establish a token or call allowance."
+}
