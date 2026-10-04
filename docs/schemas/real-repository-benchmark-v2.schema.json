@@ -740,6 +740,56 @@
           },
           "title": "Phase Usage",
           "type": "array"
+        },
+        "compilation_sufficiency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompilationSufficiency"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "materialization_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoverageLedger"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "compilation_calibration": {
+          "default": "unverified",
+          "enum": [
+            "consistent_sufficient",
+            "false_sufficient",
+            "insufficient",
+            "unverified"
+          ],
+          "title": "Compilation Calibration",
+          "type": "string"
+        },
+        "semantic_calibration": {
+          "default": "unverified",
+          "enum": [
+            "verified",
+            "unverified"
+          ],
+          "title": "Semantic Calibration",
+          "type": "string"
+        },
+        "calibration_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Calibration Reasons",
+          "type": "array"
         }
       }
     },
@@ -1005,6 +1055,30 @@
         },
         "headline_token_savings": {
           "type": "number"
+        },
+        "consistent_sufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Consistent Sufficient Count",
+          "type": "integer"
+        },
+        "false_sufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "False Sufficient Count",
+          "type": "integer"
+        },
+        "insufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Insufficient Count",
+          "type": "integer"
+        },
+        "unverified_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Unverified Count",
+          "type": "integer"
         }
       }
     },
@@ -1819,6 +1893,535 @@
       ],
       "title": "RealBenchmarkMode",
       "type": "string"
+    },
+    "CandidateEvidenceRange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Id"
+        },
+        "strength": {
+          "enum": [
+            "verified",
+            "grounded"
+          ],
+          "title": "Strength",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_range",
+        "strength"
+      ],
+      "title": "CandidateEvidenceRange",
+      "type": "object"
+    },
+    "CompilationSufficiency": {
+      "additionalProperties": false,
+      "description": "Verified effective status after the compiler's real materialization.",
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "declared_status": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ],
+          "title": "Declared Status",
+          "type": "string"
+        },
+        "effective_status": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ],
+          "title": "Effective Status",
+          "type": "string"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "enum": [
+              "graph_endpoint_missing",
+              "declared_insufficient",
+              "empty_retrieval",
+              "empty_task_context",
+              "plan_replaced",
+              "planned_item_unmaterialized",
+              "planned_evidence_unmaterialized",
+              "planned_range_unmaterialized",
+              "budget_excluded_mandatory_item",
+              "mandatory_role_missing",
+              "planned_role_lost",
+              "required_source_evidence_missing",
+              "task_anchor_unresolved"
+            ],
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "planned_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Item Ids",
+          "type": "array"
+        },
+        "materialized_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Item Ids",
+          "type": "array"
+        },
+        "missing_planned_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Planned Item Ids",
+          "type": "array"
+        },
+        "planned_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Evidence Ids",
+          "type": "array"
+        },
+        "materialized_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Evidence Ids",
+          "type": "array"
+        },
+        "planned_range_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Planned Range Count",
+          "type": "integer"
+        },
+        "materialized_range_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Materialized Range Count",
+          "type": "integer"
+        },
+        "planned_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Role Ids",
+          "type": "array"
+        },
+        "materialized_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Role Ids",
+          "type": "array"
+        },
+        "missing_mandatory_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Mandatory Role Ids",
+          "type": "array"
+        },
+        "replacement_used": {
+          "default": false,
+          "title": "Replacement Used",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "declared_status",
+        "effective_status"
+      ],
+      "title": "CompilationSufficiency",
+      "type": "object"
+    },
+    "CoverageLedger": {
+      "additionalProperties": false,
+      "description": "Verified coverage state with IDs and source addresses only, never prose.",
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stage": {
+          "enum": [
+            "retrieval",
+            "action",
+            "plan",
+            "materialization"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "bindings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoleEvidenceBinding"
+          },
+          "title": "Bindings",
+          "type": "array"
+        },
+        "covered_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Role Ids",
+          "type": "array"
+        },
+        "missing_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Role Ids",
+          "type": "array"
+        },
+        "unique_symbols": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unique Symbols",
+          "type": "array"
+        },
+        "concepts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Concepts",
+          "type": "array"
+        },
+        "ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CandidateEvidenceRange"
+          },
+          "title": "Ranges",
+          "type": "array"
+        },
+        "covered_graph_endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Graph Endpoints",
+          "type": "array"
+        },
+        "missing_graph_endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Graph Endpoints",
+          "type": "array"
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "missing_requirement_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Requirement Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stage",
+        "roles"
+      ],
+      "title": "CoverageLedger",
+      "type": "object"
+    },
+    "EvidenceRequirement": {
+      "additionalProperties": false,
+      "description": "Source-bound obligation derived locally, never from a model-created fact.",
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "role_id": {
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "basis": {
+          "enum": [
+            "exact-symbol",
+            "verified-call",
+            "verified-source-test",
+            "verified-config",
+            "task-syntax"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "anchor_candidate_id": {
+          "title": "Anchor Candidate Id",
+          "type": "string"
+        },
+        "anchor_symbol_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Symbol Id"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "role_id",
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "basis",
+        "anchor_candidate_id"
+      ],
+      "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "EvidenceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchors",
+          "type": "array"
+        },
+        "source_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "title": "Source Evidence",
+          "type": "array"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
+        },
+        "topic_grounding": {
+          "default": "unresolved",
+          "enum": [
+            "exact-identifier",
+            "grounded-semantic",
+            "unresolved"
+          ],
+          "title": "Topic Grounding",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "title": "EvidenceRequirements",
+      "type": "object"
+    },
+    "RoleEvidenceBinding": {
+      "additionalProperties": false,
+      "description": "A role bound only to supplied candidate and evidence identities.",
+      "properties": {
+        "role_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "source": {
+          "default": "deterministic",
+          "enum": [
+            "deterministic",
+            "planner"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role_id",
+        "candidate_id"
+      ],
+      "title": "RoleEvidenceBinding",
+      "type": "object"
+    },
+    "SourceRange": {
+      "additionalProperties": false,
+      "description": "One-based lines and zero-based half-open source columns.",
+      "properties": {
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "start_column": {
+          "minimum": 0,
+          "title": "Start Column",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "end_column": {
+          "minimum": 0,
+          "title": "End Column",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
+      "title": "SourceRange",
+      "type": "object"
+    },
+    "TaskEvidenceRole": {
+      "additionalProperties": false,
+      "description": "A closed evidence-diversity requirement derived from task syntax.",
+      "properties": {
+        "role_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Role Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "entrypoint",
+            "implementation",
+            "caller",
+            "callee",
+            "configuration",
+            "test",
+            "documentation",
+            "public_api",
+            "data_model",
+            "unknown"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role_id",
+        "kind"
+      ],
+      "title": "TaskEvidenceRole",
+      "type": "object"
     }
   }
 }

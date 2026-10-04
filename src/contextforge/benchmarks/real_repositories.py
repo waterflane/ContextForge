@@ -33,8 +33,14 @@ from contextforge.benchmarks.models import (
     BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
 )
+from contextforge.context.capsule import CompilationSufficiency
 from contextforge.core.validation import validate_portable_relative_path
 from contextforge.intelligence.cards import SemanticCoverage
+from contextforge.intelligence.retrieval import CoverageLedger
+
+CompilationCalibration = Literal[
+    "consistent_sufficient", "false_sufficient", "insufficient", "unverified"
+]
 
 REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[2] = 2
 MAX_FINAL_ANSWER_MS = 90_000
@@ -266,6 +272,8 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     semantic_described_functions: NonNegativeInt | None = None
     semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
+    materialization_coverage: CoverageLedger | None = None
     paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     citation_validity: Rate = 0.0
     assertion_recall: Rate = 0.0
@@ -364,6 +372,11 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     semantic_described_functions: NonNegativeInt | None = None
     semantic_file_only_functions: NonNegativeInt | None = None
     plan_sufficient: bool | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
+    materialization_coverage: CoverageLedger | None = None
+    compilation_calibration: CompilationCalibration = "unverified"
+    semantic_calibration: Literal["verified", "unverified"] = "unverified"
+    calibration_reasons: tuple[str, ...] = ()
     paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     citation_validity: Rate | None = None
     assertion_recall: Rate | None = None
@@ -421,6 +434,10 @@ class RealBenchmarkAggregate(RealBenchmarkModel):
     semantic_file_only_rate: Rate | None = None
     plan_sufficient_count: NonNegativeInt = 0
     planned_task_count: NonNegativeInt = 0
+    consistent_sufficient_count: NonNegativeInt = 0
+    false_sufficient_count: NonNegativeInt = 0
+    insufficient_count: NonNegativeInt = 0
+    unverified_count: NonNegativeInt = 0
     citation_containment: Rate | None = None
     assertion_recall: Rate | None = None
     assertion_evidence_support: Rate | None = None
@@ -547,6 +564,7 @@ def evaluate_real_repository_observation(
         and groundedness is not None
         and groundedness.passed
     )
+    calibration, calibration_reasons = _audit_compilation(task, observation)
     gate_failed = not (
         retrieval_recall >= 0.90
         and precision_at_r > 0.80
@@ -567,8 +585,10 @@ def evaluate_real_repository_observation(
         and groundedness.provider_http_calls >= 3
         and quality_not_lower
         and observation.planner_calls <= 3
+        and calibration != "false_sufficient"
         and (
-            observation.mode is RealBenchmarkMode.DETERMINISTIC
+            observation.compilation_sufficiency is not None
+            or observation.mode is RealBenchmarkMode.DETERMINISTIC
             or observation.plan_sufficient is True
         )
         and (
@@ -613,9 +633,11 @@ def evaluate_real_repository_observation(
                 ),
                 (
                     "planner_sufficiency",
-                    observation.mode is RealBenchmarkMode.DETERMINISTIC
+                    observation.compilation_sufficiency is not None
+                    or observation.mode is RealBenchmarkMode.DETERMINISTIC
                     or observation.plan_sufficient is True,
                 ),
+                ("false_sufficient", calibration != "false_sufficient"),
             )
             if not passed
         )
@@ -666,6 +688,18 @@ def evaluate_real_repository_observation(
         semantic_described_functions=observation.semantic_described_functions,
         semantic_file_only_functions=observation.semantic_file_only_functions,
         plan_sufficient=observation.plan_sufficient,
+        compilation_sufficiency=observation.compilation_sufficiency,
+        materialization_coverage=observation.materialization_coverage,
+        compilation_calibration=calibration,
+        calibration_reasons=calibration_reasons,
+        semantic_calibration=(
+            "verified"
+            if capsule_answer is not None
+            and groundedness is not None
+            and capsule_answer.provider_http_calls > 0
+            and groundedness.provider_http_calls >= 3
+            else "unverified"
+        ),
         paired_answer=paired,
         citation_validity=(
             None if capsule_answer is None else capsule_answer.citation_validity
@@ -773,7 +807,12 @@ def aggregate_real_repository_report(
                 for build in builds
             )
             and all(
-                run.status == "complete" and not run.quality_gate_failed for run in runs
+                run.status == "complete"
+                and not run.quality_gate_failed
+                and run.compilation_calibration
+                in {"consistent_sufficient", "insufficient"}
+                and run.semantic_calibration == "verified"
+                for run in runs
             )
             and all(
                 run.deterministic_warm_query_ms is not None
@@ -850,6 +889,18 @@ def _aggregate(
         ),
         plan_sufficient_count=sum(item.plan_sufficient is True for item in complete),
         planned_task_count=sum(item.plan_sufficient is not None for item in complete),
+        consistent_sufficient_count=sum(
+            item.compilation_calibration == "consistent_sufficient" for item in complete
+        ),
+        false_sufficient_count=sum(
+            item.compilation_calibration == "false_sufficient" for item in complete
+        ),
+        insufficient_count=sum(
+            item.compilation_calibration == "insufficient" for item in complete
+        ),
+        unverified_count=sum(
+            item.compilation_calibration == "unverified" for item in complete
+        ),
         citation_containment=mean("citation_validity"),
         assertion_recall=mean("assertion_recall"),
         assertion_evidence_support=mean("assertion_evidence_support"),
@@ -867,6 +918,56 @@ def _aggregate(
             else 0.0
         ),
     )
+
+
+def _audit_compilation(
+    task: RealBenchmarkTask, observation: RealBenchmarkObservation
+) -> tuple[CompilationCalibration, tuple[str, ...]]:
+    """Audit real material against frozen obligations and evaluator-only support."""
+    status = observation.compilation_sufficiency
+    if status is None:
+        return "unverified", ("compilation_status_absent",)
+    if status.effective_status == "insufficient":
+        return "insufficient", status.reason_codes
+    ledger = observation.materialization_coverage
+    reasons: list[str] = []
+    if ledger is None:
+        return "unverified", ("materialization_coverage_absent",)
+    if ledger.missing_requirement_ids or ledger.missing_graph_endpoints:
+        reasons.append("mandatory_evidence_missing")
+    kinds = {r.role_id: r.kind for r in ledger.roles}
+    if any(kinds[r] != "unknown" for r in ledger.missing_role_ids):
+        reasons.append("mandatory_role_missing")
+    requirements = ledger.requirements
+    if requirements is None or requirements.topic_grounding == "unresolved":
+        reasons.append("topic_unverified")
+    if requirements is not None:
+        for requirement in requirements.source_evidence:
+            actual_ids = observation.material_evidence_ids.get(requirement.path, ())
+            if (
+                requirement.path not in observation.materialized_files
+                or not requirement.evidence_ids
+                or not set(requirement.evidence_ids) <= set(actual_ids)
+            ):
+                reasons.append("mandatory_material_missing")
+                break
+    for assertion in task.answer_assertions:
+        if assertion.support and not any(
+            _range_recall((support.citation,), observation.materialized_ranges) == 1.0
+            and set(support.material_evidence_ids)
+            <= set(observation.material_evidence_ids.get(support.citation.path, ()))
+            for support in assertion.support
+        ):
+            reasons.append("reviewed_assertion_material_missing")
+            break
+    paired = observation.paired_answer
+    if paired is not None and paired.contextforge.assertion_evidence_support != 1.0:
+        reasons.append("assertion_support_failed")
+    if reasons:
+        return "false_sufficient", tuple(sorted(set(reasons)))
+    if paired is None or paired.contextforge_groundedness is None:
+        return "unverified", ("semantic_calibration_unverified",)
+    return "consistent_sufficient", ()
 
 
 def _range_recall(

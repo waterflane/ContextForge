@@ -36,6 +36,88 @@ from contextforge.models import (
 MANIFEST = Path(__file__).parents[1] / "benchmarks" / "real-repository-v31.json"
 
 
+@pytest.mark.parametrize("mode", list(RealBenchmarkMode))
+@pytest.mark.parametrize("status", ["sufficient", "insufficient"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_compilation_calibration_audits_both_modes(
+    mode: RealBenchmarkMode, status: str, missing: bool
+) -> None:
+    from contextforge.context.capsule import CompilationSufficiency
+    from contextforge.intelligence.retrieval import (
+        CoverageLedger,
+        EvidenceRequirements,
+        RoleEvidenceBinding,
+        TaskEvidenceRole,
+    )
+
+    task = load_real_repository_benchmark_manifest(MANIFEST).tasks[0]
+    ledger = CoverageLedger(
+        stage="materialization",
+        roles=(TaskEvidenceRole(role_id="implementation", kind="implementation"),),
+        bindings=()
+        if missing
+        else (
+            RoleEvidenceBinding(
+                role_id="implementation", candidate_id="candidate-alpha"
+            ),
+        ),
+        missing_role_ids=("implementation",) if missing else (),
+        covered_role_ids=() if missing else ("implementation",),
+        requirements=EvidenceRequirements(roles=(), topic_grounding="exact-identifier"),
+    )
+    evidence = {
+        path: tuple(
+            sorted(
+                {
+                    identity
+                    for assertion in task.answer_assertions
+                    for support in assertion.support
+                    if support.citation.path == path
+                    for identity in support.material_evidence_ids
+                }
+            )
+        )
+        for path in task.required_files
+    }
+    observation = RealBenchmarkObservation(
+        mode=mode,
+        retrieved_top5=task.required_files,
+        materialized_files=task.required_files,
+        materialized_ranges=task.required_ranges,
+        material_evidence_ids=evidence,
+        capsule_tokens=1,
+        ordinary_tokens=10,
+        compilation_sufficiency=CompilationSufficiency.model_validate(
+            {
+                "declared_status": status,
+                "effective_status": status,
+            }
+        ),
+        materialization_coverage=ledger,
+        paired_answer=_paired_answer(),
+    )
+    report = evaluate_real_repository_observation(task, observation)
+    assert report.compilation_calibration == (
+        "insufficient"
+        if status == "insufficient"
+        else "false_sufficient"
+        if missing
+        else "consistent_sufficient"
+    )
+    assert report.semantic_calibration == "verified"
+    if status == "sufficient" and not missing:
+        unverified = evaluate_real_repository_observation(
+            task, observation.model_copy(update={"paired_answer": None})
+        )
+        assert unverified.compilation_calibration == "unverified"
+        assert unverified.semantic_calibration == "unverified"
+        damaged = evaluate_real_repository_observation(
+            task, observation.model_copy(update={"material_evidence_ids": {}})
+        )
+        assert damaged.compilation_calibration == "false_sufficient"
+        assert "reviewed_assertion_material_missing" in damaged.calibration_reasons
+
+
 def test_real_report_schema_tracks_public_fields() -> None:
     schema_path = (
         Path(__file__).parents[1]

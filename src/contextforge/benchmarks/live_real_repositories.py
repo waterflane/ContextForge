@@ -476,6 +476,8 @@ async def _evaluate_task(
             paired.contextforge.provider_input_tokens if paired is not None else None
         ),
         phase_errors=phase_errors,
+        compilation_sufficiency=compiled.compilation_sufficiency,
+        materialization_coverage=compiled.coverage_ledger,
         plan_sufficient=(
             None
             if mode is RealBenchmarkMode.DETERMINISTIC

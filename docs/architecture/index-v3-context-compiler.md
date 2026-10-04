@@ -301,6 +301,24 @@ explicit implementation anchor needs its own test binding when tests are
 requested. Directed call endpoints and connected entrypoint facts retain their
 source obligations through selection and compilation.
 
+Source-bound resolved anchors retain the query identifier, structural symbol ID,
+qualified name, resolution method and declaration/implementation evidence IDs.
+A unique component suffix may resolve `Widget.run` to `widget.Widget.run`;
+full names take precedence and multiple matches remain ambiguous. Symbol-level
+call and test obligations use directed persisted CodeMap facts, including calls
+within a file. Each selected method requires its own implementation range;
+the enclosing class remains optional. Planner binding validation and ledger
+construction use the same frozen requirement predicate and source identity.
+
+Real-repository observations retain compilation sufficiency and materialization
+coverage independently of planner status in both deterministic and planned modes.
+The evaluator reports consistent sufficient, false sufficient, insufficient and
+unverified counts. Reviewed assertion support is used only by the evaluator.
+Missing answer/judge evaluation leaves semantic calibration unverified. An honest
+insufficient result does not automatically fail answer quality; contradictory
+sufficient claims do. Legacy `plan_sufficient` remains readable, while acceptance
+requires the new compilation audit and verified semantic evaluation.
+
 Frozen source obligations retain declaration IDs and add implementation/call-site
 addresses from digest-checked persisted CodeMaps. The compiler selects source
 coverage before optional context and evaluates the final ledger from actual
