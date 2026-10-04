@@ -1491,6 +1491,9 @@ async def retrieve_context_candidates(
         index,
         ranked_candidates[:planning_max_pool_candidates],
     )
+    ranked_candidates = _restore_required_source_evidence(
+        repository_root, active, index, task, ranked_candidates
+    )
     candidates = ranked_candidates[:limit]
     requirements = build_evidence_requirements(
         task, tuple(ranked_candidates[:planning_max_pool_candidates])
@@ -2041,6 +2044,146 @@ def _restore_exact_identifier_evidence(
     return restored
 
 
+def _restore_required_source_evidence(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    index: RetrievalIndex,
+    task: str,
+    candidates: list[CandidateCard],
+) -> list[CandidateCard]:
+    """Bind bounded requirements to persisted implementation/call-site facts.
+
+    Only selected source-bound CodeMaps are read; no parser or provider runs.
+    Declaration addresses remain available alongside implementation addresses.
+    """
+    from contextforge.intelligence.store import load_index_record
+
+    requirements = build_evidence_requirements(task, tuple(candidates))
+    required_paths = {r.path for r in requirements.source_evidence}
+    states = {f.path: f for f in manifest.files}
+    documents = {d.path: d for d in index.documents}
+    maps: dict[str, dict[str, Any]] = {}
+    additions: dict[str, dict[str, CandidateEvidenceRange]] = defaultdict(dict)
+    for c in candidates:
+        if c.path not in required_paths and c.exact_group not in {
+            "exact_symbol",
+            "exact_qualified_symbol",
+        }:
+            continue
+        state = states[c.path]
+        payload = cast(
+            dict[str, Any],
+            json.loads(load_index_record(repository_root, state, manifest=manifest)),
+        )
+        if (
+            payload.get("source_sha256") != c.source_sha256
+            or payload.get("path") != c.path
+        ):
+            raise ValueError("required source CodeMap identity is stale")
+        maps[c.path] = payload
+
+    def add(path: str, identity: str, source_range: SourceRange) -> None:
+        evidence_id = _structural_evidence_id_from_source(
+            path, states[path].source_sha256, identity, source_range
+        )
+        additions[path][evidence_id] = CandidateEvidenceRange(
+            path=path,
+            source_range=source_range,
+            evidence_id=evidence_id,
+            strength="verified",
+        )
+
+    def body(path: str, symbol: dict[str, Any]) -> None:
+        declaration = SourceRange.model_validate(symbol["declaration_range"])
+        ending = SourceRange.model_validate(
+            symbol.get("body_range") or symbol["declaration_range"]
+        )
+        add(
+            path,
+            f"implementation:{symbol['symbol_id']}",
+            SourceRange(
+                start_line=declaration.start_line,
+                start_column=declaration.start_column,
+                end_line=ending.end_line,
+                end_column=ending.end_column,
+            ),
+        )
+
+    for c in candidates:
+        candidate_map = maps.get(c.path)
+        if candidate_map is None:
+            continue
+        matches = {v.casefold() for v in c.matched_symbols}
+        symbols = cast(list[dict[str, Any]], candidate_map.get("symbols", []))
+        for symbol in symbols:
+            declaration = SourceRange.model_validate(symbol["declaration_range"])
+            if (
+                symbol["name"].casefold() in matches
+                or symbol["qualified_name"].casefold() in matches
+                or any(
+                    e.source_range.start_line
+                    <= declaration.start_line
+                    <= e.source_range.end_line
+                    for e in c.evidence_ranges
+                )
+            ):
+                body(c.path, symbol)
+            for call in cast(list[dict[str, Any]], symbol.get("direct_calls", [])):
+                target_path = call.get("target_file_path")
+                if (
+                    call.get("resolution") != "internal"
+                    or target_path not in required_paths
+                ):
+                    continue
+                target_map = maps.get(str(target_path))
+                if target_map is None:
+                    continue
+                target = next(
+                    (
+                        v
+                        for v in target_map.get("symbols", [])
+                        if v["symbol_id"] == call.get("target_symbol_id")
+                    ),
+                    None,
+                )
+                if target is None:
+                    continue
+                body(c.path, symbol)
+                add(
+                    c.path,
+                    f"call-site:{symbol['symbol_id']}:{call['observed_name']}",
+                    SourceRange.model_validate(call["source_range"]),
+                )
+                body(str(target_path), target)
+    return [
+        c.model_copy(
+            update={
+                "evidence_ranges": tuple(
+                    sorted(
+                        {
+                            **{
+                                e.evidence_id or str(e.source_range): e
+                                for e in c.evidence_ranges
+                            },
+                            **additions[c.path],
+                        }.values(),
+                        key=lambda e: (
+                            e.source_range.start_line,
+                            e.source_range.end_line,
+                            e.evidence_id or "",
+                        ),
+                    )
+                ),
+                "estimated_cost": _representation_costs(
+                    documents[c.path],
+                    tuple((*c.evidence_ranges, *additions[c.path].values())),
+                ),
+            }
+        )
+        for c in candidates
+    ]
+
+
 def _exact_postings_from_persisted_map(
     repository_root: str | Path,
     manifest: IndexManifest,
@@ -2367,6 +2510,14 @@ async def _plan_evidence_session(
                 active_modules = dict(tuple(active_modules.items())[:retained])
             elif previews:
                 previews = {}
+            elif (
+                active_request.max_output_tokens is not None
+                and active_request.max_output_tokens > 512
+            ):
+                active_request = replace(
+                    active_request, max_output_tokens=512, max_output_tokens_ceiling=512
+                )
+                continue
             else:
                 break
             active_request = build_active_request(candidates, previews, active_modules)
@@ -3199,7 +3350,7 @@ def _planner_request(
                 "covered_role_ids": coverage.covered_role_ids,
                 "missing_role_ids": coverage.missing_role_ids,
                 "missing_graph_endpoints": coverage.missing_graph_endpoints,
-                "missing_requirement_ids": coverage.missing_requirement_ids,
+                "missing_requirement_count": len(coverage.missing_requirement_ids),
             },
             "compatibility_alias": legacy_alias,
             **(
@@ -3816,6 +3967,7 @@ def build_coverage_ledger(
                 r.requirement_id
                 for r in requirements.source_evidence
                 if r.candidate_id not in selected_ids
+                or not r.evidence_ids
                 or not any(
                     c.candidate_id == r.candidate_id
                     and c.path == r.path
@@ -3880,7 +4032,10 @@ def _mandatory_missing_roles(ledger: CoverageLedger) -> tuple[str, ...]:
 def _task_evidence_roles(
     task: str, candidates: tuple[CandidateCard, ...]
 ) -> tuple[TaskEvidenceRole, ...]:
-    terms = set(_tokens(task))
+    syntax_task = re.sub(
+        r"`[^`]*`|[A-Za-z_]\w*[_]\w*|[A-Za-z_]\w*(?:(?:::|\.)\w+)+", " ", task
+    )
+    terms = set(_tokens(syntax_task))
     requested: set[TaskEvidenceRoleKind] = set()
     syntax = {
         "entrypoint": {
@@ -4089,7 +4244,12 @@ def build_evidence_requirements(
         ],
         role_id: str,
     ) -> None:
-        identity = f"{role_id}:{anchor.candidate_id}:{candidate.candidate_id}:{basis}"
+        identity = (
+            "requirement-"
+            + hashlib.sha256(
+                f"{role_id}:{anchor.candidate_id}:{candidate.candidate_id}:{basis}".encode()
+            ).hexdigest()[:24]
+        )
         evidence_ids = tuple(
             sorted({e.evidence_id for e in candidate.evidence_ranges if e.evidence_id})
         )

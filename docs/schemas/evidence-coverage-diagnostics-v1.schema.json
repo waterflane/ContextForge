@@ -128,7 +128,8 @@
         "planned_range_unmaterialized",
         "budget_excluded_mandatory_item",
         "mandatory_role_missing",
-        "planned_role_lost"
+        "planned_role_lost",
+        "required_source_evidence_missing"
       ]
     },
     "action_delta": {

@@ -284,6 +284,14 @@ unclosed evidence requirements precede relevance in complementary selection.
 Centrality and inferred edges cannot admit a file without a lexical/exact seed
 or a verified connection. Query instruction words do not form coverage facets.
 
+Frozen source obligations retain declaration IDs and add implementation/call-site
+addresses from digest-checked persisted CodeMaps. The compiler selects source
+coverage before optional context and evaluates the final ledger from actual
+SLICE/FULL ranges and source hashes. MAP/SUMMARY have no source evidence IDs.
+A deterministic result can be sufficient when every frozen obligation and
+requested role is present. Missing required source material reports
+`required_source_evidence_missing`; a planner declaration cannot override it.
+
 Python exports `load_relationship_graph()`, `load_orientation_map()`,
 `retrieve_context_candidates()`, and `compile_context_capsule()` plus the
 public card/candidate/capsule/budget/estimator types. Bridge 2.1, MCP, and the

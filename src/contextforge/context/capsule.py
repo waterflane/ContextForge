@@ -505,7 +505,7 @@ def compile_context_capsule(
         candidate
         for candidate in retrieval.candidates
         if candidate.path not in set(working) and _is_automatic_candidate(candidate)
-    ][:8]
+    ]
     if retrieval.evidence_plan is None or plan_fallback:
         evidence_material, evidence_tokens, capsule = _select_automatic_evidence(
             state,
@@ -592,23 +592,10 @@ def compile_context_capsule(
     if token_count > budget.available_tokens:
         raise ContextBudgetError("indivisible selected context exceeds the hard budget")
     capsule = capsule.model_copy(update={"token_count": token_count})
-    materialized_paths = {
-        item.path for item in (*capsule.working_set, *capsule.task_context)
-    }
-    materialized_ids = tuple(
-        item.candidate_id
-        for item in retrieval.candidates
-        if item.path in materialized_paths
-    )
-    planner_bindings = (
-        () if retrieval.evidence_plan is None else retrieval.evidence_plan.role_bindings
-    )
-    materialization_ledger = build_coverage_ledger(
+    materialization_ledger = _capsule_ledger(
         task,
         retrieval.candidates,
-        selected_candidate_ids=materialized_ids,
-        stage="materialization",
-        planner_bindings=planner_bindings,
+        capsule,
         requirements=retrieval.requirements,
     )
     sufficiency = _compilation_sufficiency(
@@ -647,7 +634,15 @@ def _compilation_sufficiency(
     """Derive effective status from actual materials without mutating retrieval."""
 
     plan = retrieval.evidence_plan
-    declared_status = "insufficient" if plan is None else plan.sufficiency
+    declared_status = (
+        "sufficient"
+        if plan is None
+        and retrieval.requirements
+        and retrieval.requirements.source_evidence
+        else "insufficient"
+        if plan is None
+        else plan.sufficiency
+    )
     candidates_by_id = {item.candidate_id: item for item in retrieval.candidates}
     materials_by_path = {
         item.path: item for item in (*capsule.working_set, *capsule.task_context)
@@ -743,6 +738,8 @@ def _compilation_sufficiency(
         reasons.add("mandatory_role_missing")
     if materialization_ledger.missing_graph_endpoints:
         reasons.add("graph_endpoint_missing")
+    if materialization_ledger.missing_requirement_ids:
+        reasons.add("required_source_evidence_missing")
     effective_status: Literal["sufficient", "insufficient"] = (
         "sufficient"
         if declared_status == "sufficient" and capsule.task_context and not reasons
@@ -783,17 +780,22 @@ def _capsule_ledger(
     selected_ids: list[str] = []
     for candidate in candidates:
         material = materials.get(candidate.path)
+        if material is not None and material.source_sha256 != candidate.source_sha256:
+            material = None
         visible = (
             ()
             if material is None
             else tuple(
                 evidence
                 for evidence in candidate.evidence_ranges
-                if material.representation == RepresentationMode.FULL
-                or any(
-                    actual.start_line <= evidence.source_range.start_line
-                    and evidence.source_range.end_line <= actual.end_line
-                    for actual in material.ranges
+                if evidence.evidence_id in material.evidence_ids
+                and (
+                    material.representation == RepresentationMode.FULL
+                    or any(
+                        actual.start_line <= evidence.source_range.start_line
+                        and evidence.source_range.end_line <= actual.end_line
+                        for actual in material.ranges
+                    )
                 )
             )
         )
@@ -968,7 +970,17 @@ def _select_automatic_evidence(
         capsule = capsule.model_copy(update={"task_context": tuple(selected)})
         return True
 
-    # Mandatory roles and structural endpoints are unambiguously the first pass.
+    # Frozen source obligations precede role alternatives and optional detail.
+    for requirement in () if requirements is None else requirements.source_evidence:
+        if requirement.requirement_id in current_ledger().missing_requirement_ids:
+            append_for(
+                lambda before, after, _candidate, expected=requirement.requirement_id: (
+                    expected in before.missing_requirement_ids
+                    and expected not in after.missing_requirement_ids
+                ),
+                required_evidence=True,
+            )
+    # Mandatory roles and structural endpoints follow the source obligations.
     for role_id in _mandatory_role_ids(all_ledger):
         while role_id not in set(current_ledger().covered_role_ids):
             if not append_for(
@@ -1459,8 +1471,11 @@ def _materialize(
         content = source
         provenance.append("verified-full-source")
     relevance = 1.0 if candidate is None else candidate.score
-    material_evidence_ids = requested_evidence_ids
-    if not material_evidence_ids and candidate is not None:
+    material_evidence_ids: tuple[str, ...] = ()
+    if candidate is not None and mode in {
+        RepresentationMode.SLICE,
+        RepresentationMode.FULL,
+    }:
         material_evidence_ids = tuple(
             item.evidence_id
             for item in candidate.evidence_ranges

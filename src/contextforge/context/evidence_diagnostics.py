@@ -27,6 +27,7 @@ CompilationReasonCode = Literal[
     "budget_excluded_mandatory_item",
     "mandatory_role_missing",
     "planned_role_lost",
+    "required_source_evidence_missing",
 ]
 
 
@@ -103,6 +104,7 @@ _DROP_CODES = frozenset(
         "empty_task_context",
         "planned_item_unmaterialized",
         "mandatory_role_missing",
+        "required_source_evidence_missing",
     }
 )
 
