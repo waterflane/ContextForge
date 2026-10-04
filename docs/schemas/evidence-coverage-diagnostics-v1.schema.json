@@ -212,6 +212,17 @@
           },
           "title": "Ambiguous Identifiers",
           "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -325,6 +336,45 @@
         "anchor_candidate_id"
       ],
       "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "QueryIntent": {
+      "additionalProperties": false,
+      "description": "Original task syntax; search rewrites never become user-supplied anchors.",
+      "properties": {
+        "original_task": {
+          "title": "Original Task",
+          "type": "string"
+        },
+        "explicit_anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Explicit Anchors",
+          "type": "array"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "facet_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Facet Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "original_task"
+      ],
+      "title": "QueryIntent",
       "type": "object"
     }
   }

@@ -105,6 +105,17 @@
         }
       ],
       "default": null
+    },
+    "query_intent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/QueryIntent"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "$defs": {
@@ -787,6 +798,17 @@
           },
           "title": "Source Connections",
           "type": "array"
+        },
+        "match_origin": {
+          "default": "lexical-discovery",
+          "enum": [
+            "explicit-anchor",
+            "lexical-discovery",
+            "grounded-semantic",
+            "verified-expansion"
+          ],
+          "title": "Match Origin",
+          "type": "string"
         }
       }
     },
@@ -833,6 +855,17 @@
           },
           "title": "Ambiguous Identifiers",
           "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1116,6 +1149,45 @@
         "target_evidence_ids"
       ],
       "title": "VerifiedSourceConnection",
+      "type": "object"
+    },
+    "QueryIntent": {
+      "additionalProperties": false,
+      "description": "Original task syntax; search rewrites never become user-supplied anchors.",
+      "properties": {
+        "original_task": {
+          "title": "Original Task",
+          "type": "string"
+        },
+        "explicit_anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Explicit Anchors",
+          "type": "array"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/task_role"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "facet_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Facet Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "original_task"
+      ],
+      "title": "QueryIntent",
       "type": "object"
     }
   }

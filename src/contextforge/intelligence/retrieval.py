@@ -11,6 +11,7 @@ import threading
 from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import replace
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -397,6 +398,12 @@ class CandidateCard(IndexModel):
     source_sha256: Sha256
     synopsis: str
     exact_group: ExactGroup
+    match_origin: Literal[
+        "explicit-anchor",
+        "lexical-discovery",
+        "grounded-semantic",
+        "verified-expansion",
+    ] = "lexical-discovery"
     score: NonNegativeFloat
     bm25_score: NonNegativeFloat
     bm25_field_scores: dict[str, NonNegativeFloat] = Field(default_factory=dict)
@@ -427,6 +434,15 @@ class TaskEvidenceRole(IndexModel):
     kind: TaskEvidenceRoleKind
 
 
+class QueryIntent(IndexModel):
+    """Original task syntax; search rewrites never become user-supplied anchors."""
+
+    original_task: str
+    explicit_anchors: tuple[str, ...] = ()
+    roles: tuple[TaskEvidenceRole, ...] = ()
+    facet_terms: tuple[str, ...] = ()
+
+
 class EvidenceRequirement(IndexModel):
     """Source-bound obligation derived locally, never from a model-created fact."""
 
@@ -449,6 +465,7 @@ class EvidenceRequirement(IndexModel):
 
 class EvidenceRequirements(IndexModel):
     roles: tuple[TaskEvidenceRole, ...]
+    query_intent: QueryIntent | None = None
     anchors: tuple[str, ...] = ()
     source_evidence: tuple[EvidenceRequirement, ...] = ()
     ambiguous_identifiers: tuple[str, ...] = ()
@@ -654,6 +671,7 @@ class RetrievalResult(IndexModel):
     source_snapshot_digest: Sha256
     generation_id: Sha256
     task: str
+    query_intent: QueryIntent | None = None
     candidates: tuple[CandidateCard, ...]
     reranked: bool = False
     provider_calls: NonNegativeInt = 0
@@ -1574,6 +1592,7 @@ async def retrieve_context_candidates(
         source_snapshot_digest=active.build.source_snapshot_digest,
         generation_id=active.generation_id,
         task=task,
+        query_intent=parse_query_intent(task),
         candidates=tuple(candidates),
         requirements=requirements,
         coverage_ledger=retrieval_ledger,
@@ -1638,7 +1657,8 @@ def _rank_candidates(
         raise TypeError("relationship graph is required")
     query_terms = _tokens(task)
     task_folded = task.casefold()
-    identifier_task_folded = _exact_identifier_scope(task)
+    intent = parse_query_intent(task)
+    identifier_task_folded = _exact_identifier_scope(task) or task_folded
     working = set(working_set)
     diff = set(diff_paths)
     exact_by_path: dict[str, ExactGroup] = {}
@@ -1717,6 +1737,12 @@ def _rank_candidates(
             else f"Structural map for {document.path}."
         )
         provenance = ["verified-structure"]
+        explicit_match = any(
+            document.path.casefold() == anchor.casefold()
+            or anchor.casefold()
+            in {s.casefold() for s in matched_symbols[document.path]}
+            for anchor in intent.explicit_anchors
+        )
         if document.semantic_quality != "none":
             provenance.append("grounded-semantic-card")
         if distance in {1, 2}:
@@ -1732,6 +1758,9 @@ def _rank_candidates(
                 source_sha256=document.source_sha256,
                 synopsis=synopsis,
                 exact_group=exact_by_path[document.path],
+                match_origin="explicit-anchor"
+                if explicit_match
+                else "lexical-discovery",
                 score=max(score, 0.0),
                 bm25_score=max(bm25, 0.0),
                 bm25_field_scores=field_scores,
@@ -1763,7 +1792,7 @@ def _rank_candidates(
             )
         )
     results.sort(
-        key=lambda item: (_group_order(item.exact_group), -item.score, item.path)
+        key=lambda item: (_candidate_group_order(item), -item.score, item.path)
     )
     return results
 
@@ -1772,33 +1801,7 @@ def _topical_seeds(
     task: str, index: RetrievalIndex, ranked: list[CandidateCard]
 ) -> tuple[list[CandidateCard], set[str]]:
     """Greedily discover up to four distinct lexical facets without certifying them."""
-    instruction_terms = (
-        "a an the and or of to for in on at by with from into as is are be this that "
-        "how what where why which does do explain describe find show review trace "
-        "implement implementation implementations behavior behaviors flow flows "
-        "lifecycle caller callers callee callees call calls test tests regression "
-        "spec specs config configuration configurations setting settings "
-        "entry entrypoint start startup bootstrap launch public api interface "
-        "endpoint endpoints data model models schema schemas codec doc docs "
-        "documentation readme code source function functions method methods file files "
-        "before after when then through its their it works happen happens"
-    )
-    translated_instruction_terms = (
-        "\u043a\u0430\u043a \u0447\u0442\u043e \u0433\u0434\u0435 "
-        "\u0438 \u0432 \u043d\u0430 \u0434\u043b\u044f \u0438\u0437 "
-        "\u043f\u0440\u043e\u0441\u043b\u0435\u0434\u0438 "
-        "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f "
-        "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044e "
-        "\u043f\u043e\u0442\u043e\u043a \u0446\u0435\u043f\u043e\u0447\u043a\u0430 "
-        "\u0432\u044b\u0437\u043e\u0432 \u0432\u044b\u0437\u043e\u0432\u044b "
-        "\u0442\u0435\u0441\u0442 \u0442\u0435\u0441\u0442\u044b "
-        "\u0442\u0435\u0441\u0442\u0430\u043c\u0438 "
-        "\u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044f "
-        "\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438"
-    )
-    instructions = set(instruction_terms.split())
-    instructions.update(translated_instruction_terms.split())
-    uncovered = set(_tokens(task)) - instructions
+    uncovered = set(parse_query_intent(task).facet_terms)
     document_terms = {
         d.path: {term for f in d.fields for term in f.terms} & uncovered
         for d in index.documents
@@ -1855,13 +1858,13 @@ def _complementary_candidates(
         or c.exact_group != "approximate"
         or set(c.provenance) & {"working-set", "current-diff"}
     ]
-    exact = [c for c in relevant if c.exact_group != "approximate"]
+    exact = [c for c in relevant if c.match_origin == "explicit-anchor"]
     explicit = [
         c
         for c in exact
         if c.resolved_symbols
         or c.exact_group == "exact_path"
-        or _exact_identifier_scope(task) != task
+        or bool(_exact_identifier_scope(task))
     ]
     seeds = list({c.path: c for c in (*explicit, *lexical_seeds)}.values())
     admitted = {c.path for c in relevant}
@@ -1903,8 +1906,8 @@ def _complementary_candidates(
     requirements = build_evidence_requirements(task, tuple(available))
     required = {r.candidate_id for r in requirements.source_evidence}
     selected = sorted(
-        (c for c in available if c.exact_group != "approximate"),
-        key=lambda c: (_group_order(c.exact_group), -c.score, c.path),
+        (c for c in available if c.match_origin == "explicit-anchor"),
+        key=lambda c: (_candidate_group_order(c), -c.score, c.path),
     )
     covered = {
         r.role_id
@@ -2144,21 +2147,7 @@ def _resolve_source_symbols(
     task: str,
     candidates: list[CandidateCard],
 ) -> list[CandidateCard]:
-    scope = _exact_identifier_scope(task)
-    original_identifiers = {
-        value.casefold(): value for value in re.findall(r"[A-Za-z_][\w.:]*", task)
-    }
-    queries = (
-        {original_identifiers.get(value, value) for value in scope.split()}
-        if scope != task or len(task.split()) == 1
-        else set()
-    )
-    queries.update(
-        value
-        for pair in re.findall(r"`([A-Za-z_][\w.:]*)`|<([A-Za-z_][\w.:]*)>", task)
-        for value in pair
-        if value
-    )
+    queries = set(parse_query_intent(task).explicit_anchors)
     queries.discard("")
     paths = {d.path.casefold() for d in index.documents}
     resolved: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
@@ -2263,6 +2252,9 @@ def _resolve_source_symbols(
             candidate.model_copy(
                 update={
                     "resolved_symbols": tuple(symbols),
+                    "match_origin": "explicit-anchor"
+                    if symbols
+                    else candidate.match_origin,
                     "exact_group": min(
                         (candidate.exact_group, "exact_qualified_symbol"),
                         key=_group_order,
@@ -4506,7 +4498,7 @@ def _mandatory_missing_roles(ledger: CoverageLedger) -> tuple[str, ...]:
     )
 
 
-def _task_evidence_roles(
+def _syntax_evidence_roles(
     task: str, candidates: tuple[CandidateCard, ...]
 ) -> tuple[TaskEvidenceRole, ...]:
     syntax_task = re.sub(
@@ -4602,6 +4594,12 @@ def _task_evidence_roles(
     if not values:
         values["unknown"] = TaskEvidenceRole(role_id="unknown", kind="unknown")
     return tuple(values[role_id] for role_id in sorted(values))
+
+
+def _task_evidence_roles(
+    task: str, candidates: tuple[CandidateCard, ...]
+) -> tuple[TaskEvidenceRole, ...]:
+    return parse_query_intent(task).roles
 
 
 def _deterministic_role_bindings(
@@ -4760,13 +4758,10 @@ def _test_bindings_cover_anchors(
 def build_evidence_requirements(
     task: str, candidates: tuple[CandidateCard, ...]
 ) -> EvidenceRequirements:
-    roles = _task_evidence_roles(task, ())
+    intent = parse_query_intent(task)
+    roles = intent.roles
     kinds = {r.kind for r in roles}
-    scope = _exact_identifier_scope(task)
-    quoted = re.findall(r"`([A-Za-z_][\w.:]*)`|<([A-Za-z_][\w.:]*)>", task)
-    identifiers = {value.casefold() for pair in quoted for value in pair if value}
-    if scope != task or len(task.split()) == 1:
-        identifiers.update(scope.casefold().split())
+    identifiers = {value.casefold() for value in intent.explicit_anchors}
     anchors = (
         tuple(
             c
@@ -5069,6 +5064,7 @@ def build_evidence_requirements(
             if "configuration" in kinds and "config-consumer" in verified:
                 add(candidate, anchor, "verified-config", "configuration")
     return EvidenceRequirements(
+        query_intent=intent,
         roles=roles,
         ambiguous_identifiers=ambiguous,
         anchors=tuple(c.candidate_id for c in anchors),
@@ -5119,19 +5115,178 @@ def _identifier_character(value: str) -> bool:
     return value == "_" or value.isalnum()
 
 
-def _exact_identifier_scope(task: str) -> str:
-    """Prefer explicit code-shaped identifiers over incidental prose words."""
-
-    values = re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*", task)
-    explicit = tuple(
+@lru_cache(maxsize=256)
+def parse_query_intent(task: str) -> QueryIntent:
+    identifier = r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*"
+    anchors = {
         value
-        for value in values
-        if "_" in value
-        or "." in value
-        or "::" in value
-        or re.search(r"[a-z][A-Z]", value) is not None
+        for pair in re.findall(r"`([^`]+)`|<([^>]+)>", task)
+        for value in pair
+        if value and re.fullmatch(r"[A-Za-z0-9_./:\\-]+", value)
+    }
+    paths = tuple(re.finditer(r"[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+", task))
+    anchors.update(match.group().replace("\\", "/") for match in paths)
+    for match in re.finditer(identifier, task):
+        value = match.group()
+        if any(path.start() <= match.start() < path.end() for path in paths):
+            continue
+        if (
+            "_" in value
+            or "." in value
+            or "::" in value
+            or re.search(r"[a-z][A-Z]", value)
+        ):
+            anchors.add(value)
+    if re.fullmatch(identifier, task.strip()):
+        anchors.add(task.strip())
+    for match in re.finditer(
+        rf"\b(?:callers?|callees?|symbols?|functions?|methods?|classes)\s+(?:of\s+)?({identifier})",
+        task,
+        flags=re.IGNORECASE,
+    ):
+        anchors.add(match.group(1))
+    # Role nouns can also be task subjects; retain them unless syntax consumes them.
+    content = task
+    for anchor in sorted(anchors, key=lambda value: (-len(value), value)):
+        content = re.sub(rf"(?<![\w]){re.escape(anchor)}(?![\w])", " ", content)
+    role_syntax = content
+    content = re.sub(
+        r"\b(?:with|include|including|require|requires)\s+(?:configuration|config|data\s+model|schema)\s+evidence\b",
+        " ",
+        content,
+        flags=re.IGNORECASE,
     )
-    return " ".join(explicit).casefold() if explicit else task
+    instructions = set(
+        [
+            "a",
+            "an",
+            "the",
+            "and",
+            "or",
+            "of",
+            "to",
+            "for",
+            "in",
+            "on",
+            "at",
+            "by",
+            "with",
+            "from",
+            "into",
+            "as",
+            "is",
+            "are",
+            "be",
+            "this",
+            "that",
+            "how",
+            "what",
+            "where",
+            "why",
+            "which",
+            "does",
+            "do",
+            "explain",
+            "describe",
+            "find",
+            "show",
+            "review",
+            "trace",
+            "implement",
+            "implementation",
+            "implementations",
+            "behavior",
+            "behaviors",
+            "flow",
+            "flows",
+            "lifecycle",
+            "caller",
+            "callers",
+            "callee",
+            "callees",
+            "call",
+            "calls",
+            "test",
+            "tests",
+            "regression",
+            "spec",
+            "specs",
+            "entry",
+            "entrypoint",
+            "start",
+            "startup",
+            "bootstrap",
+            "launch",
+            "public",
+            "api",
+            "interface",
+            "endpoint",
+            "endpoints",
+            "doc",
+            "docs",
+            "documentation",
+            "readme",
+            "code",
+            "source",
+            "function",
+            "functions",
+            "method",
+            "methods",
+            "file",
+            "files",
+            "before",
+            "after",
+            "when",
+            "then",
+            "through",
+            "its",
+            "their",
+            "it",
+            "works",
+            "happen",
+            "happens",
+        ]
+    )
+    instructions.update(
+        [
+            "\u043a\u0430\u043a",
+            "\u0447\u0442\u043e",
+            "\u0433\u0434\u0435",
+            "\u0438",
+            "\u0432",
+            "\u043d\u0430",
+            "\u0434\u043b\u044f",
+            "\u0438\u0437",
+            "\u043f\u0440\u043e\u0441\u043b\u0435\u0434\u0438",
+            "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f",
+            "\u0440\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044e",
+            "\u043f\u043e\u0442\u043e\u043a",
+            "\u0446\u0435\u043f\u043e\u0447\u043a\u0430",
+            "\u0432\u044b\u0437\u043e\u0432",
+            "\u0432\u044b\u0437\u043e\u0432\u044b",
+            "\u0442\u0435\u0441\u0442",
+            "\u0442\u0435\u0441\u0442\u044b",
+            "\u0442\u0435\u0441\u0442\u0430\u043c\u0438",
+        ]
+    )
+    return QueryIntent(
+        original_task=task,
+        explicit_anchors=tuple(sorted(anchors, key=canonical_casefold_key)),
+        roles=_syntax_evidence_roles(role_syntax, ()),
+        facet_terms=tuple(sorted(set(_tokens(content)) - instructions)),
+    )
+
+
+def _exact_identifier_scope(task: str) -> str:
+    return " ".join(parse_query_intent(task).explicit_anchors).casefold()
+
+
+def _candidate_group_order(candidate: CandidateCard) -> int:
+    return (
+        _group_order(candidate.exact_group)
+        if candidate.match_origin == "explicit-anchor"
+        else _group_order("approximate")
+    )
 
 
 def _group_order(group: ExactGroup) -> int:

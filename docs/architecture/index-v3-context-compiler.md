@@ -1,5 +1,12 @@
 # Index v3.1 retrieval and Context Capsule compiler
 
+`QueryIntent` records original explicit code anchors, evidence roles and topic
+facets. Candidate `match_origin` separates explicit anchors from lexical discovery
+while `exact_group` retains the observed match category. Only explicit anchors
+receive guaranteed exact-group priority. Ordinary words matching symbols cannot
+certify the task topic; role nouns remain topical unless instruction syntax
+consumes them. Requirements and retrieval results carry the same immutable intent.
+
 The current repository-context pipeline is:
 
 ```text
