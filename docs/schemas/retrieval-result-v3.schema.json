@@ -791,6 +791,16 @@
           },
           "title": "Source Evidence",
           "type": "array"
+        },
+        "topic_grounding": {
+          "default": "unresolved",
+          "enum": [
+            "exact-identifier",
+            "grounded-semantic",
+            "unresolved"
+          ],
+          "title": "Topic Grounding",
+          "type": "string"
         }
       },
       "required": [

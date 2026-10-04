@@ -710,6 +710,11 @@ def _compilation_sufficiency(
         if materialized_kinds[role_id] != "unknown"
     )
     reasons: set[CompilationReasonCode] = set()
+    if (
+        retrieval.requirements is not None
+        and retrieval.requirements.topic_grounding == "unresolved"
+    ):
+        reasons.add("task_anchor_unresolved")
     if declared_status == "insufficient":
         reasons.add("declared_insufficient")
     if not retrieval.candidates:

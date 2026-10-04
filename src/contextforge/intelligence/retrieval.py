@@ -394,6 +394,9 @@ class EvidenceRequirements(IndexModel):
     roles: tuple[TaskEvidenceRole, ...]
     anchors: tuple[str, ...] = ()
     source_evidence: tuple[EvidenceRequirement, ...] = ()
+    topic_grounding: Literal["exact-identifier", "grounded-semantic", "unresolved"] = (
+        "unresolved"
+    )
 
 
 class RoleEvidenceBinding(IndexModel):
@@ -4197,7 +4200,11 @@ def build_evidence_requirements(
 ) -> EvidenceRequirements:
     roles = _task_evidence_roles(task, ())
     kinds = {r.kind for r in roles}
-    explicit = _exact_identifier_scope(task) != task or len(task.split()) == 1
+    explicit = (
+        _exact_identifier_scope(task) != task
+        or len(task.split()) == 1
+        or re.search(r"`[A-Za-z_]\w*`|<[A-Za-z_]\w*>", task) is not None
+    )
     anchors = (
         tuple(
             c
@@ -4207,6 +4214,7 @@ def build_evidence_requirements(
         if explicit
         else ()
     )
+    exact_anchor = bool(anchors)
     if not anchors:
         relevant = [
             c
@@ -4230,6 +4238,17 @@ def build_evidence_requirements(
             ]
         )
     by_path = {c.path: c for c in candidates}
+    topic_grounding: Literal["exact-identifier", "grounded-semantic", "unresolved"] = (
+        "exact-identifier"
+        if exact_anchor
+        else "grounded-semantic"
+        if any(
+            c.matched_concepts
+            and any(e.strength == "grounded" for e in c.evidence_ranges)
+            for c in anchors
+        )
+        else "unresolved"
+    )
     obligations: dict[str, EvidenceRequirement] = {}
 
     def add(
@@ -4268,7 +4287,7 @@ def build_evidence_requirements(
         add(
             anchor,
             anchor,
-            "exact-symbol" if explicit else "task-syntax",
+            "exact-symbol" if exact_anchor else "task-syntax",
             "implementation" if "implementation" in kinds else "unknown",
         )
         queue = deque([(anchor, 0)])
@@ -4323,6 +4342,7 @@ def build_evidence_requirements(
         roles=roles,
         anchors=tuple(c.candidate_id for c in anchors),
         source_evidence=tuple(obligations[key] for key in sorted(obligations)),
+        topic_grounding=topic_grounding,
     )
 
 

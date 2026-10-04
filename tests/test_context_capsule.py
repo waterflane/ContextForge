@@ -69,7 +69,7 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
         "def greet(name: str) -> str:\n    return f'<hello>{name}</hello>'\n",
     )
     report = _build(tmp_path)
-    retrieval = _retrieve(tmp_path, report, "change greet")
+    retrieval = _retrieve(tmp_path, report, "change <greet>")
 
     first = compile_context_capsule(
         tmp_path, "change <greet>", retrieval, budget=_budget(4_000)

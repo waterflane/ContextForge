@@ -300,7 +300,11 @@ addresses from digest-checked persisted CodeMaps. The compiler selects source
 coverage before optional context and evaluates the final ledger from actual
 SLICE/FULL ranges and source hashes. MAP/SUMMARY have no source evidence IDs.
 A deterministic result can be sufficient when every frozen obligation and
-requested role is present. Missing required source material reports
+requested role is present and the task has an exact identifier or a source-bound
+grounded semantic anchor. Lexical matches and structural role coverage alone do
+not resolve the task topic: `task_anchor_unresolved` keeps such compilations
+insufficient even when the selected heuristic obligations fit. Grounded semantics
+remain interpretation and do not create structural facts. Missing required source material reports
 `required_source_evidence_missing`; a planner declaration cannot override it.
 
 Python exports `load_relationship_graph()`, `load_orientation_map()`,

@@ -15,6 +15,30 @@ from contextforge.intelligence import (
 )
 
 
+@pytest.mark.parametrize("task", ["Explain job behavior", "missing_job implementation"])
+def test_heuristic_anchor_cannot_certify_task_topic(tmp_path: Path, task: str) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def execute_job():\n    return 7\n", encoding="utf-8"
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert retrieval.requirements.topic_grounding == "unresolved"
+    assert all(
+        r.basis != "exact-symbol" for r in retrieval.requirements.source_evidence
+    )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert "task_anchor_unresolved" in compiled.compilation_sufficiency.reason_codes
+
+
 @pytest.mark.parametrize(
     "task",
     [

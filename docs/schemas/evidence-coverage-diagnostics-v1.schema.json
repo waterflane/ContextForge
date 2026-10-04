@@ -129,7 +129,8 @@
         "budget_excluded_mandatory_item",
         "mandatory_role_missing",
         "planned_role_lost",
-        "required_source_evidence_missing"
+        "required_source_evidence_missing",
+        "task_anchor_unresolved"
       ]
     },
     "action_delta": {
@@ -193,6 +194,16 @@
           },
           "title": "Source Evidence",
           "type": "array"
+        },
+        "topic_grounding": {
+          "default": "unresolved",
+          "enum": [
+            "exact-identifier",
+            "grounded-semantic",
+            "unresolved"
+          ],
+          "title": "Topic Grounding",
+          "type": "string"
         }
       },
       "required": [

@@ -28,6 +28,7 @@ CompilationReasonCode = Literal[
     "mandatory_role_missing",
     "planned_role_lost",
     "required_source_evidence_missing",
+    "task_anchor_unresolved",
 ]
 
 
