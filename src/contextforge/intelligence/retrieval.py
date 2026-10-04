@@ -1847,12 +1847,11 @@ def _complementary_candidates(
         return []
     roles = _task_evidence_roles(task, ())
     by_path = {c.path: c for c in ranked}
-    lexical_seeds, topical = _topical_seeds(task, index, ranked)
+    lexical_seeds, _ = _topical_seeds(task, index, ranked)
     relevant = [
         c
         for c in ranked
         if c.bm25_score > 0
-        and c.path in topical
         or c.exact_group != "approximate"
         or set(c.provenance) & {"working-set", "current-diff"}
     ]
