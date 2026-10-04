@@ -40,7 +40,10 @@ from contextforge.intelligence.models import (
 )
 from contextforge.models import (
     ModelProvider,
+    ModelProviderError,
     ModelRequest,
+    ModelResponse,
+    ProviderCapabilities,
     StructuredResponseError,
     UntrustedSource,
     estimate_request_context,
@@ -337,6 +340,8 @@ class CandidateCard(IndexModel):
     exact_group: ExactGroup
     score: NonNegativeFloat
     bm25_score: NonNegativeFloat
+    bm25_field_scores: dict[str, NonNegativeFloat] = Field(default_factory=dict)
+    selection_reasons: tuple[str, ...] = ()
     matched_concepts: tuple[str, ...] = ()
     matched_symbols: tuple[str, ...] = ()
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
@@ -510,6 +515,9 @@ class PlanningDiagnostics(IndexModel):
     provider_calls: NonNegativeInt = 0
     input_tokens: NonNegativeInt = 0
     output_tokens: NonNegativeInt = 0
+    estimated_input_tokens: NonNegativeInt = 0
+    reported_input_tokens: NonNegativeInt | None = None
+    reported_output_tokens: NonNegativeInt | None = None
     rounds: NonNegativeInt = 0
     dropped_candidates: NonNegativeInt = 0
     dropped_evidence_ids: NonNegativeInt = 0
@@ -1534,7 +1542,8 @@ def _rank_candidates(
     neighbors = _candidate_neighbors(graph)
     results: list[CandidateCard] = []
     for document in index.documents:
-        bm25 = _bm25(document, query_terms, index)
+        field_scores = _bm25_fields(document, query_terms, index)
+        bm25 = sum(field_scores.values())
         distance = distances.get(document.path)
         graph_score = 0.20 if distance == 1 else 0.08 if distance == 2 else 0.0
         centrality = metrics[document.path].normalized_centrality * 0.10
@@ -1570,6 +1579,16 @@ def _rank_candidates(
                 exact_group=exact_by_path[document.path],
                 score=max(score, 0.0),
                 bm25_score=max(bm25, 0.0),
+                bm25_field_scores=field_scores,
+                selection_reasons=tuple(
+                    sorted(
+                        {exact_by_path[document.path]}
+                        | ({"bm25"} if bm25 > 0 else set())
+                        | ({"graph-proximity"} if distance in {1, 2} else set())
+                        | ({"working-set"} if document.path in working else set())
+                        | ({"current-diff"} if document.path in diff else set())
+                    )
+                ),
                 matched_concepts=concepts,
                 matched_symbols=matched_symbols[document.path],
                 evidence_ranges=evidence,
@@ -1741,8 +1760,15 @@ def _complementary_candidates(
 def _bm25(
     document: RetrievalDocument, query_terms: tuple[str, ...], index: RetrievalIndex
 ) -> float:
-    score = 0.0
+    return sum(_bm25_fields(document, query_terms, index).values())
+
+
+def _bm25_fields(
+    document: RetrievalDocument, query_terms: tuple[str, ...], index: RetrievalIndex
+) -> dict[str, float]:
+    scores: dict[str, float] = {}
     for field in document.fields:
+        score = 0.0
         average = index.average_field_lengths[field.name] or 1.0
         frequencies = index.document_frequencies[field.name]
         for term in query_terms:
@@ -1771,7 +1797,8 @@ def _bm25(
                 * (BM25_K1 + 1.0)
                 / denominator
             )
-    return score
+        scores[field.name] = score
+    return scores
 
 
 def _graph_distances(graph: object, seeds: set[str]) -> dict[str, int]:
@@ -2084,7 +2111,88 @@ def _representation_costs(
     )
 
 
+class _PlanningMeter:
+    """Keep request estimates separate from reported transport usage."""
+
+    def __init__(self, provider: ModelProvider) -> None:
+        self.provider = provider
+        self.configuration = provider.configuration
+        self.estimated = 0
+        self.reported_input: int | None = None
+        self.reported_output: int | None = None
+
+    @property
+    def provider_id(self) -> str:
+        return self.provider.provider_id
+
+    def capabilities(self) -> ProviderCapabilities:
+        return self.provider.capabilities()
+
+    async def complete_structured(
+        self, request: ModelRequest, *, cancellation: asyncio.Event | None = None
+    ) -> ModelResponse:
+        self.estimated += _request_tokens(request)
+        try:
+            response = await self.provider.complete_structured(
+                request, cancellation=cancellation
+            )
+        except ModelProviderError:
+            raise
+        if response.usage is not None:
+            if response.usage.input_tokens is not None:
+                self.reported_input = (
+                    self.reported_input or 0
+                ) + response.usage.input_tokens
+            if response.usage.output_tokens is not None:
+                self.reported_output = (
+                    self.reported_output or 0
+                ) + response.usage.output_tokens
+        return response
+
+    async def close(self) -> None:
+        await self.provider.close()
+
+    def diagnostics(self, value: PlanningDiagnostics) -> PlanningDiagnostics:
+        return value.model_copy(
+            update={
+                "estimated_input_tokens": self.estimated,
+                "reported_input_tokens": self.reported_input,
+                "reported_output_tokens": self.reported_output,
+            }
+        )
+
+
 async def _plan_evidence(
+    provider: ModelProvider,
+    result: RetrievalResult,
+    repository_root: Path,
+    **kwargs: Any,
+) -> RetrievalResult:
+    meter = _PlanningMeter(provider)
+    try:
+        planned = await _plan_evidence_session(meter, result, repository_root, **kwargs)
+    except EvidencePlanningError as exc:
+        if exc.diagnostics is None:
+            raise
+        raise EvidencePlanningError(
+            str(exc), diagnostics=meter.diagnostics(exc.diagnostics)
+        ) from exc
+    diagnostics = planned.planning_diagnostics
+    if diagnostics is None:
+        return planned
+    diagnostics = meter.diagnostics(diagnostics)
+    plan = planned.evidence_plan
+    return planned.model_copy(
+        update={
+            "planning_diagnostics": diagnostics,
+            "evidence_plan": None
+            if plan is None
+            else plan.model_copy(update={"diagnostics": diagnostics}),
+        }
+    )
+
+
+async def _plan_evidence_session(
     provider: ModelProvider,
     result: RetrievalResult,
     repository_root: Path,

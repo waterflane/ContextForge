@@ -4,174 +4,656 @@
   "title": "ContextForge Retrieval Result v3",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "source_snapshot_digest", "generation_id", "task", "candidates", "reranked", "provider_calls", "diagnostics", "evidence_plan", "planning_diagnostics"],
+  "required": [
+    "schema_version",
+    "source_snapshot_digest",
+    "generation_id",
+    "task",
+    "candidates",
+    "reranked",
+    "provider_calls",
+    "diagnostics",
+    "evidence_plan",
+    "planning_diagnostics"
+  ],
   "properties": {
-    "schema_version": { "const": 3 },
-    "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
-    "generation_id": { "$ref": "#/$defs/sha256" },
-    "task": { "type": "string", "minLength": 1 },
-    "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
-    "reranked": { "type": "boolean" },
-    "provider_calls": { "type": "integer", "minimum": 0 },
-    "diagnostics": { "type": "array", "items": { "type": "string" } },
-    "evidence_plan": { "oneOf": [{ "$ref": "#/$defs/evidence_plan" }, { "type": "null" }] },
-    "planning_diagnostics": { "oneOf": [{ "$ref": "#/$defs/planning_diagnostics" }, { "type": "null" }] },
-    "coverage_ledger": { "description": "Closed ID-only role, symbol, range, and graph-endpoint coverage; never planner prose.", "oneOf": [{ "$ref": "#/$defs/coverage_ledger" }, { "type": "null" }] },
-    "coverage_history": { "type": "array", "items": { "$ref": "#/$defs/coverage_ledger" } },
-    "plan_requested": { "type": ["boolean", "null"] },
-    "evidence_diagnostics": { "$ref": "evidence-coverage-diagnostics-v1.schema.json" }
+    "schema_version": {
+      "const": 3
+    },
+    "source_snapshot_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "generation_id": {
+      "$ref": "#/$defs/sha256"
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "reranked": {
+      "type": "boolean"
+    },
+    "provider_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_plan": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/evidence_plan"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "planning_diagnostics": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/planning_diagnostics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coverage_ledger": {
+      "description": "Closed ID-only role, symbol, range, and graph-endpoint coverage; never planner prose.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/coverage_ledger"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coverage_history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverage_ledger"
+      }
+    },
+    "plan_requested": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "evidence_diagnostics": {
+      "$ref": "evidence-coverage-diagnostics-v1.schema.json"
+    }
   },
   "$defs": {
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "range": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start_line", "start_column", "end_line", "end_column"],
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
       "properties": {
-        "start_line": { "type": "integer", "minimum": 1 },
-        "start_column": { "type": "integer", "minimum": 0 },
-        "end_line": { "type": "integer", "minimum": 1 },
-        "end_column": { "type": "integer", "minimum": 0 }
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_column": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_column": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "costs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["map", "summary", "slice", "full"],
+      "required": [
+        "map",
+        "summary",
+        "slice",
+        "full"
+      ],
       "properties": {
-        "map": { "type": "integer", "minimum": 0 },
-        "summary": { "type": ["integer", "null"], "minimum": 0 },
-        "slice": { "type": ["integer", "null"], "minimum": 0 },
-        "full": { "type": "integer", "minimum": 0 }
+        "map": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "slice": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "full": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "planning_diagnostics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "status", "provider_calls", "input_tokens", "output_tokens", "rounds", "dropped_candidates", "dropped_evidence_ids", "messages"],
+      "required": [
+        "mode",
+        "status",
+        "provider_calls",
+        "input_tokens",
+        "output_tokens",
+        "rounds",
+        "dropped_candidates",
+        "dropped_evidence_ids",
+        "messages"
+      ],
       "properties": {
-        "mode": { "enum": ["off", "auto", "required"] },
-        "status": { "enum": ["planned", "fallback", "failed"] },
-        "provider_calls": { "type": "integer", "minimum": 0 },
-        "input_tokens": { "type": "integer", "minimum": 0 },
-        "output_tokens": { "type": "integer", "minimum": 0 },
-        "rounds": { "type": "integer", "minimum": 0 },
-        "dropped_candidates": { "type": "integer", "minimum": 0 },
-        "dropped_evidence_ids": { "type": "integer", "minimum": 0 },
-        "query_expansions": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/query_expansion" } },
-        "messages": { "type": "array", "items": { "type": "string" } }
+        "mode": {
+          "enum": [
+            "off",
+            "auto",
+            "required"
+          ]
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "fallback",
+            "failed"
+          ]
+        },
+        "provider_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped_evidence_ids": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "query_expansions": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "$ref": "#/$defs/query_expansion"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Input Tokens"
+        },
+        "reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Output Tokens"
+        }
       }
     },
     "planned_evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["candidate_id", "path", "source_sha256", "evidence_ids", "representation"],
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "evidence_ids",
+        "representation"
+      ],
       "properties": {
-        "candidate_id": { "type": "string" },
-        "path": { "type": "string", "minLength": 1 },
-        "source_sha256": { "$ref": "#/$defs/sha256" },
-        "evidence_ids": { "type": "array", "maxItems": 8, "items": { "type": "string" } },
-        "representation": { "enum": ["map", "summary", "slice", "full"] }
+        "candidate_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string"
+          }
+        },
+        "representation": {
+          "enum": [
+            "map",
+            "summary",
+            "slice",
+            "full"
+          ]
+        }
       }
     },
     "evidence_plan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "source_snapshot_digest", "items", "sufficiency", "interpretation", "diagnostics"],
+      "required": [
+        "schema_version",
+        "source_snapshot_digest",
+        "items",
+        "sufficiency",
+        "interpretation",
+        "diagnostics"
+      ],
       "properties": {
-        "schema_version": { "const": 1 },
-        "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
-        "items": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/planned_evidence" } },
-        "role_bindings": { "type": "array", "items": { "$ref": "#/$defs/role_binding" } },
-        "coverage_ledger": { "oneOf": [{ "$ref": "#/$defs/coverage_ledger" }, { "type": "null" }] },
-        "sufficiency": { "enum": ["sufficient", "insufficient"] },
-        "interpretation": { "type": ["string", "null"], "maxLength": 2000 },
-        "diagnostics": { "$ref": "#/$defs/planning_diagnostics" }
+        "schema_version": {
+          "const": 1
+        },
+        "source_snapshot_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/planned_evidence"
+          }
+        },
+        "role_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_binding"
+          }
+        },
+        "coverage_ledger": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/coverage_ledger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sufficiency": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ]
+        },
+        "interpretation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/planning_diagnostics"
+        }
       }
     },
     "query_expansion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["expression", "result_candidate_ids"],
+      "required": [
+        "expression",
+        "result_candidate_ids"
+      ],
       "properties": {
-        "expression": { "description": "Untrusted repository-search expression, not a source claim.", "type": "string", "minLength": 1, "maxLength": 180 },
-        "result_candidate_ids": { "type": "array", "maxItems": 16, "items": { "type": "string" } }
+        "expression": {
+          "description": "Untrusted repository-search expression, not a source claim.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 180
+        },
+        "result_candidate_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "task_role": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role_id", "kind"],
+      "required": [
+        "role_id",
+        "kind"
+      ],
       "properties": {
-        "role_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "kind": { "enum": ["entrypoint", "implementation", "caller", "callee", "configuration", "test", "documentation", "public_api", "data_model", "unknown"] }
+        "role_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "enum": [
+            "entrypoint",
+            "implementation",
+            "caller",
+            "callee",
+            "configuration",
+            "test",
+            "documentation",
+            "public_api",
+            "data_model",
+            "unknown"
+          ]
+        }
       }
     },
     "role_binding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role_id", "candidate_id", "evidence_ids", "source"],
+      "required": [
+        "role_id",
+        "candidate_id",
+        "evidence_ids",
+        "source"
+      ],
       "properties": {
-        "role_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "evidence_ids": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
-        "source": { "enum": ["deterministic", "planner"] }
+        "role_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "enum": [
+            "deterministic",
+            "planner"
+          ]
+        }
       }
     },
     "coverage_ledger": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "stage", "roles", "bindings", "covered_role_ids", "missing_role_ids", "unique_symbols", "concepts", "ranges", "covered_graph_endpoints", "missing_graph_endpoints"],
+      "required": [
+        "schema_version",
+        "stage",
+        "roles",
+        "bindings",
+        "covered_role_ids",
+        "missing_role_ids",
+        "unique_symbols",
+        "concepts",
+        "ranges",
+        "covered_graph_endpoints",
+        "missing_graph_endpoints"
+      ],
       "properties": {
-        "schema_version": { "const": 1 },
-        "stage": { "enum": ["retrieval", "action", "plan", "materialization"] },
-        "roles": { "type": "array", "items": { "$ref": "#/$defs/task_role" } },
-        "bindings": { "type": "array", "items": { "$ref": "#/$defs/role_binding" } },
-        "covered_role_ids": { "type": "array", "items": { "type": "string" } },
-        "missing_role_ids": { "type": "array", "items": { "type": "string" } },
-        "unique_symbols": { "type": "array", "items": { "type": "string" } },
-        "concepts": { "type": "array", "items": { "type": "string" } },
-        "ranges": { "type": "array", "items": { "$ref": "#/$defs/evidence_range" } },
-        "covered_graph_endpoints": { "type": "array", "items": { "type": "string" } },
-        "missing_graph_endpoints": { "type": "array", "items": { "type": "string" } }
+        "schema_version": {
+          "const": 1
+        },
+        "stage": {
+          "enum": [
+            "retrieval",
+            "action",
+            "plan",
+            "materialization"
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task_role"
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_binding"
+          }
+        },
+        "covered_role_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_role_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique_symbols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_range"
+          }
+        },
+        "covered_graph_endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_graph_endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "evidence_range": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "source_range", "evidence_id", "strength"],
+      "required": [
+        "path",
+        "source_range",
+        "evidence_id",
+        "strength"
+      ],
       "properties": {
-        "path": { "type": "string" },
-        "source_range": { "$ref": "#/$defs/range" },
-        "evidence_id": { "type": ["string", "null"] },
-        "strength": { "enum": ["verified", "grounded"] }
+        "path": {
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/range"
+        },
+        "evidence_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strength": {
+          "enum": [
+            "verified",
+            "grounded"
+          ]
+        }
       }
     },
     "candidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["candidate_id", "path", "source_sha256", "synopsis", "exact_group", "score", "bm25_score", "matched_concepts", "matched_symbols", "evidence_ranges", "graph_neighbors", "provenance", "freshness", "estimated_cost", "suggested_representation"],
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "synopsis",
+        "exact_group",
+        "score",
+        "bm25_score",
+        "matched_concepts",
+        "matched_symbols",
+        "evidence_ranges",
+        "graph_neighbors",
+        "provenance",
+        "freshness",
+        "estimated_cost",
+        "suggested_representation"
+      ],
       "properties": {
-        "candidate_id": { "type": "string" },
-        "path": { "type": "string", "minLength": 1 },
-        "source_sha256": { "$ref": "#/$defs/sha256" },
-        "synopsis": { "type": "string" },
-        "exact_group": { "enum": ["exact_path", "exact_qualified_symbol", "exact_symbol", "exact_source_identifier", "approximate"] },
-        "score": { "type": "number", "minimum": 0 },
-        "bm25_score": { "type": "number", "minimum": 0 },
-        "matched_concepts": { "type": "array", "items": { "type": "string" } },
-        "matched_symbols": { "type": "array", "items": { "type": "string" } },
+        "candidate_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "synopsis": {
+          "type": "string"
+        },
+        "exact_group": {
+          "enum": [
+            "exact_path",
+            "exact_qualified_symbol",
+            "exact_symbol",
+            "exact_source_identifier",
+            "approximate"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bm25_score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "matched_concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matched_symbols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "evidence_ranges": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "source_range", "evidence_id", "strength"],
+            "required": [
+              "path",
+              "source_range",
+              "evidence_id",
+              "strength"
+            ],
             "properties": {
-              "path": { "type": "string" },
-              "source_range": { "$ref": "#/$defs/range" },
-              "evidence_id": { "type": ["string", "null"] },
-              "strength": { "enum": ["verified", "grounded"] }
+              "path": {
+                "type": "string"
+              },
+              "source_range": {
+                "$ref": "#/$defs/range"
+              },
+              "evidence_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "strength": {
+                "enum": [
+                  "verified",
+                  "grounded"
+                ]
+              }
             }
           }
         },
@@ -180,23 +662,75 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "distance", "relationship_kinds", "provenance"],
+            "required": [
+              "path",
+              "distance",
+              "relationship_kinds",
+              "provenance"
+            ],
             "properties": {
-              "path": { "type": "string" },
-              "distance": { "enum": [1, 2] },
-              "relationship_kinds": { "type": "array", "items": { "type": "string" } },
-              "provenance": { "type": "array", "items": { "type": "string" } }
+              "path": {
+                "type": "string"
+              },
+              "distance": {
+                "enum": [
+                  1,
+                  2
+                ]
+              },
+              "relationship_kinds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "provenance": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           }
         },
         "provenance": {
           "description": "Validated ranking signals, including current-diff and working-set when applicable.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "freshness": { "const": "current" },
-        "estimated_cost": { "$ref": "#/$defs/costs" },
-        "suggested_representation": { "enum": ["map", "summary", "slice", "full", null] }
+        "freshness": {
+          "const": "current"
+        },
+        "estimated_cost": {
+          "$ref": "#/$defs/costs"
+        },
+        "suggested_representation": {
+          "enum": [
+            "map",
+            "summary",
+            "slice",
+            "full",
+            null
+          ]
+        },
+        "bm25_field_scores": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Bm25 Field Scores",
+          "type": "object"
+        },
+        "selection_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selection Reasons",
+          "type": "array"
+        }
       }
     }
   }

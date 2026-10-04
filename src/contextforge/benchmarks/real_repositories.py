@@ -188,6 +188,42 @@ class RealRepositoryBenchmarkManifest(RealBenchmarkModel):
         return self
 
 
+class CandidateSelectionDiagnostic(RealBenchmarkModel):
+    """Bounded ranking facts, without source content or model rationale."""
+
+    candidate_id: str
+    path: RepositoryRelativePath
+    source_sha256: str
+    rank: Annotated[int, Field(ge=1)]
+    exact_group: str
+    bm25_field_scores: dict[str, float] = Field(default_factory=dict)
+    selection_reasons: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
+    graph_paths: tuple[RepositoryRelativePath, ...] = ()
+
+
+EvidenceLossReason = Literal[
+    "covered",
+    "absent_from_pool",
+    "selection_lost",
+    "range_not_found",
+    "budget_excluded",
+    "source_stale",
+]
+
+
+class EvidenceSelectionTransition(RealBenchmarkModel):
+    """Evaluator-only source address and its actual pipeline coverage."""
+
+    source_range: BenchmarkSourceRange
+    candidate_id: str | None = None
+    retrieval_evidence_ids: tuple[str, ...] = ()
+    planned_evidence_ids: tuple[str, ...] = ()
+    materialized_evidence_ids: tuple[str, ...] = ()
+    source_current: bool = True
+    reason: EvidenceLossReason
+
+
 class RealBenchmarkObservation(RealBenchmarkModel):
     """One pipeline measurement; the evaluator owns how it obtained it."""
 
@@ -196,11 +232,18 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     materialized_files: tuple[RepositoryRelativePath, ...]
     materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
     material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    candidate_diagnostics: tuple[CandidateSelectionDiagnostic, ...] = Field(
+        default=(), max_length=64
+    )
+    evidence_transitions: tuple[EvidenceSelectionTransition, ...] = ()
     capsule_tokens: NonNegativeInt
     ordinary_tokens: NonNegativeInt
     planner_calls: NonNegativeInt = 0
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
+    planner_estimated_input_tokens: NonNegativeInt = 0
+    planner_reported_input_tokens: NonNegativeInt | None = None
+    planner_reported_output_tokens: NonNegativeInt | None = None
     planner_status: str | None = None
     planner_messages: tuple[str, ...] = ()
     latency_ms: NonNegativeInt = 0
@@ -264,6 +307,10 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     materialized_files: tuple[RepositoryRelativePath, ...] = ()
     materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
     material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    candidate_diagnostics: tuple[CandidateSelectionDiagnostic, ...] = Field(
+        default=(), max_length=64
+    )
+    evidence_transitions: tuple[EvidenceSelectionTransition, ...] = ()
     failure_reasons: tuple[str, ...] = ()
     required_file_recall_at_5: Rate | None = None
     precision_at_5: Rate | None = None
@@ -277,6 +324,9 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     planner_calls: NonNegativeInt = 0
     planner_input_tokens: NonNegativeInt = 0
     planner_output_tokens: NonNegativeInt = 0
+    planner_estimated_input_tokens: NonNegativeInt = 0
+    planner_reported_input_tokens: NonNegativeInt | None = None
+    planner_reported_output_tokens: NonNegativeInt | None = None
     planner_status: str | None = None
     planner_messages: tuple[str, ...] = ()
     latency_ms: NonNegativeInt = 0
@@ -548,6 +598,11 @@ def evaluate_real_repository_observation(
         planner_calls=observation.planner_calls,
         planner_input_tokens=observation.planner_input_tokens,
         planner_output_tokens=observation.planner_output_tokens,
+        planner_estimated_input_tokens=observation.planner_estimated_input_tokens,
+        planner_reported_input_tokens=observation.planner_reported_input_tokens,
+        planner_reported_output_tokens=observation.planner_reported_output_tokens,
+        candidate_diagnostics=observation.candidate_diagnostics,
+        evidence_transitions=observation.evidence_transitions,
         planner_status=observation.planner_status,
         planner_messages=observation.planner_messages,
         latency_ms=observation.latency_ms,

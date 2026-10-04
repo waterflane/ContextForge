@@ -72,6 +72,13 @@ overlay is bound to the structural manifest digest; a corrupt overlay produces
 
 ## Retrieval and evidence planning
 
+Candidate diagnostics retain weighted BM25 field contributions and closed
+selection reasons. Reviewed benchmark reports separately trace source evidence
+through retrieval, planning, and materialization and classify pool, selection,
+range, budget, and stale-source losses. These reviewed addresses never enter
+answer requests. Planner request estimates and provider-reported input/output
+usage are separate; unavailable reported usage is null rather than an estimate.
+
 Retrieval first partitions exact matches in this order: exact path, qualified
 symbol, symbol, and source identifier. Approximate candidates use BM25 with
 `k1=1.2`, `b=0.75`, and weights path `4`, symbols `3`, source identifiers `2`,

@@ -91,6 +91,10 @@ def test_exact_symbol_precedes_graph_related_approximate_candidates(
     assert result.candidates[0].exact_group == "exact_symbol"
     assert "handle_request" in result.candidates[0].matched_symbols
     assert result.candidates[0].evidence_ranges
+    assert result.candidates[0].bm25_score == sum(
+        result.candidates[0].bm25_field_scores.values()
+    )
+    assert "exact_symbol" in result.candidates[0].selection_reasons
     app = next(item for item in result.candidates if item.path == "src/app.py")
     assert app.exact_group == "exact_source_identifier"
     assert app.evidence_ranges
@@ -377,6 +381,8 @@ def test_valid_rerank_can_only_reorder_and_represent_supplied_candidates(
 
     assert reranked.reranked is True
     assert reranked.provider_calls == 1
+    assert reranked.planning_diagnostics is not None
+    assert reranked.planning_diagnostics.estimated_input_tokens > 0
     assert [item.candidate_id for item in reranked.candidates] == list(
         reversed([item.candidate_id for item in deterministic.candidates])
     )

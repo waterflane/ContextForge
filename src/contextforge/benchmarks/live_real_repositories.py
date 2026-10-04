@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import subprocess
 import sys
@@ -19,6 +20,9 @@ from contextforge.benchmarks.answers import (
 )
 from contextforge.benchmarks.models import BenchmarkSourceRange
 from contextforge.benchmarks.real_repositories import (
+    CandidateSelectionDiagnostic,
+    EvidenceLossReason,
+    EvidenceSelectionTransition,
     RealBenchmarkBuildReport,
     RealBenchmarkMode,
     RealBenchmarkObservation,
@@ -33,6 +37,7 @@ from contextforge.benchmarks.real_repositories import (
     temporary_read_only_clone,
 )
 from contextforge.context import (
+    CompiledContextCapsule,
     ContextBudget,
     RepresentationMode,
     compile_context_capsule,
@@ -41,6 +46,7 @@ from contextforge.intelligence.cards import SemanticCardBuildResult
 from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.retrieval import (
+    RetrievalResult,
     _all_structural_postings,
     load_retrieval_index,
     retrieve_context_candidates,
@@ -251,6 +257,102 @@ def _failure_reason(error: Exception) -> str:
     return f"pipeline_error:{type(error).__name__}"
 
 
+def _candidate_diagnostics(
+    retrieval: RetrievalResult,
+) -> tuple[CandidateSelectionDiagnostic, ...]:
+    return tuple(
+        CandidateSelectionDiagnostic(
+            candidate_id=item.candidate_id,
+            path=item.path,
+            source_sha256=item.source_sha256,
+            rank=rank,
+            exact_group=item.exact_group,
+            bm25_field_scores=item.bm25_field_scores,
+            selection_reasons=item.selection_reasons,
+            evidence_ids=tuple(
+                sorted({e.evidence_id for e in item.evidence_ranges if e.evidence_id})
+            ),
+            graph_paths=tuple(sorted({n.path for n in item.graph_neighbors})),
+        )
+        for rank, item in enumerate(retrieval.candidates[:64], 1)
+    )
+
+
+def _evidence_transitions(
+    root: Path,
+    task: RealBenchmarkTask,
+    retrieval: RetrievalResult,
+    compiled: CompiledContextCapsule,
+    ranges: tuple[BenchmarkSourceRange, ...],
+) -> tuple[EvidenceSelectionTransition, ...]:
+    """Classify losses after evaluation; never pass these addresses to models."""
+    candidates = {item.path: item for item in retrieval.candidates}
+    materials = {
+        item.path: item
+        for item in (*compiled.capsule.working_set, *compiled.capsule.task_context)
+    }
+    planned = (
+        {}
+        if retrieval.evidence_plan is None
+        else {item.path: item for item in retrieval.evidence_plan.items}
+    )
+    results = []
+    for span in task.required_ranges:
+        candidate = candidates.get(span.path)
+        material = materials.get(span.path)
+        item = planned.get(span.path)
+        evidence_ids = tuple(
+            sorted(
+                {
+                    e.evidence_id
+                    for e in (() if candidate is None else candidate.evidence_ranges)
+                    if e.evidence_id
+                    and e.source_range.start_line <= span.start_line
+                    and e.source_range.end_line >= span.end_line
+                }
+            )
+        )
+        actual_ids = () if material is None else material.evidence_ids
+        current = candidate is None or (
+            (root / span.path).is_file()
+            and hashlib.sha256((root / span.path).read_bytes()).hexdigest()
+            == candidate.source_sha256
+        )
+        covered = any(
+            r.path == span.path
+            and r.start_line <= span.start_line
+            and r.end_line >= span.end_line
+            for r in ranges
+        )
+        reason: EvidenceLossReason = (
+            "source_stale"
+            if not current
+            else "covered"
+            if covered
+            else "absent_from_pool"
+            if candidate is None
+            else "range_not_found"
+            if not evidence_ids
+            else "budget_excluded"
+            if item is not None and material is None
+            else "selection_lost"
+        )
+        results.append(
+            EvidenceSelectionTransition(
+                source_range=span,
+                candidate_id=None if candidate is None else candidate.candidate_id,
+                retrieval_evidence_ids=evidence_ids,
+                planned_evidence_ids=() if item is None else item.evidence_ids,
+                materialized_evidence_ids=tuple(
+                    sorted(set(evidence_ids) & set(actual_ids))
+                ),
+                source_current=current,
+                reason=reason,
+            )
+        )
+    return tuple(results)
+
+
 async def _evaluate_task(
     root: Path,
     task: RealBenchmarkTask,
@@ -291,6 +393,10 @@ async def _evaluate_task(
     sufficiency = compiled.compilation_sufficiency
     observation = RealBenchmarkObservation(
         mode=mode,
+        candidate_diagnostics=_candidate_diagnostics(retrieval),
+        evidence_transitions=_evidence_transitions(
+            root, task, retrieval, compiled, ranges
+        ),
         retrieved_top5=tuple(item.path for item in retrieval.candidates[:5]),
         materialized_files=paths,
         materialized_ranges=ranges,
@@ -310,6 +416,15 @@ async def _evaluate_task(
         planner_calls=retrieval.provider_calls,
         planner_input_tokens=0 if planning is None else planning.input_tokens,
         planner_output_tokens=0 if planning is None else planning.output_tokens,
+        planner_estimated_input_tokens=0
+        if planning is None
+        else planning.estimated_input_tokens,
+        planner_reported_input_tokens=None
+        if planning is None
+        else planning.reported_input_tokens,
+        planner_reported_output_tokens=None
+        if planning is None
+        else planning.reported_output_tokens,
         planner_status=None if planning is None else planning.status,
         planner_messages=() if planning is None else planning.messages,
         latency_ms=round((time.perf_counter() - started) * 1_000),

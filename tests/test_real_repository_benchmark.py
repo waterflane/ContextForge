@@ -1030,6 +1030,12 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
     assert report.builds[0].noop_generation_unchanged
     assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
     assert all(run.status == "complete" for run in report.runs)
+    assert all(run.candidate_diagnostics for run in report.runs)
+    assert all(run.evidence_transitions[0].reason == "covered" for run in report.runs)
+    assert all(
+        run.evidence_transitions[0].retrieval_evidence_ids for run in report.runs
+    )
+    assert report.runs[1].planner_estimated_input_tokens > 0
     assert all(
         run.final_answer_ms == run.paired_answer.contextforge.duration_ms
         for run in report.runs
@@ -1222,3 +1228,52 @@ def _write_json(path: Path, payload: object) -> Path:
 
 def _unexpected_observation(*_: object) -> RealBenchmarkObservation:
     raise AssertionError("observer must not be called")
+
+
+@pytest.mark.parametrize(
+    "loss", ["absent_from_pool", "range_not_found", "selection_lost", "source_stale"]
+)
+def test_evidence_loss_diagnostics_distinguish_pipeline_stages(
+    tmp_path: Path, loss: str
+) -> None:
+    from contextforge.application import build_repository_index
+    from contextforge.benchmarks.live_real_repositories import _evidence_transitions
+    from contextforge.context import ContextBudget, compile_context_capsule
+    from contextforge.intelligence import retrieve_context_candidates
+
+    source = tmp_path / "alpha.py"
+    source.write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, "alpha", planning_mode="off")
+    )
+    compiled = compile_context_capsule(
+        tmp_path,
+        "alpha",
+        retrieval,
+        budget=ContextBudget(context_window_tokens=16000, response_tokens=1000),
+    )
+    span = BenchmarkSourceRange(path="alpha.py", start_line=1, end_line=2)
+    task = (
+        load_real_repository_benchmark_manifest(MANIFEST)
+        .tasks[0]
+        .model_copy(update={"required_ranges": (span,)})
+    )
+    if loss == "absent_from_pool":
+        retrieval = retrieval.model_copy(update={"candidates": ()})
+    elif loss == "range_not_found":
+        retrieval = retrieval.model_copy(
+            update={
+                "candidates": tuple(
+                    c.model_copy(update={"evidence_ranges": ()})
+                    for c in retrieval.candidates
+                )
+            }
+        )
+    elif loss == "source_stale":
+        source.write_text("def alpha():\n    return 2\n", encoding="utf-8")
+    transition = _evidence_transitions(tmp_path, task, retrieval, compiled, ())[0]
+    assert transition.reason == loss
+    assert transition.source_current == (loss != "source_stale")

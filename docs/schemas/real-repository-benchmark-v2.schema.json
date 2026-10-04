@@ -5,206 +5,1307 @@
   "description": "Passing results require a verified pipeline and paired final answers; headline savings use final-answer input tokens only for quality-passing runs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "suite_name", "verified_pipeline", "runs", "aggregates", "passed"],
+  "required": [
+    "schema_version",
+    "suite_name",
+    "verified_pipeline",
+    "runs",
+    "aggregates",
+    "passed"
+  ],
   "properties": {
-    "schema_version": {"const": 2},
-    "suite_name": {"type": "string", "minLength": 1},
-    "verified_pipeline": {"type": "boolean"},
-    "provider_endpoint": {"type": ["string", "null"]},
-    "model_id": {"type": ["string", "null"]},
-    "requested_context_window": {"type": ["integer", "null"], "minimum": 0},
-    "reasoning_effort": {"type": ["string", "null"]},
-    "passed": {"type": "boolean"},
-    "builds": {"type": "array", "items": {"$ref": "#/$defs/build"}},
+    "schema_version": {
+      "const": 2
+    },
+    "suite_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verified_pipeline": {
+      "type": "boolean"
+    },
+    "provider_endpoint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requested_context_window": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reasoning_effort": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "builds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/build"
+      }
+    },
     "runs": {
       "type": "array",
-      "items": {"$ref": "#/$defs/run"}
+      "items": {
+        "$ref": "#/$defs/run"
+      }
     },
     "aggregates": {
       "type": "array",
-      "items": {"$ref": "#/$defs/aggregate"}
+      "items": {
+        "$ref": "#/$defs/aggregate"
+      }
     }
   },
   "$defs": {
-    "rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
     "build": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository_id", "repetition", "status"],
+      "required": [
+        "repository_id",
+        "repetition",
+        "status"
+      ],
       "properties": {
-        "repository_id": {"type": "string"},
-        "repetition": {"type": "integer", "minimum": 1},
-        "status": {"enum": ["complete", "skipped", "partial"]},
-        "reason": {"type": ["string", "null"]},
-        "failed_paths": {"type": "array", "items": {"type": "string"}},
-        "failure_code_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
-        "cold_structural_ms": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_offline_ms": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_provider_calls": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_estimated_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_reported_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_reported_output_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "requested_functions": {"type": ["integer", "null"], "minimum": 0},
-        "described_functions": {"type": ["integer", "null"], "minimum": 0},
-        "file_only_functions": {"type": ["integer", "null"], "minimum": 0},
-        "code_test_files": {"type": ["integer", "null"], "minimum": 0},
-        "tagged_code_test_files": {"type": ["integer", "null"], "minimum": 0},
-        "model_tagged_code_test_files": {"type": ["integer", "null"], "minimum": 0},
-        "noop_update_ms": {"type": ["integer", "null"], "minimum": 0},
-        "noop_provider_calls": {"type": ["integer", "null"], "minimum": 0},
-        "noop_generation_unchanged": {"type": ["boolean", "null"]},
-        "active_amplification": {"type": ["number", "null"], "minimum": 0},
-        "maximum_shard_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "fresh_process_reload_successes": {"type": ["integer", "null"], "minimum": 0}
+        "repository_id": {
+          "type": "string"
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "skipped",
+            "partial"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_code_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "cold_structural_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_offline_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_estimated_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_reported_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_reported_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "requested_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "described_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "file_only_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tagged_code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "model_tagged_code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_update_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_generation_unchanged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "active_amplification": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "maximum_shard_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "fresh_process_reload_successes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
       }
     },
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task_id", "repository_id", "mode", "status", "quality_gate_failed"],
+      "required": [
+        "task_id",
+        "repository_id",
+        "mode",
+        "status",
+        "quality_gate_failed"
+      ],
       "properties": {
-        "task_id": {"type": "string"}, "repository_id": {"type": "string"},
-        "mode": {"enum": ["deterministic", "planned"]},
-        "repetition": {"type": "integer", "minimum": 1},
-        "status": {"enum": ["complete", "skipped"]}, "skip_reason": {"type": ["string", "null"]},
-        "retrieved_top5": {"type": "array", "items": {"type": "string"}},
-        "materialized_files": {"type": "array", "items": {"type": "string"}},
-        "materialized_ranges": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "start_line", "end_line"], "properties": {"path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1}, "end_line": {"type": "integer", "minimum": 1}}}},
-        "material_evidence_ids": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
-        "failure_reasons": {"type": "array", "items": {"type": "string"}},
-        "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "precision_at_r": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
-        "token_savings": {"type": "number"}, "valid_token_savings": {"type": "number"},
-        "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
-        "planner_status": {"type": ["string", "null"]}, "planner_messages": {"type": "array", "items": {"type": "string"}},
-        "latency_ms": {"type": "integer", "minimum": 0}, "plan_sufficient": {"type": ["boolean", "null"]},
-        "paired_answer": {"anyOf": [{"$ref": "#/$defs/paired_answer"}, {"type": "null"}]},
-        "cold_structural_ms": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_offline_ms": {"type": ["integer", "null"], "minimum": 0},
-        "deterministic_warm_query_ms": {"type": ["integer", "null"], "minimum": 0},
-        "agentic_planner_ms": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_ms": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_provider_calls": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_estimated_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_reported_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "phase_errors": {"type": "array", "items": {"type": "string"}},
-        "semantic_provider_calls": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_output_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_output_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_requested_functions": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_described_functions": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_file_only_functions": {"type": ["integer", "null"], "minimum": 0},
-        "citation_validity": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "assertion_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "assertion_evidence_support": {"description": "Assertions with a citation and material evidence IDs, distinct from containment.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "lexical_identifier_support": {"description": "Assertions with lexical or identifier support in cited material, distinct from semantic grounding.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "groundedness_majority": {"type": ["boolean", "null"]}, "quality_not_lower_than_oracle": {"type": ["boolean", "null"]},
-        "quality_gate_failed": {"type": "boolean"}
+        "task_id": {
+          "type": "string"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "deterministic",
+            "planned"
+          ]
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "skipped"
+          ]
+        },
+        "skip_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retrieved_top5": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "materialized_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "materialized_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "start_line",
+              "end_line"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "material_evidence_ids": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "failure_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_file_recall_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_r": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materialized_required_file_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capsule_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinary_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_savings": {
+          "type": "number"
+        },
+        "valid_token_savings": {
+          "type": "number"
+        },
+        "planner_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planner_messages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plan_sufficient": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "paired_answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/paired_answer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cold_structural_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_offline_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deterministic_warm_query_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "agentic_planner_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_estimated_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_reported_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "phase_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_requested_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_described_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_file_only_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "citation_validity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_evidence_support": {
+          "description": "Assertions with a citation and material evidence IDs, distinct from containment.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lexical_identifier_support": {
+          "description": "Assertions with lexical or identifier support in cited material, distinct from semantic grounding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groundedness_majority": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "quality_not_lower_than_oracle": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "quality_gate_failed": {
+          "type": "boolean"
+        },
+        "candidate_diagnostics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CandidateSelectionDiagnostic"
+          },
+          "maxItems": 64,
+          "title": "Candidate Diagnostics",
+          "type": "array"
+        },
+        "evidence_transitions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceSelectionTransition"
+          },
+          "title": "Evidence Transitions",
+          "type": "array"
+        },
+        "planner_estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Planner Estimated Input Tokens",
+          "type": "integer"
+        },
+        "planner_reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Planner Reported Input Tokens"
+        },
+        "planner_reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Planner Reported Output Tokens"
+        }
       }
     },
     "aggregate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "task_count", "completed_task_count", "skipped_task_count", "quality_gate_failed_count", "headline_token_savings"],
+      "required": [
+        "mode",
+        "task_count",
+        "completed_task_count",
+        "skipped_task_count",
+        "quality_gate_failed_count",
+        "headline_token_savings"
+      ],
       "properties": {
-        "mode": {"enum": ["deterministic", "planned"]}, "task_count": {"type": "integer", "minimum": 0},
-        "completed_task_count": {"type": "integer", "minimum": 0}, "skipped_task_count": {"type": "integer", "minimum": 0},
-        "required_file_recall_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "precision_at_5": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "precision_at_r": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "materialized_required_file_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "range_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "capsule_tokens": {"type": "integer", "minimum": 0}, "ordinary_tokens": {"type": "integer", "minimum": 0},
-        "planner_calls": {"type": "integer", "minimum": 0}, "planner_input_tokens": {"type": "integer", "minimum": 0}, "planner_output_tokens": {"type": "integer", "minimum": 0},
-        "mean_latency_ms": {"type": ["number", "null"], "minimum": 0}, "plan_sufficient_count": {"type": "integer", "minimum": 0}, "planned_task_count": {"type": "integer", "minimum": 0},
-        "mean_cold_structural_ms": {"type": ["number", "null"], "minimum": 0},
-        "mean_semantic_offline_ms": {"type": ["number", "null"], "minimum": 0},
-        "mean_deterministic_warm_query_ms": {"type": ["number", "null"], "minimum": 0},
-        "mean_agentic_planner_ms": {"type": ["number", "null"], "minimum": 0},
-        "mean_final_answer_ms": {"type": ["number", "null"], "minimum": 0},
-        "semantic_provider_calls": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_output_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_input_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "final_answer_output_tokens": {"type": ["integer", "null"], "minimum": 0},
-        "semantic_function_coverage": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "semantic_file_only_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "citation_containment": {"description": "Citation range is contained in supplied material; this is not semantic support.", "anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "assertion_recall": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "assertion_evidence_support": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "lexical_identifier_support": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "groundedness_majority_rate": {"anyOf": [{"$ref": "#/$defs/rate"}, {"type": "null"}]},
-        "quality_gate_failed_count": {"type": "integer", "minimum": 0}, "headline_token_savings": {"type": "number"}
+        "mode": {
+          "enum": [
+            "deterministic",
+            "planned"
+          ]
+        },
+        "task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required_file_recall_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_r": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materialized_required_file_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capsule_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinary_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_latency_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "plan_sufficient_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planned_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_cold_structural_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_semantic_offline_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_deterministic_warm_query_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_agentic_planner_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_final_answer_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_function_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic_file_only_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "citation_containment": {
+          "description": "Citation range is contained in supplied material; this is not semantic support.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_evidence_support": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lexical_identifier_support": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groundedness_majority_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_gate_failed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "headline_token_savings": {
+          "type": "number"
+        }
       }
     },
     "paired_answer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinary", "oracle", "contextforge", "contextforge_groundedness", "input_token_reduction", "quality_not_lower"],
+      "required": [
+        "ordinary",
+        "oracle",
+        "contextforge",
+        "contextforge_groundedness",
+        "input_token_reduction",
+        "quality_not_lower"
+      ],
       "properties": {
-        "ordinary": {"anyOf": [{"$ref": "#/$defs/answer"}, {"type": "null"}]},
-        "oracle": {"$ref": "#/$defs/answer"},
-        "contextforge": {"$ref": "#/$defs/answer"},
-        "contextforge_groundedness": {"anyOf": [{"$ref": "#/$defs/judge"}, {"type": "null"}]},
-        "input_token_reduction": {"type": "number"},
-        "quality_not_lower": {"type": "boolean"}
+        "ordinary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/answer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oracle": {
+          "$ref": "#/$defs/answer"
+        },
+        "contextforge": {
+          "$ref": "#/$defs/answer"
+        },
+        "contextforge_groundedness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/judge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_token_reduction": {
+          "type": "number"
+        },
+        "quality_not_lower": {
+          "type": "boolean"
+        }
       }
     },
     "citation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["assertion_id", "path", "start_line", "end_line", "material_evidence_ids"],
+      "required": [
+        "assertion_id",
+        "path",
+        "start_line",
+        "end_line",
+        "material_evidence_ids"
+      ],
       "properties": {
-        "assertion_id": {"type": "string"},
-        "path": {"type": "string"},
-        "start_line": {"type": "integer", "minimum": 1},
-        "end_line": {"type": "integer", "minimum": 1},
-        "material_evidence_ids": {"type": "array", "items": {"type": "string"}}
+        "assertion_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "material_evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "answer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["answer", "assertion_ids", "citations", "assertion_recall", "citation_validity", "assertion_evidence_support", "lexical_identifier_support", "input_tokens"],
+      "required": [
+        "answer",
+        "assertion_ids",
+        "citations",
+        "assertion_recall",
+        "citation_validity",
+        "assertion_evidence_support",
+        "lexical_identifier_support",
+        "input_tokens"
+      ],
       "properties": {
-        "answer": {"type": "string"},
-        "assertion_ids": {"type": "array", "items": {"type": "string"}},
-        "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}},
-        "valid_citation_count": {"type": "integer", "minimum": 0},
-        "invalid_citation_count": {"type": "integer", "minimum": 0},
-        "assertion_recall": {"$ref": "#/$defs/rate"},
-        "citation_validity": {"$ref": "#/$defs/rate"},
-        "assertion_evidence_support": {"$ref": "#/$defs/rate"},
-        "lexical_identifier_support": {"$ref": "#/$defs/rate"},
-        "input_tokens": {"type": "integer", "minimum": 0},
-        "estimated_input_tokens": {"type": "integer", "minimum": 0},
-        "provider_input_tokens": {"type": "integer", "minimum": 0},
-        "output_tokens": {"type": "integer", "minimum": 0},
-        "provider_http_calls": {"type": "integer", "minimum": 0},
-        "duration_ms": {"type": "integer", "minimum": 0}
+        "answer": {
+          "type": "string"
+        },
+        "assertion_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/citation"
+          }
+        },
+        "valid_citation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalid_citation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assertion_recall": {
+          "$ref": "#/$defs/rate"
+        },
+        "citation_validity": {
+          "$ref": "#/$defs/rate"
+        },
+        "assertion_evidence_support": {
+          "$ref": "#/$defs/rate"
+        },
+        "lexical_identifier_support": {
+          "$ref": "#/$defs/rate"
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_http_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "judge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["votes", "passed", "unsupported_claims", "input_tokens", "provider_http_calls", "duration_ms"],
+      "required": [
+        "votes",
+        "passed",
+        "unsupported_claims",
+        "input_tokens",
+        "provider_http_calls",
+        "duration_ms"
+      ],
       "properties": {
-        "votes": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "boolean"}},
-        "passed": {"type": "boolean"},
-        "unsupported_claims": {"type": "array", "items": {"type": "string"}},
-        "input_tokens": {"type": "integer", "minimum": 0},
-        "estimated_input_tokens": {"type": "integer", "minimum": 0},
-        "provider_input_tokens": {"type": "integer", "minimum": 0},
-        "output_tokens": {"type": "integer", "minimum": 0},
-        "provider_http_calls": {"type": "integer", "minimum": 0},
-        "duration_ms": {"type": "integer", "minimum": 0}
+        "votes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "boolean"
+          }
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "unsupported_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_http_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
+    },
+    "CandidateSelectionDiagnostic": {
+      "additionalProperties": false,
+      "description": "Bounded ranking facts, without source content or model rationale.",
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "rank": {
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "exact_group": {
+          "title": "Exact Group",
+          "type": "string"
+        },
+        "bm25_field_scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Bm25 Field Scores",
+          "type": "object"
+        },
+        "selection_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selection Reasons",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "graph_paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Graph Paths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "rank",
+        "exact_group"
+      ],
+      "title": "CandidateSelectionDiagnostic",
+      "type": "object"
+    },
+    "EvidenceSelectionTransition": {
+      "additionalProperties": false,
+      "description": "Evaluator-only source address and its actual pipeline coverage.",
+      "properties": {
+        "source_range": {
+          "$ref": "#/$defs/BenchmarkSourceRange"
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidate Id"
+        },
+        "retrieval_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Retrieval Evidence Ids",
+          "type": "array"
+        },
+        "planned_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Evidence Ids",
+          "type": "array"
+        },
+        "materialized_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Evidence Ids",
+          "type": "array"
+        },
+        "source_current": {
+          "default": true,
+          "title": "Source Current",
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "covered",
+            "absent_from_pool",
+            "selection_lost",
+            "range_not_found",
+            "budget_excluded",
+            "source_stale"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_range",
+        "reason"
+      ],
+      "title": "EvidenceSelectionTransition",
+      "type": "object"
+    },
+    "BenchmarkSourceRange": {
+      "additionalProperties": false,
+      "description": "One one-based inclusive repository source range.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "title": "BenchmarkSourceRange",
+      "type": "object"
     }
   }
 }
