@@ -4200,18 +4200,26 @@ def build_evidence_requirements(
 ) -> EvidenceRequirements:
     roles = _task_evidence_roles(task, ())
     kinds = {r.kind for r in roles}
-    explicit = (
-        _exact_identifier_scope(task) != task
-        or len(task.split()) == 1
-        or re.search(r"`[A-Za-z_]\w*`|<[A-Za-z_]\w*>", task) is not None
-    )
+    scope = _exact_identifier_scope(task)
+    quoted = re.findall(r"`([A-Za-z_]\w*)`|<([A-Za-z_]\w*)>", task)
+    identifiers = {value.casefold() for pair in quoted for value in pair if value}
+    if scope != task or len(task.split()) == 1:
+        identifiers.update(scope.casefold().split())
     anchors = (
         tuple(
             c
             for c in candidates
             if c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
+            and (
+                identifiers & {s.casefold() for s in c.matched_symbols}
+                or any(
+                    c.path.casefold() == value
+                    or c.path.casefold().endswith("/" + value)
+                    for value in identifiers
+                )
+            )
         )
-        if explicit
+        if identifiers
         else ()
     )
     exact_anchor = bool(anchors)

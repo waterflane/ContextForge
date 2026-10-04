@@ -304,7 +304,9 @@ requested role is present and the task has an exact identifier or a source-bound
 grounded semantic anchor. Lexical matches and structural role coverage alone do
 not resolve the task topic: `task_anchor_unresolved` keeps such compilations
 insufficient even when the selected heuristic obligations fit. Grounded semantics
-remain interpretation and do not create structural facts. Missing required source material reports
+remain interpretation and do not create structural facts. Exact anchors must match
+the supplied identifier against a verified symbol or path; a code-shaped word
+elsewhere in the question does not validate incidental lexical matches. Missing required source material reports
 `required_source_evidence_missing`; a planner declaration cannot override it.
 
 Python exports `load_relationship_graph()`, `load_orientation_map()`,

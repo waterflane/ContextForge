@@ -15,7 +15,14 @@ from contextforge.intelligence import (
 )
 
 
-@pytest.mark.parametrize("task", ["Explain job behavior", "missing_job implementation"])
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Explain job behavior",
+        "missing_job implementation",
+        "Explain AcmeTools job behavior",
+    ],
+)
 def test_heuristic_anchor_cannot_certify_task_topic(tmp_path: Path, task: str) -> None:
     (tmp_path / "jobs.py").write_text(
         "def execute_job():\n    return 7\n", encoding="utf-8"
