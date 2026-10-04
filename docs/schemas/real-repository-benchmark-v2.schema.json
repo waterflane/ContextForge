@@ -1537,6 +1537,288 @@
       ],
       "title": "RealBenchmarkPhaseUsage",
       "type": "object"
+    },
+    "BenchmarkAnswerCitation": {
+      "additionalProperties": false,
+      "description": "One answer citation validated against a materialized source range.",
+      "properties": {
+        "assertion_id": {
+          "title": "Assertion Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "material_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Material Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "assertion_id",
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "title": "BenchmarkAnswerCitation",
+      "type": "object"
+    },
+    "BenchmarkAnswerEvaluation": {
+      "additionalProperties": false,
+      "description": "Quality and token accounting for one downstream answer.",
+      "properties": {
+        "answer": {
+          "default": "",
+          "title": "Answer",
+          "type": "string"
+        },
+        "assertion_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Assertion Ids",
+          "type": "array"
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchmarkAnswerCitation"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "valid_citation_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Valid Citation Count",
+          "type": "integer"
+        },
+        "invalid_citation_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Invalid Citation Count",
+          "type": "integer"
+        },
+        "assertion_recall": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Assertion Recall",
+          "type": "number"
+        },
+        "citation_validity": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Citation Validity",
+          "type": "number"
+        },
+        "assertion_evidence_support": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Assertion Evidence Support",
+          "type": "number"
+        },
+        "lexical_identifier_support": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Lexical Identifier Support",
+          "type": "number"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "provider_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "provider_http_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Http Calls",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assertion_recall",
+        "citation_validity"
+      ],
+      "title": "BenchmarkAnswerEvaluation",
+      "type": "object"
+    },
+    "BenchmarkGroundednessEvaluation": {
+      "additionalProperties": false,
+      "description": "Blinded majority judgment over one answer and its source evidence.",
+      "properties": {
+        "votes": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Votes",
+          "type": "array"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "unsupported_claims": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unsupported Claims",
+          "type": "array"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "provider_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "provider_http_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Http Calls",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "votes",
+        "passed"
+      ],
+      "title": "BenchmarkGroundednessEvaluation",
+      "type": "object"
+    },
+    "BenchmarkPairedAnswerEvaluation": {
+      "additionalProperties": false,
+      "description": "Same-model ordinary, manual-oracle, and ContextForge comparison.",
+      "properties": {
+        "ordinary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "oracle": {
+          "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+        },
+        "contextforge": {
+          "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+        },
+        "contextforge_groundedness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkGroundednessEvaluation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "input_token_reduction": {
+          "title": "Input Token Reduction",
+          "type": "number"
+        },
+        "quality_not_lower": {
+          "title": "Quality Not Lower",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oracle",
+        "contextforge",
+        "input_token_reduction",
+        "quality_not_lower"
+      ],
+      "title": "BenchmarkPairedAnswerEvaluation",
+      "type": "object"
+    },
+    "RealBenchmarkMode": {
+      "enum": [
+        "deterministic",
+        "planned"
+      ],
+      "title": "RealBenchmarkMode",
+      "type": "string"
     }
   }
 }

@@ -16,6 +16,39 @@ from contextforge.intelligence import (
 from contextforge.intelligence.retrieval import build_evidence_requirements
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_class_qualified_anchor_requires_unique_source_identity(
+    tmp_path: Path, ambiguous: bool
+) -> None:
+    source = "class Widget:\n    def run(self):\n        return 7\n"
+    (tmp_path / "widget.py").write_text(source, encoding="utf-8")
+    if ambiguous:
+        (tmp_path / "other.py").write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain Widget.run implementation"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert retrieval.requirements.topic_grounding == (
+        "unresolved" if ambiguous else "exact-identifier"
+    )
+    assert bool(retrieval.requirements.ambiguous_identifiers) == ambiguous
+    if not ambiguous:
+        anchor = next(c for c in retrieval.candidates if c.path == "widget.py")
+        assert anchor.resolved_symbols[0].qualified_name == "widget.Widget.run"
+        assert anchor.resolved_symbols[0].resolution == "unique-qualified-suffix"
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8_000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == (
+        "insufficient" if ambiguous else "sufficient"
+    )
+
+
 @pytest.mark.parametrize("direction", ["caller", "callers", "callee", "callees"])
 @pytest.mark.parametrize("missing", [False, True])
 def test_directed_role_requests_require_the_requested_endpoint(

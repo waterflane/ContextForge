@@ -336,6 +336,17 @@ class RepresentationCosts(IndexModel):
     full: NonNegativeInt
 
 
+class ResolvedSourceSymbol(IndexModel):
+    """A query anchor resolved against digest-bound structural declarations."""
+
+    query_identifier: str
+    symbol_id: str
+    qualified_name: str
+    resolution: Literal["exact", "unique-qualified-suffix"]
+    declaration_evidence_id: str
+    implementation_evidence_id: str
+
+
 class CandidateCard(IndexModel):
     """Retrieval result with evidence, graph context, and representation costs."""
 
@@ -351,6 +362,8 @@ class CandidateCard(IndexModel):
     structural_roles: tuple[TaskEvidenceRoleKind, ...] = ()
     matched_concepts: tuple[str, ...] = ()
     matched_symbols: tuple[str, ...] = ()
+    resolved_symbols: tuple[ResolvedSourceSymbol, ...] = ()
+    ambiguous_identifiers: tuple[str, ...] = ()
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
     graph_neighbors: tuple[CandidateGraphNeighbor, ...] = ()
     provenance: tuple[str, ...]
@@ -388,12 +401,14 @@ class EvidenceRequirement(IndexModel):
         "task-syntax",
     ]
     anchor_candidate_id: str
+    anchor_symbol_id: str | None = None
 
 
 class EvidenceRequirements(IndexModel):
     roles: tuple[TaskEvidenceRole, ...]
     anchors: tuple[str, ...] = ()
     source_evidence: tuple[EvidenceRequirement, ...] = ()
+    ambiguous_identifiers: tuple[str, ...] = ()
     topic_grounding: Literal["exact-identifier", "grounded-semantic", "unresolved"] = (
         "unresolved"
     )
@@ -1491,6 +1506,9 @@ async def retrieve_context_candidates(
         working_set=working_set,
         diff_paths=diff_paths,
     )
+    ranked_candidates = _resolve_source_symbols(
+        repository_root, active, index, task, ranked_candidates
+    )
     ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
     ranked_candidates = _restore_exact_identifier_evidence(
         repository_root,
@@ -1995,6 +2013,141 @@ def _candidate_evidence(
                     strength="grounded",
                 )
     return tuple(values[key] for key in sorted(values))
+
+
+def _resolve_source_symbols(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    index: RetrievalIndex,
+    task: str,
+    candidates: list[CandidateCard],
+) -> list[CandidateCard]:
+    from contextforge.intelligence.store import load_index_record
+
+    scope = _exact_identifier_scope(task)
+    queries = set(scope.split()) if scope != task or len(task.split()) == 1 else set()
+    queries.update(
+        value
+        for pair in re.findall(r"`([A-Za-z_][\w.:]*)`|<([A-Za-z_][\w.:]*)>", task)
+        for value in pair
+        if value
+    )
+    queries.discard("")
+    paths = {d.path.casefold() for d in index.documents}
+    resolved: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    ambiguous: set[str] = set()
+    for query in sorted(queries):
+        value = query.casefold().replace("::", ".")
+        if any(p == value or p.endswith("/" + value) for p in paths):
+            continue
+        exact = [
+            (d.path, name)
+            for d in index.documents
+            for name in d.qualified_symbols
+            if name.casefold().replace("::", ".") == value
+        ]
+        matches = exact or [
+            (d.path, name)
+            for d in index.documents
+            for name in d.qualified_symbols
+            if name.casefold().replace("::", ".").endswith("." + value)
+        ]
+        matches = sorted(set(matches))
+        if len(matches) == 1:
+            path, name = matches[0]
+            resolved[path].append(
+                (query, name, "exact" if exact else "unique-qualified-suffix")
+            )
+        elif len(matches) > 1:
+            ambiguous.add(query)
+    states = {s.path: s for s in manifest.files}
+    result: list[CandidateCard] = []
+    for candidate in candidates:
+        symbols: list[ResolvedSourceSymbol] = []
+        additions: list[CandidateEvidenceRange] = []
+        if candidate.path in resolved:
+            payload = json.loads(
+                load_index_record(
+                    repository_root, states[candidate.path], manifest=manifest
+                )
+            )
+            if (
+                payload.get("path") != candidate.path
+                or payload.get("source_sha256") != candidate.source_sha256
+            ):
+                raise ValueError("resolved anchor CodeMap identity is stale")
+            by_name = {s["qualified_name"]: s for s in payload["symbols"]}
+            for query, name, resolution in resolved[candidate.path]:
+                symbol = by_name[name]
+                declaration = SourceRange.model_validate(symbol["declaration_range"])
+                ending = SourceRange.model_validate(
+                    symbol.get("body_range") or symbol["declaration_range"]
+                )
+                implementation = declaration.model_copy(
+                    update={
+                        "end_line": ending.end_line,
+                        "end_column": ending.end_column,
+                    }
+                )
+                declaration_id = _structural_evidence_id_from_source(
+                    candidate.path,
+                    candidate.source_sha256,
+                    f"declaration:{symbol['symbol_id']}",
+                    declaration,
+                )
+                implementation_id = _structural_evidence_id_from_source(
+                    candidate.path,
+                    candidate.source_sha256,
+                    f"implementation:{symbol['symbol_id']}",
+                    implementation,
+                )
+                symbols.append(
+                    ResolvedSourceSymbol(
+                        query_identifier=query,
+                        symbol_id=symbol["symbol_id"],
+                        qualified_name=name,
+                        resolution=cast(
+                            Literal["exact", "unique-qualified-suffix"], resolution
+                        ),
+                        declaration_evidence_id=declaration_id,
+                        implementation_evidence_id=implementation_id,
+                    )
+                )
+                additions.extend(
+                    CandidateEvidenceRange(
+                        path=candidate.path,
+                        source_range=address,
+                        evidence_id=identity,
+                        strength="verified",
+                    )
+                    for address, identity in (
+                        (declaration, declaration_id),
+                        (implementation, implementation_id),
+                    )
+                )
+        evidence = {
+            e.evidence_id or str(e.source_range): e
+            for e in (*candidate.evidence_ranges, *additions)
+        }
+        result.append(
+            candidate.model_copy(
+                update={
+                    "resolved_symbols": tuple(symbols),
+                    "ambiguous_identifiers": tuple(sorted(ambiguous)),
+                    "evidence_ranges": tuple(
+                        sorted(
+                            evidence.values(),
+                            key=lambda e: (
+                                e.source_range.start_line,
+                                e.source_range.end_line,
+                                e.evidence_id or "",
+                            ),
+                        )
+                    ),
+                }
+            )
+        )
+    return result
 
 
 def _restore_exact_identifier_evidence(
@@ -4303,7 +4456,7 @@ def build_evidence_requirements(
     roles = _task_evidence_roles(task, ())
     kinds = {r.kind for r in roles}
     scope = _exact_identifier_scope(task)
-    quoted = re.findall(r"`([A-Za-z_]\w*)`|<([A-Za-z_]\w*)>", task)
+    quoted = re.findall(r"`([A-Za-z_][\w.:]*)`|<([A-Za-z_][\w.:]*)>", task)
     identifiers = {value.casefold() for pair in quoted for value in pair if value}
     if scope != task or len(task.split()) == 1:
         identifiers.update(scope.casefold().split())
@@ -4311,9 +4464,11 @@ def build_evidence_requirements(
         tuple(
             c
             for c in candidates
-            if c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
+            if c.resolved_symbols
+            or c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
             and (
-                identifiers & {s.casefold() for s in c.matched_symbols}
+                c.resolved_symbols
+                or identifiers & {s.casefold() for s in c.matched_symbols}
                 or any(
                     c.path.casefold() == value
                     or c.path.casefold().endswith("/" + value)
@@ -4324,7 +4479,8 @@ def build_evidence_requirements(
         if identifiers
         else ()
     )
-    exact_anchor = bool(anchors)
+    ambiguous = tuple(sorted({q for c in candidates for q in c.ambiguous_identifiers}))
+    exact_anchor = bool(anchors) and not ambiguous
     if not anchors:
         relevant = [
             c
@@ -4352,7 +4508,8 @@ def build_evidence_requirements(
         "exact-identifier"
         if exact_anchor
         else "grounded-semantic"
-        if any(
+        if not ambiguous
+        and any(
             c.matched_concepts
             and any(e.strength == "grounded" for e in c.evidence_ranges)
             for c in anchors
@@ -4456,6 +4613,7 @@ def build_evidence_requirements(
                 add(candidate, anchor, "verified-config", "configuration")
     return EvidenceRequirements(
         roles=roles,
+        ambiguous_identifiers=ambiguous,
         anchors=tuple(c.candidate_id for c in anchors),
         source_evidence=tuple(obligations[key] for key in sorted(obligations)),
         topic_grounding=topic_grounding,

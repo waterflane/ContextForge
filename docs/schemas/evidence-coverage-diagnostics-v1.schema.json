@@ -204,6 +204,14 @@
           ],
           "title": "Topic Grounding",
           "type": "string"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
         }
       },
       "required": [
@@ -293,6 +301,18 @@
         "anchor_candidate_id": {
           "title": "Anchor Candidate Id",
           "type": "string"
+        },
+        "anchor_symbol_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Symbol Id"
         }
       },
       "required": [

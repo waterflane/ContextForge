@@ -763,6 +763,22 @@
           },
           "title": "Structural Roles",
           "type": "array"
+        },
+        "resolved_symbols": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResolvedSourceSymbol"
+          },
+          "title": "Resolved Symbols",
+          "type": "array"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
         }
       }
     },
@@ -801,6 +817,14 @@
           ],
           "title": "Topic Grounding",
           "type": "string"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
         }
       },
       "required": [
@@ -856,6 +880,18 @@
         "anchor_candidate_id": {
           "title": "Anchor Candidate Id",
           "type": "string"
+        },
+        "anchor_symbol_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Symbol Id"
         }
       },
       "required": [
@@ -963,6 +999,60 @@
         "provenance"
       ],
       "title": "CandidateGraphNeighbor",
+      "type": "object"
+    },
+    "ContextPlanningMode": {
+      "description": "Whether model-assisted evidence planning is disabled, optional, or required.",
+      "enum": [
+        "off",
+        "auto",
+        "required"
+      ],
+      "title": "ContextPlanningMode",
+      "type": "string"
+    },
+    "ResolvedSourceSymbol": {
+      "additionalProperties": false,
+      "description": "A query anchor resolved against digest-bound structural declarations.",
+      "properties": {
+        "query_identifier": {
+          "title": "Query Identifier",
+          "type": "string"
+        },
+        "symbol_id": {
+          "title": "Symbol Id",
+          "type": "string"
+        },
+        "qualified_name": {
+          "title": "Qualified Name",
+          "type": "string"
+        },
+        "resolution": {
+          "enum": [
+            "exact",
+            "unique-qualified-suffix"
+          ],
+          "title": "Resolution",
+          "type": "string"
+        },
+        "declaration_evidence_id": {
+          "title": "Declaration Evidence Id",
+          "type": "string"
+        },
+        "implementation_evidence_id": {
+          "title": "Implementation Evidence Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query_identifier",
+        "symbol_id",
+        "qualified_name",
+        "resolution",
+        "declaration_evidence_id",
+        "implementation_evidence_id"
+      ],
+      "title": "ResolvedSourceSymbol",
       "type": "object"
     }
   }
