@@ -407,3 +407,12 @@ become explicit user anchors. New candidates are resolved against the original
 anchors and immutable CodeMaps. Discovery extends frozen requirements and
 retains prior obligations, roles, and ambiguity. A broad task without grounded
 topical support remains insufficient, regardless of the planner's declaration.
+
+Each retrieval query uses one generation-bound view. Source digests are checked
+on the first read of an artifact in a query; repeated reads reuse those validated
+facts. Every new query validates the immutable artifacts again. Source symbol
+and range lookups use a 256-entry LRU keyed by repository, generation, and digest;
+verified graph routing uses an eight-entry LRU with the same provenance boundary.
+Coverage checks index IDs and range bounds rather than scanning every candidate
+range for every requirement. These caches neither disable integrity checks nor
+change deterministic retrieval output.

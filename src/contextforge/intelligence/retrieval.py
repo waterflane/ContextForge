@@ -8,10 +8,15 @@ import json
 import math
 import re
 import threading
+from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
-from dataclasses import replace
+from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from enum import StrEnum
-from functools import lru_cache
+from functools import lru_cache, wraps
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -119,35 +124,108 @@ _retrieval_cache: OrderedDict[
     ],
 ] = OrderedDict()
 _retrieval_cache_lock = threading.Lock()
-_source_record_cache: OrderedDict[tuple[str, str, str, str], dict[str, Any]] = (
+
+
+@dataclass
+class _SourceLookup:
+    payload: dict[str, Any]
+    symbols_by_id: dict[str, dict[str, Any]]
+    symbols_by_name: dict[str, list[dict[str, Any]]]
+    ranges: dict[tuple[int, int, int, int], SourceRange] = dataclass_field(
+        default_factory=dict
+    )
+
+    def source_range(self, raw: dict[str, Any]) -> SourceRange:
+        key = (
+            raw["start_line"],
+            raw["start_column"],
+            raw["end_line"],
+            raw["end_column"],
+        )
+        if key not in self.ranges:
+            self.ranges[key] = SourceRange.model_validate(raw)
+        return self.ranges[key]
+
+
+_source_record_cache: OrderedDict[tuple[str, str, str, str], _SourceLookup] = (
     OrderedDict()
 )
 
 
-def _load_source_record(
+@dataclass
+class _QueryView:
+    validated_sources: dict[tuple[str, str, str, str], _SourceLookup] = dataclass_field(
+        default_factory=dict
+    )
+    neighbors: dict[str, tuple[CandidateGraphNeighbor, ...]] | None = None
+    graph_cache_key: tuple[str, str, str] | None = None
+
+
+_query_view: ContextVar[_QueryView | None] = ContextVar(
+    "retrieval_query_view", default=None
+)
+_graph_query_cache: OrderedDict[
+    tuple[str, str, str], dict[str, tuple[CandidateGraphNeighbor, ...]]
+] = OrderedDict()
+
+
+def _scoped_query[**P, T](
+    function: Callable[P, Coroutine[Any, Any, T]],
+) -> Callable[P, Coroutine[Any, Any, T]]:
+    @wraps(function)
+    async def execute(*args: P.args, **kwargs: P.kwargs) -> T:
+        token = _query_view.set(_QueryView())
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            _query_view.reset(token)
+
+    return execute
+
+
+def _load_source_facts(
     repository_root: str | Path, manifest: IndexManifest, state: IndexedFileState
-) -> dict[str, Any]:
+) -> _SourceLookup:
     """Reuse parsed immutable facts only after the store rechecks their digest."""
     from contextforge.intelligence.store import load_index_record
 
-    encoded = load_index_record(repository_root, state, manifest=manifest)
     key = (
         str(Path(repository_root).resolve()),
         manifest.generation_id,
         state.record_location or "",
         state.record_sha256 or "",
     )
+    view = _query_view.get()
+    if view is not None and key in view.validated_sources:
+        return view.validated_sources[key]
+    encoded = load_index_record(repository_root, state, manifest=manifest)
     with _retrieval_cache_lock:
         cached = _source_record_cache.get(key)
         if cached is not None:
             _source_record_cache.move_to_end(key)
+            if view is not None:
+                view.validated_sources[key] = cached
             return cached
     payload = cast(dict[str, Any], json.loads(encoded))
+    by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for symbol in payload.get("symbols", []):
+        by_name[symbol["qualified_name"]].append(symbol)
+    facts = _SourceLookup(
+        payload, {v["symbol_id"]: v for v in payload.get("symbols", [])}, dict(by_name)
+    )
     with _retrieval_cache_lock:
-        _source_record_cache[key] = payload
+        _source_record_cache[key] = facts
         while len(_source_record_cache) > 256:
             _source_record_cache.popitem(last=False)
-    return payload
+    if view is not None:
+        view.validated_sources[key] = facts
+    return facts
+
+
+def _load_source_record(
+    repository_root: str | Path, manifest: IndexManifest, state: IndexedFileState
+) -> dict[str, Any]:
+    return _load_source_facts(repository_root, manifest, state).payload
 
 
 class RetrievalField(IndexModel):
@@ -1504,6 +1582,7 @@ def retrieval_index_record_locations(
     return tuple(locations)
 
 
+@_scoped_query
 async def retrieve_context_candidates(
     repository_root: str | Path,
     task: str,
@@ -1585,6 +1664,17 @@ async def retrieve_context_candidates(
     if index.source_snapshot_digest != active.build.source_snapshot_digest:
         raise ValueError("retrieval postings are stale for the pinned generation")
     graph = load_relationship_graph_projection(repository_root, manifest=active)
+    view = _query_view.get()
+    if view is not None and active.artifacts.relationship_graph is not None:
+        view.graph_cache_key = (
+            str(Path(repository_root).resolve()),
+            active.generation_id,
+            active.artifacts.relationship_graph.sha256,
+        )
+        with _retrieval_cache_lock:
+            view.neighbors = _graph_query_cache.get(view.graph_cache_key)
+            if view.neighbors is not None:
+                _graph_query_cache.move_to_end(view.graph_cache_key)
     ranked_candidates = _rank_candidates(
         task,
         index,
@@ -2140,6 +2230,9 @@ def _graph_distances(graph: object, seeds: set[str]) -> dict[str, int]:
 def _candidate_neighbors(
     graph: object,
 ) -> dict[str, tuple[CandidateGraphNeighbor, ...]]:
+    view = _query_view.get()
+    if view is not None and view.neighbors is not None:
+        return view.neighbors
     from contextforge.intelligence.graph import (
         FileRelationshipProjection,
         RelationshipGraph,
@@ -2213,6 +2306,12 @@ def _candidate_neighbors(
                 )
             )
         by_path[source] = tuple(values)
+    if view is not None and view.graph_cache_key is not None:
+        view.neighbors = by_path
+        with _retrieval_cache_lock:
+            _graph_query_cache[view.graph_cache_key] = by_path
+            while len(_graph_query_cache) > 8:
+                _graph_query_cache.popitem(last=False)
     return by_path
 
 
@@ -2300,24 +2399,23 @@ def _resolve_source_symbols(
         symbols: list[ResolvedSourceSymbol] = []
         additions: list[CandidateEvidenceRange] = []
         if candidate.path in resolved:
-            payload = _load_source_record(
+            facts = _load_source_facts(
                 repository_root, manifest, states[candidate.path]
             )
+            payload = facts.payload
             if (
                 payload.get("path") != candidate.path
                 or payload.get("source_sha256") != candidate.source_sha256
             ):
                 raise ValueError("resolved anchor CodeMap identity is stale")
-            by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for symbol in payload["symbols"]:
-                by_name[symbol["qualified_name"]].append(symbol)
+            by_name = facts.symbols_by_name
             for query, name, resolution in resolved[candidate.path]:
                 if len(by_name[name]) != 1:
                     ambiguous.add(query)
                     continue
                 symbol = by_name[name][0]
-                declaration = SourceRange.model_validate(symbol["declaration_range"])
-                ending = SourceRange.model_validate(
+                declaration = facts.source_range(symbol["declaration_range"])
+                ending = facts.source_range(
                     symbol.get("body_range") or symbol["declaration_range"]
                 )
                 implementation = declaration.model_copy(
@@ -2500,6 +2598,7 @@ def _restore_required_source_evidence(
     states = {f.path: f for f in manifest.files}
     documents = {d.path: d for d in index.documents}
     maps: dict[str, dict[str, Any]] = {}
+    source_facts: dict[str, _SourceLookup] = {}
     additions: dict[str, dict[str, CandidateEvidenceRange]] = defaultdict(dict)
     for c in candidates:
         related = c.path in connected_paths
@@ -2515,13 +2614,15 @@ def _restore_required_source_evidence(
         ):
             continue
         state = states[c.path]
-        payload = _load_source_record(repository_root, manifest, state)
+        facts = _load_source_facts(repository_root, manifest, state)
+        payload = facts.payload
         if (
             payload.get("source_sha256") != c.source_sha256
             or payload.get("path") != c.path
         ):
             raise ValueError("required source CodeMap identity is stale")
         maps[c.path] = payload
+        source_facts[c.path] = facts
 
     def add(path: str, identity: str, source_range: SourceRange) -> None:
         evidence_id = _structural_evidence_id_from_source(
@@ -2543,8 +2644,8 @@ def _restore_required_source_evidence(
         if key in restored_bodies:
             return
         restored_bodies.add(key)
-        declaration = SourceRange.model_validate(symbol["declaration_range"])
-        ending = SourceRange.model_validate(
+        declaration = source_facts[path].source_range(symbol["declaration_range"])
+        ending = source_facts[path].source_range(
             symbol.get("body_range") or symbol["declaration_range"]
         )
         add(
@@ -2616,8 +2717,7 @@ def _restore_required_source_evidence(
 
     connections: list[VerifiedSourceConnection] = []
     symbols_by_path = {
-        path: {s["symbol_id"]: s for s in payload.get("symbols", [])}
-        for path, payload in maps.items()
+        path: facts.symbols_by_id for path, facts in source_facts.items()
     }
     restored_ids: dict[tuple[str, str], tuple[str, ...]] = {}
     for source_path, payload in maps.items():
@@ -4622,6 +4722,7 @@ def build_coverage_ledger(
             )
         )
     )
+    selected_by_id = {c.candidate_id: c for c in selected}
     return CoverageLedger(
         stage=stage,
         roles=roles,
@@ -4640,35 +4741,41 @@ def build_coverage_ledger(
             sorted(
                 r.requirement_id
                 for r in requirements.source_evidence
-                if r.candidate_id not in selected_ids
-                or not r.evidence_ids
-                or any(
-                    not any(
-                        e.path == r.path
-                        and e.source_range.start_line <= address.start_line
-                        and address.end_line <= e.source_range.end_line
-                        for e in ranges
-                        if e.evidence_id in r.evidence_ids
-                    )
-                    for address in r.required_ranges
-                )
-                or not any(
-                    c.candidate_id == r.candidate_id
-                    and c.path == r.path
-                    and c.source_sha256 == r.source_sha256
-                    for c in selected
-                )
-                or not set(r.evidence_ids)
-                <= {
-                    e.evidence_id
-                    for c in selected
-                    if c.candidate_id == r.candidate_id
-                    and c.source_sha256 == r.source_sha256
-                    for e in c.evidence_ranges
-                }
+                if not source_requirement_covered(r, selected_by_id.get(r.candidate_id))
             )
         ),
     )
+
+
+def source_requirement_covered(
+    requirement: EvidenceRequirement, candidate: CandidateCard | None
+) -> bool:
+    """Check the same frozen IDs and ranges using an indexed source projection."""
+    if (
+        candidate is None
+        or not requirement.evidence_ids
+        or candidate.path != requirement.path
+        or candidate.source_sha256 != requirement.source_sha256
+    ):
+        return False
+    by_id = {
+        e.evidence_id: e.source_range
+        for e in candidate.evidence_ranges
+        if e.path == requirement.path
+    }
+    if not set(requirement.evidence_ids) <= by_id.keys():
+        return False
+    intervals = sorted(
+        (by_id[identity].start_line, by_id[identity].end_line)
+        for identity in requirement.evidence_ids
+    )
+    starts = tuple(start for start, _ in intervals)
+    ends = tuple(accumulate((end for _, end in intervals), max))
+    for address in requirement.required_ranges:
+        position = bisect_right(starts, address.start_line) - 1
+        if position < 0 or ends[position] < address.end_line:
+            return False
+    return True
 
 
 def _coverage_delta(before: CoverageLedger, after: CoverageLedger) -> CoverageDelta:
