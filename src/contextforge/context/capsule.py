@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -303,6 +304,17 @@ class _CompilerState:
     pinned_full: set[str]
     mandatory_ranges: dict[str, tuple[SourceRange, ...]] = field(default_factory=dict)
     mandatory_ids: dict[str, frozenset[str]] = field(default_factory=dict)
+    material_cache: dict[tuple[object, ...], CapsuleMaterial | None] = field(
+        default_factory=dict
+    )
+    material_candidates: dict[int, CandidateCard] = field(default_factory=dict)
+    material_options: dict[
+        tuple[int, bool, frozenset[str]], tuple[CapsuleMaterial, ...]
+    ] = field(default_factory=dict)
+    source_lookups: dict[str, dict[str, SourceRange]] = field(default_factory=dict)
+    coverage_cache: OrderedDict[
+        tuple[int, ...], tuple[tuple[CapsuleMaterial, ...], CoverageLedger]
+    ] = field(default_factory=OrderedDict)
 
 
 def compile_context_capsule(
@@ -797,9 +809,16 @@ def _capsule_ledger(
     candidates: tuple[CandidateCard, ...],
     capsule: ContextCapsule,
     requirements: EvidenceRequirements | None = None,
+    *,
+    state: _CompilerState | None = None,
 ) -> CoverageLedger:
     """Build coverage from actual material identities, never from ranking order."""
 
+    source_material = tuple((*capsule.working_set, *capsule.task_context))
+    cache_key = tuple(id(item) for item in source_material)
+    if state is not None and cache_key in state.coverage_cache:
+        state.coverage_cache.move_to_end(cache_key)
+        return state.coverage_cache[cache_key][1]
     materials = {
         item.path: item
         for item in (*capsule.working_set, *capsule.task_context)
@@ -833,13 +852,19 @@ def _capsule_ledger(
         )
         if material is not None and (visible or not candidate.evidence_ranges):
             selected_ids.append(candidate.candidate_id)
-    return build_coverage_ledger(
+    ledger = build_coverage_ledger(
         task,
         tuple(visible_candidates),
         selected_candidate_ids=tuple(selected_ids),
         stage="materialization",
         requirements=requirements,
     )
+    if state is not None:
+        # Retain the materials with the identity key, preventing object ID reuse.
+        state.coverage_cache[cache_key] = (source_material, ledger)
+        if len(state.coverage_cache) > 128:
+            state.coverage_cache.popitem(last=False)
+    return ledger
 
 
 def _mandatory_role_ids(ledger: CoverageLedger) -> tuple[str, ...]:
@@ -855,7 +880,9 @@ def _automatic_material_options(
     required_ids: frozenset[str] = frozenset(),
 ) -> tuple[CapsuleMaterial, ...]:
     """Return the cheapest verified map/slice choices for one candidate."""
-
+    key = (id(candidate), required_evidence, required_ids)
+    if key in state.material_options:
+        return state.material_options[key]
     options = [
         material
         for material in (
@@ -890,12 +917,13 @@ def _automatic_material_options(
         )
         if material is not None
     ]
-    return tuple(
+    state.material_options[key] = tuple(
         sorted(
             options,
             key=lambda item: (item.token_count, _mode_rank(item.representation)),
         )
     )
+    return state.material_options[key]
 
 
 def _supplemental_coverage_keys(candidate: CandidateCard) -> set[str]:
@@ -965,26 +993,29 @@ def _select_automatic_evidence(
             candidates,
             capsule,
             requirements=requirements,
+            state=state,
         )
 
-    def append_for(predicate: object, *, required_evidence: bool = False) -> bool:
+    def append_for(
+        predicate: object,
+        *,
+        required_evidence: bool = False,
+        candidate_id: str | None = None,
+    ) -> bool:
         nonlocal capsule, selected_tokens
         before = current_ledger()
         choices: list[
             tuple[int, int, int, float, str, CandidateCard, CapsuleMaterial]
         ] = []
         for candidate in remaining:
+            if candidate_id is not None and candidate.candidate_id != candidate_id:
+                continue
             options = _automatic_material_options(
                 state,
                 candidate,
                 required_evidence=required_evidence,
-                required_ids=frozenset(
-                    evidence_id
-                    for requirement in (
-                        () if requirements is None else requirements.source_evidence
-                    )
-                    if requirement.candidate_id == candidate.candidate_id
-                    for evidence_id in requirement.evidence_ids
+                required_ids=state.mandatory_ids.get(
+                    candidate.candidate_id, frozenset()
                 ),
             )
             for material in options:
@@ -996,6 +1027,7 @@ def _select_automatic_evidence(
                     candidates,
                     proposed,
                     requirements=requirements,
+                    state=state,
                 )
                 if not callable(predicate) or not predicate(before, after, candidate):
                     continue
@@ -1034,6 +1066,7 @@ def _select_automatic_evidence(
                     and expected not in after.missing_requirement_ids
                 ),
                 required_evidence=True,
+                candidate_id=requirement.candidate_id,
             )
     # Mandatory roles and structural endpoints follow the source obligations.
     for role_id in _mandatory_role_ids(all_ledger):
@@ -1211,8 +1244,12 @@ def _apply_greedy_upgrades(
             # An upgrade must be monotonic for verified coverage.  It normally
             # replaces one material in place, but calculate from the ledger so
             # later representation changes cannot silently evict last coverage.
-            before = _capsule_ledger(task, candidates, capsule, requirements)
-            after = _capsule_ledger(task, candidates, candidate_capsule, requirements)
+            before = _capsule_ledger(
+                task, candidates, capsule, requirements, state=state
+            )
+            after = _capsule_ledger(
+                task, candidates, candidate_capsule, requirements, state=state
+            )
             if set(after.missing_requirement_ids) - set(before.missing_requirement_ids):
                 continue
             if set(before.covered_role_ids) - set(after.covered_role_ids) or set(
@@ -1517,6 +1554,40 @@ def _materialize(
     if candidate is not None and candidate.source_sha256 != expected_sha:
         raise ContextFreshnessError(f"candidate source identity is stale: {path}")
     _assert_fresh(state, path, expected_sha)
+    if candidate is not None:
+        state.material_candidates[id(candidate)] = candidate
+    key = (
+        path,
+        mode,
+        id(candidate),
+        requested_evidence_ids,
+        tuple(
+            (r.start_line, r.start_column, r.end_line, r.end_column)
+            for r in requested_ranges
+        ),
+    )
+    if key not in state.material_cache:
+        state.material_cache[key] = _materialize_uncached(
+            state,
+            path,
+            mode,
+            candidate,
+            requested_ranges,
+            requested_evidence_ids,
+        )
+    return state.material_cache[key]
+
+
+def _materialize_uncached(
+    state: _CompilerState,
+    path: str,
+    mode: RepresentationMode,
+    candidate: CandidateCard | None,
+    requested_ranges: tuple[SourceRange, ...],
+    requested_evidence_ids: tuple[str, ...],
+) -> CapsuleMaterial | None:
+    code_map = _code_map(state, path)
+    expected_sha = code_map.source_sha256
     ranges: tuple[CapsuleRange, ...] = ()
     provenance = ["verified-structure"]
     if mode == RepresentationMode.MAP:
@@ -1550,7 +1621,9 @@ def _materialize(
         RepresentationMode.SLICE,
         RepresentationMode.FULL,
     }:
-        known_ranges = verified_source_lookup(code_map)
+        if path not in state.source_lookups:
+            state.source_lookups[path] = verified_source_lookup(code_map)
+        known_ranges = state.source_lookups[path]
         selected_ids = {
             *(e.evidence_id for e in candidate.evidence_ranges if e.evidence_id),
             *requested_evidence_ids,

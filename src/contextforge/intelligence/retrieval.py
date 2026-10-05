@@ -169,6 +169,35 @@ _graph_query_cache: OrderedDict[
 ] = OrderedDict()
 
 
+@dataclass(frozen=True)
+class _ValidatedQueryFacts:
+    result: RetrievalResult
+    serialized_size: int
+    source_paths: tuple[str, ...]
+
+
+_validated_query_cache: OrderedDict[tuple[object, ...], _ValidatedQueryFacts] = (
+    OrderedDict()
+)
+
+
+def _isolate_query_diagnostics(result: RetrievalResult) -> RetrievalResult:
+    """Share frozen facts while copying the only mutable candidate mappings."""
+    return result.model_copy(
+        update={
+            "candidates": tuple(
+                candidate.model_copy(
+                    update={
+                        "bm25_field_scores": dict(candidate.bm25_field_scores),
+                        "topical_term_weights": dict(candidate.topical_term_weights),
+                    }
+                )
+                for candidate in result.candidates
+            )
+        }
+    )
+
+
 def _scoped_query[**P, T](
     function: Callable[P, Coroutine[Any, Any, T]],
 ) -> Callable[P, Coroutine[Any, Any, T]]:
@@ -1670,6 +1699,39 @@ async def retrieve_context_candidates(
     if index.source_snapshot_digest != active.build.source_snapshot_digest:
         raise ValueError("retrieval postings are stale for the pinned generation")
     graph = load_relationship_graph_projection(repository_root, manifest=active)
+    query_cache_key = (
+        str(Path(repository_root).resolve()),
+        active.generation_id,
+        reference.sha256,
+        graph.source_snapshot_digest,
+        active.artifacts.relationship_graph.sha256
+        if active.artifacts.relationship_graph
+        else None,
+        tuple(
+            (f.path, f.source_sha256, f.record_location, f.record_sha256)
+            for f in active.files
+        ),
+        task,
+        limit,
+        working_set,
+        diff_paths,
+    )
+    if mode == ContextPlanningMode.OFF:
+        with _retrieval_cache_lock:
+            cached_query = _validated_query_cache.get(query_cache_key)
+            if cached_query is not None:
+                _validated_query_cache.move_to_end(query_cache_key)
+        if cached_query is not None:
+            states = {f.path: f for f in active.files}
+            for path in cached_query.source_paths:
+                _load_source_facts(repository_root, active, states[path])
+            result = _isolate_query_diagnostics(cached_query.result)
+            if query_stage_timings_ms is not None:
+                query_stage_timings_ms.clear()
+                query_stage_timings_ms["validated_query_cache"] = (
+                    time.perf_counter() - stage_started
+                ) * 1000
+            return result
     view = _query_view.get()
     if view is not None and active.artifacts.relationship_graph is not None:
         view.graph_cache_key = (
@@ -1717,7 +1779,9 @@ async def retrieve_context_candidates(
     discovered_requirements = build_evidence_requirements(
         task, tuple(ranked_candidates)
     )
-    ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
+    ranked_candidates = _complementary_candidates(
+        task, index, ranked_candidates, requirements=discovered_requirements
+    )
     if query_stage_timings_ms is not None:
         query_stage_timings_ms["source_restoration"] = (
             time.perf_counter() - stage_started
@@ -1744,6 +1808,34 @@ async def retrieve_context_candidates(
             time.perf_counter() - stage_started
         ) * 1000
     if mode == ContextPlanningMode.OFF:
+        serialized_size = len(result.model_dump_json().encode("utf-8"))
+        if serialized_size <= 32 * 1024 * 1024:
+            cached_sources = (
+                ()
+                if view is None
+                else tuple(
+                    sorted(
+                        {
+                            facts.payload["path"]
+                            for facts in view.validated_sources.values()
+                        }
+                    )
+                )
+            )
+            with _retrieval_cache_lock:
+                _validated_query_cache[query_cache_key] = _ValidatedQueryFacts(
+                    _isolate_query_diagnostics(result), serialized_size, cached_sources
+                )
+                _validated_query_cache.move_to_end(query_cache_key)
+                while (
+                    len(_validated_query_cache) > 8
+                    or sum(
+                        entry.serialized_size
+                        for entry in _validated_query_cache.values()
+                    )
+                    > 64 * 1024 * 1024
+                ):
+                    _validated_query_cache.popitem(last=False)
         return result
     if provider is None:
         if mode == ContextPlanningMode.REQUIRED:
@@ -2096,6 +2188,7 @@ def _complementary_candidates(
     ranked: list[CandidateCard],
     *,
     truncate: bool = True,
+    requirements: EvidenceRequirements | None = None,
 ) -> list[CandidateCard]:
     """Admit lexical/exact seeds and their verified two-hop counterparts.
 
@@ -2167,7 +2260,8 @@ def _complementary_candidates(
     ]
     if not truncate:
         return available
-    requirements = build_evidence_requirements(task, tuple(available))
+    requirements = requirements or build_evidence_requirements(task, tuple(available))
+    obligation_counts = Counter(r.candidate_id for r in requirements.source_evidence)
     required = {r.candidate_id for r in requirements.source_evidence}
     selected = sorted(
         (c for c in available if c.match_origin == "explicit-anchor"),
@@ -2189,10 +2283,7 @@ def _complementary_candidates(
         candidate = min(
             remaining,
             key=lambda c: (
-                -sum(
-                    r.candidate_id == c.candidate_id
-                    for r in requirements.source_evidence
-                ),
+                -obligation_counts[c.candidate_id],
                 -len(
                     {
                         r.role_id
@@ -4862,6 +4953,12 @@ def build_coverage_ledger(
         )
     )
     selected_by_id = {c.candidate_id: c for c in selected}
+    source_ranges_by_candidate = {
+        c.candidate_id: {
+            e.evidence_id: e.source_range for e in c.evidence_ranges if e.path == c.path
+        }
+        for c in selected
+    }
     return CoverageLedger(
         stage=stage,
         roles=roles,
@@ -4880,7 +4977,11 @@ def build_coverage_ledger(
             sorted(
                 r.requirement_id
                 for r in requirements.source_evidence
-                if not source_requirement_covered(r, selected_by_id.get(r.candidate_id))
+                if not _source_requirement_covered(
+                    r,
+                    selected_by_id.get(r.candidate_id),
+                    source_ranges_by_candidate.get(r.candidate_id, {}),
+                )
             )
         ),
     )
@@ -4890,6 +4991,23 @@ def source_requirement_covered(
     requirement: EvidenceRequirement, candidate: CandidateCard | None
 ) -> bool:
     """Check the same frozen IDs and ranges using an indexed source projection."""
+    by_id = (
+        {}
+        if candidate is None
+        else {
+            e.evidence_id: e.source_range
+            for e in candidate.evidence_ranges
+            if e.path == requirement.path
+        }
+    )
+    return _source_requirement_covered(requirement, candidate, by_id)
+
+
+def _source_requirement_covered(
+    requirement: EvidenceRequirement,
+    candidate: CandidateCard | None,
+    by_id: dict[str | None, SourceRange],
+) -> bool:
     if (
         candidate is None
         or not requirement.evidence_ids
@@ -4897,11 +5015,6 @@ def source_requirement_covered(
         or candidate.source_sha256 != requirement.source_sha256
     ):
         return False
-    by_id = {
-        e.evidence_id: e.source_range
-        for e in candidate.evidence_ranges
-        if e.path == requirement.path
-    }
     if not set(requirement.evidence_ids) <= by_id.keys():
         return False
     intervals = sorted(
@@ -5194,24 +5307,28 @@ def _test_bindings_cover_anchors(
     requirements: EvidenceRequirements, bindings: tuple[RoleEvidenceBinding, ...]
 ) -> bool:
     test_ids = {b.candidate_id for b in bindings if b.role_id == "test"}
+    anchors = set(requirements.anchors)
+    eligible_paths = {
+        r.path for r in requirements.source_evidence if r.candidate_id in anchors
+    }
+    eligible_paths = {
+        path
+        for path in eligible_paths
+        if FILE_POLICY_REGISTRY.profile(path) == "code"
+        or FILE_POLICY_REGISTRY.is_test(path)
+    }
     code_anchors = {
         (r.candidate_id, r.anchor_symbol_id)
         for r in requirements.source_evidence
-        if r.candidate_id in requirements.anchors
-        and (
-            FILE_POLICY_REGISTRY.profile(r.path) == "code"
-            or FILE_POLICY_REGISTRY.is_test(r.path)
-        )
+        if r.candidate_id in anchors and r.path in eligible_paths
+    }
+    covered_anchors = {
+        (r.anchor_candidate_id, r.anchor_symbol_id)
+        for r in requirements.source_evidence
+        if r.role_id == "test" and r.candidate_id in test_ids
     }
     return all(
-        anchor in test_ids
-        or any(
-            r.anchor_candidate_id == anchor
-            and r.anchor_symbol_id == symbol_id
-            and r.role_id == "test"
-            and r.candidate_id in test_ids
-            for r in requirements.source_evidence
-        )
+        anchor in test_ids or (anchor, symbol_id) in covered_anchors
         for anchor, symbol_id in code_anchors
     )
 

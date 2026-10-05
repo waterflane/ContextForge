@@ -1726,6 +1726,33 @@ def test_query_stage_measurements_preserve_deterministic_result(tmp_path: Path) 
     assert all(value >= 0 for value in timings.values())
 
 
+def test_validated_query_cache_does_not_share_mutable_diagnostics(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    first = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    expected = first.model_dump(mode="json")
+    first.candidates[0].bm25_field_scores["symbols"] = -999.0
+    warm = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert warm.model_dump(mode="json") == expected
+    assert warm.provider_calls == 0
+
+
 @pytest.mark.parametrize("rejection", ["explicit_zero", "open_circuit"])
 def test_planner_preflight_rejection_counts_zero_dispatches(
     tmp_path: Path,

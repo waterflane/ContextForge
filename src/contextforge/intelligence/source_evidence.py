@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Literal
 
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange, SymbolKind
@@ -204,30 +206,77 @@ def derive_source_evidence_units(
     )
 
 
+@dataclass
+class _UnitSelectionView:
+    units: tuple[SourceEvidenceUnit, ...]
+    implementations: tuple[SourceEvidenceUnit, ...]
+    owner_indices: dict[str, tuple[int, ...]]
+    address_owners: dict[tuple[int, int], str | None] = field(default_factory=dict)
+
+
+_selection_views: OrderedDict[int, _UnitSelectionView] = OrderedDict()
+
+
+def _selection_view(units: tuple[SourceEvidenceUnit, ...]) -> _UnitSelectionView:
+    key = id(units)
+    if key in _selection_views:
+        _selection_views.move_to_end(key)
+        return _selection_views[key]
+    indices: dict[str, list[int]] = {}
+    for position, unit in enumerate(units):
+        for owner in {unit.owner_symbol_id, *unit.related_symbol_ids}:
+            indices.setdefault(owner, []).append(position)
+    view = _UnitSelectionView(
+        # Retaining the immutable tuple prevents an object ID collision.
+        units=units,
+        implementations=tuple(
+            sorted(
+                (u for u in units if u.kind == "implementation"),
+                key=lambda u: (
+                    u.source_range.end_line - u.source_range.start_line,
+                    u.evidence_id,
+                ),
+            )
+        ),
+        owner_indices={owner: tuple(values) for owner, values in indices.items()},
+    )
+    _selection_views[key] = view
+    if len(_selection_views) > 32:
+        _selection_views.popitem(last=False)
+    return view
+
+
 def select_source_evidence_units(
     units: tuple[SourceEvidenceUnit, ...], ranges: tuple[SourceRange, ...]
 ) -> tuple[SourceEvidenceUnit, ...]:
     """Select the smallest owning implementation for each observed address."""
+    if not ranges or not units:
+        return ()
     owners: set[str] = set()
-    implementations = tuple(u for u in units if u.kind == "implementation")
+    view = _selection_view(units)
     for address in ranges:
-        owner = min(
-            (
-                unit
-                for unit in implementations
-                if unit.source_range.start_line <= address.start_line
-                and address.end_line <= unit.source_range.end_line
-            ),
-            key=lambda u: (
-                u.source_range.end_line - u.source_range.start_line,
-                u.evidence_id,
-            ),
-            default=None,
-        )
-        if owner is not None:
-            owners.add(owner.owner_symbol_id)
+        address_key = (address.start_line, address.end_line)
+        if address_key not in view.address_owners:
+            owner = next(
+                (
+                    u.owner_symbol_id
+                    for u in view.implementations
+                    if u.source_range.start_line <= address.start_line
+                    and address.end_line <= u.source_range.end_line
+                ),
+                None,
+            )
+            view.address_owners[address_key] = owner
+        selected_owner = view.address_owners[address_key]
+        if selected_owner is not None:
+            owners.add(selected_owner)
     return tuple(
-        u
-        for u in units
-        if u.owner_symbol_id in owners or owners.intersection(u.related_symbol_ids)
+        units[position]
+        for position in sorted(
+            {
+                position
+                for owner in owners
+                for position in view.owner_indices.get(owner, ())
+            }
+        )
     )

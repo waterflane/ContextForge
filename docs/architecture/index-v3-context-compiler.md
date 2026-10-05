@@ -440,9 +440,24 @@ Coverage checks index IDs and range bounds rather than scanning every candidate
 range for every requirement. These caches neither disable integrity checks nor
 change deterministic retrieval output.
 
+One compiler invocation reuses material options, verified source ID lookups,
+and bounded coverage projections. Frozen source obligations select their own
+candidate instead of probing unrelated files. Cached material identities retain
+their immutable values; each new invocation scans sources and validates the
+generation again. Final prompt token counting remains independent of those
+caches and enforces the same hard budget.
+
+Repeated deterministic queries can reuse an eight-entry projection cache,
+charged against a 64 MiB total serialized-size ceiling and a 32 MiB entry ceiling.
+Its key includes the repository,
+generation, retrieval and graph identities, source record digests, and query
+arguments. Cache hits still validate index shards, graph records, and every
+previously used CodeMap. Copies isolate mutable diagnostic mappings
+between callers. Planning and fresh-process queries retain the discovery path.
+
 
 Bounded live benchmarks share a dispatch budget across index, planner, paired
-answers, and judges. The guard checks actual-call allowance, estimated input
+answers, and judges, with a separate availability-preflight phase. The guard checks actual-call allowance, estimated input
 allowance, phase ceilings, and elapsed time before dispatch. Bounded runs require
 zero transport retries and JSON repairs. Exhausted allowance remains a partial
 run with explicit stop reasons; it never establishes semantic acceptance.
