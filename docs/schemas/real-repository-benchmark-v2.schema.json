@@ -69,6 +69,40 @@
       "items": {
         "$ref": "#/$defs/aggregate"
       }
+    },
+    "dispatch_stop_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Dispatch Stop Reasons",
+      "type": "array"
+    },
+    "dispatch_calls": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dispatch Calls"
+    },
+    "dispatch_estimated_input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dispatch Estimated Input Tokens"
     }
   },
   "$defs": {
@@ -790,6 +824,27 @@
           },
           "title": "Calibration Reasons",
           "type": "array"
+        },
+        "compiler_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compiler Ms"
+        },
+        "query_stage_timings_ms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Query Stage Timings Ms",
+          "type": "object"
         }
       }
     },

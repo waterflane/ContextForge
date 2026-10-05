@@ -19,6 +19,7 @@ from contextforge.benchmarks.answers import (
     OrdinaryBaselineContextOverflow,
     run_paired_answer_regression,
 )
+from contextforge.benchmarks.dispatch_budget import BenchmarkDispatchBudget
 from contextforge.benchmarks.models import BenchmarkSourceRange
 from contextforge.benchmarks.real_repositories import (
     CandidateSelectionDiagnostic,
@@ -73,7 +74,9 @@ from contextforge.project_config import create_model_provider
 class _MeasuredProvider:
     """Count actual HTTP attempts and provider-reported tokens by phase."""
 
-    def __init__(self, provider: ModelProvider) -> None:
+    def __init__(
+        self, provider: ModelProvider, budget: BenchmarkDispatchBudget | None = None
+    ) -> None:
         self._provider = provider
         self.configuration = provider.configuration
         self.calls = 0
@@ -81,6 +84,12 @@ class _MeasuredProvider:
         self.reported_output: int | None = None
         self.estimated_input = 0
         self.records: list[RealBenchmarkPhaseUsage] = []
+        self.budget = budget
+        if budget is not None and (
+            self.configuration.retry_limit
+            or self.configuration.max_json_repair_attempts
+        ):
+            raise ValueError("bounded live dispatch requires zero retries and repairs")
 
     @property
     def provider_id(self) -> str:
@@ -100,14 +109,30 @@ class _MeasuredProvider:
         estimated = estimate_request_context(
             request, self.configuration
         ).estimated_input_tokens
+        if self.budget is not None:
+            self.budget.authorize(request.operation_id, estimated)
         self.estimated_input += estimated
         reported_in: int | None = None
         reported_out: int | None = None
         error: str | None = None
         try:
-            response = await self._provider.complete_structured(
+            pending = self._provider.complete_structured(
                 request, cancellation=cancellation
             )
+            if self.budget is None:
+                response = await pending
+            else:
+                response = await asyncio.wait_for(
+                    pending, timeout=self.budget.remaining_seconds
+                )
+        except TimeoutError as exc:
+            if self.budget is None:
+                raise
+            error = "time_limit"
+            self.calls += 1
+            assert self.budget is not None
+            self.budget.stop_reasons.append("time_limit")
+            raise ModelProviderError("benchmark time limit reached") from exc
         except ModelProviderError as exc:
             error = type(exc).__name__
             self.calls += (
@@ -137,6 +162,10 @@ class _MeasuredProvider:
                     self.reported_output = (self.reported_output or 0) + reported_out
             return response
         finally:
+            if self.budget is not None:
+                self.budget.record(
+                    request.operation_id, self.calls - calls_before, estimated
+                )
             self.records.append(
                 RealBenchmarkPhaseUsage(
                     phase=request.operation_id,
@@ -394,15 +423,19 @@ async def _evaluate_task(
     _validate_reviewed_sources(root, task)
     started = time.perf_counter()
     retrieval_started = time.perf_counter()
+    query_stages: dict[str, float] = {}
     retrieval = await retrieve_context_candidates(
         root,
         task.task,
         limit=20,
+        query_stage_timings_ms=query_stages,
         provider=provider if mode is RealBenchmarkMode.PLANNED else None,
         planning_mode="auto" if mode is RealBenchmarkMode.PLANNED else "off",
     )
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1_000)
+    compiler_started = time.perf_counter()
     compiled = compile_context_capsule(root, task.task, retrieval, budget=budget)
+    compiler_ms = round((time.perf_counter() - compiler_started) * 1000)
     paths, ranges = _materialized(compiled)
     phase_errors: tuple[str, ...] = ()
     try:
@@ -422,6 +455,8 @@ async def _evaluate_task(
     sufficiency = compiled.compilation_sufficiency
     observation = RealBenchmarkObservation(
         mode=mode,
+        compiler_ms=compiler_ms,
+        query_stage_timings_ms=query_stages,
         candidate_diagnostics=_candidate_diagnostics(retrieval),
         evidence_transitions=_evidence_transitions(
             root, task, retrieval, compiled, ranges
@@ -506,6 +541,7 @@ async def run_pinned_real_repository_benchmark(
     hash_seed_reloads: int = 100,
     semantic_max_files: int | None = None,
     semantic_max_requests: int = 4_096,
+    dispatch_budget: BenchmarkDispatchBudget | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> RealRepositoryBenchmarkReport:
     """Build once per clone, then evaluate both retrieval modes and paired answers."""
@@ -544,6 +580,15 @@ async def run_pinned_real_repository_benchmark(
         staging.write_text(
             json.dumps(
                 {
+                    "dispatch_stop_reasons": []
+                    if dispatch_budget is None
+                    else dispatch_budget.stop_reasons,
+                    "dispatch_calls": None
+                    if dispatch_budget is None
+                    else dispatch_budget.calls,
+                    "dispatch_estimated_input_tokens": None
+                    if dispatch_budget is None
+                    else dispatch_budget.estimated_input_tokens,
                     "status": "partial",
                     "acceptance": "unverified",
                     "suite_name": manifest.suite_name,
@@ -594,7 +639,9 @@ async def run_pinned_real_repository_benchmark(
                 continue
             try:
                 with temporary_read_only_clone(source, repository.revision) as root:
-                    provider = _MeasuredProvider(_new_provider(configuration))
+                    provider = _MeasuredProvider(
+                        _new_provider(configuration), dispatch_budget
+                    )
                     try:
                         announce(
                             f"{repository.repository_id} repeat {repetition}: "
@@ -923,6 +970,15 @@ async def run_pinned_real_repository_benchmark(
     safe_endpoint = urlunsplit((endpoint.scheme, host, endpoint.path, "", ""))
     result = result.model_copy(
         update={
+            "dispatch_stop_reasons": ()
+            if dispatch_budget is None
+            else tuple(dispatch_budget.stop_reasons),
+            "dispatch_calls": None
+            if dispatch_budget is None
+            else dispatch_budget.calls,
+            "dispatch_estimated_input_tokens": None
+            if dispatch_budget is None
+            else dispatch_budget.estimated_input_tokens,
             "provider_endpoint": safe_endpoint,
             "model_id": configuration.model_id,
             "requested_context_window": configuration.context_window,

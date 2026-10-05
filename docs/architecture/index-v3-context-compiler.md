@@ -416,3 +416,14 @@ verified graph routing uses an eight-entry LRU with the same provenance boundary
 Coverage checks index IDs and range bounds rather than scanning every candidate
 range for every requirement. These caches neither disable integrity checks nor
 change deterministic retrieval output.
+
+
+Bounded live benchmarks share a dispatch budget across index, planner, paired
+answers, and judges. The guard checks actual-call allowance, estimated input
+allowance, phase ceilings, and elapsed time before dispatch. Bounded runs require
+zero transport retries and JSON repairs. Exhausted allowance remains a partial
+run with explicit stop reasons; it never establishes semantic acceptance.
+Compiler duration is reported separately. Optional query stage measurements are
+returned through a caller-owned dictionary, leaving deterministic retrieval
+results independent of clock readings. Existing reports read these fields with
+empty or absent defaults.

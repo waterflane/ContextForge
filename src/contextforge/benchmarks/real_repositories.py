@@ -259,6 +259,10 @@ class RealBenchmarkObservation(RealBenchmarkModel):
     semantic_offline_ms: NonNegativeInt | None = None
     deterministic_warm_query_ms: NonNegativeInt | None = None
     agentic_planner_ms: NonNegativeInt | None = None
+    compiler_ms: NonNegativeInt | None = None
+    query_stage_timings_ms: dict[str, Annotated[float, Field(ge=0)]] = Field(
+        default_factory=dict
+    )
     final_answer_ms: NonNegativeInt | None = None
     final_answer_provider_calls: NonNegativeInt | None = None
     final_answer_estimated_input_tokens: NonNegativeInt | None = None
@@ -359,6 +363,10 @@ class RealBenchmarkTaskReport(RealBenchmarkModel):
     semantic_offline_ms: NonNegativeInt | None = None
     deterministic_warm_query_ms: NonNegativeInt | None = None
     agentic_planner_ms: NonNegativeInt | None = None
+    compiler_ms: NonNegativeInt | None = None
+    query_stage_timings_ms: dict[str, Annotated[float, Field(ge=0)]] = Field(
+        default_factory=dict
+    )
     final_answer_ms: NonNegativeInt | None = None
     final_answer_provider_calls: NonNegativeInt | None = None
     final_answer_estimated_input_tokens: NonNegativeInt | None = None
@@ -497,6 +505,9 @@ class RealRepositoryBenchmarkReport(RealBenchmarkModel):
     model_id: str | None = None
     requested_context_window: NonNegativeInt | None = None
     reasoning_effort: str | None = None
+    dispatch_stop_reasons: tuple[str, ...] = ()
+    dispatch_calls: NonNegativeInt | None = None
+    dispatch_estimated_input_tokens: NonNegativeInt | None = None
     builds: tuple[RealBenchmarkBuildReport, ...] = ()
     runs: tuple[RealBenchmarkTaskReport, ...]
     aggregates: tuple[RealBenchmarkAggregate, ...]
@@ -664,6 +675,8 @@ def evaluate_real_repository_observation(
         planner_messages=observation.planner_messages,
         latency_ms=observation.latency_ms,
         cold_structural_ms=observation.cold_structural_ms,
+        compiler_ms=observation.compiler_ms,
+        query_stage_timings_ms=observation.query_stage_timings_ms,
         semantic_offline_ms=observation.semantic_offline_ms,
         deterministic_warm_query_ms=observation.deterministic_warm_query_ms,
         agentic_planner_ms=observation.agentic_planner_ms,

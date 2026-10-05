@@ -8,6 +8,7 @@ import json
 import math
 import re
 import threading
+import time
 from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Callable, Coroutine
@@ -1605,6 +1606,7 @@ async def retrieve_context_candidates(
     planning_max_pool_candidates: int = PLANNING_MAX_POOL_CANDIDATES,
     planning_request_timeout_seconds: float = PLANNING_REQUEST_TIMEOUT_SECONDS,
     cancellation: asyncio.Event | None = None,
+    query_stage_timings_ms: dict[str, float] | None = None,
 ) -> RetrievalResult:
     """Retrieve candidates and optionally ask the configured model for evidence."""
 
@@ -1652,6 +1654,7 @@ async def retrieve_context_candidates(
     from contextforge.intelligence.indexer import load_relationship_graph_projection
     from contextforge.intelligence.store import load_manifest
 
+    stage_started = time.perf_counter()
     active = manifest if manifest is not None else load_manifest(repository_root)
     if active.schema_version != 4:
         raise ValueError("retrieval requires an Index v3.1 generation")
@@ -1675,6 +1678,12 @@ async def retrieve_context_candidates(
             view.neighbors = _graph_query_cache.get(view.graph_cache_key)
             if view.neighbors is not None:
                 _graph_query_cache.move_to_end(view.graph_cache_key)
+    if query_stage_timings_ms is not None:
+        query_stage_timings_ms.clear()
+        query_stage_timings_ms["load_and_digest_checks"] = (
+            time.perf_counter() - stage_started
+        ) * 1000
+    stage_started = time.perf_counter()
     ranked_candidates = _rank_candidates(
         task,
         index,
@@ -1682,6 +1691,11 @@ async def retrieve_context_candidates(
         working_set=working_set,
         diff_paths=diff_paths,
     )
+    if query_stage_timings_ms is not None:
+        query_stage_timings_ms["bm25_and_graph_routing"] = (
+            time.perf_counter() - stage_started
+        ) * 1000
+    stage_started = time.perf_counter()
     ranked_candidates = _resolve_source_symbols(
         repository_root, active, index, task, ranked_candidates
     )
@@ -1696,6 +1710,11 @@ async def retrieve_context_candidates(
         repository_root, active, index, task, ranked_candidates
     )
     ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
+    if query_stage_timings_ms is not None:
+        query_stage_timings_ms["source_restoration"] = (
+            time.perf_counter() - stage_started
+        ) * 1000
+    stage_started = time.perf_counter()
     candidates = ranked_candidates[:limit]
     requirements = build_evidence_requirements(
         task, tuple(ranked_candidates[:planning_max_pool_candidates])
@@ -1714,6 +1733,10 @@ async def retrieve_context_candidates(
         coverage_history=(retrieval_ledger,),
         plan_requested=mode != ContextPlanningMode.OFF,
     )
+    if query_stage_timings_ms is not None:
+        query_stage_timings_ms["requirements_and_coverage"] = (
+            time.perf_counter() - stage_started
+        ) * 1000
     if mode == ContextPlanningMode.OFF:
         return result
     if provider is None:
@@ -1729,7 +1752,8 @@ async def retrieve_context_candidates(
                 ),
             }
         )
-    return await _plan_evidence(
+    stage_started = time.perf_counter()
+    planned = await _plan_evidence(
         provider,
         result,
         Path(repository_root),
@@ -1753,6 +1777,9 @@ async def retrieve_context_candidates(
         legacy_alias=planning_mode is None and rerank,
         cancellation=cancellation,
     )
+    if query_stage_timings_ms is not None:
+        query_stage_timings_ms["planner"] = (time.perf_counter() - stage_started) * 1000
+    return planned
 
 
 def _rank_candidates(

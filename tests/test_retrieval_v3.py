@@ -1693,3 +1693,34 @@ def test_retrieval_internal_guards_and_tokenization() -> None:
             working_set=(),
             diff_paths=(),
         )
+
+
+def test_query_stage_measurements_preserve_deterministic_result(tmp_path: Path) -> None:
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    timings = {"previous_query": 999.0}
+    measured = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+            query_stage_timings_ms=timings,
+        )
+    )
+    ordinary = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert measured == ordinary
+    assert set(timings) == {
+        "load_and_digest_checks",
+        "bm25_and_graph_routing",
+        "source_restoration",
+        "requirements_and_coverage",
+    }
+    assert all(value >= 0 for value in timings.values())
