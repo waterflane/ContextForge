@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from typing import Literal
 
 import pytest
@@ -242,3 +243,32 @@ def test_concurrent_phase_records_count_only_their_own_dispatch(
         == budget.estimated_input_tokens
         == sum(record.estimated_input_tokens for record in measured.records)
     )
+
+
+@pytest.mark.parametrize("bounded", [True, False])
+def test_bounded_dispatch_disables_scheduler_repairs(bounded: bool) -> None:
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="fixture",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=lambda _request, _attempt: '{"schema_version":1,"ready":true}',
+    )
+    budget = BenchmarkDispatchBudget(20, 500_000, 1800) if bounded else None
+    measured = _MeasuredProvider(provider, budget)
+    repair = replace(
+        request("semantic-card-repair-fixture"), purpose="semantic-card-repair"
+    )
+    if bounded:
+        with pytest.raises(BenchmarkBudgetExceeded, match="repair_disabled"):
+            asyncio.run(measured.complete_structured(repair))
+        assert budget is not None
+        assert budget.calls == budget.estimated_input_tokens == provider.call_count == 0
+        assert budget.stop_reasons == ["repair_disabled"]
+    else:
+        response = asyncio.run(measured.complete_structured(repair))
+        assert response.value == Response(ready=True)
+        assert measured.calls == provider.call_count == 1

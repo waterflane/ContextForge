@@ -19,7 +19,10 @@ from contextforge.benchmarks.answers import (
     OrdinaryBaselineContextOverflow,
     run_paired_answer_regression,
 )
-from contextforge.benchmarks.dispatch_budget import BenchmarkDispatchBudget
+from contextforge.benchmarks.dispatch_budget import (
+    BenchmarkBudgetExceeded,
+    BenchmarkDispatchBudget,
+)
 from contextforge.benchmarks.models import BenchmarkSourceRange
 from contextforge.benchmarks.real_repositories import (
     CandidateSelectionDiagnostic,
@@ -104,6 +107,10 @@ class _MeasuredProvider:
         *,
         cancellation: asyncio.Event | None = None,
     ) -> ModelResponse:
+        if self.budget is not None and request.purpose.endswith("-repair"):
+            if "repair_disabled" not in self.budget.stop_reasons:
+                self.budget.stop_reasons.append("repair_disabled")
+            raise BenchmarkBudgetExceeded("repair_disabled")
         started = time.perf_counter()
         actual_calls = 0
         estimated = estimate_request_context(
