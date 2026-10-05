@@ -400,3 +400,10 @@ Other file matches remain optional. Materialization recovers selected canonical
 IDs from verified CodeMaps when their complete ranges are physically covered.
 Unknown IDs receive no credit. Upgrades preserve the same frozen obligations;
 MAP/SUMMARY cannot close behavioral source requirements.
+
+Planner search strings are recorded separately from the original QueryIntent.
+Search can discover evidence from an empty pool, but rewritten identifiers never
+become explicit user anchors. New candidates are resolved against the original
+anchors and immutable CodeMaps. Discovery extends frozen requirements and
+retains prior obligations, roles, and ambiguity. A broad task without grounded
+topical support remains insufficient, regardless of the planner's declaration.

@@ -3048,9 +3048,10 @@ async def _plan_evidence_session(
             *,
             current_round: int = round_index,
             current_must_finalize: bool = must_finalize,
+            current_result: RetrievalResult = result,
         ) -> ModelRequest:
             return _planner_request(
-                result,
+                current_result,
                 current_candidates,
                 current_previews,
                 modules=current_modules,
@@ -3257,6 +3258,10 @@ async def _plan_evidence_session(
                     )
                     action_history.extend(history)
                     coverage_history.extend(action_ledgers)
+                    if action_ledgers and action_ledgers[-1].requirements is not None:
+                        result = result.model_copy(
+                            update={"requirements": action_ledgers[-1].requirements}
+                        )
                     if violation is not None:
                         return _planning_failure(
                             result,
@@ -3595,6 +3600,37 @@ def _execute_planner_actions(
         selected = selected[:remaining]
         if selected:
             selected = tuple(
+                _resolve_source_symbols(
+                    repository_root, manifest, index, task, list(selected)
+                )
+            )
+            original = parse_query_intent(task)
+            selected = tuple(
+                candidate.model_copy(
+                    update={
+                        "match_origin": (
+                            "explicit-anchor"
+                            if candidate.resolved_symbols
+                            or any(
+                                candidate.path.casefold() == anchor.casefold()
+                                or candidate.path.casefold().endswith(
+                                    "/" + anchor.casefold()
+                                )
+                                for anchor in original.explicit_anchors
+                            )
+                            else "grounded-semantic"
+                            if candidate.matched_concepts
+                            and any(
+                                e.strength == "grounded"
+                                for e in candidate.evidence_ranges
+                            )
+                            else "lexical-discovery"
+                        )
+                    }
+                )
+                for candidate in selected
+            )
+            selected = tuple(
                 _restore_exact_identifier_evidence(
                     repository_root, manifest, index, list(selected)
                 )
@@ -3605,6 +3641,43 @@ def _execute_planner_actions(
                 continue
             pool[candidate.candidate_id] = candidate
             added.append(candidate.candidate_id)
+        restored = _restore_required_source_evidence(
+            repository_root, manifest, index, task, list(pool.values())
+        )
+        pool.update((c.candidate_id, c) for c in restored)
+        discovered_requirements = build_evidence_requirements(
+            task, tuple(pool.values())
+        )
+        if requirements is not None:
+            obligations = {
+                r.requirement_id: r for r in discovered_requirements.source_evidence
+            }
+            obligations.update(
+                (r.requirement_id, r) for r in requirements.source_evidence
+            )
+            requirements = requirements.model_copy(
+                update={
+                    "anchors": tuple(
+                        dict.fromkeys(
+                            (*requirements.anchors, *discovered_requirements.anchors)
+                        )
+                    ),
+                    "source_evidence": tuple(
+                        obligations[k] for k in sorted(obligations)
+                    ),
+                    "topic_grounding": discovered_requirements.topic_grounding
+                    if requirements.topic_grounding == "unresolved"
+                    else requirements.topic_grounding,
+                    "ambiguous_identifiers": tuple(
+                        sorted(
+                            set(requirements.ambiguous_identifiers)
+                            | set(discovered_requirements.ambiguous_identifiers)
+                        )
+                    ),
+                }
+            )
+        else:
+            requirements = discovered_requirements
         after = build_coverage_ledger(
             task,
             tuple(pool.values()),
@@ -3617,6 +3690,7 @@ def _execute_planner_actions(
                 del pool[candidate_id]
             added = []
             after = before
+            requirements = before.requirements
             requires_complement = True
         else:
             discovered.extend(added)
@@ -3625,6 +3699,11 @@ def _execute_planner_actions(
                 "action": action.action,
                 "result_candidate_ids": added,
                 "result_count": len(added),
+                **(
+                    {"search_query": query}
+                    if action.action in {"search", "symbol"}
+                    else {}
+                ),
                 "coverage_delta": delta.model_dump(mode="json"),
                 **(
                     {"expansions": tuple(expansion_results)}
@@ -4902,10 +4981,12 @@ def build_evidence_requirements(
         tuple(
             c
             for c in candidates
-            if c.resolved_symbols
-            or c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
+            if c.exact_group in {"exact_path", "exact_symbol", "exact_qualified_symbol"}
             and (
-                c.resolved_symbols
+                any(
+                    s.query_identifier.casefold() in identifiers
+                    for s in c.resolved_symbols
+                )
                 or identifiers & {s.casefold() for s in c.matched_symbols}
                 or any(
                     c.path.casefold() == value
@@ -4917,7 +4998,16 @@ def build_evidence_requirements(
         if identifiers
         else ()
     )
-    ambiguous = tuple(sorted({q for c in candidates for q in c.ambiguous_identifiers}))
+    ambiguous = tuple(
+        sorted(
+            {
+                q
+                for c in candidates
+                for q in c.ambiguous_identifiers
+                if q.casefold() in identifiers
+            }
+        )
+    )
     exact_anchor = bool(anchors) and not ambiguous
     if not anchors:
         relevant = [
@@ -5031,8 +5121,13 @@ def build_evidence_requirements(
         )
 
     for anchor in anchors:
-        if anchor.resolved_symbols:
-            for resolved in anchor.resolved_symbols:
+        resolved_anchors = tuple(
+            s
+            for s in anchor.resolved_symbols
+            if s.query_identifier.casefold() in identifiers
+        )
+        if resolved_anchors:
+            for resolved in resolved_anchors:
                 sid = resolved.symbol_id
                 add(
                     anchor,

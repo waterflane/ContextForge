@@ -164,6 +164,12 @@ def test_planned_search_can_start_with_an_empty_lexical_pool(tmp_path: Path) -> 
     assert result.evidence_plan is not None
     assert result.evidence_plan.sufficiency == "insufficient"
     assert result.candidates[0].path == "worker.py"
+    assert result.candidates[0].resolved_symbols == ()
+    assert result.candidates[0].match_origin != "explicit-anchor"
+    assert result.requirements is not None
+    assert result.requirements.query_intent is not None
+    assert result.requirements.query_intent.original_task == "unmappedword"
+    assert result.requirements.query_intent.explicit_anchors == ("unmappedword",)
 
 
 @pytest.mark.parametrize("record", ["codemap", "graph-header", "graph-shard"])
