@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 from typing import Literal
 
-from contextforge.intelligence.codemap import FileCodeMap, SourceRange
+from contextforge.intelligence.codemap import FileCodeMap, SourceRange, SymbolKind
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.models import IndexModel, Sha256
 
 
@@ -13,10 +14,19 @@ class SourceEvidenceUnit(IndexModel):
     path: str
     source_sha256: Sha256
     owner_symbol_id: str
-    kind: Literal["implementation", "call", "reference", "callback", "decorator"]
+    kind: Literal[
+        "implementation",
+        "call",
+        "reference",
+        "callback",
+        "decorator",
+        "initializer",
+        "test-usage",
+    ]
     source_range: SourceRange
     evidence_id: str
     basis: Literal["verified-implementation", "observed-syntax"]
+    related_symbol_ids: tuple[str, ...] = ()
 
 
 def source_evidence_id(
@@ -37,9 +47,18 @@ def derive_source_evidence_units(
 
     def add(
         owner: str,
-        kind: Literal["implementation", "call", "reference", "callback", "decorator"],
+        kind: Literal[
+            "implementation",
+            "call",
+            "reference",
+            "callback",
+            "decorator",
+            "initializer",
+            "test-usage",
+        ],
         identity: str,
         address: SourceRange,
+        related: tuple[str, ...] = (),
     ) -> None:
         evidence_id = source_evidence_id(
             code_map.path, code_map.source_sha256, identity, address
@@ -54,6 +73,7 @@ def derive_source_evidence_units(
             basis="verified-implementation"
             if kind == "implementation"
             else "observed-syntax",
+            related_symbol_ids=related,
         )
 
     for symbol in code_map.symbols:
@@ -67,6 +87,82 @@ def derive_source_evidence_units(
             f"implementation:{symbol.symbol_id}",
             implementation,
         )
+        if symbol.kind in {SymbolKind.VARIABLE, SymbolKind.CONSTANT}:
+            readers = tuple(
+                sorted(
+                    s.symbol_id
+                    for s in code_map.symbols
+                    if s.parent_symbol_id == symbol.parent_symbol_id
+                    and any(
+                        r.observed_name == "this." + symbol.name
+                        for r in s.direct_references
+                    )
+                )
+            )
+            add(
+                symbol.symbol_id,
+                "initializer",
+                f"initializer:{symbol.symbol_id}",
+                implementation,
+                readers,
+            )
+        if FILE_POLICY_REGISTRY.is_test(code_map.path) and (
+            symbol.direct_calls or symbol.direct_references
+        ):
+            add(
+                symbol.symbol_id,
+                "test-usage",
+                f"test-usage:{symbol.symbol_id}",
+                implementation,
+            )
+        is_constructor = symbol.kind == SymbolKind.CONSTRUCTOR or (
+            symbol.parent_symbol_id is not None
+            and (
+                (code_map.language == "Python" and symbol.name == "__init__")
+                or (
+                    code_map.language in {"JavaScript", "TypeScript"}
+                    and symbol.name == "constructor"
+                )
+            )
+        )
+        if is_constructor:
+            receiver = (
+                symbol.parameters[0].name
+                if code_map.language == "Python" and symbol.parameters
+                else "this"
+            )
+            for initialization in symbol.initializations:
+                prefix = receiver + "."
+                if not initialization.observed_name.startswith(prefix):
+                    continue
+                attribute = initialization.observed_name[len(prefix) :]
+                readers = tuple(
+                    sorted(
+                        s.symbol_id
+                        for s in code_map.symbols
+                        if s.parent_symbol_id == symbol.parent_symbol_id
+                        and any(
+                            r.observed_name
+                            == (
+                                (
+                                    s.parameters[0].name
+                                    if code_map.language == "Python" and s.parameters
+                                    else "this"
+                                )
+                                + "."
+                                + attribute
+                            )
+                            for r in s.direct_references
+                        )
+                    )
+                )
+                add(
+                    symbol.symbol_id,
+                    "initializer",
+                    f"initializer:{symbol.symbol_id}:{initialization.observed_name}",
+                    initialization.source_range,
+                    readers,
+                )
         for decorator in symbol.decorators:
             add(
                 symbol.symbol_id,
@@ -130,4 +226,8 @@ def select_source_evidence_units(
         )
         if owner is not None:
             owners.add(owner.owner_symbol_id)
-    return tuple(u for u in units if u.owner_symbol_id in owners)
+    return tuple(
+        u
+        for u in units
+        if u.owner_symbol_id in owners or owners.intersection(u.related_symbol_ids)
+    )

@@ -1255,13 +1255,15 @@
             "call",
             "reference",
             "callback",
-            "decorator"
+            "decorator",
+            "initializer",
+            "test-usage"
           ],
           "title": "Kind",
           "type": "string"
         },
         "source_range": {
-          "$ref": "#/$defs/range"
+          "$ref": "#/$defs/SourceRange"
         },
         "evidence_id": {
           "title": "Evidence Id",
@@ -1274,6 +1276,14 @@
           ],
           "title": "Basis",
           "type": "string"
+        },
+        "related_symbol_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Symbol Ids",
+          "type": "array"
         }
       },
       "required": [

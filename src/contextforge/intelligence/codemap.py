@@ -100,6 +100,13 @@ class DecoratorRecord(IndexModel):
     source_range: SourceRange
 
 
+class InitializationOccurrence(IndexModel):
+    """An assignment observed in source, without asserting runtime ordering."""
+
+    observed_name: str = Field(min_length=1, max_length=500)
+    source_range: SourceRange
+
+
 class ParameterRecord(IndexModel):
     """One statically declared Python parameter."""
 
@@ -319,6 +326,7 @@ class SymbolRecord(IndexModel):
     contained_methods: tuple[str, ...] = ()
     direct_calls: tuple[CallReference, ...] = ()
     direct_references: tuple[ReferenceOccurrence, ...] = ()
+    initializations: tuple[InitializationOccurrence, ...] = ()
     raised_exceptions: tuple[str, ...] = ()
     configuration_keys: tuple[str, ...] = ()
     visibility: Visibility = "unknown"
@@ -377,6 +385,20 @@ class SymbolRecord(IndexModel):
             reference_keys
         ) != len(set(reference_keys)):
             raise ValueError("direct references must be unique and canonical")
+        initialization_keys = tuple(
+            (*_range_key(item.source_range), item.observed_name)
+            for item in self.initializations
+        )
+        if initialization_keys != tuple(sorted(set(initialization_keys))):
+            raise ValueError("initializations must be unique and canonical")
+        start = (self.declaration_range.start_line, self.declaration_range.start_column)
+        end = (self.declaration_range.end_line, self.declaration_range.end_column)
+        if any(
+            (item.source_range.start_line, item.source_range.start_column) < start
+            or (item.source_range.end_line, item.source_range.end_column) > end
+            for item in self.initializations
+        ):
+            raise ValueError("initializations must belong to the declaring symbol")
         return self
 
     @property
@@ -655,6 +677,7 @@ def _all_source_ranges(code_map: FileCodeMap) -> tuple[SourceRange, ...]:
             for argument in item.callback_arguments
         )
         ranges.extend(item.source_range for item in symbol.direct_references)
+        ranges.extend(item.source_range for item in symbol.initializations)
     return tuple(ranges)
 
 

@@ -46,14 +46,20 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 9, Python analyzer version 6,
-and polyglot analyzer version 10 extract imports, calls, and non-call references
+Fallback analyzer version 4, resolver version 9, Python analyzer version 8,
+and polyglot analyzer version 11 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
 best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
+Constructor assignment occurrences retain exact source positions. Derived
+retrieval version 13 includes initializer and complete test-usage units. A member
+read can require an observed constructor assignment in the same lexical class;
+this records source syntax, not runtime initialization order. Parent class bodies
+remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
+reuse stored CodeMaps and publish a new immutable generation.
 
 Semantic Card analyzer version 9 (`semantic-card-v3.6`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of

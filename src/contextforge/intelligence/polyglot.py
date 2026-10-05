@@ -16,6 +16,7 @@ from contextforge.intelligence.codemap import (
     CallReference,
     FileCodeMap,
     ImportRecord,
+    InitializationOccurrence,
     ParserDiagnostic,
     ReferenceOccurrence,
     SourceRange,
@@ -29,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="10",
+    analyzer_version="11",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -710,7 +711,27 @@ def _attach_occurrences(
         for child in node.named_children:
             visit_calls(child)
 
+    initializations: dict[str, list[InitializationOccurrence]] = {}
+
     def visit_references(node: Node) -> None:
+        if node.type == "assignment_expression" and not node.has_error:
+            left = node.child_by_field_name("left")
+            operator = node.child_by_field_name("operator") or next(
+                (child for child in node.children if child.type == "="), None
+            )
+            selected_owner = owner(node)
+            if (
+                left is not None
+                and selected_owner is not None
+                and operator is not None
+                and _text(source, operator) == "="
+                and re.fullmatch(r"this\.[A-Za-z_$][\w$]*", _text(source, left))
+            ):
+                initializations.setdefault(selected_owner.symbol_id, []).append(
+                    InitializationOccurrence(
+                        observed_name=_text(source, left), source_range=_range(node)
+                    )
+                )
         if (
             node.type in rules.reference_captures
             and not node.has_error
@@ -737,6 +758,19 @@ def _attach_occurrences(
                 and not _is_declaration_name(node)
             ):
                 observed = _text(source, node).strip()
+                member = node.parent
+                if member is not None and member.type == "member_expression":
+                    receiver = member.child_by_field_name("object")
+                    if receiver is not None and receiver.type == "this":
+                        assignment = member.parent
+                        if (
+                            assignment is not None
+                            and assignment.type == "assignment_expression"
+                            and assignment.child_by_field_name("left") == member
+                        ):
+                            return
+                        observed = _text(source, member).strip()
+                        region = _range(member)
                 if observed and len(observed) <= 500:
                     references[selected_owner.symbol_id].append(
                         ReferenceOccurrence(
@@ -787,6 +821,7 @@ def _attach_occurrences(
                         ),
                     )
                 ),
+                "initializations": tuple(initializations.get(item.symbol_id, ())),
             }
         )
         for item in symbols

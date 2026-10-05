@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 12
+RETRIEVAL_BUILD_VERSION = 13
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -2838,6 +2838,15 @@ def _restore_required_source_evidence(
                     target_evidence_ids=tuple(sorted(target_ids)),
                 )
             )
+    for candidate in candidates:
+        for unit in candidate.source_units:
+            if unit.kind in {"initializer", "test-usage"}:
+                additions[candidate.path][unit.evidence_id] = CandidateEvidenceRange(
+                    path=candidate.path,
+                    source_range=unit.source_range,
+                    evidence_id=unit.evidence_id,
+                    strength="verified",
+                )
     return [
         c.model_copy(
             update={
@@ -5251,9 +5260,12 @@ def build_evidence_requirements(
                 u
                 for u in candidate.source_units
                 if u.owner_symbol_id == anchor_symbol_id
+                or anchor_symbol_id in u.related_symbol_ids
             )
         mandatory_units = tuple(
-            u for u in units if u.kind in {"implementation", "decorator"}
+            u
+            for u in units
+            if u.kind in {"implementation", "decorator", "initializer", "test-usage"}
         )
         evidence_ids = tuple(
             sorted({*evidence_ids, *(u.evidence_id for u in mandatory_units)})

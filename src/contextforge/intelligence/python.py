@@ -19,6 +19,7 @@ from contextforge.intelligence.codemap import (
     ExportRecord,
     FileCodeMap,
     ImportRecord,
+    InitializationOccurrence,
     ParameterRecord,
     ParserDiagnostic,
     ReferenceOccurrence,
@@ -34,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="7",
+    analyzer_version="8",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -70,6 +71,32 @@ class _DirectFactVisitor(ast.NodeVisitor):
         self.references: list[ReferenceOccurrence] = []
         self.raises: list[tuple[SourceRange, str]] = []
         self.configuration_keys: set[str] = set()
+        self.initializations: list[InitializationOccurrence] = []
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            name = _dotted_name(target)
+            if name is not None and isinstance(target, ast.Attribute):
+                self.initializations.append(
+                    InitializationOccurrence(
+                        observed_name=name, source_range=_node_range(node)
+                    )
+                )
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        name = _dotted_name(node.target)
+        if (
+            node.value is not None
+            and name is not None
+            and isinstance(node.target, ast.Attribute)
+        ):
+            self.initializations.append(
+                InitializationOccurrence(
+                    observed_name=name, source_range=_node_range(node)
+                )
+            )
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return None
@@ -490,6 +517,7 @@ def _build_symbols(
                 contained_methods=contained_methods,
                 direct_calls=tuple(direct.calls),
                 direct_references=tuple(direct.references),
+                initializations=tuple(direct.initializations),
                 raised_exceptions=tuple(name for _, name in direct.raises),
                 configuration_keys=tuple(sorted(direct.configuration_keys)),
                 visibility="private" if draft.name.startswith("_") else "public",
@@ -549,6 +577,9 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
         )
     )
     visitor.raises.sort(key=lambda item: (*_range_tuple(item[0]), item[1]))
+    visitor.initializations.sort(
+        key=lambda item: (*_range_tuple(item.source_range), item.observed_name)
+    )
     return visitor
 
 
