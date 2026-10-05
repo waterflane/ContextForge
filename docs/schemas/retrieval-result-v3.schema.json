@@ -833,10 +833,21 @@
       "properties": {
         "roles": {
           "items": {
-            "$ref": "#/$defs/task_role"
+            "$ref": "#/$defs/TaskEvidenceRole"
           },
           "title": "Roles",
           "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "anchors": {
           "default": [],
@@ -854,6 +865,22 @@
           "title": "Source Evidence",
           "type": "array"
         },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
+        },
+        "unresolved_dependency_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Dependency Ids",
+          "type": "array"
+        },
         "topic_grounding": {
           "default": "unresolved",
           "enum": [
@@ -863,25 +890,6 @@
           ],
           "title": "Topic Grounding",
           "type": "string"
-        },
-        "ambiguous_identifiers": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Ambiguous Identifiers",
-          "type": "array"
-        },
-        "query_intent": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QueryIntent"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "required": [
@@ -923,13 +931,22 @@
           "title": "Evidence Ids",
           "type": "array"
         },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
+        },
         "basis": {
           "enum": [
             "exact-symbol",
             "verified-call",
             "verified-source-test",
             "verified-config",
-            "task-syntax"
+            "task-syntax",
+            "verified-behavior"
           ],
           "title": "Basis",
           "type": "string"
@@ -949,14 +966,6 @@
           ],
           "default": null,
           "title": "Anchor Symbol Id"
-        },
-        "required_ranges": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/range"
-          },
-          "title": "Required Ranges",
-          "type": "array"
         }
       },
       "required": [
@@ -1194,7 +1203,7 @@
         "roles": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/task_role"
+            "$ref": "#/$defs/TaskEvidenceRole"
           },
           "title": "Roles",
           "type": "array"
@@ -1206,6 +1215,16 @@
           },
           "title": "Facet Terms",
           "type": "array"
+        },
+        "evidence_scope": {
+          "default": "unknown",
+          "enum": [
+            "lookup",
+            "behavior",
+            "unknown"
+          ],
+          "title": "Evidence Scope",
+          "type": "string"
         }
       },
       "required": [

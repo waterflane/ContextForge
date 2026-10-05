@@ -528,6 +528,7 @@ class QueryIntent(IndexModel):
     explicit_anchors: tuple[str, ...] = ()
     roles: tuple[TaskEvidenceRole, ...] = ()
     facet_terms: tuple[str, ...] = ()
+    evidence_scope: Literal["lookup", "behavior", "unknown"] = "unknown"
 
 
 class EvidenceRequirement(IndexModel):
@@ -546,6 +547,7 @@ class EvidenceRequirement(IndexModel):
         "verified-source-test",
         "verified-config",
         "task-syntax",
+        "verified-behavior",
     ]
     anchor_candidate_id: str
     anchor_symbol_id: str | None = None
@@ -557,6 +559,7 @@ class EvidenceRequirements(IndexModel):
     anchors: tuple[str, ...] = ()
     source_evidence: tuple[EvidenceRequirement, ...] = ()
     ambiguous_identifiers: tuple[str, ...] = ()
+    unresolved_dependency_ids: tuple[str, ...] = ()
     topic_grounding: Literal["exact-identifier", "grounded-semantic", "unresolved"] = (
         "unresolved"
     )
@@ -2608,7 +2611,11 @@ def _restore_required_source_evidence(
     """
     requirements = build_evidence_requirements(task, tuple(candidates))
     required_paths = {r.path for r in requirements.source_evidence}
-    anchor_paths = {c.path for c in candidates if c.resolved_symbols}
+    anchor_paths = {
+        c.path
+        for c in candidates
+        if c.resolved_symbols or c.candidate_id in requirements.anchors
+    }
     connected_paths = set(anchor_paths)
     by_path = {c.path: c for c in candidates}
     frontier = set(anchor_paths)
@@ -2754,14 +2761,16 @@ def _restore_required_source_evidence(
             if (
                 relationship["kind"] not in {"call", "reference"}
                 or target.get("resolution") != "internal"
-                or target_path not in maps
+                or target_path not in states
                 or _structural_provenance(relationship["detection_method"])
                 != "verified"
             ):
                 continue
             source_symbol = source_symbols.get(relationship.get("source_symbol_id"))
-            target_symbol = symbols_by_path[target_path].get(target.get("symbol_id"))
-            if source_symbol is None or target_symbol is None:
+            target_symbol = symbols_by_path.get(target_path, {}).get(
+                target.get("symbol_id")
+            )
+            if source_symbol is None or target.get("symbol_id") is None:
                 continue
 
             def symbol_ids(path: str, symbol: dict[str, Any]) -> tuple[str, ...]:
@@ -2803,11 +2812,13 @@ def _restore_required_source_evidence(
                 return restored_ids[key]
 
             source_ids = symbol_ids(source_path, source_symbol)
-            target_ids = symbol_ids(target_path, target_symbol)
+            target_ids = (
+                () if target_symbol is None else symbol_ids(target_path, target_symbol)
+            )
             address = SourceRange.model_validate(relationship["source_range"])
             connection_identity = (
                 f"connection:{source_symbol['symbol_id']}:"
-                f"{target_symbol['symbol_id']}:{relationship['kind']}"
+                f"{target['symbol_id']}:{relationship['kind']}"
             )
             add(source_path, connection_identity, address)
             call_id = _structural_evidence_id_from_source(
@@ -2822,7 +2833,7 @@ def _restore_required_source_evidence(
                     source_path=source_path,
                     target_path=target_path,
                     source_symbol_id=source_symbol["symbol_id"],
-                    target_symbol_id=target_symbol["symbol_id"],
+                    target_symbol_id=target["symbol_id"],
                     source_evidence_ids=tuple(sorted((*source_ids, call_id))),
                     target_evidence_ids=tuple(sorted(target_ids)),
                 )
@@ -5182,6 +5193,7 @@ def build_evidence_requirements(
         else "unresolved"
     )
     obligations: dict[str, EvidenceRequirement] = {}
+    dependency_gaps: set[str] = set()
     connections = tuple(
         dict.fromkeys(v for c in candidates for v in c.source_connections)
     )
@@ -5195,6 +5207,7 @@ def build_evidence_requirements(
             "verified-source-test",
             "verified-config",
             "task-syntax",
+            "verified-behavior",
         ],
         role_id: str,
         evidence: tuple[str, ...] | None = None,
@@ -5230,7 +5243,8 @@ def build_evidence_requirements(
         )
         units = select_source_evidence_units(candidate.source_units, selected_ranges)
         if (
-            anchor_symbol_id is not None
+            basis == "exact-symbol"
+            and anchor_symbol_id is not None
             and candidate.candidate_id == anchor.candidate_id
         ):
             units = tuple(
@@ -5353,16 +5367,14 @@ def build_evidence_requirements(
                         and FILE_POLICY_REGISTRY.is_test(v.source_path)
                         and v.source_path in by_path
                     ]
-                    selected_test = min(
+                    for selected_test in sorted(
                         test_connections,
                         key=lambda v: (
-                            -by_path[v.source_path].bm25_score,
                             v.source_path,
                             v.source_symbol_id,
+                            v.source_evidence_ids,
                         ),
-                        default=None,
-                    )
-                    if selected_test is not None:
+                    ):
                         add(
                             by_path[selected_test.source_path],
                             anchor,
@@ -5463,6 +5475,72 @@ def build_evidence_requirements(
                 add(candidate, anchor, "verified-call", "entrypoint")
             if "configuration" in kinds and "config-consumer" in verified:
                 add(candidate, anchor, "verified-config", "configuration")
+    if intent.evidence_scope == "behavior":
+        behavior_outgoing: dict[tuple[str, str], list[VerifiedSourceConnection]] = (
+            defaultdict(list)
+        )
+        for connection in connections:
+            behavior_outgoing[
+                (connection.source_path, connection.source_symbol_id)
+            ].append(connection)
+        for anchor in anchors:
+            original_symbols = {
+                s.symbol_id
+                for s in anchor.resolved_symbols
+                if s.query_identifier.casefold() in identifiers
+            }
+            if not original_symbols:
+                original_symbols = {
+                    u.owner_symbol_id
+                    for u in select_source_evidence_units(
+                        anchor.source_units,
+                        tuple(
+                            e.source_range
+                            for e in anchor.evidence_ranges
+                            if not anchor.matched_concepts or e.strength == "grounded"
+                        ),
+                    )
+                }
+            for anchor_sid in sorted(original_symbols):
+                frontier = deque([(anchor.path, anchor_sid, 0)])
+                behavior_visited = {(anchor.path, anchor_sid)}
+                while frontier:
+                    path, sid, depth = frontier.popleft()
+                    for connection in behavior_outgoing.get((path, sid), ()):
+                        endpoint = (connection.target_path, connection.target_symbol_id)
+                        if endpoint in behavior_visited:
+                            continue
+                        identity = (
+                            f"{path}:{sid}:{connection.kind}:"
+                            f"{endpoint[0]}:{endpoint[1]}"
+                        )
+                        candidate = by_path.get(endpoint[0])
+                        if (
+                            depth >= 2
+                            or candidate is None
+                            or not connection.target_evidence_ids
+                        ):
+                            dependency_gaps.add(identity)
+                            continue
+                        source_candidate = by_path[path]
+                        add(
+                            source_candidate,
+                            anchor,
+                            "verified-behavior",
+                            "implementation",
+                            connection.source_evidence_ids,
+                            anchor_sid,
+                        )
+                        add(
+                            candidate,
+                            anchor,
+                            "verified-behavior",
+                            "implementation",
+                            connection.target_evidence_ids,
+                            anchor_sid,
+                        )
+                        behavior_visited.add(endpoint)
+                        frontier.append((*endpoint, depth + 1))
     return EvidenceRequirements(
         query_intent=intent,
         roles=roles,
@@ -5470,6 +5548,7 @@ def build_evidence_requirements(
         anchors=tuple(c.candidate_id for c in anchors),
         source_evidence=tuple(obligations[key] for key in sorted(obligations)),
         topic_grounding=topic_grounding,
+        unresolved_dependency_ids=tuple(sorted(dependency_gaps)),
     )
 
 
@@ -5674,6 +5753,19 @@ def parse_query_intent(task: str) -> QueryIntent:
         explicit_anchors=tuple(sorted(anchors, key=canonical_casefold_key)),
         roles=_syntax_evidence_roles(role_syntax, ()),
         facet_terms=tuple(sorted(set(_tokens(content)) - instructions)),
+        evidence_scope=(
+            "lookup"
+            if re.fullmatch(identifier, task.strip())
+            or (
+                re.search(r"\b(?:find|locate|where)\b", role_syntax, re.IGNORECASE)
+                and not re.search(
+                    r"\b(?:behavior|implementation|flow|explain|describe|review|trace)\b",
+                    role_syntax,
+                    re.IGNORECASE,
+                )
+            )
+            else "behavior"
+        ),
     )
 
 

@@ -714,6 +714,11 @@ def _compilation_sufficiency(
     reasons: set[CompilationReasonCode] = set()
     if (
         retrieval.requirements is not None
+        and retrieval.requirements.unresolved_dependency_ids
+    ):
+        reasons.add("behavioral_dependency_unresolved")
+    if (
+        retrieval.requirements is not None
         and retrieval.requirements.topic_grounding == "unresolved"
     ):
         reasons.add("task_anchor_unresolved")

@@ -1,0 +1,137 @@
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from contextforge.application import build_repository_index
+from contextforge.context import ContextBudget, compile_context_capsule
+from contextforge.intelligence import retrieve_context_candidates
+from contextforge.intelligence.retrieval import parse_query_intent
+
+
+@pytest.mark.parametrize(
+    ("task", "scope"),
+    [
+        ("execute_job", "lookup"),
+        ("Find callers of execute_job", "lookup"),
+        ("Where is `execute_job`?", "lookup"),
+        ("Explain execute_job behavior", "behavior"),
+        ("Review execute_job implementation and tests", "behavior"),
+    ],
+)
+def test_original_syntax_distinguishes_lookup_from_behavior(
+    task: str, scope: str
+) -> None:
+    assert parse_query_intent(task).evidence_scope == scope
+
+
+@pytest.mark.parametrize("same_file", [True, False])
+def test_behavior_requires_helper_without_explicit_callee_role(
+    tmp_path: Path, same_file: bool
+) -> None:
+    helper = "def normalize_value(value):\n    return value + 1\n"
+    root_source = "def execute_job(value):\n    return normalize_value(value)\n"
+    if same_file:
+        (tmp_path / "jobs.py").write_text(helper + root_source, encoding="utf-8")
+    else:
+        (tmp_path / "helpers.py").write_text(helper, encoding="utf-8")
+        (tmp_path / "jobs.py").write_text(
+            "from helpers import normalize_value\n" + root_source, encoding="utf-8"
+        )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain execute_job behavior"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert "callee" not in {r.kind for r in retrieval.requirements.roles}
+    helpers = [
+        r
+        for r in retrieval.requirements.source_evidence
+        if r.basis == "verified-behavior"
+    ]
+    assert helpers
+    expected_path = "jobs.py" if same_file else "helpers.py"
+    assert any(
+        r.path == expected_path and any(a.start_line == 1 for a in r.required_ranges)
+        for r in helpers
+    )
+    assert not retrieval.requirements.unresolved_dependency_ids
+    # Removal retains the original frozen obligations, so a helper cannot be
+    # silently erased by recomputing requirements from the smaller candidate set.
+    damaged = retrieval.model_copy(
+        update={
+            "candidates": tuple(
+                c for c in retrieval.candidates if same_file or c.path != "helpers.py"
+            )
+        }
+    )
+    if not same_file:
+        compiled = compile_context_capsule(
+            tmp_path, task, damaged, budget=ContextBudget(context_window_tokens=8000)
+        )
+        assert compiled.compilation_sufficiency is not None
+        assert compiled.compilation_sufficiency.effective_status == "insufficient"
+        assert (
+            "required_source_evidence_missing"
+            in compiled.compilation_sufficiency.reason_codes
+        )
+
+
+def test_requested_tests_keep_distinct_uses_of_the_anchor(tmp_path: Path) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def execute_job(value):\n    return value + 1\n", encoding="utf-8"
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_jobs.py").write_text(
+        "from jobs import execute_job\n"
+        "def check_positive():\n    assert execute_job(1) == 2\n"
+        "def check_negative():\n    assert execute_job(-1) == 0\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Review execute_job implementation and tests"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    requirements = [
+        r
+        for r in retrieval.requirements.source_evidence
+        if r.basis == "verified-source-test"
+    ]
+    assert len(requirements) == 2
+    assert {a.start_line for r in requirements for a in r.required_ranges} >= {2, 4}
+
+
+def test_behavior_records_dependency_beyond_two_hops(tmp_path: Path) -> None:
+    (tmp_path / "chain.py").write_text(
+        "def step_three():\n    return 1\n"
+        "def step_two():\n    return step_three()\n"
+        "def step_one():\n    return step_two()\n"
+        "def execute_job():\n    return step_one()\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain execute_job behavior"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert retrieval.requirements.unresolved_dependency_ids
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "behavioral_dependency_unresolved"
+        in compiled.compilation_sufficiency.reason_codes
+    )

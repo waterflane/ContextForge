@@ -2,7 +2,13 @@
 
 `QueryIntent` records original explicit code anchors, evidence roles and topic
 facets. Candidate `match_origin` separates explicit anchors from lexical discovery
-while `exact_group` retains the observed match category. Only explicit anchors
+and `evidence_scope` distinguishes lookup from behavioral explanation. Behavioral
+requirements include verified call/reference dependencies within two hops, with
+separate symbol obligations inside the same file. Missing endpoints or a deeper
+dependency frontier remain explicit unresolved obligations, never proof of
+sufficiency. Requested tests retain distinct verified symbol usages rather than
+only the highest-ranked test. Discovery neighbors remain optional.
+Candidate `exact_group` retains the observed match category. Only explicit anchors
 receive guaranteed exact-group priority. Ordinary words matching symbols cannot
 certify the task topic; role nouns remain topical unless instruction syntax
 consumes them. Requirements and retrieval results carry the same immutable intent.

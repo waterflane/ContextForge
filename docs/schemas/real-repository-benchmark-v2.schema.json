@@ -2055,7 +2055,8 @@
               "mandatory_role_missing",
               "planned_role_lost",
               "required_source_evidence_missing",
-              "task_anchor_unresolved"
+              "task_anchor_unresolved",
+              "behavioral_dependency_unresolved"
             ],
             "type": "string"
           },
@@ -2302,13 +2303,22 @@
           "title": "Evidence Ids",
           "type": "array"
         },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
+        },
         "basis": {
           "enum": [
             "exact-symbol",
             "verified-call",
             "verified-source-test",
             "verified-config",
-            "task-syntax"
+            "task-syntax",
+            "verified-behavior"
           ],
           "title": "Basis",
           "type": "string"
@@ -2328,14 +2338,6 @@
           ],
           "default": null,
           "title": "Anchor Symbol Id"
-        },
-        "required_ranges": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/SourceRange"
-          },
-          "title": "Required Ranges",
-          "type": "array"
         }
       },
       "required": [
@@ -2359,6 +2361,17 @@
           },
           "title": "Roles",
           "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "anchors": {
           "default": [],
@@ -2384,6 +2397,14 @@
           "title": "Ambiguous Identifiers",
           "type": "array"
         },
+        "unresolved_dependency_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Dependency Ids",
+          "type": "array"
+        },
         "topic_grounding": {
           "default": "unresolved",
           "enum": [
@@ -2393,17 +2414,6 @@
           ],
           "title": "Topic Grounding",
           "type": "string"
-        },
-        "query_intent": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QueryIntent"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "required": [
@@ -2553,6 +2563,16 @@
           },
           "title": "Facet Terms",
           "type": "array"
+        },
+        "evidence_scope": {
+          "default": "unknown",
+          "enum": [
+            "lookup",
+            "behavior",
+            "unknown"
+          ],
+          "title": "Evidence Scope",
+          "type": "string"
         }
       },
       "required": [

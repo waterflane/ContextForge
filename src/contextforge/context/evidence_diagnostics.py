@@ -29,6 +29,7 @@ CompilationReasonCode = Literal[
     "planned_role_lost",
     "required_source_evidence_missing",
     "task_anchor_unresolved",
+    "behavioral_dependency_unresolved",
 ]
 
 
