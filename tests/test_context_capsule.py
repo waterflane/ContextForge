@@ -184,8 +184,12 @@ def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
                 candidate_id=item.candidate_id,
                 path=item.path,
                 source_sha256=item.source_sha256,
-                evidence_ids=(),
-                representation="map",
+                evidence_ids=tuple(
+                    sorted(
+                        {e.evidence_id for e in item.evidence_ranges if e.evidence_id}
+                    )
+                ),
+                representation="slice",
             )
             for item in ordered
         ),

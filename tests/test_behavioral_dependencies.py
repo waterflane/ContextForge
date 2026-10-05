@@ -59,6 +59,13 @@ def test_behavior_requires_helper_without_explicit_callee_role(
         for r in helpers
     )
     assert not retrieval.requirements.unresolved_dependency_ids
+    complete = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert complete.compilation_sufficiency is not None
+    assert complete.compilation_sufficiency.effective_status == "sufficient"
+    assert complete.coverage_ledger is not None
+    assert not complete.coverage_ledger.missing_requirement_ids
     # Removal retains the original frozen obligations, so a helper cannot be
     # silently erased by recomputing requirements from the smaller candidate set.
     damaged = retrieval.model_copy(
@@ -107,6 +114,50 @@ def test_requested_tests_keep_distinct_uses_of_the_anchor(tmp_path: Path) -> Non
     ]
     assert len(requirements) == 2
     assert {a.start_line for r in requirements for a in r.required_ranges} >= {2, 4}
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    material = next(
+        m for m in compiled.capsule.task_context if m.path == "tests/test_jobs.py"
+    )
+    assert all(set(r.evidence_ids) <= set(material.evidence_ids) for r in requirements)
+
+
+def test_small_method_requires_initializer_without_owning_large_class(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "meter.py").write_text(
+        "class Meter:\n    def __init__(self):\n        self.offset = 7\n"
+        "    def read(self):\n        return self.offset\n"
+        + "".join(
+            f"    def filler_{i}(self):\n        return {i}\n" for i in range(300)
+        ),
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain Meter.read implementation"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    addresses = [
+        a for r in retrieval.requirements.source_evidence for a in r.required_ranges
+    ]
+    assert any(a.start_line == 3 for a in addresses)
+    assert not any(a.start_line == 1 for a in addresses)
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=4000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    material = next(m for m in compiled.capsule.task_context if m.path == "meter.py")
+    assert any(a.start_line <= 3 <= a.end_line for a in material.ranges)
+    assert "def filler_299" not in material.content
+    assert all(a.end_line <= 5 for a in addresses)
 
 
 def test_behavior_records_dependency_beyond_two_hops(tmp_path: Path) -> None:

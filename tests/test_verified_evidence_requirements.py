@@ -631,10 +631,7 @@ def test_map_planner_claim_and_unrelated_neighbor_do_not_prove_source(
     )
     assert missing.compilation_sufficiency is not None
     assert missing.compilation_sufficiency.effective_status == "insufficient"
-    assert (
-        "required_source_evidence_missing"
-        in missing.compilation_sufficiency.reason_codes
-    )
+    assert "plan_replaced" in missing.compilation_sufficiency.reason_codes
 
 
 @pytest.mark.parametrize("link", ["call", "import", "unrelated"])

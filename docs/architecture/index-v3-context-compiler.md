@@ -60,6 +60,11 @@ read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
 reuse stored CodeMaps and publish a new immutable generation.
+The compiler groups mandatory ranges and IDs per candidate before choosing a
+representation. SLICE uses that complete range union, including multiple symbols
+and tests in one file. Planner representations and fallback cannot drop those
+ranges. Missing or substituted retrieval evidence remains insufficient; restoring
+known IDs from physically covered material does not admit new retrieval facts.
 
 Semantic Card analyzer version 9 (`semantic-card-v3.6`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of

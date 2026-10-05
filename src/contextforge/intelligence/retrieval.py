@@ -2839,7 +2839,17 @@ def _restore_required_source_evidence(
                 )
             )
     for candidate in candidates:
-        for unit in candidate.source_units:
+        selected_units = select_source_evidence_units(
+            documents[candidate.path].source_units,
+            tuple(
+                e.source_range
+                for e in (
+                    *candidate.evidence_ranges,
+                    *additions[candidate.path].values(),
+                )
+            ),
+        )
+        for unit in selected_units:
             if unit.kind in {"initializer", "test-usage"}:
                 additions[candidate.path][unit.evidence_id] = CandidateEvidenceRange(
                     path=candidate.path,
@@ -2850,6 +2860,13 @@ def _restore_required_source_evidence(
     return [
         c.model_copy(
             update={
+                "source_units": select_source_evidence_units(
+                    documents[c.path].source_units,
+                    tuple(
+                        e.source_range
+                        for e in (*c.evidence_ranges, *additions[c.path].values())
+                    ),
+                ),
                 "evidence_ranges": tuple(
                     sorted(
                         {

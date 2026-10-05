@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -301,6 +301,8 @@ class _CompilerState:
     cards: dict[str, SemanticCard | None]
     sources: dict[str, tuple[str, int]]
     pinned_full: set[str]
+    mandatory_ranges: dict[str, tuple[SourceRange, ...]] = field(default_factory=dict)
+    mandatory_ids: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def compile_context_capsule(
@@ -356,6 +358,21 @@ def compile_context_capsule(
         sources={},
         pinned_full=pinned,
     )
+    for requirement in (
+        () if retrieval.requirements is None else retrieval.requirements.source_evidence
+    ):
+        candidate_id = requirement.candidate_id
+        state.mandatory_ids[candidate_id] = state.mandatory_ids.get(
+            candidate_id, frozenset()
+        ) | frozenset(requirement.evidence_ids)
+        state.mandatory_ranges[candidate_id] = tuple(
+            dict.fromkeys(
+                (
+                    *state.mandatory_ranges.get(candidate_id, ()),
+                    *requirement.required_ranges,
+                )
+            )
+        )
     known_paths = {item.path for item in active.files}
     if not set(working) | pinned <= known_paths:
         raise ValueError("working and pinned files must belong to the generation")
@@ -853,9 +870,16 @@ def _automatic_material_options(
                 RepresentationMode.SLICE,
                 candidate,
                 tuple(
-                    item.source_range
-                    for item in candidate.evidence_ranges
-                    if not required_ids or item.evidence_id in required_ids
+                    dict.fromkeys(
+                        (
+                            *state.mandatory_ranges.get(candidate.candidate_id, ()),
+                            *tuple(
+                                item.source_range
+                                for item in candidate.evidence_ranges
+                                if not required_ids or item.evidence_id in required_ids
+                            ),
+                        )
+                    )
                 )
                 if required_evidence
                 or candidate.exact_group in {"exact_symbol", "exact_qualified_symbol"}
@@ -1343,7 +1367,18 @@ def _planned_materializations(
     evidence_ids = tuple(
         evidence_id for evidence_id in plan.evidence_ids if evidence_id in selected
     )
-    ranges = tuple(selected[evidence_id].source_range for evidence_id in evidence_ids)
+    required_ids = state.mandatory_ids.get(candidate.candidate_id, frozenset())
+    if not required_ids <= selected.keys():
+        return ()
+    evidence_ids = tuple(sorted({*evidence_ids, *required_ids}))
+    ranges = tuple(
+        dict.fromkeys(
+            (
+                *state.mandatory_ranges.get(candidate.candidate_id, ()),
+                *(selected[evidence_id].source_range for evidence_id in evidence_ids),
+            )
+        )
+    )
     requested_mode = RepresentationMode(plan.representation)
     fallback_modes = {
         RepresentationMode.FULL: (
@@ -1360,6 +1395,11 @@ def _planned_materializations(
     }[requested_mode]
     materials: list[CapsuleMaterial] = []
     for mode in fallback_modes:
+        if required_ids and mode in {
+            RepresentationMode.MAP,
+            RepresentationMode.SUMMARY,
+        }:
+            continue
         if mode == RepresentationMode.SLICE and not ranges:
             continue
         material = _materialize(
@@ -1517,7 +1557,8 @@ def _materialize(
             *(
                 u.evidence_id
                 for u in candidate.source_units
-                if u.kind in {"implementation", "decorator"}
+                if u.kind
+                in {"implementation", "decorator", "initializer", "test-usage"}
             ),
         }
         card = _card(state, path)
