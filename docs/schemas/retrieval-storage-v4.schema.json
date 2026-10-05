@@ -1,0 +1,563 @@
+{
+  "$defs": {
+    "ArtifactReference": {
+      "additionalProperties": false,
+      "description": "Digest-bound location of one generation-level artifact.",
+      "properties": {
+        "location": {
+          "title": "Location",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "sha256"
+      ],
+      "title": "ArtifactReference",
+      "type": "object"
+    },
+    "RetrievalDocumentShard": {
+      "additionalProperties": false,
+      "description": "One bounded document shard referenced by a retrieval header.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "record_count": {
+          "minimum": 0,
+          "title": "Record Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact",
+        "record_count"
+      ],
+      "title": "RetrievalDocumentShard",
+      "type": "object"
+    },
+    "RetrievalSourceUnitShard": {
+      "additionalProperties": false,
+      "description": "A complete source-unit fragment checked independently on every reload.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "record_count": {
+          "minimum": 1,
+          "title": "Record Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact",
+        "record_count"
+      ],
+      "title": "RetrievalSourceUnitShard",
+      "type": "object"
+    },
+    "FileSearchTag": {
+      "additionalProperties": false,
+      "description": "A bounded search expression with explicit source and origin.",
+      "properties": {
+        "text": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "provenance": {
+          "enum": [
+            "model",
+            "structural-fallback"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "evidence_ids",
+        "provenance"
+      ],
+      "title": "FileSearchTag",
+      "type": "object"
+    },
+    "PositionalPosting": {
+      "additionalProperties": false,
+      "description": "A safe structural identifier occurrence bound to stable evidence.",
+      "properties": {
+        "identifier": {
+          "title": "Identifier",
+          "type": "string"
+        },
+        "fact_kind": {
+          "enum": [
+            "declaration",
+            "import",
+            "call",
+            "reference"
+          ],
+          "title": "Fact Kind",
+          "type": "string"
+        },
+        "fact_id": {
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        }
+      },
+      "required": [
+        "identifier",
+        "fact_kind",
+        "fact_id",
+        "evidence_id",
+        "source_range"
+      ],
+      "title": "PositionalPosting",
+      "type": "object"
+    },
+    "RetrievalField": {
+      "additionalProperties": false,
+      "description": "Canonical term frequencies for one weighted document field.",
+      "properties": {
+        "name": {
+          "enum": [
+            "path",
+            "symbols",
+            "source_identifiers",
+            "file_tags",
+            "grounded_semantics"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "length": {
+          "minimum": 0,
+          "title": "Length",
+          "type": "integer"
+        },
+        "terms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Terms",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "length",
+        "terms"
+      ],
+      "title": "RetrievalField",
+      "type": "object"
+    },
+    "RetrievalSemanticClaim": {
+      "additionalProperties": false,
+      "description": "One ranking-safe claim and its source-bound evidence.",
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/RetrievalSemanticEvidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "title": "RetrievalSemanticClaim",
+      "type": "object"
+    },
+    "RetrievalSemanticEvidence": {
+      "additionalProperties": false,
+      "description": "Grounded semantic evidence copied into the retrieval generation.",
+      "properties": {
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_range"
+      ],
+      "title": "RetrievalSemanticEvidence",
+      "type": "object"
+    },
+    "SourceEvidenceUnit": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "owner_symbol_id": {
+          "title": "Owner Symbol Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "implementation",
+            "call",
+            "reference",
+            "callback",
+            "decorator",
+            "initializer",
+            "test-usage"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "verified-implementation",
+            "observed-syntax"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "related_symbol_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Symbol Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "source_sha256",
+        "owner_symbol_id",
+        "kind",
+        "source_range",
+        "evidence_id",
+        "basis"
+      ],
+      "title": "SourceEvidenceUnit",
+      "type": "object"
+    },
+    "SourceRange": {
+      "additionalProperties": false,
+      "description": "One-based lines and zero-based half-open source columns.",
+      "properties": {
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "start_column": {
+          "minimum": 0,
+          "title": "Start Column",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "end_column": {
+          "minimum": 0,
+          "title": "End Column",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
+      "title": "SourceRange",
+      "type": "object"
+    },
+    "RetrievalDocument": {
+      "additionalProperties": false,
+      "description": "One source-bound persisted BM25 document.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "source_size_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Source Size Bytes",
+          "type": "integer"
+        },
+        "line_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Line Count",
+          "type": "integer"
+        },
+        "declaration_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Declaration Count",
+          "type": "integer"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/RetrievalField"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "symbols": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Symbols",
+          "type": "array"
+        },
+        "qualified_symbols": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Qualified Symbols",
+          "type": "array"
+        },
+        "source_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Identifiers",
+          "type": "array"
+        },
+        "positional_postings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PositionalPosting"
+          },
+          "title": "Positional Postings",
+          "type": "array"
+        },
+        "source_units": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceEvidenceUnit"
+          },
+          "title": "Source Units",
+          "type": "array"
+        },
+        "source_unit_shards": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RetrievalSourceUnitShard"
+          },
+          "title": "Source Unit Shards",
+          "type": "array"
+        },
+        "source_evidence_version": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Source Evidence Version",
+          "type": "integer"
+        },
+        "semantic_quality": {
+          "default": "none",
+          "enum": [
+            "none",
+            "complete",
+            "partial",
+            "deterministic"
+          ],
+          "title": "Semantic Quality",
+          "type": "string"
+        },
+        "semantic_synopsis": {
+          "default": "",
+          "title": "Semantic Synopsis",
+          "type": "string"
+        },
+        "semantic_concepts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Semantic Concepts",
+          "type": "array"
+        },
+        "semantic_claims": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RetrievalSemanticClaim"
+          },
+          "title": "Semantic Claims",
+          "type": "array"
+        },
+        "file_tags": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FileSearchTag"
+          },
+          "title": "File Tags",
+          "type": "array"
+        },
+        "structural_roles": {
+          "default": [],
+          "items": {
+            "enum": [
+              "entrypoint",
+              "implementation",
+              "caller",
+              "callee",
+              "configuration",
+              "test",
+              "documentation",
+              "public_api",
+              "data_model",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "title": "Structural Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "source_sha256",
+        "fields"
+      ],
+      "title": "RetrievalDocument",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Digest-bound header for a sharded persisted retrieval index.",
+  "properties": {
+    "schema_version": {
+      "const": 4,
+      "default": 4,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "record_kind": {
+      "const": "retrieval_posting_shards",
+      "default": "retrieval_posting_shards",
+      "title": "Record Kind",
+      "type": "string"
+    },
+    "source_snapshot_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Snapshot Digest",
+      "type": "string"
+    },
+    "document_count": {
+      "minimum": 0,
+      "title": "Document Count",
+      "type": "integer"
+    },
+    "document_shards": {
+      "items": {
+        "$ref": "#/$defs/RetrievalDocumentShard"
+      },
+      "title": "Document Shards",
+      "type": "array"
+    },
+    "source_unit_shards": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RetrievalSourceUnitShard"
+      },
+      "title": "Source Unit Shards",
+      "type": "array"
+    },
+    "exact_identifier_documents": {
+      "additionalProperties": {
+        "items": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "default": {},
+      "title": "Exact Identifier Documents",
+      "type": "object"
+    },
+    "document_frequencies": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": "object"
+      },
+      "title": "Document Frequencies",
+      "type": "object"
+    },
+    "average_field_lengths": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "number"
+      },
+      "title": "Average Field Lengths",
+      "type": "object"
+    }
+  },
+  "required": [
+    "source_snapshot_digest",
+    "document_count",
+    "document_shards",
+    "document_frequencies",
+    "average_field_lengths"
+  ],
+  "title": "RetrievalIndexShardManifest",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/retrieval-storage-v4.schema.json"
+}

@@ -10,6 +10,7 @@ from contextforge.intelligence.indexer import load_relationship_graph_projection
 from contextforge.intelligence.retrieval import (
     _complementary_candidates,
     _rank_candidates,
+    build_evidence_requirements,
     load_retrieval_index,
     parse_query_intent,
 )
@@ -185,6 +186,137 @@ def test_behavior_records_dependency_beyond_two_hops(tmp_path: Path) -> None:
     assert retrieval.requirements.unresolved_dependency_ids
     compiled = compile_context_capsule(
         tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "behavioral_dependency_unresolved"
+        in compiled.compilation_sufficiency.reason_codes
+    )
+
+
+@pytest.mark.parametrize("unit_kind", ["constant", "initializer", "test-usage"])
+def test_behavior_rejects_removed_mandatory_source_unit(
+    tmp_path: Path, unit_kind: str
+) -> None:
+    if unit_kind == "constant":
+        source = "LIMIT = 7\ndef execute_job(value):\n    return value > LIMIT\n"
+        task = "Explain execute_job behavior"
+    elif unit_kind == "initializer":
+        source = (
+            "class Meter:\n    def __init__(self):\n        self.offset = 7\n"
+            "    def read(self):\n        return self.offset\n"
+        )
+        task = "Explain Meter.read behavior"
+    else:
+        source = "def execute_job(value):\n    return value + 1\n"
+        task = "Review execute_job implementation and tests"
+        (tmp_path / "test_jobs.py").write_text(
+            "from jobs import execute_job\ndef check_result():\n"
+            "    actual = execute_job(1)\n    assert actual == 2\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "jobs.py").write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            task,
+            manifest=report.manifest,
+        )
+    )
+    budget = ContextBudget(context_window_tokens=8000)
+    complete = compile_context_capsule(tmp_path, task, result, budget=budget)
+    assert complete.compilation_sufficiency is not None
+    assert complete.compilation_sufficiency.effective_status == "sufficient"
+    removed_ids = {
+        unit.evidence_id
+        for candidate in result.candidates
+        for unit in candidate.source_units
+        if (
+            unit.kind == unit_kind
+            or (unit_kind == "constant" and unit.kind == "initializer")
+        )
+    }
+    assert removed_ids
+    damaged = result.model_copy(
+        update={
+            "candidates": tuple(
+                candidate.model_copy(
+                    update={
+                        "source_units": tuple(
+                            u
+                            for u in candidate.source_units
+                            if u.evidence_id not in removed_ids
+                        ),
+                        "evidence_ranges": tuple(
+                            e
+                            for e in candidate.evidence_ranges
+                            if e.evidence_id not in removed_ids
+                        ),
+                    }
+                )
+                for candidate in result.candidates
+            )
+        }
+    )
+    incomplete = compile_context_capsule(tmp_path, task, damaged, budget=budget)
+    assert incomplete.compilation_sufficiency is not None
+    assert incomplete.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "required_source_evidence_missing"
+        in incomplete.compilation_sufficiency.reason_codes
+    )
+
+
+@pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
+def test_legacy_missing_source_units_do_not_certify_behavior(
+    tmp_path: Path, legacy: str
+) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def execute_job():\n    return 7\n", encoding="utf-8"
+    )
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    task = "Explain execute_job behavior"
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    candidates = tuple(
+        c.model_copy(
+            update={
+                "source_units": () if legacy == "missing-units" else c.source_units,
+                "source_evidence_version": 0,
+            }
+        )
+        for c in result.candidates
+    )
+    legacy_result = result.model_copy(
+        update={
+            "candidates": candidates,
+            "requirements": (
+                result.requirements
+                if legacy == "old-capability"
+                else build_evidence_requirements(task, candidates)
+            ),
+        }
+    )
+    compiled = compile_context_capsule(
+        tmp_path,
+        task,
+        legacy_result,
+        budget=ContextBudget(context_window_tokens=8000),
     )
     assert compiled.compilation_sufficiency is not None
     assert compiled.compilation_sufficiency.effective_status == "insufficient"

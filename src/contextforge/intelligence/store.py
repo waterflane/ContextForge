@@ -1204,10 +1204,11 @@ def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[st
             "retrieval_semantic_overlay",
         }:
             continue
-        group = value.get("document_shards")
-        if not isinstance(group, list):
+        documents = value.get("document_shards")
+        units = value.get("source_unit_shards", [])
+        if not isinstance(documents, list) or not isinstance(units, list):
             raise IndexManifestReadError("retrieval shard manifest is malformed")
-        for item in group:
+        for item in (*documents, *units):
             artifact = item.get("artifact") if isinstance(item, dict) else None
             if not isinstance(artifact, dict):
                 raise IndexManifestReadError("retrieval shard manifest is malformed")

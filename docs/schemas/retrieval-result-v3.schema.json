@@ -825,6 +825,12 @@
           },
           "title": "Source Units",
           "type": "array"
+        },
+        "source_evidence_version": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Source Evidence Version",
+          "type": "integer"
         }
       }
     },

@@ -36,6 +36,7 @@ from contextforge.intelligence.retrieval import (
     RetrievalResult,
     build_coverage_ledger,
     build_evidence_requirements,
+    parse_query_intent,
     verified_source_lookup,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
@@ -340,6 +341,32 @@ def compile_context_capsule(
                 "requirements": build_evidence_requirements(task, retrieval.candidates)
             }
         )
+    frozen = retrieval.requirements
+    if frozen is not None:
+        intent = frozen.query_intent or parse_query_intent(task)
+        if intent.evidence_scope != "lookup":
+            legacy_gaps = {
+                f"source-units-unavailable:{c.candidate_id}"
+                for c in retrieval.candidates
+                if c.candidate_id in frozen.anchors and c.source_evidence_version < 2
+            }
+            if legacy_gaps:
+                retrieval = retrieval.model_copy(
+                    update={
+                        "requirements": frozen.model_copy(
+                            update={
+                                "unresolved_dependency_ids": tuple(
+                                    sorted(
+                                        {
+                                            *frozen.unresolved_dependency_ids,
+                                            *legacy_gaps,
+                                        }
+                                    )
+                                ),
+                            }
+                        )
+                    }
+                )
     active = manifest if manifest is not None else load_manifest(repository_root)
     if active.schema_version != 4:
         raise ContextCompilerError("Context Capsule v2 requires Index v3.1")

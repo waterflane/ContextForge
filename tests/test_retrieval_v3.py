@@ -1670,6 +1670,70 @@ def test_retrieval_cache_revalidates_digest_bound_shards(tmp_path: Path) -> None
         load_retrieval_index(tmp_path, reference, manifest=report.manifest)
 
 
+@pytest.mark.parametrize("corruption", ["bytes", "count", "identity"])
+def test_source_unit_shards_preserve_complete_units_and_reject_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    from contextforge.intelligence import retrieval as retrieval_module
+    from contextforge.intelligence.source_evidence import derive_source_evidence_units
+
+    monkeypatch.setattr(retrieval_module, "RETRIEVAL_SHARD_MAX_BYTES", 96 * 1024)
+    _write(tmp_path, "large.py", "".join(f"value_{i} = {i}\n" for i in range(250)))
+    report = _build(tmp_path)
+    reference = report.manifest.artifacts.structural_retrieval
+    assert reference is not None
+    index = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    document = index.documents[0]
+    assert len(document.source_unit_shards) >= 2
+    assert document.source_units == derive_source_evidence_units(
+        report.structural.code_maps[0]
+    )
+    locations = retrieval_module.retrieval_index_record_locations(
+        tmp_path, report.manifest
+    )
+    generation = (
+        tmp_path / ".contextforge/index/generations" / report.manifest.generation_id
+    )
+    assert all(
+        (generation / s.artifact.location).stat().st_size <= 96 * 1024
+        for s in document.source_unit_shards
+    )
+    assert set(s.artifact.location for s in document.source_unit_shards) <= set(
+        locations
+    )
+    assert load_retrieval_index(tmp_path, reference, manifest=report.manifest) is index
+    if corruption == "bytes":
+        from contextforge.intelligence.store import load_generation_record
+
+        target = generation / document.source_unit_shards[0].artifact.location
+        target.write_bytes(
+            load_generation_record(
+                tmp_path,
+                document.source_unit_shards[0].artifact.location,
+                manifest=report.manifest,
+            )
+            + b" "
+        )
+        with pytest.raises(ValueError, match="source-unit shard digest"):
+            load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    elif corruption == "count":
+        first = document.source_unit_shards[0]
+        changed = document.model_copy(
+            update={
+                "source_unit_shards": (
+                    first.model_copy(update={"record_count": first.record_count + 1}),
+                    *document.source_unit_shards[1:],
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="source-unit shard count"):
+            retrieval_module._load_unit_shards(tmp_path, report.manifest, changed)
+    else:
+        changed = document.model_copy(update={"source_sha256": "f" * 64})
+        with pytest.raises(ValueError, match="source-unit identity is stale"):
+            retrieval_module._load_unit_shards(tmp_path, report.manifest, changed)
+
+
 def test_retrieval_internal_guards_and_tokenization() -> None:
     from contextforge.intelligence import retrieval as retrieval_module
 

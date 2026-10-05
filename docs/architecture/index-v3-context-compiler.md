@@ -55,11 +55,20 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 13 includes initializer and complete test-usage units. A member
+retrieval version 14 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
 reuse stored CodeMaps and publish a new immutable generation.
+Large documents preserve all source units in separately digest-bound fragments,
+listed in both the document and retrieval header. Every fragment remains at most
+4 MiB, and warm reloads recheck its digest. Structural records are copied with
+these fragments into semantic generations; cached overlays also validate their
+structural base. Older inline records remain readable with empty shard defaults.
+Source evidence capability version 2 identifies extractors with initialization
+and test-usage coverage. Older or unknown capabilities remain readable but cannot
+certify behavioral anchors. Compiler validation extends frozen gaps for missing
+capability metadata without erasing existing obligations.
 The compiler groups mandatory ranges and IDs per candidate before choosing a
 representation. SLICE uses that complete range union, including multiple symbols
 and tests in one file. Planner representations and fallback cannot drop those

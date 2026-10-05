@@ -46,6 +46,20 @@ def test_public_artifact_schemas_are_closed_and_versioned(
     assert "schema_version" in schema["required"]
 
 
+def test_retrieval_storage_schema_exposes_compatible_source_unit_shards() -> None:
+    from contextforge.intelligence.retrieval import RetrievalIndexShardManifest
+
+    schema = _schema("retrieval-storage-v4.schema.json")
+    assert schema["additionalProperties"] is False
+    assert (
+        schema["properties"]
+        == RetrievalIndexShardManifest.model_json_schema()["properties"]
+    )
+    document = schema["$defs"]["RetrievalDocument"]
+    assert document["properties"]["source_unit_shards"]["default"] == []
+    assert schema["$defs"]["RetrievalSourceUnitShard"]["additionalProperties"] is False
+
+
 def test_capsule_and_retrieval_schemas_expose_representation_contract() -> None:
     capsule = _schema("context-capsule-v2.schema.json")
     retrieval = _schema("retrieval-result-v3.schema.json")

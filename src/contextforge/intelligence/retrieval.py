@@ -51,6 +51,7 @@ from contextforge.intelligence.source_evidence import (
     SourceEvidenceUnit,
     derive_source_evidence_units,
     select_source_evidence_units,
+    source_evidence_capability_version,
     source_evidence_id,
 )
 from contextforge.models import (
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 13
+RETRIEVAL_BUILD_VERSION = 14
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -302,6 +303,13 @@ class RetrievalSemanticClaim(IndexModel):
     evidence: tuple[RetrievalSemanticEvidence, ...]
 
 
+class RetrievalSourceUnitShard(IndexModel):
+    """A complete source-unit fragment checked independently on every reload."""
+
+    artifact: ArtifactReference
+    record_count: Annotated[int, Field(ge=1, strict=True)]
+
+
 class RetrievalDocument(IndexModel):
     """One source-bound persisted BM25 document."""
 
@@ -316,6 +324,8 @@ class RetrievalDocument(IndexModel):
     source_identifiers: tuple[str, ...] = ()
     positional_postings: tuple[PositionalPosting, ...] = ()
     source_units: tuple[SourceEvidenceUnit, ...] = ()
+    source_unit_shards: tuple[RetrievalSourceUnitShard, ...] = ()
+    source_evidence_version: NonNegativeInt = 0
     semantic_quality: Literal["none", "complete", "partial", "deterministic"] = "none"
     semantic_synopsis: str = ""
     semantic_concepts: tuple[str, ...] = ()
@@ -390,6 +400,7 @@ class RetrievalIndexShardManifest(IndexModel):
     source_snapshot_digest: Sha256
     document_count: NonNegativeInt
     document_shards: tuple[RetrievalDocumentShard, ...]
+    source_unit_shards: tuple[RetrievalSourceUnitShard, ...] = ()
     exact_identifier_documents: dict[str, tuple[NonNegativeInt, ...]] = {}
     document_frequencies: dict[str, dict[str, NonNegativeInt]]
     average_field_lengths: dict[str, NonNegativeFloat]
@@ -401,7 +412,9 @@ class RetrievalIndexShardManifest(IndexModel):
             != self.document_count
         ):
             raise ValueError("retrieval shard counts do not match document count")
-        locations = tuple(item.artifact.location for item in self.document_shards)
+        locations = tuple(
+            item.artifact.location for item in self.document_shards
+        ) + tuple(item.artifact.location for item in self.source_unit_shards)
         if len(locations) != len(set(locations)):
             raise ValueError("retrieval shard locations must be unique")
         if set(self.document_frequencies) != set(FIELD_WEIGHTS):
@@ -532,6 +545,7 @@ class CandidateCard(IndexModel):
     discovery_evidence_ids: tuple[str, ...] | None = None
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
     source_units: tuple[SourceEvidenceUnit, ...] = ()
+    source_evidence_version: NonNegativeInt = 0
     graph_neighbors: tuple[CandidateGraphNeighbor, ...] = ()
     provenance: tuple[str, ...]
     freshness: Literal["current"] = "current"
@@ -1147,6 +1161,7 @@ def build_retrieval_index(
                 source_identifiers=identifiers,
                 positional_postings=postings,
                 source_units=derive_source_evidence_units(code_map),
+                source_evidence_version=source_evidence_capability_version(code_map),
                 semantic_quality="none" if card is None else card.quality,
                 semantic_synopsis="" if card is None else card.synopsis.text,
                 semantic_concepts=(
@@ -1365,6 +1380,7 @@ def write_retrieval_index(
         location == "retrieval-semantic.json" and base_structural_reference is not None
     )
     shards: list[RetrievalDocumentShard] = []
+    source_unit_shards: list[RetrievalSourceUnitShard] = []
     pending: list[bytes] = []
     pending_size = 0
 
@@ -1386,7 +1402,7 @@ def write_retrieval_index(
 
     from contextforge.intelligence.manifest import canonical_json_bytes
 
-    for document in index.documents:
+    for document_number, document in enumerate(index.documents):
         value: RetrievalDocument | RetrievalSemanticOverlayDocument = document
         if overlay:
             value = RetrievalSemanticOverlayDocument(
@@ -1403,6 +1419,56 @@ def write_retrieval_index(
                 ),
             )
         encoded = canonical_json_bytes(value.model_dump(mode="json"))
+        if (
+            len(encoded) > RETRIEVAL_SHARD_MAX_BYTES
+            and isinstance(value, RetrievalDocument)
+            and value.source_units
+        ):
+            unit_shards: list[RetrievalSourceUnitShard] = []
+            unit_pending: list[bytes] = []
+            unit_size = 0
+
+            def flush_units(
+                document_number: int = document_number,
+                unit_shards: list[RetrievalSourceUnitShard] = unit_shards,
+            ) -> None:
+                nonlocal unit_pending, unit_size
+                unit_location = (
+                    f"retrieval/{kind}-units-{document_number:05d}-"
+                    f"{len(unit_shards):05d}.jsonl"
+                )
+                unit_digest = write_index_record(
+                    lock, unit_location, b"".join(unit_pending)
+                )
+                unit_shards.append(
+                    RetrievalSourceUnitShard(
+                        artifact=ArtifactReference(
+                            location=unit_location, sha256=unit_digest
+                        ),
+                        record_count=len(unit_pending),
+                    )
+                )
+                unit_pending = []
+                unit_size = 0
+
+            for unit in value.source_units:
+                unit_encoded = canonical_json_bytes(unit.model_dump(mode="json"))
+                if len(unit_encoded) > RETRIEVAL_SHARD_MAX_BYTES:
+                    raise ValueError("one source evidence unit exceeds the shard limit")
+                if (
+                    unit_pending
+                    and unit_size + len(unit_encoded) > RETRIEVAL_SHARD_MAX_BYTES
+                ):
+                    flush_units()
+                unit_pending.append(unit_encoded)
+                unit_size += len(unit_encoded)
+            if unit_pending:
+                flush_units()
+            value = value.model_copy(
+                update={"source_units": (), "source_unit_shards": tuple(unit_shards)}
+            )
+            source_unit_shards.extend(unit_shards)
+            encoded = canonical_json_bytes(value.model_dump(mode="json"))
         if len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
             raise ValueError("one retrieval document exceeds the shard limit")
         if pending and pending_size + len(encoded) > RETRIEVAL_SHARD_MAX_BYTES:
@@ -1427,7 +1493,12 @@ def write_retrieval_index(
             }
         )
         if overlay and base_structural_reference is not None
-        else RetrievalIndexShardManifest.model_validate(header_values)
+        else RetrievalIndexShardManifest.model_validate(
+            {
+                **header_values,
+                "source_unit_shards": tuple(source_unit_shards),
+            }
+        )
     )
     return write_index_record(
         lock, location, canonical_json_bytes(header.model_dump(mode="json"))
@@ -1460,6 +1531,13 @@ def load_retrieval_index(
         if cached is not None:
             _retrieval_cache.move_to_end(cache_key)
     if cached is not None and isinstance(cached[0], RetrievalSemanticOverlayManifest):
+        base_reference = manifest.artifacts.structural_retrieval
+        if (
+            base_reference is None
+            or base_reference.sha256 != cached[0].base_structural_sha256
+        ):
+            raise ValueError("retrieval overlay is corrupt; rebuild_required")
+        load_retrieval_index(repository_root, base_reference, manifest=manifest)
         for shard in cached[0].document_shards:
             shard_content = load_generation_record(
                 repository_root, shard.artifact.location, manifest=manifest
@@ -1556,15 +1634,40 @@ def load_retrieval_index(
             raise ValueError("retrieval shard digest does not match its header")
         shard_contents.append(shard_content)
     if cached is not None:
+        for document in cached[1].documents:
+            _load_unit_shards(repository_root, manifest, document, validate_only=True)
         return cached[1]
     documents: list[RetrievalDocument] = []
+    declared_unit_shards = {s.artifact.location: s for s in header.source_unit_shards}
+    used_unit_shards: set[str] = set()
     for shard, shard_content in zip(
         header.document_shards, shard_contents, strict=True
     ):
         lines = tuple(line for line in shard_content.splitlines() if line)
         if len(lines) != shard.record_count:
             raise ValueError("retrieval shard record count does not match its header")
-        documents.extend(RetrievalDocument.model_validate_json(line) for line in lines)
+        for line in lines:
+            document = RetrievalDocument.model_validate_json(line)
+            for unit_shard in document.source_unit_shards:
+                location = unit_shard.artifact.location
+                if (
+                    declared_unit_shards.get(location) != unit_shard
+                    or location in used_unit_shards
+                ):
+                    raise ValueError(
+                        "retrieval source-unit references do not match the header"
+                    )
+                used_unit_shards.add(location)
+            units = _load_unit_shards(repository_root, manifest, document)
+            if document.source_unit_shards:
+                if document.source_units:
+                    raise ValueError(
+                        "retrieval units cannot mix inline and sharded records"
+                    )
+                document = document.model_copy(update={"source_units": units})
+            documents.append(document)
+    if used_unit_shards != declared_unit_shards.keys():
+        raise ValueError("retrieval source-unit references do not match the header")
     index = RetrievalIndex(
         source_snapshot_digest=header.source_snapshot_digest,
         document_count=header.document_count,
@@ -1579,6 +1682,45 @@ def load_retrieval_index(
         while len(_retrieval_cache) > RETRIEVAL_CACHE_SIZE:
             _retrieval_cache.popitem(last=False)
     return index
+
+
+def _load_unit_shards(
+    repository_root: str | Path,
+    manifest: IndexManifest,
+    document: RetrievalDocument,
+    *,
+    validate_only: bool = False,
+) -> tuple[SourceEvidenceUnit, ...]:
+    from contextforge.intelligence.store import load_generation_record
+
+    units: list[SourceEvidenceUnit] = []
+    for shard in document.source_unit_shards:
+        content = load_generation_record(
+            repository_root, shard.artifact.location, manifest=manifest
+        )
+        if (
+            len(content) > RETRIEVAL_SHARD_MAX_BYTES
+            or hashlib.sha256(content).hexdigest() != shard.artifact.sha256
+        ):
+            raise ValueError(
+                "retrieval source-unit shard digest does not match its document"
+            )
+        if validate_only:
+            continue
+        lines = tuple(line for line in content.splitlines() if line)
+        if len(lines) != shard.record_count:
+            raise ValueError(
+                "retrieval source-unit shard count does not match its document"
+            )
+        for line in lines:
+            unit = SourceEvidenceUnit.model_validate_json(line)
+            if (
+                unit.path != document.path
+                or unit.source_sha256 != document.source_sha256
+            ):
+                raise ValueError("retrieval source-unit identity is stale")
+            units.append(unit)
+    return tuple(units)
 
 
 def retrieval_index_record_locations(
@@ -1612,6 +1754,10 @@ def retrieval_index_record_locations(
         locations.extend(
             item.artifact.location for item in shard_header.document_shards
         )
+        if isinstance(shard_header, RetrievalIndexShardManifest):
+            locations.extend(
+                shard.artifact.location for shard in shard_header.source_unit_shards
+            )
     return tuple(locations)
 
 
@@ -2070,6 +2216,7 @@ def _rank_candidates(
                 source_units=select_source_evidence_units(
                     document.source_units, tuple(e.source_range for e in evidence)
                 ),
+                source_evidence_version=document.source_evidence_version,
                 graph_neighbors=tuple(
                     sorted(
                         neighbors.get(document.path, ()),
@@ -5404,6 +5551,12 @@ def build_evidence_requirements(
     )
     obligations: dict[str, EvidenceRequirement] = {}
     dependency_gaps: set[str] = set()
+    if intent.evidence_scope != "lookup":
+        dependency_gaps.update(
+            f"source-units-unavailable:{anchor.candidate_id}"
+            for anchor in anchors
+            if not anchor.source_units or anchor.source_evidence_version < 2
+        )
     connections = tuple(
         dict.fromkeys(v for c in candidates for v in c.source_connections)
     )
