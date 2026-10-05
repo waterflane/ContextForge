@@ -6,7 +6,13 @@ import pytest
 from contextforge.application import build_repository_index
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
-from contextforge.intelligence.retrieval import parse_query_intent
+from contextforge.intelligence.indexer import load_relationship_graph_projection
+from contextforge.intelligence.retrieval import (
+    _complementary_candidates,
+    _rank_candidates,
+    load_retrieval_index,
+    parse_query_intent,
+)
 
 
 @pytest.mark.parametrize(
@@ -186,3 +192,54 @@ def test_behavior_records_dependency_beyond_two_hops(tmp_path: Path) -> None:
         "behavioral_dependency_unresolved"
         in compiled.compilation_sufficiency.reason_codes
     )
+
+
+def test_verified_dependency_is_discovered_before_pool_truncation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def leaf_step():\n    return 7\n", encoding="utf-8"
+    )
+    (tmp_path / "jobs.py").write_text(
+        "from helpers import leaf_step\ndef execute_job():\n    return leaf_step()\n",
+        encoding="utf-8",
+    )
+    for i in range(72):
+        (tmp_path / f"decoy_{i}.py").write_text(
+            f"from jobs import execute_job\ndef execute_job_decoy_{i}():\n"
+            "    return execute_job()\n",
+            encoding="utf-8",
+        )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain execute_job behavior"
+    assert report.manifest.artifacts.structural_retrieval is not None
+    index = load_retrieval_index(
+        tmp_path,
+        report.manifest.artifacts.structural_retrieval,
+        manifest=report.manifest,
+    )
+    graph = load_relationship_graph_projection(tmp_path, manifest=report.manifest)
+    raw = _rank_candidates(task, index, graph, working_set=(), diff_paths=())
+    discovery = _complementary_candidates(task, index, raw, truncate=False)
+    assert len(discovery) > 64
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest, limit=64)
+    )
+    assert len(result.candidates) <= 64
+    assert "helpers.py" in {c.path for c in result.candidates[:5]}
+    assert result.requirements is not None
+    assert any(
+        r.path == "helpers.py" and r.basis == "verified-behavior"
+        for r in result.requirements.source_evidence
+    )
+    assert not result.requirements.unresolved_dependency_ids
+    limited = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest, limit=1)
+    )
+    compiled = compile_context_capsule(
+        tmp_path, task, limited, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"

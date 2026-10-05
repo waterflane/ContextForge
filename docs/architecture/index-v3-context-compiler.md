@@ -65,6 +65,12 @@ representation. SLICE uses that complete range union, including multiple symbols
 and tests in one file. Planner representations and fallback cannot drop those
 ranges. Missing or substituted retrieval evidence remains insufficient; restoring
 known IDs from physically covered material does not admit new retrieval facts.
+Discovery retains lexical seeds and verified counterparts before the final pool
+cap of 64. Symbol requirements are frozen before truncation; missing candidates
+cannot erase them. References to an explicit identifier keep their exact match
+category but do not receive declaration-anchor priority. Initial discovery IDs
+remain separate from restored graph ranges, preventing an expansion from making
+all evidence in a file mandatory.
 
 Semantic Card analyzer version 9 (`semantic-card-v3.6`) uses one full request
 when it fits or up to four declaration-aware UTF-8 chunks with eight lines of

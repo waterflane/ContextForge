@@ -500,6 +500,7 @@ class CandidateCard(IndexModel):
     resolved_symbols: tuple[ResolvedSourceSymbol, ...] = ()
     ambiguous_identifiers: tuple[str, ...] = ()
     source_connections: tuple[VerifiedSourceConnection, ...] = ()
+    discovery_evidence_ids: tuple[str, ...] | None = None
     evidence_ranges: tuple[CandidateEvidenceRange, ...] = ()
     source_units: tuple[SourceEvidenceUnit, ...] = ()
     graph_neighbors: tuple[CandidateGraphNeighbor, ...] = ()
@@ -1701,15 +1702,20 @@ async def retrieve_context_candidates(
     ranked_candidates = _resolve_source_symbols(
         repository_root, active, index, task, ranked_candidates
     )
-    ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
+    ranked_candidates = _complementary_candidates(
+        task, index, ranked_candidates, truncate=False
+    )
     ranked_candidates = _restore_exact_identifier_evidence(
         repository_root,
         active,
         index,
-        ranked_candidates[:planning_max_pool_candidates],
+        ranked_candidates,
     )
     ranked_candidates = _restore_required_source_evidence(
         repository_root, active, index, task, ranked_candidates
+    )
+    discovered_requirements = build_evidence_requirements(
+        task, tuple(ranked_candidates)
     )
     ranked_candidates = _complementary_candidates(task, index, ranked_candidates)
     if query_stage_timings_ms is not None:
@@ -1718,9 +1724,7 @@ async def retrieve_context_candidates(
         ) * 1000
     stage_started = time.perf_counter()
     candidates = ranked_candidates[:limit]
-    requirements = build_evidence_requirements(
-        task, tuple(ranked_candidates[:planning_max_pool_candidates])
-    )
+    requirements = discovered_requirements
     retrieval_ledger = build_coverage_ledger(
         task, tuple(candidates), requirements=requirements
     )
@@ -1866,6 +1870,16 @@ def _rank_candidates(
             dict.fromkeys((*qualified_matches, *symbol_matches, *identifier_matches))
         )
 
+    declared_anchors = {
+        anchor.casefold()
+        for anchor in intent.explicit_anchors
+        for document in index.documents
+        if anchor.casefold()
+        in {
+            value.casefold()
+            for value in (*document.symbols, *document.qualified_symbols)
+        }
+    }
     seeds = {
         path for path, group in exact_by_path.items() if group != "approximate"
     } | working
@@ -1899,7 +1913,23 @@ def _rank_candidates(
             else f"Structural map for {document.path}."
         )
         provenance = ["verified-structure"]
-        explicit_match = any(
+        explicit_match = (
+            exact_by_path[document.path]
+            in {
+                "exact_path",
+                "exact_symbol",
+                "exact_qualified_symbol",
+            }
+            or (
+                exact_by_path[document.path] == "exact_source_identifier"
+                and any(
+                    anchor.casefold() not in declared_anchors
+                    and anchor.casefold()
+                    in {s.casefold() for s in matched_symbols[document.path]}
+                    for anchor in intent.explicit_anchors
+                )
+            )
+        ) and any(
             document.path.casefold() == anchor.casefold()
             or anchor.casefold()
             in {s.casefold() for s in matched_symbols[document.path]}
@@ -1942,6 +1972,9 @@ def _rank_candidates(
                 matched_concepts=concepts,
                 matched_symbols=matched_symbols[document.path],
                 evidence_ranges=evidence,
+                discovery_evidence_ids=tuple(
+                    sorted({e.evidence_id for e in evidence if e.evidence_id})
+                ),
                 source_units=select_source_evidence_units(
                     document.source_units, tuple(e.source_range for e in evidence)
                 ),
@@ -2058,7 +2091,11 @@ def _grounded_topic_anchors(
 
 
 def _complementary_candidates(
-    task: str, index: RetrievalIndex, ranked: list[CandidateCard]
+    task: str,
+    index: RetrievalIndex,
+    ranked: list[CandidateCard],
+    *,
+    truncate: bool = True,
 ) -> list[CandidateCard]:
     """Admit lexical/exact seeds and their verified two-hop counterparts.
 
@@ -2099,6 +2136,7 @@ def _complementary_candidates(
         for neighbor in by_path[path].graph_neighbors:
             kinds = _verified_neighbor_kinds(neighbor) & {
                 "call",
+                "reference",
                 "import",
                 "source-test",
                 "config-consumer",
@@ -2127,6 +2165,8 @@ def _complementary_candidates(
         for c in ranked
         if c.path in admitted
     ]
+    if not truncate:
+        return available
     requirements = build_evidence_requirements(task, tuple(available))
     required = {r.candidate_id for r in requirements.source_evidence}
     selected = sorted(
@@ -2145,11 +2185,14 @@ def _complementary_candidates(
         term for c in selected for term in c.topical_term_weights
     }
     remaining = [c for c in available if c.candidate_id not in selected_ids]
-    while remaining and len(selected) < PLANNING_MAX_POOL_CANDIDATES:
+    while remaining and (not truncate or len(selected) < PLANNING_MAX_POOL_CANDIDATES):
         candidate = min(
             remaining,
             key=lambda c: (
-                -int(c.candidate_id in required),
+                -sum(
+                    r.candidate_id == c.candidate_id
+                    for r in requirements.source_evidence
+                ),
                 -len(
                     {
                         r.role_id
@@ -2165,7 +2208,29 @@ def _complementary_candidates(
                 c.path,
             ),
         )
-        selected.append(candidate)
+        selected.append(
+            candidate.model_copy(
+                update={
+                    "selection_reasons": tuple(
+                        sorted(
+                            {
+                                *candidate.selection_reasons,
+                                *(
+                                    ("required-source-evidence",)
+                                    if candidate.candidate_id in required
+                                    else ()
+                                ),
+                                *(
+                                    ("uncovered-topic-facet",)
+                                    if _facet_gain(candidate, uncovered_facets)
+                                    else ()
+                                ),
+                            }
+                        )
+                    )
+                }
+            )
+        )
         uncovered_facets -= candidate.topical_term_weights.keys()
         remaining.remove(candidate)
         covered.update(
@@ -2174,7 +2239,7 @@ def _complementary_candidates(
             if _candidate_covers_role(candidate, r, set())
             and _binding_matches_requirements(r, candidate, requirements)
         )
-    return selected[:PLANNING_MAX_POOL_CANDIDATES]
+    return selected[:PLANNING_MAX_POOL_CANDIDATES] if truncate else selected
 
 
 def _bm25(
@@ -2616,6 +2681,8 @@ def _restore_required_source_evidence(
         for c in candidates
         if c.resolved_symbols or c.candidate_id in requirements.anchors
     }
+    discovery_seeds, _ = _topical_seeds(task, index, candidates)
+    anchor_paths.update(c.path for c in discovery_seeds)
     connected_paths = set(anchor_paths)
     by_path = {c.path: c for c in candidates}
     frontier = set(anchor_paths)
@@ -5258,6 +5325,11 @@ def build_evidence_requirements(
                         for e in candidate.evidence_ranges
                         if e.evidence_id
                         and (not candidate.matched_concepts or e.strength == "grounded")
+                        and (
+                            basis != "task-syntax"
+                            or candidate.matched_concepts
+                            or e.evidence_id in (candidate.discovery_evidence_ids or ())
+                        )
                     }
                 )
             )
