@@ -72,7 +72,7 @@ from contextforge.project_config import create_model_provider
 
 
 class _MeasuredProvider:
-    """Count actual HTTP attempts and provider-reported tokens by phase."""
+    """Count actual provider attempts and dispatched token estimates by phase."""
 
     def __init__(
         self, provider: ModelProvider, budget: BenchmarkDispatchBudget | None = None
@@ -105,13 +105,12 @@ class _MeasuredProvider:
         cancellation: asyncio.Event | None = None,
     ) -> ModelResponse:
         started = time.perf_counter()
-        calls_before = self.calls
+        actual_calls = 0
         estimated = estimate_request_context(
             request, self.configuration
         ).estimated_input_tokens
         if self.budget is not None:
             self.budget.authorize(request.operation_id, estimated)
-        self.estimated_input += estimated
         reported_in: int | None = None
         reported_out: int | None = None
         error: str | None = None
@@ -127,19 +126,19 @@ class _MeasuredProvider:
                 )
         except asyncio.CancelledError:
             error = "cancelled_dispatch"
-            self.calls += 1
+            actual_calls = 1
             raise
         except TimeoutError as exc:
             if self.budget is None:
                 raise
             error = "time_limit"
-            self.calls += 1
+            actual_calls = 1
             assert self.budget is not None
             self.budget.stop_reasons.append("time_limit")
             raise ModelProviderError("benchmark time limit reached") from exc
         except ModelProviderError as exc:
             error = type(exc).__name__
-            self.calls += (
+            actual_calls = (
                 0
                 if isinstance(
                     exc, (ProviderCircuitOpenError, ProviderConfigurationError)
@@ -152,7 +151,7 @@ class _MeasuredProvider:
             )
             raise
         else:
-            self.calls += (
+            actual_calls = (
                 response.diagnostic.total_provider_http_calls
                 if response.diagnostic is not None
                 else 1
@@ -166,15 +165,15 @@ class _MeasuredProvider:
                     self.reported_output = (self.reported_output or 0) + reported_out
             return response
         finally:
+            self.calls += actual_calls
+            self.estimated_input += estimated * actual_calls
             if self.budget is not None:
-                self.budget.record(
-                    request.operation_id, self.calls - calls_before, estimated
-                )
+                self.budget.record(request.operation_id, actual_calls, estimated)
             self.records.append(
                 RealBenchmarkPhaseUsage(
                     phase=request.operation_id,
-                    provider_calls=self.calls - calls_before,
-                    estimated_input_tokens=estimated,
+                    provider_calls=actual_calls,
+                    estimated_input_tokens=estimated * actual_calls,
                     reported_input_tokens=reported_in,
                     reported_output_tokens=reported_out,
                     duration_ms=round((time.perf_counter() - started) * 1000),

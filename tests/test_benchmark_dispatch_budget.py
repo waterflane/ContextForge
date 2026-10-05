@@ -167,3 +167,78 @@ def test_cancelled_dispatch_keeps_its_budget_reservation(
     assert measured.records[0].error == "cancelled_dispatch"
     with pytest.raises(BenchmarkBudgetExceeded, match="call_limit"):
         asyncio.run(measured.complete_structured(request("benchmark-answer-oracle")))
+
+
+def test_circuit_rejection_has_zero_dispatched_token_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextforge.models import ModelResponse, ProviderCircuitOpenError
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="fixture",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        )
+    )
+    budget = BenchmarkDispatchBudget(20, 500_000, 1800)
+    measured = _MeasuredProvider(provider, budget)
+
+    async def rejected(*_args: object, **_kwargs: object) -> ModelResponse:
+        raise ProviderCircuitOpenError("provider disabled before dispatch")
+
+    monkeypatch.setattr(provider, "complete_structured", rejected)
+    with pytest.raises(ProviderCircuitOpenError):
+        asyncio.run(measured.complete_structured(request("benchmark-answer-ordinary")))
+    assert measured.calls == budget.calls == 0
+    assert measured.estimated_input == budget.estimated_input_tokens == 0
+    assert measured.records[0].provider_calls == 0
+    assert measured.records[0].estimated_input_tokens == 0
+
+
+def test_concurrent_phase_records_count_only_their_own_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextforge.models import ModelResponse
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="fixture",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        )
+    )
+    budget = BenchmarkDispatchBudget(2, 500_000, 1800)
+    measured = _MeasuredProvider(provider, budget)
+
+    async def completed(*_args: object, **_kwargs: object) -> ModelResponse:
+        await asyncio.sleep(0)
+        value = Response(ready=True)
+        return ModelResponse(
+            normalized_json=value.model_dump_json(),
+            value=value,
+            provider_id="fake",
+            model_id="fixture",
+        )
+
+    monkeypatch.setattr(provider, "complete_structured", completed)
+
+    async def run() -> None:
+        await asyncio.gather(
+            measured.complete_structured(request("card-build-a")),
+            measured.complete_structured(request("evidence-plan-generation")),
+        )
+
+    asyncio.run(run())
+    assert measured.calls == budget.calls == 2
+    assert [record.provider_calls for record in measured.records] == [1, 1]
+    assert budget.phase_calls == {"index": 1, "planner": 1}
+    assert (
+        measured.estimated_input
+        == budget.estimated_input_tokens
+        == sum(record.estimated_input_tokens for record in measured.records)
+    )

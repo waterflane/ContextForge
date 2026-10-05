@@ -292,7 +292,8 @@ def test_live_meter_does_not_count_open_circuit_as_http() -> None:
     with pytest.raises(ProviderCircuitOpenError):
         asyncio.run(metered.complete_structured(request))
     assert metered.calls == 0
-    assert metered.estimated_input > 0
+    assert metered.estimated_input == 0
+    assert metered.records[0].estimated_input_tokens == 0
 
 
 def _paired_answer(

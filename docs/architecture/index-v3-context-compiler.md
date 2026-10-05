@@ -428,6 +428,11 @@ returned through a caller-owned dictionary, leaving deterministic retrieval
 results independent of clock readings. Existing reports read these fields with
 empty or absent defaults.
 
+Phase token estimates describe dispatched attempts. A circuit or preflight
+rejection records zero attempts and zero dispatched input tokens. Each concurrent
+request records its own attempts instead of a delta from a shared counter.
+Pre-dispatch prompt-size estimates remain separate from observed phase usage.
+
 
 The Codex adapter passes explicit reasoning settings through CLI configuration
 rather than reporting an unapplied setting. `provider_default` leaves the CLI
