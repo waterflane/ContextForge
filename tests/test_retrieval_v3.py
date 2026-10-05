@@ -1724,3 +1724,39 @@ def test_query_stage_measurements_preserve_deterministic_result(tmp_path: Path) 
         "requirements_and_coverage",
     }
     assert all(value >= 0 for value in timings.values())
+
+
+def test_planner_preflight_rejection_counts_zero_dispatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextforge.models import ModelProviderError, ModelResponse
+
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    provider = _provider(lambda _request, _attempt: "{}")
+    attempted = []
+
+    async def reject(*_args: object, **_kwargs: object) -> ModelResponse:
+        attempted.append(True)
+        error = ModelProviderError("dispatch rejected before transport")
+        error.total_provider_http_calls = 0
+        error.transport_attempts = 0
+        raise error
+
+    monkeypatch.setattr(provider, "complete_structured", reject)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            provider=provider,
+            planning_mode="auto",
+        )
+    )
+    assert attempted == [True]
+    assert result.provider_calls == 0
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"
+    assert result.planning_diagnostics.estimated_input_tokens == 0
+    assert result.planning_diagnostics.reported_input_tokens is None

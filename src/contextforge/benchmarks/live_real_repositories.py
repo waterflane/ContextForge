@@ -125,6 +125,10 @@ class _MeasuredProvider:
                 response = await asyncio.wait_for(
                     pending, timeout=self.budget.remaining_seconds
                 )
+        except asyncio.CancelledError:
+            error = "cancelled_dispatch"
+            self.calls += 1
+            raise
         except TimeoutError as exc:
             if self.budget is None:
                 raise

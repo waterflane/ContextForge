@@ -55,7 +55,6 @@ from contextforge.intelligence.source_evidence import (
 )
 from contextforge.models import (
     ModelProvider,
-    ModelProviderError,
     ModelRequest,
     ModelResponse,
     ProviderCapabilities,
@@ -3042,13 +3041,21 @@ class _PlanningMeter:
         self, request: ModelRequest, *, cancellation: asyncio.Event | None = None
     ) -> ModelResponse:
         request = replace(request, scheduler_owned_attempts=True)
-        self.estimated += _request_tokens(request)
+        estimate = _request_tokens(request)
         try:
             response = await self.provider.complete_structured(
                 request, cancellation=cancellation
             )
-        except ModelProviderError:
+        except BaseException as exc:
+            self.estimated += estimate * max(
+                int(getattr(exc, "total_provider_http_calls", 1)), 0
+            )
             raise
+        self.estimated += estimate * (
+            1
+            if response.diagnostic is None
+            else response.diagnostic.total_provider_http_calls
+        )
         if response.usage is not None:
             if response.usage.input_tokens is not None:
                 self.reported_input = (
@@ -3245,8 +3252,9 @@ async def _plan_evidence_session(
                     active_request, cancellation=cancellation
                 )
         except Exception as exc:
-            provider_calls += max(int(getattr(exc, "total_provider_http_calls", 1)), 1)
-            input_tokens += request_tokens
+            failed_calls = max(int(getattr(exc, "total_provider_http_calls", 1)), 0)
+            provider_calls += failed_calls
+            input_tokens += request_tokens * failed_calls
             locally_repairable = isinstance(exc, StructuredResponseError)
             if (
                 (locally_repairable or (legacy_alias and round_index == 0))

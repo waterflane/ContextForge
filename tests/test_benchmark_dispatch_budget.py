@@ -138,3 +138,32 @@ def test_dispatch_reservation_prevents_concurrent_budget_oversubscription() -> N
     budget.record("card-build-b", 1, 100)
     assert budget.calls == 1
     assert budget.estimated_input_tokens == 100
+
+
+def test_cancelled_dispatch_keeps_its_budget_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextforge.models import ModelResponse
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="fixture",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+    )
+    budget = BenchmarkDispatchBudget(1, 500_000, 1800)
+    measured = _MeasuredProvider(provider, budget)
+
+    async def cancelled(*_args: object, **_kwargs: object) -> ModelResponse:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(provider, "complete_structured", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(measured.complete_structured(request("benchmark-answer-ordinary")))
+    assert budget.calls == measured.calls == 1
+    assert measured.records[0].error == "cancelled_dispatch"
+    with pytest.raises(BenchmarkBudgetExceeded, match="call_limit"):
+        asyncio.run(measured.complete_structured(request("benchmark-answer-oracle")))
