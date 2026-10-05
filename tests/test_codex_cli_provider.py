@@ -556,3 +556,37 @@ async def _unexpected_runner(
     args: tuple[str, ...], prompt: bytes | None, directory: Path
 ) -> tuple[int, bytes, bytes]:
     raise AssertionError("runner must not be called")
+
+
+@pytest.mark.parametrize(
+    ("effort", "override"),
+    [
+        ("low", 'model_reasoning_effort="low"'),
+        ("off", 'model_reasoning_effort="none"'),
+        ("provider_default", None),
+    ],
+)
+def test_codex_forwards_configured_reasoning_effort(
+    effort: str,
+    override: str | None,
+) -> None:
+    async def runner(
+        args: tuple[str, ...],
+        prompt: bytes | None,
+        directory: Path,
+    ) -> tuple[int, bytes, bytes]:
+        if args[1:3] == ("login", "status"):
+            return 0, b"Logged in using ChatGPT", b""
+        if override is None:
+            assert "--config" not in args
+        else:
+            assert args[args.index("--config") + 1] == override
+        return 0, _events(), b""
+
+    provider = CodexCLIModelProvider(
+        _configuration(reasoning_effort=effort),
+        runner=runner,
+        executable="codex-test",
+    )
+    result = asyncio.run(provider.complete_structured(_request()))
+    assert isinstance(result.value, _Answer)

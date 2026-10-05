@@ -34,7 +34,7 @@ from contextforge.models.providers import (
 
 CODEX_PROVIDER_ID = "codex"
 CODEX_ENDPOINT = "codex://subscription"
-CODEX_ADAPTER_VERSION = "1"
+CODEX_ADAPTER_VERSION = "2"
 _MAX_CLI_OUTPUT_BYTES = 16_000_000
 _RunCLI = Callable[
     [tuple[str, ...], bytes | None, Path], Awaitable[tuple[int, bytes, bytes]]
@@ -102,9 +102,12 @@ class CodexCLIModelProvider:
                             (self._executable, "login", "status"), None, Path(name)
                         )
                     if code != 0 or b"chatgpt" not in (output + errors).lower():
-                        raise ProviderAuthenticationError(
+                        error = ProviderAuthenticationError(
                             "Codex CLI must be signed in with ChatGPT"
                         )
+                        error.total_provider_http_calls = 0
+                        error.transport_attempts = 0
+                        raise error
                     self._auth_checked = True
         return await self._runtime.execute(
             request, self._complete_once, cancellation=cancellation
@@ -131,6 +134,16 @@ class CodexCLIModelProvider:
                 ),
                 encoding="utf-8",
             )
+            reasoning = self.configuration.reasoning_effort
+            overrides = (
+                ()
+                if reasoning == "provider_default"
+                else (
+                    "--config",
+                    "model_reasoning_effort="
+                    + json.dumps("none" if reasoning == "off" else reasoning),
+                )
+            )
             args = (
                 self._executable,
                 "exec",
@@ -145,6 +158,7 @@ class CodexCLIModelProvider:
                 str(schema),
                 "--model",
                 self.configuration.model_id,
+                *overrides,
                 "--cd",
                 str(directory),
                 "-",

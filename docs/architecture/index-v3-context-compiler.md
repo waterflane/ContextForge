@@ -427,3 +427,12 @@ Compiler duration is reported separately. Optional query stage measurements are
 returned through a caller-owned dictionary, leaving deterministic retrieval
 results independent of clock readings. Existing reports read these fields with
 empty or absent defaults.
+
+
+The Codex adapter passes explicit reasoning settings through CLI configuration
+rather than reporting an unapplied setting. `provider_default` leaves the CLI
+choice unchanged; the common `off` setting requests CLI `none` without silently
+falling back. A live preflight must establish that the selected model supports
+the requested effort. Unsupported settings block that protocol until an
+explicit supported setting is selected. Login preflight failures count zero
+model dispatches.
