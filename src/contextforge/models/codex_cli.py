@@ -16,6 +16,7 @@ from pydantic import SecretStr
 
 from contextforge.models.providers import (
     ContextWindowExceededError,
+    ModelProviderError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -34,8 +35,20 @@ from contextforge.models.providers import (
 
 CODEX_PROVIDER_ID = "codex"
 CODEX_ENDPOINT = "codex://subscription"
-CODEX_ADAPTER_VERSION = "2"
+CODEX_ADAPTER_VERSION = "3"
 _MAX_CLI_OUTPUT_BYTES = 16_000_000
+_REQUIRED_EXEC_FLAGS = (
+    "--json",
+    "--ephemeral",
+    "--sandbox",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--skip-git-repo-check",
+    "--output-schema",
+    "--model",
+    "--config",
+    "--cd",
+)
 _RunCLI = Callable[
     [tuple[str, ...], bytes | None, Path], Awaitable[tuple[int, bytes, bytes]]
 ]
@@ -102,8 +115,25 @@ class CodexCLIModelProvider:
                             (self._executable, "login", "status"), None, Path(name)
                         )
                     if code != 0 or b"chatgpt" not in (output + errors).lower():
-                        error = ProviderAuthenticationError(
+                        error: ModelProviderError = ProviderAuthenticationError(
                             "Codex CLI must be signed in with ChatGPT"
+                        )
+                        error.total_provider_http_calls = 0
+                        error.transport_attempts = 0
+                        raise error
+                    with tempfile.TemporaryDirectory(
+                        prefix="contextforge-codex-preflight-"
+                    ) as name:
+                        code, output, errors = await self._runner(
+                            (self._executable, "exec", "--help"), None, Path(name)
+                        )
+                    if code != 0 or any(
+                        flag.encode() not in output + errors
+                        for flag in _REQUIRED_EXEC_FLAGS
+                    ):
+                        error = ProviderConfigurationError(
+                            "[codex.cli_arguments] Installed Codex lacks "
+                            "required exec flags"
                         )
                         error.total_provider_http_calls = 0
                         error.transport_attempts = 0
@@ -163,16 +193,17 @@ class CodexCLIModelProvider:
                 str(directory),
                 "-",
             )
-            code, output, _ = await self._runner(args, prompt, directory)
-        if len(output) > _MAX_CLI_OUTPUT_BYTES:
+            code, output, errors = await self._runner(args, prompt, directory)
+        if len(output) + len(errors) > _MAX_CLI_OUTPUT_BYTES:
             raise ProviderRequestError("Codex event stream exceeded its byte limit")
-        result = _parse_cli_result(code, output)
+        result = _parse_cli_result(code, output, errors)
         try:
             value = json.loads(result.text)
             restored = _restore_dynamic_maps(value, request.response_schema)
         except (TypeError, ValueError) as exc:
             raise ProviderRequestError(
-                "Codex returned an invalid structured value"
+                "[codex.invalid_structured_response] Codex returned an "
+                "invalid structured value"
             ) from exc
         return replace(result, text=json.dumps(restored, ensure_ascii=False))
 
@@ -192,7 +223,12 @@ async def _run_cli(
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        raise ProviderUnavailableError("Codex CLI could not be started") from exc
+        error = ProviderUnavailableError(
+            "[codex.cli_start] Codex CLI could not be started"
+        )
+        error.transport_attempts = 0
+        error.total_provider_http_calls = 0
+        raise error from exc
     try:
         output, errors = await process.communicate(prompt)
     except asyncio.CancelledError:
@@ -317,15 +353,69 @@ def _matches_schema_shape(value: Any, schema: dict[str, Any]) -> bool:
     return True
 
 
-def _parse_cli_result(code: int, output: bytes) -> ProviderTransportResponse:
+def _cli_failure(detail: str) -> ModelProviderError:
+    """Classify bounded diagnostic text without retaining backend data or secrets."""
+    detail = detail.casefold()
+    if "quota" in detail or "usage limit" in detail:
+        return ProviderQuotaError("[codex.quota] Codex subscription quota is exhausted")
+    if "rate limit" in detail:
+        return ProviderRateLimitError(
+            "[codex.rate_limit] Codex subscription is rate limited"
+        )
+    if "auth" in detail or "login" in detail:
+        return ProviderAuthenticationError(
+            "[codex.authentication] Codex CLI authentication failed"
+        )
+    rejected = any(
+        word in detail
+        for word in ("unsupported", "not supported", "invalid", "not allowed")
+    )
+    if rejected and ("reasoning" in detail or "effort" in detail):
+        return ProviderConfigurationError(
+            "[codex.reasoning_unsupported] Configured reasoning effort is unsupported"
+        )
+    if any(
+        word in detail
+        for word in (
+            "unexpected argument",
+            "unrecognized argument",
+            "unknown option",
+            "invalid value",
+        )
+    ):
+        return ProviderConfigurationError(
+            "[codex.cli_arguments] Codex CLI rejected its arguments"
+        )
+    if "schema" in detail and (rejected or "rejected" in detail):
+        return ProviderRequestError(
+            "[codex.output_schema] Codex rejected the output schema"
+        )
+    if "context" in detail and ("limit" in detail or "window" in detail):
+        return ContextWindowExceededError()
+    if "model" in detail and any(
+        word in detail for word in ("not found", "unavailable", "not supported")
+    ):
+        return ProviderModelNotFoundError(
+            "[codex.model_unavailable] Configured Codex model is unavailable"
+        )
+    return ProviderRequestError(
+        "[codex.incomplete_response] Codex did not complete the structured request"
+    )
+
+
+def _parse_cli_result(
+    code: int, output: bytes, errors: bytes = b""
+) -> ProviderTransportResponse:
     message: str | None = None
     usage: ModelUsage | None = None
-    error_codes: list[str] = []
+    error_codes: list[str] = [errors[:8192].decode("utf-8", errors="replace")]
     finished = False
     for line in output.splitlines():
         try:
             event: Any = json.loads(line)
         except (ValueError, UnicodeDecodeError) as exc:
+            if code:
+                raise _cli_failure(" ".join(error_codes)) from exc
             raise ProviderRequestError("Codex returned invalid JSONL") from exc
         if not isinstance(event, dict):
             raise ProviderRequestError("Codex returned an invalid event")
@@ -361,21 +451,7 @@ def _parse_cli_result(code: int, output: bytes) -> ProviderTransportResponse:
                 error_codes.append(error.casefold())
     if code or not finished or message is None:
         detail = " ".join(error_codes)
-        if "quota" in detail or "usage limit" in detail:
-            raise ProviderQuotaError("Codex subscription quota is exhausted")
-        if "rate limit" in detail:
-            raise ProviderRateLimitError("Codex subscription is rate limited")
-        if "context" in detail and ("limit" in detail or "window" in detail):
-            raise ContextWindowExceededError()
-        if "model" in detail and (
-            "not found" in detail
-            or "unavailable" in detail
-            or "not supported" in detail
-        ):
-            raise ProviderModelNotFoundError("Configured Codex model is unavailable")
-        if "auth" in detail or "login" in detail:
-            raise ProviderAuthenticationError("Codex CLI authentication failed")
-        raise ProviderRequestError("Codex did not complete the structured request")
+        raise _cli_failure(detail)
     return ProviderTransportResponse(
         text=message,
         finish_reason="stop",

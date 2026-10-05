@@ -301,6 +301,12 @@ JSONL usage events, an isolated working directory, and a read-only sandbox.
 Authentication, quota, model, and context failures stay typed; the adapter never
 switches silently to a local provider or reads stored login tokens. It uses the
 same schema validation and request budgets as the other model stages.
+Adapter version 3 checks required `exec --help` flags before dispatch. Unsupported
+reasoning, CLI arguments, and output schemas are distinguished from unavailable
+models using safe diagnostic codes; backend text and credentials are not retained.
+Login and flag preflight failures count as zero dispatches. Started failures count
+as attempts, including errors reported on stderr. Model fallback belongs to the
+benchmark policy and never happens inside the adapter.
 OpenAI-compatible HTTP 429 responses use bounded structured `error.code` and
 message fields to distinguish quota exhaustion from transient rate limiting.
 
