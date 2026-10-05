@@ -68,7 +68,6 @@ from contextforge.models import (
     ProviderCapabilities,
     ProviderCircuitOpenError,
     ProviderConfiguration,
-    ProviderConfigurationError,
     estimate_request_context,
 )
 from contextforge.project_config import create_model_provider
@@ -147,9 +146,7 @@ class _MeasuredProvider:
             error = type(exc).__name__
             actual_calls = (
                 0
-                if isinstance(
-                    exc, (ProviderCircuitOpenError, ProviderConfigurationError)
-                )
+                if isinstance(exc, ProviderCircuitOpenError)
                 or (
                     isinstance(exc, ContextWindowExceededError)
                     and exc.budget is not None

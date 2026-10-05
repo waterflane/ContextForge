@@ -32,6 +32,8 @@ class BenchmarkDispatchBudget:
 
     @staticmethod
     def phase(operation_id: str) -> str:
+        if operation_id.startswith("benchmark-preflight-"):
+            return "preflight"
         if operation_id.startswith("benchmark-groundedness-"):
             return "judge"
         if operation_id.startswith("benchmark-answer-"):

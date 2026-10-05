@@ -91,6 +91,39 @@ def test_phase_ceiling_preserves_other_phase_allowance() -> None:
     assert len(measured.records) == 2
 
 
+@pytest.mark.parametrize("actual_calls", [0, 1])
+def test_configuration_rejection_preserves_dispatch_accounting(
+    monkeypatch: pytest.MonkeyPatch, actual_calls: int
+) -> None:
+    from contextforge.models import ModelResponse, ProviderConfigurationError
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="fixture",
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        )
+    )
+    budget = BenchmarkDispatchBudget(80, 2_000_000, 7200, {"preflight": 4, "index": 16})
+    measured = _MeasuredProvider(provider, budget)
+
+    async def rejected(*_args: object, **_kwargs: object) -> ModelResponse:
+        error = ProviderConfigurationError("Configured reasoning effort is unsupported")
+        error.total_provider_http_calls = actual_calls
+        error.transport_attempts = actual_calls
+        raise error
+
+    monkeypatch.setattr(provider, "complete_structured", rejected)
+    with pytest.raises(ProviderConfigurationError):
+        asyncio.run(measured.complete_structured(request("benchmark-preflight-model")))
+    assert measured.calls == budget.calls == actual_calls
+    assert budget.phase_calls == {"preflight": actual_calls}
+    assert bool(budget.estimated_input_tokens) == bool(actual_calls)
+    assert measured.records[0].provider_calls == actual_calls
+
+
 def test_bounded_dispatch_rejects_automatic_retries() -> None:
     provider = FakeModelProvider(
         ProviderConfiguration(
