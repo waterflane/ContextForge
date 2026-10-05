@@ -461,6 +461,7 @@ class EvidenceRequirement(IndexModel):
     path: str
     source_sha256: Sha256
     evidence_ids: tuple[str, ...] = ()
+    required_ranges: tuple[SourceRange, ...] = ()
     basis: Literal[
         "exact-symbol",
         "verified-call",
@@ -1093,7 +1094,11 @@ def _retrieval_semantic_claims(
         *(claim for values in card.profile_facts.values() for claim in values),
     ]
     values: dict[tuple[str, tuple[str, ...]], RetrievalSemanticClaim] = {}
-    for claim in claims if card.provenance.method == "model" else ():
+    for claim in (
+        claims
+        if (card.provenance.method == "model" or card.profile not in {"code", "test"})
+        else ()
+    ):
         evidence_values: list[RetrievalSemanticEvidence] = []
         for evidence_id in claim.evidence_ids:
             source_range = (
@@ -1681,6 +1686,7 @@ def _rank_candidates(
         sorted(
             {
                 *intent.facet_terms,
+                *_tokens(task),
                 *(
                     term
                     for anchor in intent.explicit_anchors
@@ -2551,17 +2557,25 @@ def _restore_required_source_evidence(
                 end_column=ending.end_column,
             ),
         )
+        for decorator in symbol.get("decorators", []):
+            add(
+                path,
+                f"decorator:{symbol['symbol_id']}:{decorator['expression']}",
+                SourceRange.model_validate(decorator["source_range"]),
+            )
 
     for c in candidates:
         candidate_map = maps.get(c.path)
         if candidate_map is None:
             continue
         matches = {v.casefold() for v in c.matched_symbols}
+        selected_owners = {u.owner_symbol_id for u in c.source_units}
         symbols = cast(list[dict[str, Any]], candidate_map.get("symbols", []))
         for symbol in symbols:
             declaration = SourceRange.model_validate(symbol["declaration_range"])
             if (
-                symbol["name"].casefold() in matches
+                symbol["symbol_id"] in selected_owners
+                or symbol["name"].casefold() in matches
                 or symbol["qualified_name"].casefold() in matches
                 or any(
                     e.source_range.start_line
@@ -4549,6 +4563,16 @@ def build_coverage_ledger(
                 for r in requirements.source_evidence
                 if r.candidate_id not in selected_ids
                 or not r.evidence_ids
+                or any(
+                    not any(
+                        e.path == r.path
+                        and e.source_range.start_line <= address.start_line
+                        and address.end_line <= e.source_range.end_line
+                        for e in ranges
+                        if e.evidence_id in r.evidence_ids
+                    )
+                    for address in r.required_ranges
+                )
                 or not any(
                     c.candidate_id == r.candidate_id
                     and c.path == r.path
@@ -4922,12 +4946,7 @@ def build_evidence_requirements(
         "exact-identifier"
         if exact_anchor
         else "grounded-semantic"
-        if not ambiguous
-        and any(
-            c.matched_concepts
-            and any(e.strength == "grounded" for e in c.evidence_ranges)
-            for c in anchors
-        )
+        if not ambiguous and bool(_grounded_topic_anchors(list(anchors), intent))
         else "unresolved"
     )
     obligations: dict[str, EvidenceRequirement] = {}
@@ -4963,8 +4982,39 @@ def build_evidence_requirements(
             if evidence is not None
             else tuple(
                 sorted(
-                    {e.evidence_id for e in candidate.evidence_ranges if e.evidence_id}
+                    {
+                        e.evidence_id
+                        for e in candidate.evidence_ranges
+                        if e.evidence_id
+                        and (not candidate.matched_concepts or e.strength == "grounded")
+                    }
                 )
+            )
+        )
+        selected_ranges = tuple(
+            e.source_range
+            for e in candidate.evidence_ranges
+            if e.evidence_id in evidence_ids
+        )
+        units = select_source_evidence_units(candidate.source_units, selected_ranges)
+        if (
+            anchor_symbol_id is not None
+            and candidate.candidate_id == anchor.candidate_id
+        ):
+            units = tuple(
+                u
+                for u in candidate.source_units
+                if u.owner_symbol_id == anchor_symbol_id
+            )
+        mandatory_units = tuple(
+            u for u in units if u.kind in {"implementation", "decorator"}
+        )
+        evidence_ids = tuple(
+            sorted({*evidence_ids, *(u.evidence_id for u in mandatory_units)})
+        )
+        required_ranges = tuple(
+            dict.fromkeys(
+                (*selected_ranges, *(u.source_range for u in mandatory_units))
             )
         )
         obligations[identity] = EvidenceRequirement(
@@ -4974,6 +5024,7 @@ def build_evidence_requirements(
             path=candidate.path,
             source_sha256=candidate.source_sha256,
             evidence_ids=evidence_ids,
+            required_ranges=required_ranges,
             basis=basis,
             anchor_candidate_id=anchor.candidate_id,
             anchor_symbol_id=anchor_symbol_id,
@@ -5546,6 +5597,60 @@ def _structural_evidence_id(
         fact_identity,
         source_range,
     )
+
+
+def verified_source_lookup(code_map: FileCodeMap) -> dict[str, SourceRange]:
+    """Recover canonical known identities without interpreting the source text."""
+    values = {
+        posting.evidence_id: posting.source_range
+        for posting in _all_structural_postings(code_map)
+    }
+    values.update(
+        (unit.evidence_id, unit.source_range)
+        for unit in derive_source_evidence_units(code_map)
+    )
+    for symbol in code_map.symbols:
+        for call in symbol.direct_calls:
+            if call.resolution == "internal":
+                identity = f"call-site:{symbol.symbol_id}:{call.observed_name}"
+                values[
+                    _structural_evidence_id(code_map, identity, call.source_range)
+                ] = call.source_range
+    from contextforge.intelligence.graph import (
+        _edge,
+        _structural_provenance,
+        symbol_node_id,
+    )
+
+    for relationship in code_map.relationships:
+        target = relationship.target
+        if (
+            relationship.kind not in {"call", "reference"}
+            or target.resolution != "internal"
+            or relationship.source_symbol_id is None
+            or target.symbol_id is None
+            or _structural_provenance(relationship.detection_method) != "verified"
+        ):
+            continue
+        identity = (
+            f"connection:{relationship.source_symbol_id}:"
+            f"{target.symbol_id}:{relationship.kind}"
+        )
+        values[
+            _structural_evidence_id(code_map, identity, relationship.source_range)
+        ] = relationship.source_range
+        if relationship.kind == "call":
+            edge = _edge(
+                "call",
+                symbol_node_id(relationship.source_symbol_id),
+                symbol_node_id(target.symbol_id),
+                code_map.path,
+                relationship.source_range,
+                "verified",
+                relationship.detection_method,
+            )
+            values[f"lexicon-call:{edge.edge_id}"] = relationship.source_range
+    return values
 
 
 def _structural_evidence_id_from_source(

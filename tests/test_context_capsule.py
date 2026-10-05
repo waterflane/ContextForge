@@ -713,7 +713,7 @@ def test_required_source_coverage_precedes_supplemental_maps(
             f"def {name}_flow():\n{body}    return {name}_120\n",
         )
     report = _build(tmp_path)
-    retrieval = _retrieve(tmp_path, report, "flow")
+    retrieval = _retrieve(tmp_path, report, "review flow")
     concepts = {"alpha.py": "ingest", "beta.py": "validate", "gamma.py": "persist"}
     candidates = tuple(
         item.model_copy(

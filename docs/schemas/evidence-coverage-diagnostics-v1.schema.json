@@ -324,6 +324,14 @@
           ],
           "default": null,
           "title": "Anchor Symbol Id"
+        },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
         }
       },
       "required": [
@@ -375,6 +383,40 @@
         "original_task"
       ],
       "title": "QueryIntent",
+      "type": "object"
+    },
+    "SourceRange": {
+      "additionalProperties": false,
+      "description": "One-based lines and zero-based half-open source columns.",
+      "properties": {
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "start_column": {
+          "minimum": 0,
+          "title": "Start Column",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "end_column": {
+          "minimum": 0,
+          "title": "End Column",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
+      "title": "SourceRange",
       "type": "object"
     }
   }

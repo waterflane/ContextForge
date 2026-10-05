@@ -35,6 +35,7 @@ from contextforge.intelligence.retrieval import (
     RetrievalResult,
     build_coverage_ledger,
     build_evidence_requirements,
+    verified_source_lookup,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
@@ -544,6 +545,7 @@ def compile_context_capsule(
             selected_estimator,
             token_limit=automatic_limit,
             allow_indivisible_upgrade=allow_indivisible_automatic_upgrade,
+            requirements=retrieval.requirements,
         )
     rationales = list(dict.fromkeys((*capsule.interpretations, *interpretations)))
     if retrieval.evidence_plan is not None and not plan_fallback:
@@ -853,6 +855,7 @@ def _automatic_material_options(
                 if required_evidence
                 or candidate.exact_group in {"exact_symbol", "exact_qualified_symbol"}
                 else _automatic_slice_ranges(state, candidate),
+                tuple(sorted(required_ids)),
             ),
             _materialize(state, candidate.path, RepresentationMode.FULL, candidate, ()),
         )
@@ -1105,6 +1108,7 @@ def _apply_greedy_upgrades(
     *,
     token_limit: int,
     allow_indivisible_upgrade: bool,
+    requirements: EvidenceRequirements | None = None,
 ) -> ContextCapsule:
     by_path = {item.path: item for item in candidates}
     current = {("working", item.path): item for item in capsule.working_set} | {
@@ -1178,8 +1182,10 @@ def _apply_greedy_upgrades(
             # An upgrade must be monotonic for verified coverage.  It normally
             # replaces one material in place, but calculate from the ledger so
             # later representation changes cannot silently evict last coverage.
-            before = _capsule_ledger(task, candidates, capsule)
-            after = _capsule_ledger(task, candidates, candidate_capsule)
+            before = _capsule_ledger(task, candidates, capsule, requirements)
+            after = _capsule_ledger(task, candidates, candidate_capsule, requirements)
+            if set(after.missing_requirement_ids) - set(before.missing_requirement_ids):
+                continue
             if set(before.covered_role_ids) - set(after.covered_role_ids) or set(
                 before.covered_graph_endpoints
             ) - set(after.covered_graph_endpoints):
@@ -1499,15 +1505,47 @@ def _materialize(
         RepresentationMode.SLICE,
         RepresentationMode.FULL,
     }:
+        known_ranges = verified_source_lookup(code_map)
+        selected_ids = {
+            *(e.evidence_id for e in candidate.evidence_ranges if e.evidence_id),
+            *requested_evidence_ids,
+            *(
+                u.evidence_id
+                for u in candidate.source_units
+                if u.kind in {"implementation", "decorator"}
+            ),
+        }
+        card = _card(state, path)
+        if card is not None:
+            known_ranges.update(
+                (e.evidence_id, e.source_range)
+                for e in card.evidence
+                if e.source_range is not None
+            )
+            selected_ids.update(e.evidence_id for e in card.evidence)
+            if card.lexicon is not None:
+                owners = {s.symbol_id: s for s in code_map.symbols}
+                for function in card.lexicon.functions:
+                    owner = owners.get(function.symbol_id)
+                    if owner is not None:
+                        end = owner.body_range or owner.declaration_range
+                        known_ranges[f"lexicon:{owner.symbol_id}"] = (
+                            owner.declaration_range.model_copy(
+                                update={
+                                    "end_line": end.end_line,
+                                    "end_column": end.end_column,
+                                }
+                            )
+                        )
         material_evidence_ids = tuple(
-            item.evidence_id
-            for item in candidate.evidence_ranges
-            if item.evidence_id is not None
+            identity
+            for identity, address in known_ranges.items()
+            if identity in selected_ids
             and (
                 mode != RepresentationMode.SLICE
                 or any(
-                    value.start_line <= item.source_range.start_line
-                    and item.source_range.end_line <= value.end_line
+                    value.start_line <= address.start_line
+                    and address.end_line <= value.end_line
                     for value in ranges
                 )
             )

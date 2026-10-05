@@ -2248,6 +2248,14 @@
           ],
           "default": null,
           "title": "Anchor Symbol Id"
+        },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
         }
       },
       "required": [

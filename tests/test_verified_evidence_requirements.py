@@ -431,7 +431,9 @@ def test_grounded_facets_keep_separate_source_obligations(
         build_repository_index(tmp_path, provider=None, provider_configuration=None)
     )
     retrieval = asyncio.run(
-        retrieve_context_candidates(tmp_path, "amber cobalt", manifest=report.manifest)
+        retrieve_context_candidates(
+            tmp_path, "amber_stage cobalt_stage", manifest=report.manifest
+        )
     )
     candidates = tuple(
         candidate.model_copy(

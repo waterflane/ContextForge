@@ -949,6 +949,14 @@
           ],
           "default": null,
           "title": "Anchor Symbol Id"
+        },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/range"
+          },
+          "title": "Required Ranges",
+          "type": "array"
         }
       },
       "required": [

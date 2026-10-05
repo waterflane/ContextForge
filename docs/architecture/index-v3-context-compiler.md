@@ -392,3 +392,11 @@ Python analyzer version 7 additionally records lambda callback arguments as
 observed syntax. Upgrading an index with older Python facts requires Python
 reanalysis; other language facts remain reusable. A subsequent unchanged build
 is a no-op and preserves the generation.
+
+Frozen source requirements contain both evidence IDs and complete behavioral
+ranges. Grounded claims retain all supports and the smallest owning
+implementations; linked test usage retains its implementation and decorators.
+Other file matches remain optional. Materialization recovers selected canonical
+IDs from verified CodeMaps when their complete ranges are physically covered.
+Unknown IDs receive no credit. Upgrades preserve the same frozen obligations;
+MAP/SUMMARY cannot close behavioral source requirements.
