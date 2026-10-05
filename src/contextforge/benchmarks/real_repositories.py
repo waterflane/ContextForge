@@ -204,7 +204,17 @@ class CandidateSelectionDiagnostic(RealBenchmarkModel):
     source_sha256: str
     rank: Annotated[int, Field(ge=1)]
     exact_group: str
+    match_origin: (
+        Literal[
+            "explicit-anchor",
+            "lexical-discovery",
+            "grounded-semantic",
+            "verified-expansion",
+        ]
+        | None
+    ) = None
     bm25_field_scores: dict[str, float] = Field(default_factory=dict)
+    topical_term_weights: dict[str, float] = Field(default_factory=dict)
     selection_reasons: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
     graph_paths: tuple[RepositoryRelativePath, ...] = ()

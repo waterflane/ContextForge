@@ -1401,6 +1401,31 @@
           },
           "title": "Graph Paths",
           "type": "array"
+        },
+        "match_origin": {
+          "anyOf": [
+            {
+              "enum": [
+                "explicit-anchor",
+                "lexical-discovery",
+                "grounded-semantic",
+                "verified-expansion"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Match Origin"
+        },
+        "topical_term_weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Topical Term Weights",
+          "type": "object"
         }
       },
       "required": [

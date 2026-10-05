@@ -22,6 +22,7 @@ from contextforge.benchmarks import (
     run_real_repository_benchmark,
 )
 from contextforge.benchmarks.real_repositories import (
+    CandidateSelectionDiagnostic,
     RealBenchmarkAggregate,
     RealBenchmarkBuildReport,
     RealBenchmarkTaskReport,
@@ -202,6 +203,21 @@ def test_real_report_schema_tracks_public_fields() -> None:
     assert set(schema["$defs"]["build"]["properties"]) == set(
         RealBenchmarkBuildReport.model_fields
     )
+    assert set(schema["$defs"]["CandidateSelectionDiagnostic"]["properties"]) == set(
+        CandidateSelectionDiagnostic.model_fields
+    )
+
+
+def test_legacy_candidate_diagnostic_does_not_invent_match_origin() -> None:
+    diagnostic = CandidateSelectionDiagnostic(
+        candidate_id="file:app.py",
+        path="app.py",
+        source_sha256="a" * 64,
+        rank=1,
+        exact_group="none",
+    )
+    assert diagnostic.match_origin is None
+    assert diagnostic.topical_term_weights == {}
 
 
 def test_live_reload_compares_complete_candidate_records(
@@ -1194,6 +1210,11 @@ def test_official_runner_executes_built_in_pipeline_on_pinned_clone(
     assert {run.mode for run in report.runs} == set(RealBenchmarkMode)
     assert all(run.status == "complete" for run in report.runs)
     assert all(run.candidate_diagnostics for run in report.runs)
+    assert all(
+        candidate.match_origin is not None
+        for run in report.runs
+        for candidate in run.candidate_diagnostics
+    )
     assert all(run.evidence_transitions[0].reason == "covered" for run in report.runs)
     assert all(
         run.evidence_transitions[0].retrieval_evidence_ids for run in report.runs

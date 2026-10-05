@@ -434,6 +434,9 @@ Phase token estimates describe dispatched attempts. A circuit or preflight
 rejection records zero attempts and zero dispatched input tokens. Each concurrent
 request records its own attempts instead of a delta from a shared counter.
 Pre-dispatch prompt-size estimates remain separate from observed phase usage.
+Candidate report diagnostics retain match origin and IDF-weighted topical terms.
+Legacy records without these fields remain unknown or empty; reading them does
+not infer an explicit anchor or grounded semantic support.
 
 
 The Codex adapter passes explicit reasoning settings through CLI configuration

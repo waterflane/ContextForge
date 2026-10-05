@@ -333,7 +333,9 @@ def _candidate_diagnostics(
             source_sha256=item.source_sha256,
             rank=rank,
             exact_group=item.exact_group,
+            match_origin=item.match_origin,
             bm25_field_scores=item.bm25_field_scores,
+            topical_term_weights=item.topical_term_weights,
             selection_reasons=item.selection_reasons,
             evidence_ids=tuple(
                 sorted({e.evidence_id for e in item.evidence_ranges if e.evidence_id})
