@@ -623,6 +623,8 @@ def test_provider_circuit_opens_after_three_matching_transient_failures() -> Non
         with pytest.raises(ProviderCircuitOpenError) as captured:
             await provider.complete_structured(_request())
         assert captured.value.circuit_opened is True
+        assert captured.value.transport_attempts == 0
+        assert captured.value.total_provider_http_calls == 0
         return provider
 
     provider = asyncio.run(exercise())

@@ -992,6 +992,8 @@ class ProviderCircuitOpenError(ModelProviderError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.circuit_opened = True
+        self.transport_attempts = 0
+        self.total_provider_http_calls = 0
 
 
 class ProviderCancelledError(ModelProviderError):

@@ -1726,11 +1726,17 @@ def test_query_stage_measurements_preserve_deterministic_result(tmp_path: Path) 
     assert all(value >= 0 for value in timings.values())
 
 
+@pytest.mark.parametrize("rejection", ["explicit_zero", "open_circuit"])
 def test_planner_preflight_rejection_counts_zero_dispatches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
 ) -> None:
-    from contextforge.models import ModelProviderError, ModelResponse
+    from contextforge.models import (
+        ModelProviderError,
+        ModelResponse,
+        ProviderCircuitOpenError,
+    )
 
     _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
     report = _build(tmp_path)
@@ -1739,9 +1745,13 @@ def test_planner_preflight_rejection_counts_zero_dispatches(
 
     async def reject(*_args: object, **_kwargs: object) -> ModelResponse:
         attempted.append(True)
-        error = ModelProviderError("dispatch rejected before transport")
-        error.total_provider_http_calls = 0
-        error.transport_attempts = 0
+        error: ModelProviderError
+        if rejection == "open_circuit":
+            error = ProviderCircuitOpenError("provider disabled before dispatch")
+        else:
+            error = ModelProviderError("dispatch rejected before transport")
+            error.total_provider_http_calls = 0
+            error.transport_attempts = 0
         raise error
 
     monkeypatch.setattr(provider, "complete_structured", reject)
