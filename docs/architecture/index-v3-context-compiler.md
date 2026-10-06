@@ -418,6 +418,12 @@ is false sufficient even when no semantic judge has run. Answer evaluation adds
 citation checks and groundedness; missing answer/judge evaluation remains
 semantically unverified. All model payloads, including blinded judges, receive
 only public assertion IDs and descriptions, never reviewed support addresses.
+Reviewed-source validation recognizes both structural postings and source units
+from verified CodeMaps, and rejects changed source SHA. Ordinary and oracle
+material expose these same known IDs only after their entire fact ranges are
+physically covered, including adjacent range unions. Answer citations must
+collectively cover every mandatory support range; an ID attached to a partial
+citation cannot replace its missing source lines.
 
 Broad discovery covers topical facets with up to four lexical seeds and verified
 two-hop expansion before the 64-candidate pool is truncated. Explicit anchors

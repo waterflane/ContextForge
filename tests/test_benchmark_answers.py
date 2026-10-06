@@ -24,7 +24,162 @@ from contextforge.benchmarks.answers import (
 )
 from contextforge.context import ContextBudget, compile_context_capsule
 from contextforge.intelligence import retrieve_context_candidates
+from contextforge.intelligence.source_evidence import derive_source_evidence_units
 from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
+
+
+@pytest.mark.parametrize(
+    ("spans", "covered"),
+    [
+        (((1, 4),), True),
+        (((1, 2), (3, 4)), True),
+        (((1, 2),), False),
+        (((1, 1), (3, 4)), False),
+    ],
+)
+def test_source_material_exposes_units_only_with_complete_physical_coverage(
+    tmp_path: Path, spans: tuple[tuple[int, int], ...], covered: bool
+) -> None:
+    (tmp_path / "service.py").write_text(
+        "def serve(value):\n    prepared = value + 1\n"
+        "    result = prepared * 2\n    return result\n",
+        encoding="utf-8",
+    )
+    built = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    unit = next(
+        u
+        for u in derive_source_evidence_units(built.structural.code_maps[0])
+        if u.kind == "implementation"
+    )
+    visible = tuple(
+        BenchmarkSourceRange(path="service.py", start_line=a, end_line=b)
+        for a, b in spans
+    )
+    material = _source_material_evidence(tmp_path, visible)
+    assert tuple(r for r, _ in material) == visible
+    assert any(unit.evidence_id in ids for _, ids in material) == covered
+
+
+@pytest.mark.parametrize(
+    ("spans", "supported"),
+    [
+        (((1, 4),), True),
+        (((1, 2), (3, 4)), True),
+        (((1, 1),), False),
+        (((2, 4),), False),
+    ],
+)
+def test_assertion_citations_must_cover_every_required_support_line(
+    spans: tuple[tuple[int, int], ...], supported: bool
+) -> None:
+    source = BenchmarkSourceRange(path="service.py", start_line=1, end_line=4)
+    assertion = BenchmarkExpectedAssertion(
+        assertion_id="behavior",
+        description="The implementation prepares and returns the result",
+        support=(
+            BenchmarkAssertionSupport(
+                citation=source, material_evidence_ids=("implementation",)
+            ),
+        ),
+    )
+    citations = tuple(
+        BenchmarkAnswerCitation(
+            assertion_id="behavior",
+            path="service.py",
+            start_line=a,
+            end_line=b,
+            material_evidence_ids=("implementation",),
+        )
+        for a, b in spans
+    )
+    assert (
+        _assertion_has_evidence_support(
+            assertion, citations, ((source, ("implementation",)),)
+        )
+        == supported
+    )
+
+
+@pytest.mark.parametrize("damage", [None, "unknown", "foreign", "outside", "sha"])
+def test_reviewed_validation_accepts_known_units_and_rejects_damaged_support(
+    tmp_path: Path, damage: str | None
+) -> None:
+    from contextforge.benchmarks.live_real_repositories import (
+        _validate_reviewed_sources,
+    )
+    from contextforge.benchmarks.real_repositories import (
+        RealBenchmarkTask,
+        RealBenchmarkTaskKind,
+        RealBenchmarkTaskRole,
+    )
+
+    source = (
+        "def serve(value):\n    prepared = value + 1\n"
+        "    return prepared * 2\n# outside\n"
+    )
+    (tmp_path / "service.py").write_text(source, encoding="utf-8")
+    (tmp_path / "other.py").write_text("def other():\n    return 0\n", encoding="utf-8")
+    built = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    maps = {m.path: m for m in built.structural.code_maps}
+    unit = next(
+        u
+        for u in derive_source_evidence_units(maps["service.py"])
+        if u.kind == "implementation"
+    )
+    identity = unit.evidence_id
+    if damage == "unknown":
+        identity = "guessed-id"
+    elif damage == "foreign":
+        identity = derive_source_evidence_units(maps["other.py"])[0].evidence_id
+    required = BenchmarkSourceRange(
+        path="service.py",
+        start_line=4 if damage == "outside" else 1,
+        end_line=4 if damage == "outside" else 3,
+    )
+    task = RealBenchmarkTask(
+        task_id="unit-validation",
+        repository_id="fixture",
+        kind=RealBenchmarkTaskKind.EXACT_SYMBOL,
+        dataset_split="holdout",
+        task="Explain `serve`",
+        required_files=("service.py",),
+        relevant_top5=("service.py",),
+        required_ranges=(required,),
+        oracle_ranges=(required,),
+        task_roles=(
+            RealBenchmarkTaskRole(
+                role_id="implementation",
+                description="Implementation",
+                required_paths=("service.py",),
+            ),
+        ),
+        answer_assertions=(
+            BenchmarkExpectedAssertion(
+                assertion_id="behavior",
+                description="serve returns the prepared value",
+                support=(
+                    BenchmarkAssertionSupport(
+                        citation=required, material_evidence_ids=(identity,)
+                    ),
+                ),
+            ),
+        ),
+    )
+    if damage == "sha":
+        (tmp_path / "service.py").write_text(
+            source.replace("* 2", "* 3"), encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="material source SHA is stale"):
+            _source_material_evidence(tmp_path, (required,))
+    if damage is None:
+        _validate_reviewed_sources(tmp_path, task)
+    else:
+        with pytest.raises(ValueError, match="stale or outside|source SHA is stale"):
+            _validate_reviewed_sources(tmp_path, task)
 
 
 def test_oracle_and_capsule_answers_keep_real_citation_identity(

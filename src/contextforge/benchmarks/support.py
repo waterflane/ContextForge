@@ -9,10 +9,9 @@ from contextforge.benchmarks.models import (
 MaterialEvidence = tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...]
 
 
-def support_is_materialized(
-    support: BenchmarkAssertionSupport, material: MaterialEvidence
+def range_is_materialized(
+    required: BenchmarkSourceRange, material: MaterialEvidence
 ) -> bool:
-    required = support.citation
     intervals = sorted(
         (
             max(required.start_line, source.start_line),
@@ -28,6 +27,13 @@ def support_is_materialized(
         if start > next_line:
             return False
         next_line = max(next_line, end + 1)
+    return next_line > required.end_line
+
+
+def support_is_materialized(
+    support: BenchmarkAssertionSupport, material: MaterialEvidence
+) -> bool:
+    required = support.citation
     visible_ids = {
         identity
         for source, identities in material
@@ -37,7 +43,7 @@ def support_is_materialized(
         for identity in identities
     }
     return (
-        next_line > required.end_line
+        range_is_materialized(required, material)
         and set(support.material_evidence_ids) <= visible_ids
     )
 

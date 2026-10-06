@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -22,11 +23,13 @@ from contextforge.benchmarks.models import (
 from contextforge.benchmarks.support import (
     assertion_support_is_materialized,
     public_assertions,
+    range_is_materialized,
 )
 from contextforge.context import CompiledContextCapsule, RepresentationMode
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.retrieval import _all_structural_postings
+from contextforge.intelligence.source_evidence import derive_source_evidence_units
 from contextforge.intelligence.store import load_manifest
 from contextforge.models import (
     ContextWindowExceededError,
@@ -521,27 +524,49 @@ def _capsule_material_evidence(
 def _source_material_evidence(
     root: Path, ranges: tuple[BenchmarkSourceRange, ...]
 ) -> tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...]:
-    """Bind source IDs to visible intersections, independently of the answer key."""
+    """Bind fully covered verified facts to actual material, without answer keys."""
 
     manifest = load_manifest(root)
     evidence: list[tuple[BenchmarkSourceRange, tuple[str, ...]]] = []
     for path in sorted({item.path for item in ranges}):
         code_map = load_file_code_map(root, path, manifest=manifest)
-        for posting in _all_structural_postings(code_map):
-            for visible in ranges:
-                if visible.path != path:
-                    continue
-                start = max(visible.start_line, posting.source_range.start_line)
-                end = min(visible.end_line, posting.source_range.end_line)
-                if start <= end:
-                    evidence.append(
-                        (
-                            BenchmarkSourceRange(
-                                path=path, start_line=start, end_line=end
-                            ),
-                            (posting.evidence_id,),
-                        )
-                    )
+        if (
+            hashlib.sha256((root / path).read_bytes()).hexdigest()
+            != code_map.source_sha256
+        ):
+            raise ValueError(f"material source SHA is stale: {path}")
+        visible_material = tuple((r, ()) for r in ranges if r.path == path)
+        identities: dict[BenchmarkSourceRange, set[str]] = {
+            visible: set() for visible, _ in visible_material
+        }
+        facts = (
+            *(
+                (p.evidence_id, p.source_range)
+                for p in _all_structural_postings(code_map)
+            ),
+            *(
+                (u.evidence_id, u.source_range)
+                for u in derive_source_evidence_units(code_map)
+            ),
+        )
+        for identity, source_range in facts:
+            fact_range = BenchmarkSourceRange(
+                path=path,
+                start_line=source_range.start_line,
+                end_line=source_range.end_line,
+            )
+            if not range_is_materialized(fact_range, visible_material):
+                continue
+            for visible, _ in visible_material:
+                if (
+                    visible.start_line <= fact_range.end_line
+                    and fact_range.start_line <= visible.end_line
+                ):
+                    identities[visible].add(identity)
+        evidence.extend(
+            (visible, tuple(sorted(identities[visible])))
+            for visible, _ in visible_material
+        )
     return tuple(evidence)
 
 
@@ -568,22 +593,27 @@ def _assertion_has_evidence_support(
         return any(item.assertion_id == assertion.assertion_id for item in citations)
     if not assertion_support_is_materialized(assertion, material_evidence):
         return False
-    return all(
-        any(
-            citation.assertion_id == assertion.assertion_id
-            and _contains(expected.citation, citation)
-            and set(expected.material_evidence_ids)
-            <= set(citation.material_evidence_ids)
-            <= {
-                evidence_id
-                for source_range, evidence_ids in material_evidence
-                if _contains(source_range, citation)
-                for evidence_id in evidence_ids
-            }
-            for citation in citations
+    cited_material = tuple(
+        (
+            BenchmarkSourceRange(
+                path=citation.path,
+                start_line=citation.start_line,
+                end_line=citation.end_line,
+            ),
+            citation.material_evidence_ids,
         )
-        for expected in assertion.support
+        for citation in citations
+        if citation.assertion_id == assertion.assertion_id
+        and any(_contains(source, citation) for source, _ in material_evidence)
+        and set(citation.material_evidence_ids)
+        <= {
+            identity
+            for source, identities in material_evidence
+            if _contains(source, citation)
+            for identity in identities
+        }
     )
+    return assertion_support_is_materialized(assertion, cited_material)
 
 
 def _assertion_has_lexical_support(

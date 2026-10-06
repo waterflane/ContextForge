@@ -58,6 +58,7 @@ from contextforge.intelligence.retrieval import (
     retrieve_context_candidates,
 )
 from contextforge.intelligence.semantic_lexicon import callable_symbols
+from contextforge.intelligence.source_evidence import derive_source_evidence_units
 from contextforge.intelligence.store import load_manifest
 from contextforge.models import (
     ContextWindowExceededError,
@@ -283,9 +284,20 @@ def _validate_reviewed_sources(root: Path, task: RealBenchmarkTask) -> None:
                 for item in document.positional_postings
             }
             code_map = load_file_code_map(root, support.citation.path, manifest=active)
+            if (
+                hashlib.sha256((root / support.citation.path).read_bytes()).hexdigest()
+                != code_map.source_sha256
+            ):
+                raise ValueError(
+                    f"reviewed source SHA is stale: {support.citation.path}"
+                )
             identities.update(
                 (item.evidence_id, item.source_range)
                 for item in _all_structural_postings(code_map)
+            )
+            identities.update(
+                (item.evidence_id, item.source_range)
+                for item in derive_source_evidence_units(code_map)
             )
             identities.update(
                 (item.evidence_id, item.source_range)
@@ -311,6 +323,8 @@ def _failure_reason(error: Exception) -> str:
             return "ordinary_baseline_context_overflow"
         if detail.startswith("reviewed range is stale:"):
             return "reviewed_range_stale"
+        if detail.startswith("reviewed source SHA is stale:"):
+            return "reviewed_source_stale"
         if detail == "reviewed evidence references an absent source":
             return "reviewed_source_absent"
         if detail == "reviewed evidence ID is stale or outside its range":
