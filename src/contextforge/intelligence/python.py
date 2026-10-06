@@ -35,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="9",
+    analyzer_version="10",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -108,7 +108,33 @@ class _DirectFactVisitor(ast.NodeVisitor):
         return None
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return None
+        # Defaults execute in the enclosing scope; the body is deferred. Its
+        # uses are reference facts, never invented calls from the enclosing
+        # function. Lambda parameters shadow names from that outer scope.
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        nested = _DirectFactVisitor(self._source)
+        nested.visit(node.body)
+        parameters = {
+            a.arg
+            for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+        }
+        parameters.update(
+            a.arg for a in (node.args.vararg, node.args.kwarg) if a is not None
+        )
+        uses = [
+            *nested.references,
+            *(
+                ReferenceOccurrence(
+                    observed_name=c.observed_name, source_range=c.source_range
+                )
+                for c in nested.calls
+            ),
+        ]
+        self.references.extend(
+            r for r in uses if r.observed_name.split(".")[0] not in parameters
+        )
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _dotted_name(node.func)
@@ -121,6 +147,10 @@ class _DirectFactVisitor(ast.NodeVisitor):
                 )
             )
         self._record_call_configuration(node)
+        if isinstance(node.func, ast.Attribute):
+            self.visit(node.func.value)
+        elif not isinstance(node.func, ast.Name):
+            self.visit(node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
@@ -144,7 +174,6 @@ class _DirectFactVisitor(ast.NodeVisitor):
                     source_range=_node_range(node),
                 )
             )
-            return
         self.generic_visit(node)
 
     def visit_Raise(self, node: ast.Raise) -> None:

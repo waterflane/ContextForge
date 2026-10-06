@@ -33,12 +33,12 @@ class SourceEvidenceUnit(IndexModel):
 
 def source_evidence_capability_version(code_map: FileCodeMap) -> int:
     """Legacy records cannot certify newer execution and test-scope coverage."""
-    minimum = {"python-ast": 8, "tree-sitter-polyglot": 12}.get(
+    minimum = {"python-ast": 10, "tree-sitter-polyglot": 13}.get(
         code_map.analyzer.analyzer_id
     )
     version = code_map.analyzer.analyzer_version
     return (
-        3
+        4
         if minimum is not None and version.isdecimal() and int(version) >= minimum
         else 0
     )

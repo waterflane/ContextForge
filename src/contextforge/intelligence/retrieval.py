@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 15
+RETRIEVAL_BUILD_VERSION = 16
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -5566,7 +5566,7 @@ def build_evidence_requirements(
         dependency_gaps.update(
             f"source-units-unavailable:{anchor.candidate_id}"
             for anchor in anchors
-            if not anchor.source_units or anchor.source_evidence_version < 3
+            if not anchor.source_units or anchor.source_evidence_version < 4
         )
     connections = tuple(
         dict.fromkeys(v for c in candidates for v in c.source_connections)

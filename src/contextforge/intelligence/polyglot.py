@@ -30,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="12",
+    analyzer_version="13",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -842,10 +842,20 @@ def _attach_occurrences(
             selected_owners = owners(node)
             region = _range(node)
             member = node.parent
+            receiver = None if member is None else member.child_by_field_name("object")
             receiver_reference = (
                 member is not None
                 and member.type == "member_expression"
-                and member.child_by_field_name("object") == node
+                and (
+                    member.child_by_field_name("object") == node
+                    or (
+                        receiver is not None
+                        and receiver.type == "this"
+                        and member.parent is not None
+                        and member.parent.type == "member_expression"
+                        and member.parent.child_by_field_name("object") == member
+                    )
+                )
             )
             if (
                 selected_owners

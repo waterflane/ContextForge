@@ -109,6 +109,94 @@ def test_original_syntax_distinguishes_lookup_from_behavior(
     assert parse_query_intent(task).evidence_scope == scope
 
 
+@pytest.mark.parametrize(
+    "receiver", ["constant", "python-member", "typescript-member", "factory"]
+)
+def test_behavior_retains_receiver_and_factory_dependencies(
+    tmp_path: Path, receiver: str
+) -> None:
+    if receiver == "constant":
+        source = (
+            "CONFIG = {'limit': 7}\n"
+            + "".join(f"def filler_{i}():\n    return {i}\n" for i in range(150))
+            + "def execute_job():\n    return CONFIG.get('limit', 0)\n"
+        )
+        filename, task, required_line = "jobs.py", "Explain execute_job behavior", 1
+    elif receiver == "factory":
+        source = (
+            "def do_work():\n    return 7\ndef make_worker():\n    return do_work\n"
+            + "".join(f"def filler_{i}():\n    return {i}\n" for i in range(150))
+            + "def execute_job():\n    return make_worker()()\n"
+        )
+        filename, task, required_line = "jobs.py", "Explain execute_job behavior", 1
+    elif receiver == "python-member":
+        source = (
+            "class Meter:\n    def __init__(self):\n"
+            "        self.config = {'limit': 7}\n"
+            + "".join(
+                f"    def filler_{i}(self):\n        return {i}\n" for i in range(150)
+            )
+            + "    def read(self):\n        return self.config.get('limit', 0)\n"
+        )
+        filename, task, required_line = "jobs.py", "Explain Meter.read behavior", 3
+    else:
+        source = (
+            "class Meter {\n constructor() { this.config = new Map([['limit', 7]]); }\n"
+            + "".join(f" filler_{i}() {{ return {i}; }}\n" for i in range(150))
+            + " read() { return this.config.get('limit'); }\n}\n"
+        )
+        filename, task, required_line = "jobs.ts", "Explain Meter.read behavior", 2
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    requirements = [
+        r
+        for r in retrieval.requirements.source_evidence
+        if any(a.start_line == required_line for a in r.required_ranges)
+    ]
+    assert requirements
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=6000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    material = next(m for m in compiled.capsule.task_context if m.path == filename)
+    assert any(a.start_line <= required_line <= a.end_line for a in material.ranges)
+    assert "filler_75" not in material.content
+    missing_ids = {identity for r in requirements for identity in r.evidence_ids}
+    damaged = retrieval.model_copy(
+        update={
+            "candidates": tuple(
+                c.model_copy(
+                    update={
+                        "source_units": tuple(
+                            u
+                            for u in c.source_units
+                            if u.evidence_id not in missing_ids
+                        ),
+                        "evidence_ranges": tuple(
+                            e
+                            for e in c.evidence_ranges
+                            if e.evidence_id not in missing_ids
+                        ),
+                    }
+                )
+                for c in retrieval.candidates
+            )
+        }
+    )
+    missing = compile_context_capsule(
+        tmp_path, task, damaged, budget=ContextBudget(context_window_tokens=6000)
+    )
+    assert missing.compilation_sufficiency is not None
+    assert missing.compilation_sufficiency.effective_status == "insufficient"
+
+
 def test_inline_callback_binding_is_a_reference_with_complete_behavior(
     tmp_path: Path,
 ) -> None:
@@ -135,6 +223,47 @@ def test_inline_callback_binding_is_a_reference_with_complete_behavior(
     assert not any(
         "callback" in s for c in retrieval.candidates for s in c.matched_symbols
     )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+
+
+@pytest.mark.parametrize("shadowed", [False, True])
+def test_python_lambda_dependencies_are_references_and_respect_parameters(
+    tmp_path: Path, shadowed: bool
+) -> None:
+    (tmp_path / "jobs.py").write_text(
+        "def clean(value):\n    return value + 1\n"
+        "def execute_job(values):\n"
+        + (
+            "    return map(lambda clean: clean(1), values)\n"
+            if shadowed
+            else "    return map(lambda value: clean(value), values)\n"
+        ),
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    code_map = report.structural.code_maps[0]
+    function = next(s for s in code_map.symbols if s.name == "execute_job")
+    assert not any(c.observed_name == "clean" for c in function.direct_calls)
+    assert any(
+        r.observed_name == "clean" and r.resolution == "internal"
+        for r in function.direct_references
+    ) == (not shadowed)
+    task = "Explain execute_job behavior"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert any(
+        a.start_line == 1
+        for q in retrieval.requirements.source_evidence
+        for a in q.required_ranges
+    ) == (not shadowed)
     compiled = compile_context_capsule(
         tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
     )
@@ -386,7 +515,7 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
-@pytest.mark.parametrize("capability", [0, 2])
+@pytest.mark.parametrize("capability", [0, 2, 3])
 def test_legacy_missing_source_units_do_not_certify_behavior(
     tmp_path: Path, legacy: str, capability: int
 ) -> None:

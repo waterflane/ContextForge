@@ -46,8 +46,8 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 11, Python analyzer version 9,
-and polyglot analyzer version 12 extract imports, calls, and non-call references
+Fallback analyzer version 4, resolver version 11, Python analyzer version 10,
+and polyglot analyzer version 13 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
@@ -55,7 +55,7 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 15 includes initializer and complete test-usage units. A member
+retrieval version 16 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
@@ -71,12 +71,18 @@ their method calls are resolved independently.
 Qualified calls cannot resolve to a local declaration by suffix alone.
 JavaScript/TypeScript imports require the observed binding, including aliases;
 side-effect imports do not bind symbols. Unknown receivers remain unresolved.
+Method receivers retain value references independently of their calls, including
+configuration constants and initialized instance members. Nested callable
+expressions retain observed inner calls. Deferred Python lambda bodies retain free
+dependencies as references, excluding lambda parameters, without claiming direct
+execution by their enclosing function. These facts require structural reanalysis
+when the older CodeMap lacks them; subsequent no-op updates reuse the new facts.
 Large documents preserve all source units in separately digest-bound fragments,
 listed in both the document and retrieval header. Every fragment remains at most
 4 MiB, and warm reloads recheck its digest. Structural records are copied with
 these fragments into semantic generations; cached overlays also validate their
 structural base. Older inline records remain readable with empty shard defaults.
-Source evidence capability version 3 identifies extractors with initialization,
+Source evidence capability version 4 identifies extractors with receiver dependencies, initialization,
 execution-owner and complete test-usage coverage. Older or unknown capabilities remain readable but cannot
 certify behavioral anchors. Compiler validation extends frozen gaps for missing
 capability metadata without erasing existing obligations.
