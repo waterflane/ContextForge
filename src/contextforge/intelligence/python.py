@@ -35,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="8",
+    analyzer_version="9",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -577,9 +577,13 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
         )
     )
     visitor.raises.sort(key=lambda item: (*_range_tuple(item[0]), item[1]))
-    visitor.initializations.sort(
-        key=lambda item: (*_range_tuple(item.source_range), item.observed_name)
-    )
+    initialization_by_key = {
+        (*_range_tuple(item.source_range), item.observed_name): item
+        for item in visitor.initializations
+    }
+    visitor.initializations = [
+        initialization_by_key[key] for key in sorted(initialization_by_key)
+    ]
     return visitor
 
 

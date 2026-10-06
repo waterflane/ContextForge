@@ -38,6 +38,29 @@ def test_units_preserve_observed_callbacks_and_test_decorators(tmp_path: Path) -
     assert len({u.evidence_id for u in units}) == len(units)
 
 
+def test_repeated_assignment_targets_preserve_one_initializer(tmp_path: Path) -> None:
+    (tmp_path / "sample.py").write_text(
+        "class Meter:\n    def __init__(self):\n"
+        "        self.offset = self.offset = 7\n"
+        "    def read(self):\n        return self.offset\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    assert code_map.parse_status == "parsed"
+    constructor = next(s for s in code_map.symbols if s.name == "__init__")
+    assert len(constructor.initializations) == 1
+    assert constructor.initializations[0].observed_name == "self.offset"
+    method = next(s for s in code_map.symbols if s.name == "read")
+    selected = select_source_evidence_units(
+        derive_source_evidence_units(code_map), (method.declaration_range,)
+    )
+    initializers = [unit for unit in selected if unit.kind == "initializer"]
+    assert len(initializers) == 1
+    assert initializers[0].source_range.start_line == 3
+    assert method.symbol_id in initializers[0].related_symbol_ids
+
+
 def test_unit_selection_keeps_the_smallest_method_owner(tmp_path: Path) -> None:
     (tmp_path / "sample.py").write_text(
         "class Container:\n    def run(self):\n        return 1\n"
