@@ -56,6 +56,21 @@ TEMPORARY_SUFFIX = ".contextforge-tmp"
 MAX_MANIFEST_BYTES = 4_000_000
 MAX_RECORD_BYTES = 16_000_000
 _COMPRESSED_RECORD_PREFIX = b"CFZ1"
+_query_shard_references: ContextVar[
+    dict[tuple[Path, str, str | None, str | None], dict[str, str]] | None
+] = ContextVar("validated_query_shard_references", default=None)
+
+
+@contextmanager
+def generation_read_scope() -> Iterator[None]:
+    """Reuse immutable header routing within one query, never across queries."""
+    token = _query_shard_references.set({})
+    try:
+        yield
+    finally:
+        _query_shard_references.reset(token)
+
+
 _COMPRESSION_MIN_BYTES = 4_096
 _COMPRESSED_RECORD_DIRECTORIES = ("files/", "graph/", "retrieval/")
 
@@ -1185,6 +1200,19 @@ def _referenced_graph_shards(root: Path, manifest: IndexManifest) -> dict[str, s
 
 
 def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[str, str]:
+    scope = _query_shard_references.get()
+    key = (
+        root,
+        manifest.generation_id,
+        manifest.artifacts.structural_retrieval.sha256
+        if manifest.artifacts.structural_retrieval
+        else None,
+        manifest.artifacts.semantic_retrieval.sha256
+        if manifest.artifacts.semantic_retrieval
+        else None,
+    )
+    if scope is not None and key in scope:
+        return scope[key]
     result: dict[str, str] = {}
     for reference in (
         manifest.artifacts.structural_retrieval,
@@ -1222,6 +1250,8 @@ def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[st
                     "retrieval shard manifest contains invalid locations"
                 )
             result[location] = digest
+    if scope is not None:
+        scope[key] = result
     return result
 
 

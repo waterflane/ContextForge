@@ -204,9 +204,12 @@ def _scoped_query[**P, T](
 ) -> Callable[P, Coroutine[Any, Any, T]]:
     @wraps(function)
     async def execute(*args: P.args, **kwargs: P.kwargs) -> T:
+        from contextforge.intelligence.store import generation_read_scope
+
         token = _query_view.set(_QueryView())
         try:
-            return await function(*args, **kwargs)
+            with generation_read_scope():
+                return await function(*args, **kwargs)
         finally:
             _query_view.reset(token)
 

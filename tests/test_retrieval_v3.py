@@ -172,7 +172,10 @@ def test_planned_search_can_start_with_an_empty_lexical_pool(tmp_path: Path) -> 
     assert result.requirements.query_intent.explicit_anchors == ("unmappedword",)
 
 
-@pytest.mark.parametrize("record", ["codemap", "graph-header", "graph-shard"])
+@pytest.mark.parametrize(
+    "record",
+    ["codemap", "graph-header", "graph-shard", "retrieval-header", "retrieval-shard"],
+)
 def test_warm_caches_still_reject_changed_immutable_records(
     tmp_path: Path, record: str
 ) -> None:
@@ -211,10 +214,14 @@ def test_warm_caches_still_reject_changed_immutable_records(
         )
         assert location is not None
     else:
-        reference = report.manifest.artifacts.relationship_graph
+        reference = (
+            report.manifest.artifacts.structural_retrieval
+            if record.startswith("retrieval-")
+            else report.manifest.artifacts.relationship_graph
+        )
         assert reference is not None
         location = reference.location
-        if record == "graph-shard":
+        if record in {"graph-shard", "retrieval-shard"}:
             header = json.loads(
                 load_generation_record(
                     tmp_path,
@@ -222,7 +229,12 @@ def test_warm_caches_still_reject_changed_immutable_records(
                     manifest=report.manifest,
                 )
             )
-            location = header["file_projection_shards"][0]["artifact"]["location"]
+            field = (
+                "document_shards"
+                if record == "retrieval-shard"
+                else "file_projection_shards"
+            )
+            location = header[field][0]["artifact"]["location"]
     destination = (
         tmp_path
         / ".contextforge/index/generations"
