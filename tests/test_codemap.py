@@ -102,6 +102,47 @@ def test_python_default_can_use_same_named_import_but_not_body_import(
     assert symbols["local"].direct_references[0].resolution == "unresolved"
 
 
+def test_python_receiver_members_use_formal_binding_and_respect_shadowing(
+    tmp_path: Path,
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "worker.py").write_text(
+        "class Worker:\n    def helper(holder, value):\n        return value + 1\n"
+        "    def run(holder, value):\n        return holder.helper(value)\n"
+        "    async def async_run(holder, value):\n        return holder.helper(value)\n"
+        "    @classmethod\n    def shared(holder, value):\n"
+        "        return holder.helper(value)\n"
+        "    @staticmethod\n    def static(holder, value):\n"
+        "        return holder.helper(value)\n"
+        "    def replaced(holder, value):\n        holder = value\n"
+        "        return holder.helper(value)\n"
+        "    def closure(holder, value):\n        def later():\n"
+        "            return holder.helper(value)\n        return later\n"
+        "    def shadow(holder, value):\n        def later(holder):\n"
+        "            return holder.helper(value)\n        return later\n"
+        "    def chain(holder, value):\n        return holder.config.helper(value)\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    helper = symbols["worker.Worker.helper"]
+    for name in ("run", "async_run", "shared", "closure.later"):
+        assert (
+            symbols["worker.Worker." + name].direct_calls[0].target_symbol_id
+            == helper.symbol_id
+        )
+    for name in ("static", "replaced", "shadow.later", "chain"):
+        assert (
+            symbols["worker.Worker." + name].direct_calls[0].resolution == "unresolved"
+        )
+    assert symbols["worker.Worker.run"].receiver_parameter_name == "holder"
+    assert symbols["worker.Worker.static"].receiver_parameter_name is None
+
+
 def _write(root: Path, path: str, content: str | bytes) -> None:
     destination = root.joinpath(*path.split("/"))
     destination.parent.mkdir(parents=True, exist_ok=True)

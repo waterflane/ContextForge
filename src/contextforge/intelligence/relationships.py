@@ -150,6 +150,14 @@ def _clear_repository_resolution(code_map: FileCodeMap) -> FileCodeMap:
 
 
 def _clear_call_resolution(call: CallReference, source_path: str) -> CallReference:
+    if call.detection_method == "python_receiver_unresolved":
+        return call.model_copy(
+            update={
+                "resolution": "unresolved",
+                "target_symbol_id": None,
+                "target_file_path": None,
+            }
+        )
     if call.detection_method == "python_shadowed_name":
         return call
     if (
@@ -669,7 +677,10 @@ def _resolve_imported_calls(
         if call.resolution == "internal":
             calls.append(call)
             continue
-        if call.detection_method == "python_shadowed_name":
+        if call.detection_method in {
+            "python_shadowed_name",
+            "python_receiver_unresolved",
+        }:
             calls.append(call)
             continue
         if call.observed_name.split(".")[0] in {

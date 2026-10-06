@@ -273,7 +273,15 @@ def test_python_lambda_dependencies_are_references_and_respect_parameters(
 
 @pytest.mark.parametrize(
     "language",
-    ["javascript", "kotlin", "receiver", "arrow", "default", "python-default"],
+    [
+        "javascript",
+        "kotlin",
+        "receiver",
+        "arrow",
+        "default",
+        "python-default",
+        "python-receiver",
+    ],
 )
 def test_lexical_behavior_retains_closure_helpers_and_property_values(
     tmp_path: Path, language: str
@@ -304,6 +312,19 @@ def test_lexical_behavior_retains_closure_helpers_and_property_values(
             "Store.kt",
             "Explain Store.purge behavior",
             (2, 84),
+        )
+    elif language == "python-receiver":
+        text = (
+            "class Worker:\n    def helper(holder, value):\n        return value + 1\n"
+            + "".join(
+                f"    def filler{i}(holder):\n        return {i}\n" for i in range(80)
+            )
+            + "    def run(holder, value):\n        return holder.helper(value)\n"
+        )
+        filename, task, required_lines = (
+            "worker.py",
+            "Explain Worker.run behavior",
+            (2, 3),
         )
     elif language == "python-default":
         text = (
@@ -704,7 +725,7 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
-@pytest.mark.parametrize("capability", [0, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("capability", [0, 2, 3, 4, 5, 6, 7])
 def test_legacy_missing_source_units_do_not_certify_behavior(
     tmp_path: Path, legacy: str, capability: int
 ) -> None:
@@ -753,6 +774,35 @@ def test_legacy_missing_source_units_do_not_certify_behavior(
         "behavioral_dependency_unresolved"
         in compiled.compilation_sufficiency.reason_codes
     )
+
+
+@pytest.mark.parametrize("suffix", ["py", "js"])
+def test_unresolved_direct_class_receiver_is_a_behavioral_gap(
+    tmp_path: Path, suffix: str
+) -> None:
+    source = (
+        "class Worker:\n    def run(self, value):\n        return self.missing(value)\n"
+        if suffix == "py"
+        else "class Worker { run(value) { return this.missing(value); } }\n"
+    )
+    (tmp_path / f"worker.{suffix}").write_text(source, encoding="utf-8")
+    built = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    query = "Explain Worker.run behavior"
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, query, manifest=built.manifest)
+    )
+    assert (
+        result.requirements is not None
+        and result.requirements.unresolved_dependency_ids
+    )
+    assert any(u.unresolved_endpoint for c in result.candidates for u in c.source_units)
+    compiled = compile_context_capsule(
+        tmp_path, query, result, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
 
 
 def test_verified_dependency_is_discovered_before_pool_truncation(

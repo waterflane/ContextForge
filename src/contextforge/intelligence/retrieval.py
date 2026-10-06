@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 19
+RETRIEVAL_BUILD_VERSION = 20
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -5566,7 +5566,7 @@ def build_evidence_requirements(
         dependency_gaps.update(
             f"source-units-unavailable:{anchor.candidate_id}"
             for anchor in anchors
-            if not anchor.source_units or anchor.source_evidence_version < 7
+            if not anchor.source_units or anchor.source_evidence_version < 8
         )
     connections = tuple(
         dict.fromkeys(v for c in candidates for v in c.source_connections)
@@ -5888,6 +5888,13 @@ def build_evidence_requirements(
                 behavior_visited = {(anchor.path, anchor_sid)}
                 while frontier:
                     path, sid, depth = frontier.popleft()
+                    source_candidate = by_path.get(path)
+                    if source_candidate is not None:
+                        dependency_gaps.update(
+                            f"{path}:{sid}:unresolved-endpoint:{u.evidence_id}"
+                            for u in source_candidate.source_units
+                            if u.owner_symbol_id == sid and u.unresolved_endpoint
+                        )
                     for connection in behavior_outgoing.get((path, sid), ()):
                         endpoint = (connection.target_path, connection.target_symbol_id)
                         if endpoint in behavior_visited:

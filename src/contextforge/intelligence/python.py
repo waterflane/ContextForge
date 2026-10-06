@@ -35,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="11",
+    analyzer_version="12",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -507,6 +507,24 @@ def _build_symbols(
         )
         callable_node = node if isinstance(node, _Callable) else None
         class_node = node if isinstance(node, ast.ClassDef) else None
+        positional = (
+            (*callable_node.args.posonlyargs, *callable_node.args.args)
+            if callable_node is not None
+            else ()
+        )
+        static = any(
+            d.expression in {"staticmethod", "builtins.staticmethod"}
+            for d in decorators
+        )
+        class_receiver = (
+            parent_id
+            if callable_node is not None
+            and positional
+            and not static
+            and draft.parent_index is not None
+            and drafts[draft.parent_index].kind == SymbolKind.CLASS
+            else None
+        )
         result.append(
             SymbolRecord(
                 symbol_id=draft.symbol_id,
@@ -522,6 +540,11 @@ def _build_symbols(
                 declaration_range=_node_range(node),
                 body_range=_body_range(node),
                 parent_symbol_id=parent_id,
+                receiver_class_symbol_id=class_receiver,
+                receiver_parameter_name=positional[0].arg
+                if class_receiver is not None
+                else None,
+                is_static_member=static,
                 docstring=(
                     ast.get_docstring(node, clean=False)
                     if isinstance(node, _Definition)
@@ -658,11 +681,52 @@ def _resolve_local_calls(
     by_name: dict[str, list[SymbolRecord]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
+    by_id = {s.symbol_id: s for s in symbols}
+    body_bindings = {
+        s.symbol_id: _body_bound_names(d.node)
+        for s, d in zip(symbols, drafts, strict=True)
+    }
     result: list[SymbolRecord] = []
     for symbol, draft in zip(symbols, drafts, strict=True):
         shadowed_names = _shadowed_names(draft.node)
         calls: list[CallReference] = []
         for call in symbol.direct_calls:
+            receiver_bound, members = _python_receiver_members(
+                symbol,
+                call.observed_name,
+                call.source_range,
+                by_id,
+                by_name,
+                body_bindings,
+            )
+            if receiver_bound:
+                targets = [
+                    s
+                    for s in members
+                    if s.kind
+                    in {
+                        SymbolKind.METHOD,
+                        SymbolKind.ASYNC_FUNCTION,
+                        SymbolKind.CONSTRUCTOR,
+                    }
+                ]
+                calls.append(
+                    call.model_copy(
+                        update={
+                            "resolution": "internal"
+                            if len(targets) == 1
+                            else "unresolved",
+                            "target_symbol_id": targets[0].symbol_id
+                            if len(targets) == 1
+                            else None,
+                            "target_file_path": path if len(targets) == 1 else None,
+                            "detection_method": "python_lexical_name"
+                            if len(targets) == 1
+                            else "python_receiver_unresolved",
+                        }
+                    )
+                )
+                continue
             candidates = (
                 by_name.get(call.observed_name, [])
                 if "." not in call.observed_name
@@ -732,11 +796,32 @@ def _resolve_local_references(
         symbol_id: _shadowed_names(draft.node)
         for symbol_id, draft in draft_by_id.items()
     }
+    body_bindings = {sid: _body_bound_names(d.node) for sid, d in draft_by_id.items()}
     result: list[SymbolRecord] = []
     for symbol in symbols:
         shadowed_names = shadowed_by_id[symbol.symbol_id]
         references: list[ReferenceOccurrence] = []
         for reference in symbol.direct_references:
+            receiver_bound, members = _python_receiver_members(
+                symbol,
+                reference.observed_name,
+                reference.source_range,
+                by_id,
+                by_name,
+                body_bindings,
+            )
+            if receiver_bound and len(members) == 1:
+                references.append(
+                    reference.model_copy(
+                        update={
+                            "resolution": "internal",
+                            "target_file_path": path,
+                            "target_symbol_id": members[0].symbol_id,
+                            "detection_method": "python_lexical_reference",
+                        }
+                    )
+                )
+                continue
             observed_root = reference.observed_name.split(".", maxsplit=1)[0]
             candidates = (
                 by_name.get(reference.observed_name, [])
@@ -820,6 +905,55 @@ def _resolve_local_references(
             symbol.model_copy(update={"direct_references": tuple(references)})
         )
     return tuple(result)
+
+
+def _python_receiver_members(
+    symbol: SymbolRecord,
+    observed: str,
+    address: SourceRange,
+    by_id: dict[str, SymbolRecord],
+    by_name: dict[str, list[SymbolRecord]],
+    body_bindings: dict[str, set[str]],
+) -> tuple[bool, list[SymbolRecord]]:
+    parts = observed.split(".")
+    if len(parts) != 2:
+        return False, []
+    current: SymbolRecord | None = symbol
+    while current is not None:
+        in_default = any(
+            (r.start_line, r.start_column) <= (address.start_line, address.start_column)
+            and (address.end_line, address.end_column) <= (r.end_line, r.end_column)
+            for r in current.parameter_default_ranges
+        )
+        if not in_default:
+            if (
+                current.receiver_parameter_name == parts[0]
+                and current.receiver_class_symbol_id is not None
+            ):
+                return True, (
+                    [
+                        s
+                        for s in by_name.get(parts[1], [])
+                        if s.parent_symbol_id == current.receiver_class_symbol_id
+                    ]
+                    if parts[0] not in body_bindings[current.symbol_id]
+                    else []
+                )
+            if parts[0] in body_bindings[current.symbol_id] or any(
+                p.name == parts[0] for p in current.parameters
+            ):
+                return False, []
+        current = by_id.get(current.parent_symbol_id or "")
+    return False, []
+
+
+def _body_bound_names(node: ast.stmt) -> set[str]:
+    visitor = _BoundNameVisitor()
+    body = getattr(node, "body", ())
+    if isinstance(body, list):
+        for statement in body:
+            visitor.visit(statement)
+    return visitor.names
 
 
 def _shadowed_names(node: ast.stmt) -> set[str]:

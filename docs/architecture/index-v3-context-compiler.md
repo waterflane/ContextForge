@@ -46,7 +46,7 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 14, Python analyzer version 11,
+Fallback analyzer version 4, resolver version 15, Python analyzer version 12,
 and polyglot analyzer version 16 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
@@ -55,7 +55,7 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 19 includes initializer and complete test-usage units. A member
+retrieval version 20 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
@@ -101,7 +101,14 @@ dependencies require their own verified source units, not merely a visible signa
 Python default dependencies are definition-scope references, not invocation-body
 calls; body-local declarations and the function's own parameters do not shadow
 the enclosing bindings used to evaluate defaults.
-Source evidence capability version 7 identifies extractors with lexical bindings,
+Python methods retain a compatible receiver parameter name and class owner ID.
+The first positional parameter of an ordinary method or classmethod supplies the
+source receiver; staticmethod parameters do not. Verified receiver members also
+resolve in non-shadowing lexical closures. Defaults and receiver reassignments
+cannot silently reuse the invocation binding. Unresolved direct class receiver
+calls retain an explicit source-unit endpoint gap for behavioral requirements.
+This does not claim runtime dispatch or an inherited/dynamic implementation.
+Source evidence capability version 8 identifies extractors with lexical bindings,
 receiver dependencies, initialization,
 execution-owner and complete test-usage coverage. Older or unknown capabilities remain readable but cannot
 certify behavioral anchors. Compiler validation extends frozen gaps for missing

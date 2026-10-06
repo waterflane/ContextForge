@@ -29,16 +29,17 @@ class SourceEvidenceUnit(IndexModel):
     evidence_id: str
     basis: Literal["verified-implementation", "observed-syntax"]
     related_symbol_ids: tuple[str, ...] = ()
+    unresolved_endpoint: bool = False
 
 
 def source_evidence_capability_version(code_map: FileCodeMap) -> int:
     """Legacy records cannot certify newer execution and test-scope coverage."""
-    minimum = {"python-ast": 11, "tree-sitter-polyglot": 16}.get(
+    minimum = {"python-ast": 12, "tree-sitter-polyglot": 16}.get(
         code_map.analyzer.analyzer_id
     )
     version = code_map.analyzer.analyzer_version
     return (
-        7
+        8
         if minimum is not None and version.isdecimal() and int(version) >= minimum
         else 0
     )
@@ -199,6 +200,27 @@ def derive_source_evidence_units(
                     ).encode()
                 ).hexdigest()
                 add(symbol.symbol_id, kind, f"{kind}:{identity}", address)  # type: ignore[arg-type]
+                if (
+                    kind == "call"
+                    and occurrence.resolution != "internal"
+                    and (
+                        occurrence.detection_method == "python_receiver_unresolved"
+                        or (
+                            symbol.receiver_class_symbol_id is not None
+                            and occurrence.observed_name.startswith("this.")
+                            and len(occurrence.observed_name.split(".")) == 2
+                        )
+                    )
+                ):
+                    key = source_evidence_id(
+                        code_map.path,
+                        code_map.source_sha256,
+                        f"{kind}:{identity}",
+                        address,
+                    )
+                    units[key] = units[key].model_copy(
+                        update={"unresolved_endpoint": True}
+                    )
         for call in symbol.direct_calls:
             for callback in call.callback_arguments:
                 add(
@@ -224,7 +246,9 @@ class _UnitSelectionView:
     units: tuple[SourceEvidenceUnit, ...]
     implementations: tuple[SourceEvidenceUnit, ...]
     owner_indices: dict[str, tuple[int, ...]]
-    address_owners: dict[tuple[int, int], str | None] = field(default_factory=dict)
+    address_owners: dict[tuple[int, int, int, int], str | None] = field(
+        default_factory=dict
+    )
 
 
 _selection_views: OrderedDict[int, _UnitSelectionView] = OrderedDict()
@@ -247,6 +271,7 @@ def _selection_view(units: tuple[SourceEvidenceUnit, ...]) -> _UnitSelectionView
                 (u for u in units if u.kind == "implementation"),
                 key=lambda u: (
                     u.source_range.end_line - u.source_range.start_line,
+                    u.source_range.end_column - u.source_range.start_column,
                     u.evidence_id,
                 ),
             )
@@ -268,14 +293,21 @@ def select_source_evidence_units(
     owners: set[str] = set()
     view = _selection_view(units)
     for address in ranges:
-        address_key = (address.start_line, address.end_line)
+        address_key = (
+            address.start_line,
+            address.start_column,
+            address.end_line,
+            address.end_column,
+        )
         if address_key not in view.address_owners:
             owner = next(
                 (
                     u.owner_symbol_id
                     for u in view.implementations
-                    if u.source_range.start_line <= address.start_line
-                    and address.end_line <= u.source_range.end_line
+                    if (u.source_range.start_line, u.source_range.start_column)
+                    <= (address.start_line, address.start_column)
+                    and (address.end_line, address.end_column)
+                    <= (u.source_range.end_line, u.source_range.end_column)
                 ),
                 None,
             )

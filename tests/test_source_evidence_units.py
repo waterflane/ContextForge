@@ -77,6 +77,26 @@ def test_unit_selection_keeps_the_smallest_method_owner(tmp_path: Path) -> None:
     assert max(u.source_range.end_line for u in selected) == 3
 
 
+def test_same_line_units_keep_distinct_minimal_symbol_owners(tmp_path: Path) -> None:
+    (tmp_path / "sample.js").write_text(
+        "class Worker { run() { return this.missing(); } other() { return 7; } }\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    units = derive_source_evidence_units(code_map)
+    methods = [s for s in code_map.symbols if s.name in {"run", "other"}]
+    assert len(methods) == 2
+    for method in methods:
+        selected = select_source_evidence_units(units, (method.declaration_range,))
+        assert {u.owner_symbol_id for u in selected} == {method.symbol_id}
+        assert any(u.unresolved_endpoint for u in selected) == (method.name == "run")
+    selected = select_source_evidence_units(
+        units, tuple(method.declaration_range for method in methods)
+    )
+    assert {u.owner_symbol_id for u in selected} == {s.symbol_id for s in methods}
+
+
 def test_multiple_evidence_ids_on_one_range_survive_discovery(tmp_path: Path) -> None:
     (tmp_path / "sample.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     snapshot = scan_repository(tmp_path)
