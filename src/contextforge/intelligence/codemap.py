@@ -19,7 +19,7 @@ from contextforge.intelligence.models import (
 )
 
 CODEMAP_SCHEMA_VERSION: Literal[3] = 3
-RESOLVER_VERSION = "11"
+RESOLVER_VERSION = "12"
 
 NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
@@ -322,6 +322,7 @@ class SymbolRecord(IndexModel):
     docstring: str | None = None
     decorators: tuple[DecoratorRecord, ...] = ()
     parameters: tuple[ParameterRecord, ...] = ()
+    parameter_bindings: tuple[str, ...] = ()
     return_annotation: str | None = None
     base_classes: tuple[str, ...] = ()
     contained_methods: tuple[str, ...] = ()

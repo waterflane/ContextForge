@@ -271,6 +271,153 @@ def test_python_lambda_dependencies_are_references_and_respect_parameters(
     assert compiled.compilation_sufficiency.effective_status == "sufficient"
 
 
+@pytest.mark.parametrize("language", ["javascript", "kotlin"])
+def test_lexical_behavior_retains_closure_helpers_and_property_values(
+    tmp_path: Path, language: str
+) -> None:
+    if language == "javascript":
+        text = (
+            "function createStore() {\n"
+            "  let pending = Promise.resolve();\n"
+            "  function save(value) { return value; }\n"
+            + "".join(f"  function filler{i}() {{ return {i}; }}\n" for i in range(80))
+            + "  function update(value) { return pending.then(() => save(value)); }\n"
+            "  return update;\n}\n"
+        )
+        filename, task, required_lines = (
+            "store.js",
+            "Explain createStore.update behavior",
+            (2, 3),
+        )
+    else:
+        text = (
+            "class Store {\n  private val directory get() = folder\n"
+            + "".join(f"  fun filler{i}() = {i}\n" for i in range(80))
+            + "  fun purge() = directory.trim()\n"
+            '  private companion object { const val folder = "items" }\n}\n'
+        )
+        filename, task, required_lines = (
+            "Store.kt",
+            "Explain Store.purge behavior",
+            (2, 84),
+        )
+    (tmp_path / filename).write_text(text, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    result = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert result.requirements is not None
+    ranges = tuple(
+        r
+        for q in result.requirements.source_evidence
+        for r in q.required_ranges
+        if q.path == filename
+    )
+    for line in required_lines:
+        assert any(r.start_line <= line <= r.end_line for r in ranges)
+    compiled = compile_context_capsule(
+        tmp_path, task, result, budget=ContextBudget(context_window_tokens=12000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    source = next(m for m in compiled.capsule.task_context if m.path == filename)
+    assert "filler40" not in source.content
+    removed = {
+        u.evidence_id
+        for c in result.candidates
+        if c.path == filename
+        for u in c.source_units
+        if u.source_range.start_line <= required_lines[0] <= u.source_range.end_line
+        and u.kind in {"implementation", "initializer"}
+    }
+    assert removed
+    damaged = result.model_copy(
+        update={
+            "candidates": tuple(
+                c.model_copy(
+                    update={
+                        "source_units": tuple(
+                            u for u in c.source_units if u.evidence_id not in removed
+                        ),
+                        "evidence_ranges": tuple(
+                            e for e in c.evidence_ranges if e.evidence_id not in removed
+                        ),
+                    }
+                )
+                if c.path == filename
+                else c
+                for c in result.candidates
+            )
+        }
+    )
+    incomplete = compile_context_capsule(
+        tmp_path, task, damaged, budget=ContextBudget(context_window_tokens=12000)
+    )
+    assert incomplete.compilation_sufficiency is not None
+    assert incomplete.compilation_sufficiency.effective_status == "insufficient"
+
+
+@pytest.mark.parametrize("suffix", ["js", "ts"])
+def test_polyglot_parameter_bindings_exclude_keys_types_and_defaults(
+    tmp_path: Path, suffix: str
+) -> None:
+    source = (
+        "function save(value) { return value; }\n"
+        "function renamed({save: alias}) { return save(1); }\n"
+        "function blocked({save}) { return save(2); }\n"
+        "const single = save => save(3);\n"
+        "function defaults(save = fallback) { return save(4); }\n"
+    )
+    if suffix == "ts":
+        source += "function typed(save: (n: number) => number) { return save(5); }\n"
+    (tmp_path / f"store.{suffix}").write_text(source, encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    symbols = {s.qualified_name: s for s in report.structural.code_maps[0].symbols}
+    assert symbols["renamed"].parameter_bindings == ("alias",)
+    assert (
+        symbols["renamed"].direct_calls[0].target_symbol_id == symbols["save"].symbol_id
+    )
+    for name in (
+        "blocked",
+        "single",
+        "defaults",
+        *(("typed",) if suffix == "ts" else ()),
+    ):
+        assert symbols[name].parameter_bindings == ("save",)
+        assert symbols[name].direct_calls[0].resolution == "unresolved"
+
+
+@pytest.mark.parametrize("shadowed", [False, True])
+def test_polyglot_lexical_resolution_respects_nearest_binding_and_parameters(
+    tmp_path: Path, shadowed: bool
+) -> None:
+    (tmp_path / "store.js").write_text(
+        "function save(value) { return 99; }\n"
+        "function createStore() {\n"
+        "  function save(value) { return value; }\n"
+        + (
+            "  function update(save) { return save(1); }\n"
+            if shadowed
+            else "  function update(value) { return save(value); }\n"
+        )
+        + "  return update;\n}\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    symbols = {s.qualified_name: s for s in report.structural.code_maps[0].symbols}
+    call = symbols["createStore.update"].direct_calls[0]
+    assert call.target_symbol_id == (
+        None if shadowed else symbols["createStore.save"].symbol_id
+    )
+    assert call.resolution == ("unresolved" if shadowed else "internal")
+
+
 @pytest.mark.parametrize("same_file", [True, False])
 def test_behavior_requires_helper_without_explicit_callee_role(
     tmp_path: Path, same_file: bool
@@ -515,7 +662,7 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
-@pytest.mark.parametrize("capability", [0, 2, 3])
+@pytest.mark.parametrize("capability", [0, 2, 3, 4])
 def test_legacy_missing_source_units_do_not_certify_behavior(
     tmp_path: Path, legacy: str, capability: int
 ) -> None:

@@ -30,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="13",
+    analyzer_version="14",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -446,6 +446,7 @@ def extract_polyglot_code_map(
                     and _is_async(callable_node, source_bytes)
                 ),
                 signature=_signature(source_bytes, draft.node, body),
+                parameter_bindings=_parameter_bindings(callable_node, source_bytes),
                 declaration_range=_range(draft.node),
                 body_range=None if body is None else _range(body),
                 parent_symbol_id=(
@@ -856,6 +857,11 @@ def _attach_occurrences(
                         and member.parent.child_by_field_name("object") == member
                     )
                 )
+            ) or (
+                member is not None
+                and member.type == "navigation_expression"
+                and len(member.named_children) > 1
+                and member.named_children[0] == node
             )
             if (
                 selected_owners
@@ -1302,6 +1308,95 @@ def _c_prototype(node: Node) -> tuple[Node | None, Node | None]:
     if ancestor is None or ancestor.type not in {"declaration", "field_declaration"}:
         return None, None
     return name, ancestor
+
+
+def _parameter_bindings(node: Node, source: bytes) -> tuple[str, ...]:
+    parameters = node.child_by_field_name("parameters") or node.child_by_field_name(
+        "parameter"
+    )
+    if parameters is None:
+        parameters = next(
+            (
+                n
+                for n in node.named_children
+                if n.type
+                in {
+                    "function_value_parameters",
+                    "class_parameters",
+                    "primary_constructor",
+                }
+            ),
+            None,
+        )
+    names: set[str] = set()
+
+    def collect(pattern: Node) -> None:
+        if pattern.type in {
+            "identifier",
+            "shorthand_property_identifier_pattern",
+            "self",
+        }:
+            names.add(_text(source, pattern))
+            return
+        if pattern.type == "pair_pattern":
+            target = pattern.child_by_field_name("value")
+        else:
+            declared_names = tuple(
+                child
+                for index, child in enumerate(pattern.children)
+                if pattern.field_name_for_child(index) == "name"
+            )
+            if declared_names:
+                for child in declared_names:
+                    collect(child)
+                return
+            target = (
+                pattern.child_by_field_name("pattern")
+                or pattern.child_by_field_name("left")
+                or pattern.child_by_field_name("declarator")
+            )
+        if target is not None:
+            collect(target)
+        elif pattern.type in {
+            "formal_parameters",
+            "parameter_list",
+            "parameters",
+            "function_value_parameters",
+            "class_parameters",
+            "primary_constructor",
+            "array_pattern",
+            "object_pattern",
+            "rest_pattern",
+        }:
+            for child in pattern.named_children:
+                collect(child)
+        elif (
+            pattern.type
+            in {
+                "parameter",
+                "parameter_declaration",
+                "class_parameter",
+                "formal_parameter",
+                "required_parameter",
+                "optional_parameter",
+            }
+            and pattern.named_children
+        ):
+            binding = next(
+                (
+                    child
+                    for child in pattern.named_children
+                    if child.type
+                    in {"identifier", "object_pattern", "array_pattern", "rest_pattern"}
+                ),
+                None,
+            )
+            if binding is not None:
+                collect(binding)
+
+    if parameters is not None:
+        collect(parameters)
+    return tuple(sorted(names))
 
 
 def _range(node: Node) -> SourceRange:

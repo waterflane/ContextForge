@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -17,6 +18,7 @@ from contextforge.intelligence.codemap import (
     RelationshipTarget,
     SourceRange,
     StructuralOccurrenceCount,
+    SymbolKind,
     SymbolRecord,
     stable_fact_id,
 )
@@ -33,6 +35,22 @@ _TYPESCRIPT_EMITTED_SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
     ".mjs": (".mts",),
 }
 _TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION = "polyglot_typescript_emitted_suffix_resolution"
+
+
+@dataclass(frozen=True)
+class _PolyglotScopes:
+    by_id: dict[str, SymbolRecord]
+    bindings: dict[tuple[str | None, str], tuple[SymbolRecord, ...]]
+
+    @classmethod
+    def from_symbols(cls, symbols: tuple[SymbolRecord, ...]) -> _PolyglotScopes:
+        bindings: dict[tuple[str | None, str], list[SymbolRecord]] = defaultdict(list)
+        for symbol in symbols:
+            bindings[(symbol.parent_symbol_id, symbol.name)].append(symbol)
+        return cls(
+            {s.symbol_id: s for s in symbols},
+            {key: tuple(values) for key, values in bindings.items()},
+        )
 
 
 def resolve_relationships(
@@ -72,9 +90,10 @@ def resolve_relationships(
                 _resolve_polyglot_import(item, code_map.path, ordered)
                 for item in code_map.imports
             )
+            scopes = _PolyglotScopes.from_symbols(code_map.symbols)
             symbols = tuple(
                 _resolve_polyglot_symbol(
-                    symbol, imports, code_map.symbols, by_path, code_map.path
+                    symbol, imports, code_map.symbols, by_path, code_map.path, scopes
                 )
                 for symbol in code_map.symbols
             )
@@ -374,10 +393,18 @@ def _resolve_polyglot_symbol(
     symbols: tuple[SymbolRecord, ...],
     maps_by_path: dict[str, FileCodeMap],
     source_path: str,
+    scopes: _PolyglotScopes,
 ) -> SymbolRecord:
     calls = tuple(
         _resolve_polyglot_occurrence(
-            call, imports, symbols, maps_by_path, source_path, is_call=True
+            call,
+            imports,
+            symbols,
+            maps_by_path,
+            source_path,
+            owner=symbol,
+            scopes=scopes,
+            is_call=True,
         )
         for call in symbol.direct_calls
     )
@@ -388,6 +415,8 @@ def _resolve_polyglot_symbol(
             symbols,
             maps_by_path,
             source_path,
+            owner=symbol,
+            scopes=scopes,
             is_call=False,
         )
         for reference in symbol.direct_references
@@ -404,6 +433,8 @@ def _resolve_polyglot_occurrence(
     maps_by_path: dict[str, FileCodeMap],
     source_path: str,
     *,
+    owner: SymbolRecord,
+    scopes: _PolyglotScopes,
     is_call: bool,
 ) -> CallReference | ReferenceOccurrence:
     if occurrence.detection_method == "polyglot_ast_callback_binding":
@@ -427,15 +458,17 @@ def _resolve_polyglot_occurrence(
             }
         )
     observed = occurrence.observed_name
-    final_name = _final_observed_name(observed)
-    local = [
-        item
-        for item in symbols
-        if observed == final_name
-        and item.parent_symbol_id is None
-        and item.name == final_name
-    ]
+    bound, local = _polyglot_lexical_binding(observed, owner, scopes)
     if len(local) == 1:
+        if is_call and local[0].kind not in {
+            SymbolKind.FUNCTION,
+            SymbolKind.ASYNC_FUNCTION,
+            SymbolKind.METHOD,
+            SymbolKind.CONSTRUCTOR,
+            SymbolKind.CLASS,
+            SymbolKind.STRUCT,
+        }:
+            return occurrence
         return occurrence.model_copy(
             update={
                 "resolution": "internal",
@@ -446,6 +479,8 @@ def _resolve_polyglot_occurrence(
                 ),
             }
         )
+    if bound:
+        return occurrence
     targets: set[tuple[str, str, bool, bool]] = set()
     for item in imports:
         if item.resolution != "internal" or item.target_file_path is None:
@@ -516,6 +551,28 @@ def _resolve_polyglot_occurrence(
             ),
         }
     )
+
+
+def _polyglot_lexical_binding(
+    observed: str, owner: SymbolRecord, scopes: _PolyglotScopes
+) -> tuple[bool, tuple[SymbolRecord, ...]]:
+    # A lexical binding may shadow an import or outer declaration, but a
+    # receiver member is never resolved by its final component alone.
+    binding = observed.split(".", 1)[0]
+    current: SymbolRecord | None = owner
+    visited: set[str] = set()
+    while current is not None and current.symbol_id not in visited:
+        visited.add(current.symbol_id)
+        if binding in current.parameter_bindings or any(
+            p.name == binding for p in current.parameters
+        ):
+            return True, ()
+        matches = scopes.bindings.get((current.symbol_id, binding), ())
+        if matches:
+            return True, matches if observed == binding else ()
+        current = scopes.by_id.get(current.parent_symbol_id or "")
+    matches = scopes.bindings.get((None, binding), ())
+    return bool(matches), matches if observed == binding else ()
 
 
 def _polyglot_target_names(observed_name: str, item: ImportRecord) -> set[str]:

@@ -46,8 +46,8 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 11, Python analyzer version 10,
-and polyglot analyzer version 13 extract imports, calls, and non-call references
+Fallback analyzer version 4, resolver version 12, Python analyzer version 10,
+and polyglot analyzer version 14 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
@@ -55,7 +55,7 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 16 includes initializer and complete test-usage units. A member
+retrieval version 17 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
@@ -82,7 +82,13 @@ listed in both the document and retrieval header. Every fragment remains at most
 4 MiB, and warm reloads recheck its digest. Structural records are copied with
 these fragments into semantic generations; cached overlays also validate their
 structural base. Older inline records remain readable with empty shard defaults.
-Source evidence capability version 4 identifies extractors with receiver dependencies, initialization,
+Polyglot parameter bindings have a compatible empty default. Verified lexical
+ancestry resolves unqualified helpers and values in the nearest scope; parameters
+and nearer declarations shadow outer bindings and imports. Qualified receivers
+remain subject to structural binding checks. Kotlin navigation receivers retain
+value references, including properties with source-defined getters.
+Source evidence capability version 5 identifies extractors with lexical bindings,
+receiver dependencies, initialization,
 execution-owner and complete test-usage coverage. Older or unknown capabilities remain readable but cannot
 certify behavioral anchors. Compiler validation extends frozen gaps for missing
 capability metadata without erasing existing obligations.
