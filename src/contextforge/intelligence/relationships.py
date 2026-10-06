@@ -458,7 +458,29 @@ def _resolve_polyglot_occurrence(
             }
         )
     observed = occurrence.observed_name
-    bound, local = _polyglot_lexical_binding(observed, owner, scopes)
+    if observed.startswith("this."):
+        bound = True
+        parts = observed.split(".")
+        receiver = scopes.by_id.get(owner.receiver_class_symbol_id or "")
+        local = (
+            tuple(
+                s
+                for s in scopes.bindings.get((receiver.symbol_id, parts[1]), ())
+                if s.is_static_member == owner.is_static_member
+            )
+            if receiver is not None
+            and receiver.kind == SymbolKind.CLASS
+            and len(parts) == 2
+            else ()
+        )
+    else:
+        bound, local = _polyglot_lexical_binding(
+            observed,
+            owner,
+            scopes,
+            class_members=maps_by_path[source_path].language
+            not in {"JavaScript", "TypeScript"},
+        )
     if len(local) == 1:
         if is_call and local[0].kind not in {
             SymbolKind.FUNCTION,
@@ -554,7 +576,11 @@ def _resolve_polyglot_occurrence(
 
 
 def _polyglot_lexical_binding(
-    observed: str, owner: SymbolRecord, scopes: _PolyglotScopes
+    observed: str,
+    owner: SymbolRecord,
+    scopes: _PolyglotScopes,
+    *,
+    class_members: bool,
 ) -> tuple[bool, tuple[SymbolRecord, ...]]:
     # A lexical binding may shadow an import or outer declaration, but a
     # receiver member is never resolved by its final component alone.
@@ -567,7 +593,11 @@ def _polyglot_lexical_binding(
             p.name == binding for p in current.parameters
         ):
             return True, ()
-        matches = scopes.bindings.get((current.symbol_id, binding), ())
+        matches = (
+            scopes.bindings.get((current.symbol_id, binding), ())
+            if class_members or current.kind != SymbolKind.CLASS
+            else ()
+        )
         if matches:
             return True, matches if observed == binding else ()
         current = scopes.by_id.get(current.parent_symbol_id or "")

@@ -30,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="14",
+    analyzer_version="15",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -414,10 +414,18 @@ def extract_polyglot_code_map(
             source_range.start_column,
         )
 
+    class_ids = {
+        (draft.node.start_byte, draft.node.end_byte): draft.symbol_id
+        for draft in drafts
+        if draft.kind == SymbolKind.CLASS
+    }
     symbols: list[SymbolRecord] = []
     for index, draft in enumerate(drafts):
         callable_node = draft.callable_node or draft.node
         body = callable_node.child_by_field_name("body")
+        receiver_class, static_member = _class_receiver_binding(
+            callable_node, class_ids, language_name
+        )
         contained = tuple(
             child.symbol_id
             for child in drafts
@@ -447,6 +455,8 @@ def extract_polyglot_code_map(
                 ),
                 signature=_signature(source_bytes, draft.node, body),
                 parameter_bindings=_parameter_bindings(callable_node, source_bytes),
+                receiver_class_symbol_id=receiver_class,
+                is_static_member=static_member,
                 declaration_range=_range(draft.node),
                 body_range=None if body is None else _range(body),
                 parent_symbol_id=(
@@ -1308,6 +1318,37 @@ def _c_prototype(node: Node) -> tuple[Node | None, Node | None]:
     if ancestor is None or ancestor.type not in {"declaration", "field_declaration"}:
         return None, None
     return name, ancestor
+
+
+def _class_receiver_binding(
+    node: Node, class_ids: dict[tuple[int, int], str], language: str
+) -> tuple[str | None, bool]:
+    """Bind source-level `this` without crossing a dynamic function receiver."""
+    if language not in {"JavaScript", "TypeScript"}:
+        return None, False
+    current: Node | None = node
+    static = False
+    while current is not None:
+        if current.type in {
+            "function_declaration",
+            "generator_function_declaration",
+            "function_expression",
+            "generator_function",
+        }:
+            return None, False
+        if current.type in {
+            "method_definition",
+            "public_field_definition",
+            "field_definition",
+        }:
+            static = any(child.type == "static" for child in current.children)
+            parent = current.parent
+            if parent is None or parent.type != "class_body":
+                return None, False
+        if current.type in {"class_declaration", "abstract_class_declaration", "class"}:
+            return class_ids.get((current.start_byte, current.end_byte)), static
+        current = current.parent
+    return None, False
 
 
 def _parameter_bindings(node: Node, source: bytes) -> tuple[str, ...]:

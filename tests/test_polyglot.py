@@ -92,6 +92,75 @@ def test_qualified_calls_require_the_observed_receiver_binding(tmp_path: Path) -
     assert calls["options.hidden"].resolution == "unresolved"
 
 
+@pytest.mark.parametrize("suffix", ["js", "ts"])
+def test_class_receivers_preserve_direction_and_dynamic_scope(
+    tmp_path: Path, suffix: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / f"worker.{suffix}").write_text(
+        "class Worker {\n"
+        "  helper(value) { return value; }\n"
+        "  static shared(value) { return value; }\n"
+        "  run(value) {\n"
+        "    this.helper(value);\n"
+        "    const later = () => this.helper(value);\n"
+        "    const dynamic = function() { return this.helper(value); };\n"
+        "    function nested() { return this.helper(value); }\n"
+        "    const object = { helper() { return this.helper(value); } };\n"
+        "    other.helper(value);\n"
+        "    this.config.helper(value);\n"
+        "    this.shared(value);\n"
+        "    helper(value);\n"
+        "    return later;\n"
+        "  }\n"
+        "  static execute(value) { this.shared(value); this.helper(value); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    helper, shared = symbols["Worker.helper"], symbols["Worker.shared"]
+    run = symbols["Worker.run"]
+    assert run.receiver_class_symbol_id == symbols["Worker"].symbol_id
+    assert not run.is_static_member
+    calls = {c.observed_name: c for c in run.direct_calls}
+    assert calls["this.helper"].target_symbol_id == helper.symbol_id
+    for name in ("other.helper", "this.config.helper", "this.shared", "helper"):
+        assert calls[name].resolution == "unresolved"
+    later = symbols["Worker.run.later"]
+    assert later.receiver_class_symbol_id == run.receiver_class_symbol_id
+    assert later.direct_calls[0].target_symbol_id == helper.symbol_id
+    for name in ("Worker.run.dynamic", "Worker.run.nested", "Worker.run.object.helper"):
+        symbol = symbols[name]
+        assert symbol.receiver_class_symbol_id is None
+        assert symbol.direct_calls[0].resolution == "unresolved"
+    static = symbols["Worker.execute"]
+    assert static.is_static_member
+    assert {c.observed_name: c.target_symbol_id for c in static.direct_calls} == {
+        "this.shared": shared.symbol_id,
+        "this.helper": None,
+    }
+    # Older records cannot silently gain a receiver binding by suffix matching.
+    legacy = code_map.model_copy(
+        update={
+            "symbols": tuple(
+                s.model_copy(update={"receiver_class_symbol_id": None})
+                for s in code_map.symbols
+            )
+        }
+    )
+    old_run = next(
+        s
+        for s in resolve_relationships((legacy,))[0].symbols
+        if s.symbol_id == run.symbol_id
+    )
+    assert all(c.target_symbol_id is None for c in old_run.direct_calls)
+
+
 def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
     assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
     assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())

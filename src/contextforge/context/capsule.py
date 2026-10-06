@@ -348,7 +348,7 @@ def compile_context_capsule(
             legacy_gaps = {
                 f"source-units-unavailable:{c.candidate_id}"
                 for c in retrieval.candidates
-                if c.candidate_id in frozen.anchors and c.source_evidence_version < 5
+                if c.candidate_id in frozen.anchors and c.source_evidence_version < 6
             }
             if legacy_gaps:
                 retrieval = retrieval.model_copy(

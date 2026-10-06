@@ -271,10 +271,11 @@ def test_python_lambda_dependencies_are_references_and_respect_parameters(
     assert compiled.compilation_sufficiency.effective_status == "sufficient"
 
 
-@pytest.mark.parametrize("language", ["javascript", "kotlin"])
+@pytest.mark.parametrize("language", ["javascript", "kotlin", "receiver", "arrow"])
 def test_lexical_behavior_retains_closure_helpers_and_property_values(
     tmp_path: Path, language: str
 ) -> None:
+    required_lines: tuple[int, ...]
     if language == "javascript":
         text = (
             "function createStore() {\n"
@@ -289,7 +290,7 @@ def test_lexical_behavior_retains_closure_helpers_and_property_values(
             "Explain createStore.update behavior",
             (2, 3),
         )
-    else:
+    elif language == "kotlin":
         text = (
             "class Store {\n  private val directory get() = folder\n"
             + "".join(f"  fun filler{i}() = {i}\n" for i in range(80))
@@ -300,6 +301,22 @@ def test_lexical_behavior_retains_closure_helpers_and_property_values(
             "Store.kt",
             "Explain Store.purge behavior",
             (2, 84),
+        )
+    else:
+        text = (
+            "class Worker {\n  helper(value) { return value + 1; }\n"
+            + "".join(f"  filler{i}() {{ return {i}; }}\n" for i in range(80))
+            + (
+                "  run(value) { return (() => this.helper(value))(); }\n"
+                if language == "arrow"
+                else "  run(value) { return this.helper(value); }\n"
+            )
+            + "}\n"
+        )
+        filename, task, required_lines = (
+            "worker.js",
+            "Explain Worker.run behavior",
+            (2,),
         )
     (tmp_path / filename).write_text(text, encoding="utf-8")
     report = asyncio.run(
@@ -662,7 +679,7 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
-@pytest.mark.parametrize("capability", [0, 2, 3, 4])
+@pytest.mark.parametrize("capability", [0, 2, 3, 4, 5])
 def test_legacy_missing_source_units_do_not_certify_behavior(
     tmp_path: Path, legacy: str, capability: int
 ) -> None:
