@@ -30,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="11",
+    analyzer_version="12",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -305,6 +305,50 @@ def extract_polyglot_code_map(
                 )
 
     visit(tree.root_node, None)
+    # Append syntax-owned scopes after named declarations to keep existing named
+    # identities and lexical qualification stable. Their labels are addresses,
+    # not source identifiers or inferred public APIs.
+    anonymous_nodes: set[tuple[int, int]] = set()
+
+    def anonymous_scopes(node: Node) -> None:
+        verified = _declaration_node_is_verified(node, language_name)
+        ancestor = node.parent
+        while verified and ancestor is not None:
+            verified = not ancestor.is_error and not ancestor.is_missing
+            ancestor = ancestor.parent
+        if (
+            language_name in {"JavaScript", "TypeScript"}
+            and node.type in {"arrow_function", "function_expression"}
+            and verified
+            and not any(d.callable_node == node for d in drafts)
+        ):
+            containers = [
+                (i, d)
+                for i, d in enumerate(drafts)
+                if _contains_range(_range(d.node), _range(node))
+            ]
+            parent = min(
+                containers,
+                key=lambda item: item[1].node.end_byte - item[1].node.start_byte,
+                default=None,
+            )
+            address = _range(node)
+            drafts.append(
+                _Draft(
+                    node,
+                    f"@callback:{address.start_line}:{address.start_column}",
+                    SymbolKind.ASYNC_FUNCTION
+                    if _is_async(node, source_bytes)
+                    else SymbolKind.FUNCTION,
+                    None if parent is None else parent[0],
+                    callable_node=node,
+                )
+            )
+            anonymous_nodes.add((node.start_byte, node.end_byte))
+        for child in node.named_children:
+            anonymous_scopes(child)
+
+    anonymous_scopes(tree.root_node)
     for draft in drafts:
         owner_name = _method_owner(draft.node, language_name, source_bytes)
         if owner_name is not None:
@@ -395,6 +439,8 @@ def extract_polyglot_code_map(
                 name=draft.name,
                 qualified_name=draft.qualified_name,
                 kind=draft.kind,
+                is_anonymous=(draft.node.start_byte, draft.node.end_byte)
+                in anonymous_nodes,
                 is_async=(
                     draft.kind in {SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
                     and _is_async(callable_node, source_bytes)
@@ -414,7 +460,12 @@ def extract_polyglot_code_map(
     imports = _extract_imports(source, project_file.path, language_name)
     symbols = list(
         _attach_occurrences(
-            tree.root_node, tuple(symbols), imports, source_bytes, rules
+            tree.root_node,
+            tuple(symbols),
+            imports,
+            source_bytes,
+            rules,
+            project_file.path,
         )
     )
     return FileCodeMap(
@@ -427,7 +478,19 @@ def extract_polyglot_code_map(
         line_count=selected.source_line_count,
         module_has_executable_code=_module_has_executable_code(tree.root_node, rules),
         imports=imports,
-        symbols=tuple(symbols),
+        symbols=tuple(
+            sorted(
+                symbols,
+                key=lambda item: (
+                    item.declaration_range.start_line,
+                    item.declaration_range.start_column,
+                    item.declaration_range.end_line,
+                    item.declaration_range.end_column,
+                    item.qualified_name,
+                    item.symbol_id,
+                ),
+            )
+        ),
         diagnostics=tuple(
             sorted(
                 (*diagnostics, *omitted),
@@ -646,6 +709,7 @@ def _attach_occurrences(
     imports: tuple[ImportRecord, ...],
     source: bytes,
     rules: StructuralCaptureRules,
+    source_path: str,
 ) -> tuple[SymbolRecord, ...]:
     del imports
     calls: dict[str, list[CallReference]] = {item.symbol_id: [] for item in symbols}
@@ -660,6 +724,7 @@ def _attach_occurrences(
         for item in symbols
     }
     call_target_ranges: list[SourceRange] = []
+    callback_nodes: dict[tuple[int, int], Node] = {}
 
     def owner(node: Node) -> SymbolRecord | None:
         region = _range(node)
@@ -678,6 +743,39 @@ def _attach_occurrences(
             default=None,
         )
 
+    def execution_owner(node: Node) -> SymbolRecord | None:
+        region = _range(node)
+        return min(
+            (
+                item
+                for item in symbols
+                if item.kind
+                in {
+                    SymbolKind.FUNCTION,
+                    SymbolKind.ASYNC_FUNCTION,
+                    SymbolKind.METHOD,
+                    SymbolKind.CONSTRUCTOR,
+                }
+                and _contains_range(item.body_range or item.declaration_range, region)
+            ),
+            key=lambda item: (
+                (item.body_range or item.declaration_range).end_line
+                - (item.body_range or item.declaration_range).start_line,
+                (item.body_range or item.declaration_range).end_column
+                - (item.body_range or item.declaration_range).start_column,
+                item.qualified_name,
+            ),
+            default=None,
+        )
+
+    def owners(node: Node) -> tuple[SymbolRecord, ...]:
+        # Keep the original declaration occurrence as well as its execution
+        # owner; old source-bound IDs remain independently verifiable.
+        values = (owner(node), execution_owner(node))
+        return tuple(
+            {item.symbol_id: item for item in values if item is not None}.values()
+        )
+
     def in_import(node: Node) -> bool:
         current: Node | None = node
         while current is not None:
@@ -687,6 +785,9 @@ def _attach_occurrences(
         return False
 
     def visit_calls(node: Node) -> None:
+        if node.type in {"arrow_function", "function_expression"}:
+            region = _range(node)
+            callback_nodes[(region.start_line, region.start_column)] = node
         if node.type in rules.call_captures and not node.has_error:
             target = (
                 node.child_by_field_name("function")
@@ -694,20 +795,21 @@ def _attach_occurrences(
                 or node.child_by_field_name("method")
                 or next(iter(node.named_children), None)
             )
-            selected_owner = owner(node)
-            if target is not None and selected_owner is not None:
+            selected_owners = owners(node)
+            if target is not None and selected_owners:
                 observed = _text(source, target).strip()
                 if observed and len(observed) <= 500:
                     region = _range(target)
                     call_target_ranges.append(region)
-                    calls[selected_owner.symbol_id].append(
-                        CallReference(
-                            observed_name=observed,
-                            source_range=region,
-                            detection_method="polyglot_ast_call",
-                            callback_arguments=_callback_arguments(node, source),
+                    for selected_owner in selected_owners:
+                        calls[selected_owner.symbol_id].append(
+                            CallReference(
+                                observed_name=observed,
+                                source_range=region,
+                                detection_method="polyglot_ast_call",
+                                callback_arguments=_callback_arguments(node, source),
+                            )
                         )
-                    )
         for child in node.named_children:
             visit_calls(child)
 
@@ -737,22 +839,31 @@ def _attach_occurrences(
             and not node.has_error
             and not in_import(node)
         ):
-            selected_owner = owner(node)
+            selected_owners = owners(node)
             region = _range(node)
+            member = node.parent
+            receiver_reference = (
+                member is not None
+                and member.type == "member_expression"
+                and member.child_by_field_name("object") == node
+            )
             if (
-                selected_owner is not None
-                and not any(
-                    target.start_line <= region.start_line
-                    and region.end_line <= target.end_line
-                    and (
-                        target.start_line != region.start_line
-                        or target.start_column <= region.start_column
+                selected_owners
+                and (
+                    receiver_reference
+                    or not any(
+                        target.start_line <= region.start_line
+                        and region.end_line <= target.end_line
+                        and (
+                            target.start_line != region.start_line
+                            or target.start_column <= region.start_column
+                        )
+                        and (
+                            target.end_line != region.end_line
+                            or region.end_column <= target.end_column
+                        )
+                        for target in call_target_ranges
                     )
-                    and (
-                        target.end_line != region.end_line
-                        or region.end_column <= target.end_column
-                    )
-                    for target in call_target_ranges
                 )
                 and (region.start_line, region.start_column) not in declaration_ranges
                 and not _is_declaration_name(node)
@@ -772,18 +883,41 @@ def _attach_occurrences(
                         observed = _text(source, member).strip()
                         region = _range(member)
                 if observed and len(observed) <= 500:
-                    references[selected_owner.symbol_id].append(
-                        ReferenceOccurrence(
-                            observed_name=observed,
-                            source_range=region,
-                            detection_method="polyglot_ast_reference",
+                    for selected_owner in selected_owners:
+                        references[selected_owner.symbol_id].append(
+                            ReferenceOccurrence(
+                                observed_name=observed,
+                                source_range=region,
+                                detection_method="polyglot_ast_reference",
+                            )
                         )
-                    )
         for child in node.named_children:
             visit_references(child)
 
     visit_calls(root)
     visit_references(root)
+    for symbol in symbols:
+        if not symbol.is_anonymous:
+            continue
+        node = callback_nodes.get(
+            (symbol.declaration_range.start_line, symbol.declaration_range.start_column)
+        )
+        if node is None:
+            continue
+        enclosing = execution_owner(node)
+        if enclosing is not None and enclosing.symbol_id != symbol.symbol_id:
+            references[enclosing.symbol_id].append(
+                ReferenceOccurrence(
+                    observed_name=_signature(
+                        source, node, node.child_by_field_name("body")
+                    ),
+                    source_range=symbol.declaration_range,
+                    resolution="internal",
+                    target_symbol_id=symbol.symbol_id,
+                    target_file_path=source_path,
+                    detection_method="polyglot_ast_callback_binding",
+                )
+            )
     return tuple(
         item.model_copy(
             update={

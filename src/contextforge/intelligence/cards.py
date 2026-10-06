@@ -1845,8 +1845,11 @@ def _deterministic_card(
     public = [
         symbol
         for symbol in code_map.symbols
-        if symbol.visibility in {"public", "explicit_export"}
-        or symbol.parent_symbol_id is None
+        if not symbol.is_anonymous
+        and (
+            symbol.visibility in {"public", "explicit_export"}
+            or symbol.parent_symbol_id is None
+        )
     ][:12]
     evidence_by_symbol = {
         item.symbol_id: item.evidence_id

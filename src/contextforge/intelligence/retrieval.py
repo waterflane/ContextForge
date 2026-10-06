@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from contextforge.context.evidence_diagnostics import EvidenceCoverageDiagnostics
 
 RETRIEVAL_SCHEMA_VERSION: Literal[4] = 4
-RETRIEVAL_BUILD_VERSION = 14
+RETRIEVAL_BUILD_VERSION = 15
 BM25_K1 = 1.2
 BM25_B = 0.75
 FIELD_WEIGHTS = {
@@ -239,7 +239,8 @@ def _load_source_facts(
     payload = cast(dict[str, Any], json.loads(encoded))
     by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for symbol in payload.get("symbols", []):
-        by_name[symbol["qualified_name"]].append(symbol)
+        if not symbol.get("is_anonymous", False):
+            by_name[symbol["qualified_name"]].append(symbol)
     facts = _SourceLookup(
         payload, {v["symbol_id"]: v for v in payload.get("symbols", [])}, dict(by_name)
     )
@@ -1109,11 +1110,18 @@ def build_retrieval_index(
             card, code_map, graph_edges, graph_nodes
         )
         symbols = tuple(
-            sorted({item.name for item in code_map.symbols}, key=canonical_casefold_key)
+            sorted(
+                {item.name for item in code_map.symbols if not item.is_anonymous},
+                key=canonical_casefold_key,
+            )
         )
         qualified = tuple(
             sorted(
-                {item.qualified_name for item in code_map.symbols},
+                {
+                    item.qualified_name
+                    for item in code_map.symbols
+                    if not item.is_anonymous
+                },
                 key=canonical_casefold_key,
             )
         )
@@ -6213,6 +6221,8 @@ def _all_structural_postings(code_map: FileCodeMap) -> tuple[PositionalPosting, 
             values.setdefault(_posting_key(item), item)
 
     for symbol in code_map.symbols:
+        if symbol.is_anonymous:
+            continue
         add(symbol.name, "declaration", symbol.symbol_id, symbol.declaration_range)
         add(
             symbol.qualified_name,
@@ -6265,8 +6275,9 @@ def _safe_structural_identifiers(value: str) -> tuple[str, ...]:
 def _all_structural_identifiers(code_map: FileCodeMap) -> tuple[str, ...]:
     values: set[str] = set()
     for symbol in code_map.symbols:
-        values.update(_safe_structural_identifiers(symbol.name))
-        values.update(_safe_structural_identifiers(symbol.qualified_name))
+        if not symbol.is_anonymous:
+            values.update(_safe_structural_identifiers(symbol.name))
+            values.update(_safe_structural_identifiers(symbol.qualified_name))
         for call in symbol.direct_calls:
             values.update(_safe_structural_identifiers(call.observed_name))
         for reference in symbol.direct_references:
@@ -6310,6 +6321,11 @@ def verified_source_lookup(code_map: FileCodeMap) -> dict[str, SourceRange]:
         for unit in derive_source_evidence_units(code_map)
     )
     for symbol in code_map.symbols:
+        values[
+            _structural_evidence_id(
+                code_map, f"declaration:{symbol.symbol_id}", symbol.declaration_range
+            )
+        ] = symbol.declaration_range
         for call in symbol.direct_calls:
             if call.resolution == "internal":
                 identity = f"call-site:{symbol.symbol_id}:{call.observed_name}"

@@ -46,8 +46,8 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 9, Python analyzer version 9,
-and polyglot analyzer version 11 extract imports, calls, and non-call references
+Fallback analyzer version 4, resolver version 10, Python analyzer version 9,
+and polyglot analyzer version 12 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
@@ -55,11 +55,19 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 14 includes initializer and complete test-usage units. A member
+retrieval version 15 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
 reuse stored CodeMaps and publish a new immutable generation.
+JavaScript and TypeScript anonymous callable scopes have source-position
+identities with `is_anonymous=true` (default false for older records). They are
+excluded from named exact anchors and public API summaries. Calls and references
+in local initializers retain their declaration occurrences and their enclosing
+execution owner. Callback bindings are verified references to observed syntax,
+not claims that a callback will execute. Test usages include the enclosing
+callable body and its assertions. Member-call receivers remain reference facts;
+their method calls are resolved independently.
 Large documents preserve all source units in separately digest-bound fragments,
 listed in both the document and retrieval header. Every fragment remains at most
 4 MiB, and warm reloads recheck its digest. Structural records are copied with

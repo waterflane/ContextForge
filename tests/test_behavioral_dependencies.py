@@ -16,6 +16,83 @@ from contextforge.intelligence.retrieval import (
 )
 
 
+def test_javascript_behavior_requires_helpers_constants_and_complete_test_scopes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "jobs.js").write_text(
+        "export const ALLOWED = new Set(['raw']);\n"
+        "function clean(value) { return value.trim(); }\n"
+        "export function execute_job(value) {\n"
+        "  const normalized = clean(value);\n"
+        "  return ALLOWED.has(normalized);\n}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_jobs.js").write_text(
+        "import { execute_job } from './jobs.js';\n"
+        "test('direct', () => {\n"
+        "  assert.equal(execute_job(' raw '), true);\n});\n"
+        "test('local', () => {\n  const result = execute_job('other');\n"
+        "  assert.equal(result, false);\n});\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Review execute_job implementation and tests"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    source = retrieval.requirements.source_evidence
+    assert {
+        a.start_line for r in source if r.path == "jobs.js" for a in r.required_ranges
+    } >= {1, 2, 3}
+    test_ranges = [
+        a for r in source if r.path == "test_jobs.js" for a in r.required_ranges
+    ]
+    assert any(a.start_line == 2 and a.end_line == 4 for a in test_ranges)
+    assert any(a.start_line == 5 and a.end_line == 8 for a in test_ranges)
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=12000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    removed_ids = {
+        u.evidence_id
+        for c in retrieval.candidates
+        if c.path == "test_jobs.js"
+        for u in c.source_units
+        if u.kind == "test-usage"
+    }
+    assert removed_ids
+    damaged = retrieval.model_copy(
+        update={
+            "candidates": tuple(
+                c.model_copy(
+                    update={
+                        "source_units": tuple(
+                            u for u in c.source_units if u.kind != "test-usage"
+                        ),
+                        "evidence_ranges": tuple(
+                            e
+                            for e in c.evidence_ranges
+                            if e.evidence_id not in removed_ids
+                        ),
+                    }
+                )
+                if c.path == "test_jobs.js"
+                else c
+                for c in retrieval.candidates
+            )
+        }
+    )
+    missing = compile_context_capsule(
+        tmp_path, task, damaged, budget=ContextBudget(context_window_tokens=12000)
+    )
+    assert missing.compilation_sufficiency is not None
+    assert missing.compilation_sufficiency.effective_status == "insufficient"
+
+
 @pytest.mark.parametrize(
     ("task", "scope"),
     [
@@ -30,6 +107,39 @@ def test_original_syntax_distinguishes_lookup_from_behavior(
     task: str, scope: str
 ) -> None:
     assert parse_query_intent(task).evidence_scope == scope
+
+
+def test_inline_callback_binding_is_a_reference_with_complete_behavior(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "jobs.js").write_text(
+        "function clean(value) { return value.trim(); }\n"
+        "export function execute_job(values) {\n"
+        "  return values.map(value => clean(value));\n}\n",
+        encoding="utf-8",
+    )
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    task = "Explain execute_job behavior"
+    retrieval = asyncio.run(
+        retrieve_context_candidates(tmp_path, task, manifest=report.manifest)
+    )
+    assert retrieval.requirements is not None
+    assert not retrieval.requirements.unresolved_dependency_ids
+    relations = report.structural.code_maps[0].relationships
+    callback = next(s for s in report.structural.code_maps[0].symbols if s.is_anonymous)
+    binding = [r for r in relations if r.target.symbol_id == callback.symbol_id]
+    assert any(r.kind == "reference" for r in binding)
+    assert not any(r.kind == "call" for r in binding)
+    assert not any(
+        "callback" in s for c in retrieval.candidates for s in c.matched_symbols
+    )
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=ContextBudget(context_window_tokens=8000)
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
 
 
 @pytest.mark.parametrize("same_file", [True, False])

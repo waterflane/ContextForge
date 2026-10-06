@@ -17,6 +17,45 @@ from contextforge.intelligence.polyglot import (
 from contextforge.repositories import scan_repository
 
 
+def test_calls_in_local_initializers_keep_execution_owner_and_receiver(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sample.js").write_text(
+        "const ALLOWED = new Set(['raw']);\n"
+        "function clean(value) { return value.trim(); }\n"
+        "function execute_job(value) {\n"
+        "  const normalized = clean(value);\n"
+        "  return ALLOWED.has(normalized);\n}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    assert code_map.parse_status == "parsed"
+    function = next(s for s in code_map.symbols if s.name == "execute_job")
+    initializer = next(s for s in code_map.symbols if s.name == "normalized")
+    assert "clean" in {c.observed_name for c in function.direct_calls}
+    assert "clean" in {c.observed_name for c in initializer.direct_calls}
+    assert "ALLOWED" in {r.observed_name for r in function.direct_references}
+
+
+def test_anonymous_test_scope_keeps_calls_and_assertions(tmp_path: Path) -> None:
+    (tmp_path / "test_sample.js").write_text(
+        "test('direct', () => {\n"
+        "  assert.equal(execute_job(1), 2);\n});\n"
+        "test('local', () => {\n  const result = execute_job(2);\n"
+        "  assert.equal(result, 3);\n});\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    callbacks = [s for s in code_map.symbols if s.is_anonymous]
+    assert len(callbacks) == 2
+    assert {s.declaration_range.end_line for s in callbacks} == {3, 7}
+    assert all(
+        "execute_job" in {c.observed_name for c in s.direct_calls} for s in callbacks
+    )
+
+
 def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
     assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
     assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())

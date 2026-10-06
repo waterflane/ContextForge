@@ -162,7 +162,8 @@ def _clear_reference_resolution(
     if (
         reference.resolution == "internal"
         and reference.target_file_path == source_path
-        and reference.detection_method == "python_lexical_reference"
+        and reference.detection_method
+        in {"python_lexical_reference", "polyglot_ast_callback_binding"}
     ):
         return reference
     method = (
@@ -405,6 +406,26 @@ def _resolve_polyglot_occurrence(
     *,
     is_call: bool,
 ) -> CallReference | ReferenceOccurrence:
+    if occurrence.detection_method == "polyglot_ast_callback_binding":
+        target = next(
+            (s for s in symbols if s.symbol_id == occurrence.target_symbol_id), None
+        )
+        if (
+            not is_call
+            and target is not None
+            and target.is_anonymous
+            and occurrence.target_file_path == source_path
+            and occurrence.source_range == target.declaration_range
+        ):
+            return occurrence
+        return occurrence.model_copy(
+            update={
+                "resolution": "unresolved",
+                "target_symbol_id": None,
+                "target_file_path": None,
+                "detection_method": "polyglot_ast_reference",
+            }
+        )
     observed = occurrence.observed_name
     final_name = _final_observed_name(observed)
     local = [
