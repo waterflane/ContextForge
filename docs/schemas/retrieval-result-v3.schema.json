@@ -1290,6 +1290,11 @@
           },
           "title": "Related Symbol Ids",
           "type": "array"
+        },
+        "unresolved_endpoint": {
+          "default": false,
+          "title": "Unresolved Endpoint",
+          "type": "boolean"
         }
       },
       "required": [

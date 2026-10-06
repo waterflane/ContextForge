@@ -60,6 +60,21 @@ def test_retrieval_storage_schema_exposes_compatible_source_unit_shards() -> Non
     assert schema["$defs"]["RetrievalSourceUnitShard"]["additionalProperties"] is False
 
 
+@pytest.mark.parametrize(
+    "name", ["retrieval-storage-v4.schema.json", "retrieval-result-v3.schema.json"]
+)
+def test_source_unit_schemas_accept_current_endpoint_gap_metadata(name: str) -> None:
+    from contextforge.intelligence.source_evidence import SourceEvidenceUnit
+
+    unit = _schema(name)["$defs"]["SourceEvidenceUnit"]
+    runtime = SourceEvidenceUnit.model_json_schema()
+    assert unit["additionalProperties"] is False
+    assert unit["properties"] == runtime["properties"]
+    assert unit["required"] == runtime["required"]
+    assert unit["properties"]["unresolved_endpoint"]["default"] is False
+    assert "unresolved_endpoint" not in unit["required"]
+
+
 def test_capsule_and_retrieval_schemas_expose_representation_contract() -> None:
     capsule = _schema("context-capsule-v2.schema.json")
     retrieval = _schema("retrieval-result-v3.schema.json")
