@@ -466,7 +466,11 @@ def _resolve_polyglot_occurrence(
                     *parts[1:],
                 )
             )
-        target_names = _polyglot_target_names(observed, item)
+        target_names = (
+            {qualified_target.rsplit(".", 1)[-1]}
+            if qualified_target is not None
+            else _polyglot_target_names(observed, item)
+        )
         if not target_names:
             continue
         target_map = maps_by_path[item.target_file_path]
@@ -526,7 +530,7 @@ def _polyglot_target_names(observed_name: str, item: ImportRecord) -> set[str]:
         return {parts[-1]}
     binding = item.alias or item.imported_name
     if len(parts) == 1:
-        return {item.imported_name} if parts[0] == binding else set()
+        return {parts[0]}
     if parts[0] != binding:
         return set()
     return {parts[-1] if len(parts) > 1 else item.imported_name}
