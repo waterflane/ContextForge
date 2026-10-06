@@ -478,6 +478,7 @@ def _resolve_polyglot_occurrence(
             observed,
             owner,
             scopes,
+            source_range=occurrence.source_range,
             class_members=maps_by_path[source_path].language
             not in {"JavaScript", "TypeScript"},
         )
@@ -581,6 +582,7 @@ def _polyglot_lexical_binding(
     scopes: _PolyglotScopes,
     *,
     class_members: bool,
+    source_range: SourceRange,
 ) -> tuple[bool, tuple[SymbolRecord, ...]]:
     # A lexical binding may shadow an import or outer declaration, but a
     # receiver member is never resolved by its final component alone.
@@ -595,7 +597,14 @@ def _polyglot_lexical_binding(
             return True, ()
         matches = (
             scopes.bindings.get((current.symbol_id, binding), ())
-            if class_members or current.kind != SymbolKind.CLASS
+            if (class_members or current.kind != SymbolKind.CLASS)
+            and not any(
+                (r.start_line, r.start_column)
+                <= (source_range.start_line, source_range.start_column)
+                and (source_range.end_line, source_range.end_column)
+                <= (r.end_line, r.end_column)
+                for r in current.parameter_default_ranges
+            )
             else ()
         )
         if matches:
@@ -726,7 +735,14 @@ def _resolve_imported_references(
         if reference.detection_method == "python_shadowed_reference":
             references.append(reference)
             continue
-        if reference.observed_name.split(".")[0] in parameter_names:
+        is_default = any(
+            (r.start_line, r.start_column)
+            <= (reference.source_range.start_line, reference.source_range.start_column)
+            and (reference.source_range.end_line, reference.source_range.end_column)
+            <= (r.end_line, r.end_column)
+            for r in symbol.parameter_default_ranges
+        )
+        if not is_default and reference.observed_name.split(".")[0] in parameter_names:
             references.append(reference)
             continue
         targets: set[tuple[str, str]] = set()
@@ -734,7 +750,9 @@ def _resolve_imported_references(
             if item.resolution != "internal" or item.target_file_path is None:
                 continue
             containing_symbol = _containing_symbol(symbols, item.source_range)
-            if containing_symbol not in {None, symbol.symbol_id}:
+            if containing_symbol is not None and (
+                is_default or containing_symbol != symbol.symbol_id
+            ):
                 continue
             target_map = maps_by_path.get(item.target_file_path)
             if target_map is None:

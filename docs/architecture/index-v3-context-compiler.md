@@ -46,8 +46,8 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 13, Python analyzer version 10,
-and polyglot analyzer version 15 extract imports, calls, and non-call references
+Fallback analyzer version 4, resolver version 14, Python analyzer version 11,
+and polyglot analyzer version 16 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
 unambiguous snapshot symbols are verified; package/convention resolution is
@@ -55,7 +55,7 @@ best-effort and ambiguity stays unresolved. Config consumers match SHA-256
 digests of discovered key names in permitted root/module scope. Config values
 are never stored.
 Constructor assignment occurrences retain exact source positions. Derived
-retrieval version 18 includes initializer and complete test-usage units. A member
+retrieval version 19 includes initializer and complete test-usage units. A member
 read can require an observed constructor assignment in the same lexical class;
 this records source syntax, not runtime initialization order. Parent class bodies
 remain optional. Analyzer changes rebuild affected CodeMaps; derived-only changes
@@ -93,7 +93,15 @@ references bind only to unique members of that class with the same receiver mode
 Arrow functions inherit this binding; ordinary nested functions and object methods
 do not. Receiver chains remain unresolved. These are source-level bindings, not
 claims about dynamic dispatch or runtime receiver substitution.
-Source evidence capability version 6 identifies extractors with lexical bindings,
+Parameter default expression ranges have a compatible empty default. Their calls
+and references belong to the declaring callable, independently of its body range.
+JavaScript/TypeScript parameter defaults resolve in the parameter environment;
+body-local declarations cannot supply bindings for these expressions. Default
+dependencies require their own verified source units, not merely a visible signature.
+Python default dependencies are definition-scope references, not invocation-body
+calls; body-local declarations and the function's own parameters do not shadow
+the enclosing bindings used to evaluate defaults.
+Source evidence capability version 7 identifies extractors with lexical bindings,
 receiver dependencies, initialization,
 execution-owner and complete test-usage coverage. Older or unknown capabilities remain readable but cannot
 certify behavioral anchors. Compiler validation extends frozen gaps for missing

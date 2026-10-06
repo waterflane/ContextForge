@@ -35,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="10",
+    analyzer_version="11",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -387,7 +387,7 @@ def _collect_symbol_drafts(module: ast.Module, path: str) -> list[_SymbolDraft]:
                     parent_qualified=qualified,
                     parent_is_class=True,
                 )
-            elif parent_index is None and isinstance(
+            elif (parent_index is None or parent_is_class) and isinstance(
                 statement, (ast.Assign, ast.AnnAssign, ast.TypeAlias)
             ):
                 for name in _assignment_names(statement):
@@ -402,7 +402,7 @@ def _collect_symbol_drafts(module: ast.Module, path: str) -> list[_SymbolDraft]:
                             name=name,
                             qualified_name=f"{parent_qualified}.{name}",
                             kind=kind,
-                            parent_index=None,
+                            parent_index=parent_index,
                         )
                     )
             else:
@@ -533,6 +533,18 @@ def _build_symbols(
                     if callable_node is not None
                     else ()
                 ),
+                parameter_default_ranges=(
+                    tuple(
+                        _node_range(value)
+                        for value in (
+                            *callable_node.args.defaults,
+                            *callable_node.args.kw_defaults,
+                        )
+                        if value is not None
+                    )
+                    if callable_node is not None
+                    else ()
+                ),
                 return_annotation=(
                     _optional_segment(source, callable_node.returns)
                     if callable_node is not None
@@ -559,6 +571,30 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
     visitor = _DirectFactVisitor(source)
     if isinstance(node, _Callable):
         arguments = node.args
+        # Defaults execute at definition time. Retain their dependencies as
+        # references without claiming calls from the function's invocation body.
+        defaults = _DirectFactVisitor(source)
+        for value in (*arguments.defaults, *arguments.kw_defaults):
+            if value is not None:
+                defaults.visit(value)
+        uses = [
+            *defaults.references,
+            *(
+                ReferenceOccurrence(
+                    observed_name=c.observed_name, source_range=c.source_range
+                )
+                for c in defaults.calls
+            ),
+        ]
+        visitor.references.extend(
+            {
+                (*_range_tuple(r.source_range), r.observed_name): r.model_copy(
+                    update={"detection_method": "python_default_reference"}
+                )
+                for r in uses
+            }.values()
+        )
+        visitor.configuration_keys.update(defaults.configuration_keys)
         annotations = [
             argument.annotation
             for argument in (
@@ -641,7 +677,8 @@ def _resolve_local_calls(
                     for item in candidates
                     if item.parent_symbol_id == symbol.parent_symbol_id
                 ]
-                if symbol.kind != SymbolKind.METHOD
+                if draft.parent_index is None
+                or drafts[draft.parent_index].kind != SymbolKind.CLASS
                 else []
             )
             module_level = [
@@ -687,9 +724,17 @@ def _resolve_local_references(
     by_name: dict[str, list[SymbolRecord]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
+    by_id = {symbol.symbol_id: symbol for symbol in symbols}
+    draft_by_id = {
+        symbol.symbol_id: draft for symbol, draft in zip(symbols, drafts, strict=True)
+    }
+    shadowed_by_id = {
+        symbol_id: _shadowed_names(draft.node)
+        for symbol_id, draft in draft_by_id.items()
+    }
     result: list[SymbolRecord] = []
-    for symbol, draft in zip(symbols, drafts, strict=True):
-        shadowed_names = _shadowed_names(draft.node)
+    for symbol in symbols:
+        shadowed_names = shadowed_by_id[symbol.symbol_id]
         references: list[ReferenceOccurrence] = []
         for reference in symbol.direct_references:
             observed_root = reference.observed_name.split(".", maxsplit=1)[0]
@@ -703,15 +748,53 @@ def _resolve_local_references(
                 for item in candidates
                 if item.parent_symbol_id == symbol.parent_symbol_id
                 and item.symbol_id != symbol.symbol_id
+                and not (
+                    by_id.get(symbol.parent_symbol_id or "") is not None
+                    and by_id[symbol.parent_symbol_id or ""].kind == SymbolKind.CLASS
+                    and symbol.kind
+                    in {
+                        SymbolKind.METHOD,
+                        SymbolKind.ASYNC_FUNCTION,
+                        SymbolKind.CONSTRUCTOR,
+                    }
+                )
             ]
             module_level = [
                 item
                 for item in candidates
                 if item.parent_symbol_id is None and item.symbol_id != symbol.symbol_id
             ]
-            selected = [] if observed_root in shadowed_names else siblings
-            if not selected and observed_root not in shadowed_names:
-                selected = module_level
+            shadowed = observed_root in shadowed_names
+            is_default = any(
+                (r.start_line, r.start_column)
+                <= (
+                    reference.source_range.start_line,
+                    reference.source_range.start_column,
+                )
+                and (reference.source_range.end_line, reference.source_range.end_column)
+                <= (r.end_line, r.end_column)
+                for r in symbol.parameter_default_ranges
+            )
+            if is_default:
+                selected = []
+                shadowed = False
+                parent = by_id.get(symbol.parent_symbol_id or "")
+                while parent is not None:
+                    selected = [
+                        c for c in candidates if c.parent_symbol_id == parent.symbol_id
+                    ]
+                    if selected:
+                        break
+                    if observed_root in shadowed_by_id[parent.symbol_id]:
+                        shadowed = True
+                        break
+                    parent = by_id.get(parent.parent_symbol_id or "")
+                if not selected and not shadowed:
+                    selected = module_level
+            else:
+                selected = [] if shadowed else siblings
+                if not selected and not shadowed:
+                    selected = module_level
             unique = {item.symbol_id: item for item in selected}
             if len(unique) == 1:
                 target = next(iter(unique.values()))
@@ -725,7 +808,7 @@ def _resolve_local_references(
                         }
                     )
                 )
-            elif observed_root in shadowed_names:
+            elif shadowed:
                 references.append(
                     reference.model_copy(
                         update={"detection_method": "python_shadowed_reference"}

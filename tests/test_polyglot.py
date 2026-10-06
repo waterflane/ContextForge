@@ -93,6 +93,112 @@ def test_qualified_calls_require_the_observed_receiver_binding(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("suffix", ["js", "ts"])
+def test_defaults_use_parameter_scope_and_keep_helpers(
+    tmp_path: Path, suffix: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    source = (
+        "const LIMIT = 7;\nfunction fallback() { return LIMIT; }\n"
+        "function run(value = LIMIT, other = fallback()) {\n"
+        "  const LIMIT = 99; function fallback() { return 99; }\n"
+        "  return LIMIT + fallback() + value + other;\n}\n"
+        "function blocked(LIMIT = LIMIT) { return LIMIT; }\n"
+        "function destructured({key: value = fallback()} = {}) { return value; }\n"
+        "function deferred(get = () => LIMIT) { const LIMIT = 99; return get; }\n"
+    )
+    if suffix == "ts":
+        source += "function typed(value: number = LIMIT) { return value; }\n"
+    (tmp_path / f"defaults.{suffix}").write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    run = symbols["run"]
+    assert len(run.parameter_default_ranges) == 2
+    refs = {
+        r.source_range.start_line: r
+        for r in run.direct_references
+        if r.observed_name == "LIMIT"
+    }
+    assert refs[3].target_symbol_id == symbols["LIMIT"].symbol_id
+    assert refs[5].target_symbol_id == symbols["run.LIMIT"].symbol_id
+    calls = {
+        c.source_range.start_line: c
+        for c in run.direct_calls
+        if c.observed_name == "fallback"
+    }
+    assert calls[3].target_symbol_id == symbols["fallback"].symbol_id
+    assert calls[5].target_symbol_id == symbols["run.fallback"].symbol_id
+    assert all(r.target_symbol_id is None for r in symbols["blocked"].direct_references)
+    assert (
+        symbols["destructured"].direct_calls[0].target_symbol_id
+        == symbols["fallback"].symbol_id
+    )
+    callback = next(
+        s
+        for s in code_map.symbols
+        if s.is_anonymous and s.qualified_name.startswith("deferred.")
+    )
+    assert callback.direct_references[0].target_symbol_id == symbols["LIMIT"].symbol_id
+    assert not symbols["deferred"].direct_calls
+    if suffix == "ts":
+        assert (
+            symbols["typed"].direct_references[0].target_symbol_id
+            == symbols["LIMIT"].symbol_id
+        )
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        (
+            "defaults.kt",
+            "const val DEFAULT_SIZE = 7\nfun run(value: Int = DEFAULT_SIZE) = value\n",
+        ),
+        (
+            "defaults.cs",
+            "class Worker { const int DEFAULT_SIZE = 7; "
+            "int Run(int value = DEFAULT_SIZE) { return value; } }\n",
+        ),
+        (
+            "defaults.cpp",
+            "const int DEFAULT_SIZE = 7; "
+            "int run(int value = DEFAULT_SIZE) { return value; }\n",
+        ),
+        (
+            "defaults.php",
+            "<?php const DEFAULT_SIZE = 7; "
+            "function run($value = DEFAULT_SIZE) { return $value; }\n",
+        ),
+        (
+            "defaults.rb",
+            "DEFAULT_SIZE = 7\ndef run(value = DEFAULT_SIZE)\n  value\nend\n",
+        ),
+    ],
+)
+def test_polyglot_default_expressions_retain_verified_constant_references(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    assert code_map.parse_status == "parsed"
+    function = next(s for s in code_map.symbols if s.name.casefold() == "run")
+    constant = next(s for s in code_map.symbols if s.name == "DEFAULT_SIZE")
+    assert function.parameter_default_ranges
+    assert "DEFAULT_SIZE" not in function.parameter_bindings
+    assert any(
+        r.target_symbol_id == constant.symbol_id for r in function.direct_references
+    )
+
+
+@pytest.mark.parametrize("suffix", ["js", "ts"])
 def test_class_receivers_preserve_direction_and_dynamic_scope(
     tmp_path: Path, suffix: str
 ) -> None:

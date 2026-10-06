@@ -271,7 +271,10 @@ def test_python_lambda_dependencies_are_references_and_respect_parameters(
     assert compiled.compilation_sufficiency.effective_status == "sufficient"
 
 
-@pytest.mark.parametrize("language", ["javascript", "kotlin", "receiver", "arrow"])
+@pytest.mark.parametrize(
+    "language",
+    ["javascript", "kotlin", "receiver", "arrow", "default", "python-default"],
+)
 def test_lexical_behavior_retains_closure_helpers_and_property_values(
     tmp_path: Path, language: str
 ) -> None:
@@ -301,6 +304,28 @@ def test_lexical_behavior_retains_closure_helpers_and_property_values(
             "Store.kt",
             "Explain Store.purge behavior",
             (2, 84),
+        )
+    elif language == "python-default":
+        text = (
+            "DEFAULT_SIZE = 7\n"
+            + "".join(f"def filler{i}():\n    return {i}\n" for i in range(80))
+            + "def execute_job(size=DEFAULT_SIZE):\n    return size + 1\n"
+        )
+        filename, task, required_lines = (
+            "jobs.py",
+            "Explain execute_job default behavior",
+            (1,),
+        )
+    elif language == "default":
+        text = (
+            "const DEFAULT_SIZE = 7;\n"
+            + "".join(f"function filler{i}() {{ return {i}; }}\n" for i in range(80))
+            + "function execute_job(size = DEFAULT_SIZE) { return size + 1; }\n"
+        )
+        filename, task, required_lines = (
+            "jobs.js",
+            "Explain execute_job default behavior",
+            (1,),
         )
     else:
         text = (
@@ -679,7 +704,7 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
-@pytest.mark.parametrize("capability", [0, 2, 3, 4, 5])
+@pytest.mark.parametrize("capability", [0, 2, 3, 4, 5, 6])
 def test_legacy_missing_source_units_do_not_certify_behavior(
     tmp_path: Path, legacy: str, capability: int
 ) -> None:

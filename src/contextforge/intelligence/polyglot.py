@@ -30,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="15",
+    analyzer_version="16",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -423,6 +423,7 @@ def extract_polyglot_code_map(
     for index, draft in enumerate(drafts):
         callable_node = draft.callable_node or draft.node
         body = callable_node.child_by_field_name("body")
+        parameter_defaults = _parameter_default_ranges(callable_node)
         receiver_class, static_member = _class_receiver_binding(
             callable_node, class_ids, language_name
         )
@@ -454,7 +455,10 @@ def extract_polyglot_code_map(
                     and _is_async(callable_node, source_bytes)
                 ),
                 signature=_signature(source_bytes, draft.node, body),
-                parameter_bindings=_parameter_bindings(callable_node, source_bytes),
+                parameter_bindings=_parameter_bindings(
+                    callable_node, source_bytes, parameter_defaults
+                ),
+                parameter_default_ranges=parameter_defaults,
                 receiver_class_symbol_id=receiver_class,
                 is_static_member=static_member,
                 declaration_range=_range(draft.node),
@@ -743,6 +747,7 @@ def _attach_occurrences(
             item
             for item in symbols
             if _contains_range(item.body_range or item.declaration_range, region)
+            or any(_contains_range(r, region) for r in item.parameter_default_ranges)
         ]
         return min(
             candidates,
@@ -767,7 +772,13 @@ def _attach_occurrences(
                     SymbolKind.METHOD,
                     SymbolKind.CONSTRUCTOR,
                 }
-                and _contains_range(item.body_range or item.declaration_range, region)
+                and (
+                    _contains_range(item.body_range or item.declaration_range, region)
+                    or any(
+                        _contains_range(r, region)
+                        for r in item.parameter_default_ranges
+                    )
+                )
             ),
             key=lambda item: (
                 (item.body_range or item.declaration_range).end_line
@@ -1351,7 +1362,43 @@ def _class_receiver_binding(
     return None, False
 
 
-def _parameter_bindings(node: Node, source: bytes) -> tuple[str, ...]:
+def _parameter_default_ranges(node: Node) -> tuple[SourceRange, ...]:
+    parameters = _callable_parameters(node)
+    ranges: list[SourceRange] = []
+
+    def collect(pattern: Node) -> None:
+        if pattern.type in {"type_annotation", "type_parameters", "type_parameter"}:
+            return
+        if pattern.type in {"assignment_pattern", "object_assignment_pattern"}:
+            value = pattern.child_by_field_name("right")
+        elif pattern.type in {"required_parameter", "optional_parameter"}:
+            value = pattern.child_by_field_name("value")
+        else:
+            value = pattern.child_by_field_name("default_value")
+        if value is None:
+            operator = next((c for c in pattern.children if c.type == "="), None)
+            if operator is not None:
+                value = next(
+                    (
+                        c
+                        for c in pattern.named_children
+                        if c.start_byte >= operator.end_byte
+                    ),
+                    None,
+                )
+        if value is not None:
+            ranges.append(_range(value))
+        for child in pattern.named_children:
+            # Defaults inside deferred function bodies belong to their own scope.
+            if child != value:
+                collect(child)
+
+    if parameters is not None:
+        collect(parameters)
+    return tuple(ranges)
+
+
+def _callable_parameters(node: Node) -> Node | None:
     parameters = node.child_by_field_name("parameters") or node.child_by_field_name(
         "parameter"
     )
@@ -1365,13 +1412,26 @@ def _parameter_bindings(node: Node, source: bytes) -> tuple[str, ...]:
                     "function_value_parameters",
                     "class_parameters",
                     "primary_constructor",
+                    "method_parameters",
                 }
             ),
             None,
         )
+    declarator = node.child_by_field_name("declarator")
+    if parameters is None and declarator is not None:
+        return _callable_parameters(declarator)
+    return parameters
+
+
+def _parameter_bindings(
+    node: Node, source: bytes, default_ranges: tuple[SourceRange, ...]
+) -> tuple[str, ...]:
+    parameters = _callable_parameters(node)
     names: set[str] = set()
 
     def collect(pattern: Node) -> None:
+        if any(_contains_range(r, _range(pattern)) for r in default_ranges):
+            return
         if pattern.type in {
             "identifier",
             "shorthand_property_identifier_pattern",
