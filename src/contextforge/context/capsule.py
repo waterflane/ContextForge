@@ -1651,16 +1651,6 @@ def _materialize_uncached(
         if path not in state.source_lookups:
             state.source_lookups[path] = verified_source_lookup(code_map)
         known_ranges = state.source_lookups[path]
-        selected_ids = {
-            *(e.evidence_id for e in candidate.evidence_ranges if e.evidence_id),
-            *requested_evidence_ids,
-            *(
-                u.evidence_id
-                for u in candidate.source_units
-                if u.kind
-                in {"implementation", "decorator", "initializer", "test-usage"}
-            ),
-        }
         card = _card(state, path)
         if card is not None:
             known_ranges.update(
@@ -1668,7 +1658,6 @@ def _materialize_uncached(
                 for e in card.evidence
                 if e.source_range is not None
             )
-            selected_ids.update(e.evidence_id for e in card.evidence)
             if card.lexicon is not None:
                 owners = {s.symbol_id: s for s in code_map.symbols}
                 for function in card.lexicon.functions:
@@ -1686,8 +1675,7 @@ def _materialize_uncached(
         material_evidence_ids = tuple(
             identity
             for identity, address in known_ranges.items()
-            if identity in selected_ids
-            and (
+            if (
                 mode != RepresentationMode.SLICE
                 or any(
                     value.start_line <= address.start_line

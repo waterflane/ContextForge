@@ -122,7 +122,7 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
 
 
-def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None:
+def test_compiler_restores_known_ids_in_planned_source_ranges(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "service.py",
@@ -168,6 +168,26 @@ def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None
     assert material.representation == RepresentationMode.SLICE
     assert evidence_id in material.evidence_ids
     assert evidence_id in compiled.prompt
+    from contextforge.intelligence.retrieval import verified_source_lookup
+
+    known = verified_source_lookup(
+        load_file_code_map(tmp_path, "service.py", manifest=report.manifest)
+    )
+    covered = {
+        identity
+        for identity, address in known.items()
+        if any(
+            region.start_line <= address.start_line
+            and address.end_line <= region.end_line
+            for region in material.ranges
+        )
+    }
+    assert covered <= set(material.evidence_ids)
+    card = load_semantic_card(tmp_path, "service.py", manifest=report.manifest)
+    assert set(material.evidence_ids) <= {
+        *known,
+        *(entry.evidence_id for entry in card.evidence),
+    }
 
 
 def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
