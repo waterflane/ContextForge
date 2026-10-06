@@ -46,7 +46,7 @@ from retrieval. Run `index build` to create Index v3.1;
 semantic records are not migrated. Immutable generations are removed only by
 explicit `index clean`.
 
-Fallback analyzer version 4, resolver version 10, Python analyzer version 9,
+Fallback analyzer version 4, resolver version 11, Python analyzer version 9,
 and polyglot analyzer version 12 extract imports, calls, and non-call references
 for Python plus JavaScript, TypeScript, Java, Kotlin, C#, Go, Rust, C, C++, PHP,
 and Ruby. Exact relative paths and
@@ -68,6 +68,9 @@ execution owner. Callback bindings are verified references to observed syntax,
 not claims that a callback will execute. Test usages include the enclosing
 callable body and its assertions. Member-call receivers remain reference facts;
 their method calls are resolved independently.
+Qualified calls cannot resolve to a local declaration by suffix alone.
+JavaScript/TypeScript imports require the observed binding, including aliases;
+side-effect imports do not bind symbols. Unknown receivers remain unresolved.
 Large documents preserve all source units in separately digest-bound fragments,
 listed in both the document and retrieval header. Every fragment remains at most
 4 MiB, and warm reloads recheck its digest. Structural records are copied with

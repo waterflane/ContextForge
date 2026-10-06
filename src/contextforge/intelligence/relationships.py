@@ -431,7 +431,9 @@ def _resolve_polyglot_occurrence(
     local = [
         item
         for item in symbols
-        if item.parent_symbol_id is None and item.name == final_name
+        if observed == final_name
+        and item.parent_symbol_id is None
+        and item.name == final_name
     ]
     if len(local) == 1:
         return occurrence.model_copy(
@@ -448,6 +450,22 @@ def _resolve_polyglot_occurrence(
     for item in imports:
         if item.resolution != "internal" or item.target_file_path is None:
             continue
+        qualified_target: str | None = None
+        if maps_by_path[source_path].language in {"JavaScript", "TypeScript"}:
+            binding = item.alias or item.imported_name
+            parts = observed.split(".")
+            if (
+                binding is None
+                or parts[0] != binding
+                or (item.imported_name is None and len(parts) < 2)
+            ):
+                continue
+            qualified_target = ".".join(
+                (
+                    *((item.imported_name,) if item.imported_name is not None else ()),
+                    *parts[1:],
+                )
+            )
         target_names = _polyglot_target_names(observed, item)
         if not target_names:
             continue
@@ -456,6 +474,9 @@ def _resolve_polyglot_occurrence(
             candidate
             for candidate in target_map.symbols
             if candidate.name in target_names
+            and (
+                qualified_target is None or candidate.qualified_name == qualified_target
+            )
         ]
         if len(matches) == 1:
             package = not _is_exact_polyglot_import(
@@ -505,7 +526,7 @@ def _polyglot_target_names(observed_name: str, item: ImportRecord) -> set[str]:
         return {parts[-1]}
     binding = item.alias or item.imported_name
     if len(parts) == 1:
-        return {parts[0]}
+        return {item.imported_name} if parts[0] == binding else set()
     if parts[0] != binding:
         return set()
     return {parts[-1] if len(parts) > 1 else item.imported_name}

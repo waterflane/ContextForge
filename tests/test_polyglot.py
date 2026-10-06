@@ -56,6 +56,42 @@ def test_anonymous_test_scope_keeps_calls_and_assertions(tmp_path: Path) -> None
     )
 
 
+def test_qualified_calls_require_the_observed_receiver_binding(tmp_path: Path) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "helpers.js").write_text(
+        "export function clean(value) { return value; }\n"
+        "export function hidden(value) { return value; }\n"
+        "export const settings = { clean(value) { return value + 1; } };\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "jobs.js").write_text(
+        "import * as helpers from './helpers.js';\n"
+        "import { clean as tidy } from './helpers.js';\n"
+        "import { settings as options } from './helpers.js';\n"
+        "function clean(value) { return value - 1; }\n"
+        "export function execute_job(value) {\n"
+        "  helpers.clean(value);\n  tidy(value);\n"
+        "  other.clean(value);\n  hidden(value);\n  options.clean(value);\n"
+        "  options.hidden(value);\n  return clean(value);\n}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    maps = resolve_relationships(
+        tuple(extract_code_map(snapshot, f) for f in snapshot.files)
+    )
+    jobs = next(m for m in maps if m.path == "jobs.js")
+    function = next(s for s in jobs.symbols if s.name == "execute_job")
+    calls = {c.observed_name: c for c in function.direct_calls}
+    assert calls["helpers.clean"].target_file_path == "helpers.js"
+    assert calls["tidy"].target_file_path == "helpers.js"
+    assert calls["clean"].target_file_path == "jobs.js"
+    assert calls["options.clean"].target_file_path == "helpers.js"
+    assert calls["other.clean"].resolution == "unresolved"
+    assert calls["hidden"].resolution == "unresolved"
+    assert calls["options.hidden"].resolution == "unresolved"
+
+
 def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
     assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
     assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())
