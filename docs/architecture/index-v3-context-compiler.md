@@ -73,8 +73,8 @@ listed in both the document and retrieval header. Every fragment remains at most
 4 MiB, and warm reloads recheck its digest. Structural records are copied with
 these fragments into semantic generations; cached overlays also validate their
 structural base. Older inline records remain readable with empty shard defaults.
-Source evidence capability version 2 identifies extractors with initialization
-and test-usage coverage. Older or unknown capabilities remain readable but cannot
+Source evidence capability version 3 identifies extractors with initialization,
+execution-owner and complete test-usage coverage. Older or unknown capabilities remain readable but cannot
 certify behavioral anchors. Compiler validation extends frozen gaps for missing
 capability metadata without erasing existing obligations.
 The compiler groups mandatory ranges and IDs per candidate before choosing a

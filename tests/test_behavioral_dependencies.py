@@ -386,8 +386,9 @@ def test_behavior_rejects_removed_mandatory_source_unit(
 
 
 @pytest.mark.parametrize("legacy", ["missing-units", "old-capability"])
+@pytest.mark.parametrize("capability", [0, 2])
 def test_legacy_missing_source_units_do_not_certify_behavior(
-    tmp_path: Path, legacy: str
+    tmp_path: Path, legacy: str, capability: int
 ) -> None:
     (tmp_path / "jobs.py").write_text(
         "def execute_job():\n    return 7\n", encoding="utf-8"
@@ -407,7 +408,7 @@ def test_legacy_missing_source_units_do_not_certify_behavior(
         c.model_copy(
             update={
                 "source_units": () if legacy == "missing-units" else c.source_units,
-                "source_evidence_version": 0,
+                "source_evidence_version": capability,
             }
         )
         for c in result.candidates

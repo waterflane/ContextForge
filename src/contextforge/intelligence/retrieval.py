@@ -5566,7 +5566,7 @@ def build_evidence_requirements(
         dependency_gaps.update(
             f"source-units-unavailable:{anchor.candidate_id}"
             for anchor in anchors
-            if not anchor.source_units or anchor.source_evidence_version < 2
+            if not anchor.source_units or anchor.source_evidence_version < 3
         )
     connections = tuple(
         dict.fromkeys(v for c in candidates for v in c.source_connections)
