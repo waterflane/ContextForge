@@ -52,6 +52,11 @@ and Python distribution versions follow PEP 440.
 
 ### Changed
 
+- Kept the existing `contextforge-repo` PyPI distribution, `contextforge` import,
+  and `contextforge` / `ctxf` commands. Beta artifacts are a normal wheel and
+  source distribution; an optional transfer archive is not a new package format.
+- Updated the roadmap and practical function lookup documentation to distinguish
+  function discovery, source materialization, and full semantic acceptance.
 - Index build/update now publish a usable structural generation before semantic
   enrichment. Enrichment failure, timeout, or cancellation leaves that
   structural generation active; old immutable generations remain until explicit

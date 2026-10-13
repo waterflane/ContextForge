@@ -182,6 +182,8 @@ projection is available as `render_capsule_source_context` from
 offers source-bound function descriptions and deterministic function-level search
 over saved CodeMaps. These helpers do not replace verified graph dependencies,
 grounded semantic enrichment or compiler requirements.
+See the [function lookup guide](docs/guides/function-lookup.md) for runnable exact
+and descriptive queries and how to check their materialized source.
 
 - create a compact review packet for an external coding agent;
 - map a repository without sending source to a model;

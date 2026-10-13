@@ -4,6 +4,12 @@ The Python distribution uses the canonical version `0.6.0b1`. This beta contains
 Index v3.1 (storage/manifest schema 4), Context Capsule v2 and Bridge 2.2. These
 protocol versions are separate from the Python package version.
 
+This remains the same `contextforge-repo` Python package for PyPI. The import is
+`contextforge`; the commands are `contextforge` and `ctxf`. Installation and the
+release workflow have not been replaced by the presentation app. Local release
+artifacts are a standard `.whl` and `.tar.gz`. A ZIP containing these artifacts
+is only a convenient way to copy them to another computer.
+
 ## Scope
 
 The release includes structural-first immutable generations, grounded semantic
@@ -36,6 +42,10 @@ python -m contextforge --version
 contextforge doctor
 ```
 
+Activate the environment before invoking `contextforge`, or use
+`python -m contextforge` with that environment's Python. On Linux, activation is
+`source .venv/bin/activate`; in PowerShell it is `.\.venv\Scripts\Activate.ps1`.
+
 On Windows, use `.venv/Scripts/python.exe`; on Linux use `.venv/bin/python`.
 The source distribution can be installed instead of the wheel. Install runtime
 dependencies from a network connection or an appropriate local wheel cache.
@@ -57,6 +67,9 @@ Callers adding instructions/history must budget their complete model request.
 Python users can inspect functions with `FunctionCatalogue` from
 `contextforge.intelligence`, or render an existing compiled capsule with
 `render_capsule_source_context` from `contextforge.context`.
+See [practical function lookup](function-lookup.md) for exact and descriptive
+queries, the distinction between file candidates and function matches, and
+checking whether the requested implementation actually reached the capsule.
 
 ## Index migration and quality
 
