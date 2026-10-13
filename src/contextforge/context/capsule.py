@@ -1062,7 +1062,8 @@ def _select_automatic_evidence(
                 fits_first_indivisible = not selected and _fits(
                     proposed, budget, estimator
                 )
-                if not fits_limit and not fits_first_indivisible:
+                fits_required = required_evidence and _fits(proposed, budget, estimator)
+                if not fits_limit and not fits_first_indivisible and not fits_required:
                     continue
                 choices.append(
                     (

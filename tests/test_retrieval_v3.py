@@ -1507,6 +1507,150 @@ def test_planner_previews_sample_late_evidence_and_bound_large_declarations() ->
     assert len(preview.splitlines()) < 50
 
 
+def test_compact_planner_retains_required_units_without_full_file_catalog(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import ContextBudget, compile_context_capsule
+    from contextforge.intelligence.retrieval import (
+        _planner_candidate,
+        _planner_previews,
+    )
+    from contextforge.intelligence.source_evidence import derive_source_evidence_units
+
+    _write(
+        tmp_path,
+        "service.py",
+        "LIMIT = 7\ndef helper():\n    return LIMIT\n"
+        "def target_action():\n    return helper()\n"
+        + "\n".join(f"def unused_{i}():\n    return {i}\n" for i in range(180)),
+    )
+    report = _build(tmp_path)
+    plain = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path, "Explain `target_action`.", manifest=report.manifest
+        )
+    )
+    candidate = next(c for c in plain.candidates if c.path == "service.py")
+    code_map = load_file_code_map(tmp_path, "service.py", manifest=report.manifest)
+    catalog = tuple(
+        CandidateEvidenceRange(
+            path=unit.path,
+            source_range=unit.source_range,
+            evidence_id=unit.evidence_id,
+            strength="verified",
+        )
+        for unit in derive_source_evidence_units(code_map)
+    )
+    candidate = candidate.model_copy(
+        update={
+            "evidence_ranges": tuple(
+                dict.fromkeys((*candidate.evidence_ranges, *catalog))
+            )
+        }
+    )
+    assert len(candidate.evidence_ranges) > 180
+    assert plain.requirements is not None
+    required = {
+        evidence_id
+        for r in plain.requirements.source_evidence
+        if r.candidate_id == candidate.candidate_id
+        for evidence_id in r.evidence_ids
+    }
+    assert required
+    projected = _planner_candidate(
+        candidate, allow_full=False, requirements=plain.requirements
+    )
+    projected_evidence = projected["evidence"]
+    assert isinstance(projected_evidence, list)
+    supplied = {e["evidence_id"] for e in projected_evidence}
+    assert required <= supplied
+    assert supplied <= {e.evidence_id for e in candidate.evidence_ranges}
+    assert projected["source_sha256"] == candidate.source_sha256
+    assert len(projected_evidence) < 20
+    assert len(json.dumps(projected)) < 8_000
+    previews = _planner_previews(
+        tmp_path, (candidate,), requirements=plain.requirements
+    )
+    assert "target_action" in previews["service.py"].text
+    assert len(previews["service.py"].text.encode()) <= 2048
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        card = facts["candidates"][0]
+        assert required <= {e["evidence_id"] for e in card["evidence"]}
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": card["candidate_id"],
+                                "evidence_ids": sorted(required),
+                                "representation": "slice",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    planned = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            plain.task,
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert planned.requirements == plain.requirements
+    compiled = compile_context_capsule(
+        tmp_path,
+        plain.task,
+        planned,
+        budget=ContextBudget(
+            context_window_tokens=8192, response_tokens=512, safety_margin_tokens=128
+        ),
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert "def target_action" in compiled.prompt
+    assert "def helper" in compiled.prompt
+    assert "LIMIT = 7" in compiled.prompt
+
+
+def test_compact_planner_history_keeps_counts_without_mutating_diagnostics() -> None:
+    from contextforge.intelligence.retrieval import _planner_action_summary
+
+    original = {
+        "action": "search",
+        "result_candidate_ids": tuple(f"candidate-{i}" for i in range(60)),
+        "result_count": 60,
+        "coverage_delta": {
+            "new_evidence_ids": tuple(f"evidence-{i}" for i in range(1000)),
+            "new_role_ids": ("implementation",),
+        },
+    }
+    compact = _planner_action_summary(original)
+    compact_ids = compact["result_candidate_ids"]
+    compact_delta = compact["coverage_delta"]
+    compact_counts = compact["coverage_delta_counts"]
+    original_delta = original["coverage_delta"]
+    assert isinstance(compact_ids, (tuple, list))
+    assert isinstance(compact_delta, dict)
+    assert isinstance(compact_counts, dict)
+    assert isinstance(original_delta, dict)
+    assert len(compact_ids) == 8
+    assert compact["result_count"] == 60
+    assert len(compact_delta["new_evidence_ids"]) == 8
+    assert compact_counts["new_evidence_ids"] == 1000
+    assert len(original_delta["new_evidence_ids"]) == 1000
+    assert _planner_action_summary({"action": "finalize"}) == {"action": "finalize"}
+
+
 def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> None:
     _write(tmp_path, "service.py", "def serve():\n    return None\n")
     report = _build(tmp_path)
@@ -1873,3 +2017,64 @@ def test_planner_preflight_rejection_counts_zero_dispatches(
     assert result.planning_diagnostics.status == "fallback"
     assert result.planning_diagnostics.estimated_input_tokens == 0
     assert result.planning_diagnostics.reported_input_tokens is None
+
+
+def test_verified_discovery_survives_later_provider_failure(tmp_path: Path) -> None:
+    _write(tmp_path, "lifecycle.py", "def shutdown_worker():\n    return 'stopped'\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        if call == 0:
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "search", "query": "shutdown_worker", "limit": 4}
+                    ],
+                }
+            )
+        raise ValueError("Later transport failed")
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "unmatched description",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert result.candidates
+    assert any(c.path == "lifecycle.py" for c in result.candidates)
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"
+    assert result.coverage_history[-1].stage == "action"
+    assert result.requirements is not None
+    assert result.requirements.query_intent is not None
+    assert result.requirements.query_intent.original_task == "unmatched description"
+
+
+def test_zero_repairs_does_not_redispatch_invalid_planner_response(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "worker.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    calls = []
+
+    def respond(request: object, call: int) -> str:
+        calls.append(call)
+        return json.dumps({"schema_version": 1, "actions": []})
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert len(calls) == 1
+    assert result.candidates
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"

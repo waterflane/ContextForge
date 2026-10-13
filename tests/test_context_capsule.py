@@ -685,6 +685,42 @@ def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
     }
 
 
+def test_multiple_mandatory_implementations_can_exceed_soft_target(
+    tmp_path: Path,
+) -> None:
+    for name in ("alpha", "beta"):
+        body = "".join(
+            f"    result += {line}  # independently verified calculation step\n"
+            for line in range(1, 121)
+        )
+        _write(
+            tmp_path,
+            f"{name}.py",
+            f"def {name}():\n    result = 0\n{body}    return result\n",
+        )
+    report = _build(tmp_path)
+    task = "Explain `alpha` and `beta`"
+    retrieval = _retrieve(tmp_path, report, task)
+    budget = _budget(10_000)
+    compiled = compile_context_capsule(tmp_path, task, retrieval, budget=budget)
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert compiled.coverage_ledger is not None
+    assert not compiled.coverage_ledger.missing_requirement_ids
+    assert {m.path for m in compiled.capsule.task_context} == {"alpha.py", "beta.py"}
+    assert all(
+        "return result" in m.content
+        and m.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for m in compiled.capsule.task_context
+    )
+    assert compiled.token_count > budget.available_tokens * 0.3
+    assert compiled.token_count <= budget.available_tokens
+    tight = compile_context_capsule(tmp_path, task, retrieval, budget=_budget(3_000))
+    assert tight.compilation_sufficiency is not None
+    assert tight.compilation_sufficiency.effective_status == "insufficient"
+    assert tight.token_count <= _budget(3_000).available_tokens
+
+
 def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> None:
     for index in range(10):
         body = "".join(
