@@ -1,0 +1,2585 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/real-repository-benchmark-v2.schema.json",
+  "title": "ContextForge real-repository benchmark report v2",
+  "description": "Passing results require a verified pipeline and paired final answers; headline savings use final-answer input tokens only for quality-passing runs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_name",
+    "verified_pipeline",
+    "runs",
+    "aggregates",
+    "passed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "suite_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verified_pipeline": {
+      "type": "boolean"
+    },
+    "provider_endpoint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requested_context_window": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reasoning_effort": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "builds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/build"
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/run"
+      }
+    },
+    "aggregates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/aggregate"
+      }
+    },
+    "dispatch_stop_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Dispatch Stop Reasons",
+      "type": "array"
+    },
+    "dispatch_calls": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dispatch Calls"
+    },
+    "dispatch_estimated_input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dispatch Estimated Input Tokens"
+    }
+  },
+  "$defs": {
+    "rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "repetition",
+        "status"
+      ],
+      "properties": {
+        "repository_id": {
+          "type": "string"
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "skipped",
+            "partial"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_code_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "cold_structural_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_offline_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_estimated_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_reported_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_reported_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "requested_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "described_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "file_only_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tagged_code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "model_tagged_code_test_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_update_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "noop_generation_unchanged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "active_amplification": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "maximum_shard_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "fresh_process_reload_successes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SemanticCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "clone_repetition": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clone Repetition"
+        },
+        "phase_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RealBenchmarkPhaseUsage"
+          },
+          "title": "Phase Usage",
+          "type": "array"
+        },
+        "noop_structurally_reanalyzed_files": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noop Structurally Reanalyzed Files"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "repository_id",
+        "mode",
+        "status",
+        "quality_gate_failed"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "deterministic",
+            "planned"
+          ]
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "skipped"
+          ]
+        },
+        "skip_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retrieved_top5": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "materialized_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "materialized_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "start_line",
+              "end_line"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "material_evidence_ids": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "failure_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_file_recall_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_r": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materialized_required_file_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capsule_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinary_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_savings": {
+          "type": "number"
+        },
+        "valid_token_savings": {
+          "type": "number"
+        },
+        "planner_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planner_messages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plan_sufficient": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "paired_answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/paired_answer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cold_structural_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_offline_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deterministic_warm_query_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "agentic_planner_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_estimated_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_reported_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "phase_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_requested_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_described_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_file_only_functions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "citation_validity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_evidence_support": {
+          "description": "Assertions with a citation and material evidence IDs, distinct from containment.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lexical_identifier_support": {
+          "description": "Assertions with lexical or identifier support in cited material, distinct from semantic grounding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groundedness_majority": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "quality_not_lower_than_oracle": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "quality_gate_failed": {
+          "type": "boolean"
+        },
+        "candidate_diagnostics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CandidateSelectionDiagnostic"
+          },
+          "maxItems": 64,
+          "title": "Candidate Diagnostics",
+          "type": "array"
+        },
+        "evidence_transitions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceSelectionTransition"
+          },
+          "title": "Evidence Transitions",
+          "type": "array"
+        },
+        "planner_estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Planner Estimated Input Tokens",
+          "type": "integer"
+        },
+        "planner_reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Planner Reported Input Tokens"
+        },
+        "planner_reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Planner Reported Output Tokens"
+        },
+        "clone_repetition": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clone Repetition"
+        },
+        "model_repetition": {
+          "default": 1,
+          "minimum": 0,
+          "title": "Model Repetition",
+          "type": "integer"
+        },
+        "phase_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RealBenchmarkPhaseUsage"
+          },
+          "title": "Phase Usage",
+          "type": "array"
+        },
+        "compilation_sufficiency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompilationSufficiency"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "materialization_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoverageLedger"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "compilation_calibration": {
+          "default": "unverified",
+          "enum": [
+            "consistent_sufficient",
+            "false_sufficient",
+            "insufficient",
+            "unverified"
+          ],
+          "title": "Compilation Calibration",
+          "type": "string"
+        },
+        "semantic_calibration": {
+          "default": "unverified",
+          "enum": [
+            "verified",
+            "unverified"
+          ],
+          "title": "Semantic Calibration",
+          "type": "string"
+        },
+        "calibration_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Calibration Reasons",
+          "type": "array"
+        },
+        "compiler_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compiler Ms"
+        },
+        "query_stage_timings_ms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Query Stage Timings Ms",
+          "type": "object"
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "task_count",
+        "completed_task_count",
+        "skipped_task_count",
+        "quality_gate_failed_count",
+        "headline_token_savings"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "deterministic",
+            "planned"
+          ]
+        },
+        "task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required_file_recall_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision_at_r": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materialized_required_file_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capsule_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinary_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planner_output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_latency_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "plan_sufficient_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planned_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean_cold_structural_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_semantic_offline_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_deterministic_warm_query_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_agentic_planner_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_final_answer_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_provider_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "final_answer_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "semantic_function_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic_file_only_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "citation_containment": {
+          "description": "Citation range is contained in supplied material; this is not semantic support.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_recall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertion_evidence_support": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lexical_identifier_support": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groundedness_majority_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_gate_failed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "headline_token_savings": {
+          "type": "number"
+        },
+        "consistent_sufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Consistent Sufficient Count",
+          "type": "integer"
+        },
+        "false_sufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "False Sufficient Count",
+          "type": "integer"
+        },
+        "insufficient_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Insufficient Count",
+          "type": "integer"
+        },
+        "unverified_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Unverified Count",
+          "type": "integer"
+        }
+      }
+    },
+    "paired_answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinary",
+        "oracle",
+        "contextforge",
+        "contextforge_groundedness",
+        "input_token_reduction",
+        "quality_not_lower"
+      ],
+      "properties": {
+        "ordinary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/answer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oracle": {
+          "$ref": "#/$defs/answer"
+        },
+        "contextforge": {
+          "$ref": "#/$defs/answer"
+        },
+        "contextforge_groundedness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/judge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_token_reduction": {
+          "type": "number"
+        },
+        "quality_not_lower": {
+          "type": "boolean"
+        }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assertion_id",
+        "path",
+        "start_line",
+        "end_line",
+        "material_evidence_ids"
+      ],
+      "properties": {
+        "assertion_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "material_evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "answer",
+        "assertion_ids",
+        "citations",
+        "assertion_recall",
+        "citation_validity",
+        "assertion_evidence_support",
+        "lexical_identifier_support",
+        "input_tokens"
+      ],
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "assertion_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/citation"
+          }
+        },
+        "valid_citation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalid_citation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assertion_recall": {
+          "$ref": "#/$defs/rate"
+        },
+        "citation_validity": {
+          "$ref": "#/$defs/rate"
+        },
+        "assertion_evidence_support": {
+          "$ref": "#/$defs/rate"
+        },
+        "lexical_identifier_support": {
+          "$ref": "#/$defs/rate"
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_http_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "votes",
+        "passed",
+        "unsupported_claims",
+        "input_tokens",
+        "provider_http_calls",
+        "duration_ms"
+      ],
+      "properties": {
+        "votes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "boolean"
+          }
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "unsupported_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_http_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "CandidateSelectionDiagnostic": {
+      "additionalProperties": false,
+      "description": "Bounded ranking facts, without source content or model rationale.",
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "rank": {
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "exact_group": {
+          "title": "Exact Group",
+          "type": "string"
+        },
+        "bm25_field_scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Bm25 Field Scores",
+          "type": "object"
+        },
+        "selection_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selection Reasons",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "graph_paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Graph Paths",
+          "type": "array"
+        },
+        "match_origin": {
+          "anyOf": [
+            {
+              "enum": [
+                "explicit-anchor",
+                "lexical-discovery",
+                "grounded-semantic",
+                "verified-expansion"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Match Origin"
+        },
+        "topical_term_weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Topical Term Weights",
+          "type": "object"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "rank",
+        "exact_group"
+      ],
+      "title": "CandidateSelectionDiagnostic",
+      "type": "object"
+    },
+    "EvidenceSelectionTransition": {
+      "additionalProperties": false,
+      "description": "Evaluator-only source address and its actual pipeline coverage.",
+      "properties": {
+        "source_range": {
+          "$ref": "#/$defs/BenchmarkSourceRange"
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidate Id"
+        },
+        "retrieval_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Retrieval Evidence Ids",
+          "type": "array"
+        },
+        "planned_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Evidence Ids",
+          "type": "array"
+        },
+        "materialized_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Evidence Ids",
+          "type": "array"
+        },
+        "source_current": {
+          "default": true,
+          "title": "Source Current",
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "covered",
+            "absent_from_pool",
+            "selection_lost",
+            "range_not_found",
+            "budget_excluded",
+            "source_stale"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_range",
+        "reason"
+      ],
+      "title": "EvidenceSelectionTransition",
+      "type": "object"
+    },
+    "BenchmarkSourceRange": {
+      "additionalProperties": false,
+      "description": "One one-based inclusive repository source range.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "title": "BenchmarkSourceRange",
+      "type": "object"
+    },
+    "SemanticCoverage": {
+      "additionalProperties": false,
+      "description": "Completeness of requested enrichment, independently of provider errors.",
+      "properties": {
+        "eligible_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Eligible Files",
+          "type": "array"
+        },
+        "selected_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Files",
+          "type": "array"
+        },
+        "completed_files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Files",
+          "type": "array"
+        },
+        "requested_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested Function Ids",
+          "type": "array"
+        },
+        "completed_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Function Ids",
+          "type": "array"
+        },
+        "requested_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested Call Ids",
+          "type": "array"
+        },
+        "completed_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Completed Call Ids",
+          "type": "array"
+        },
+        "missing_function_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Function Ids",
+          "type": "array"
+        },
+        "missing_call_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Call Ids",
+          "type": "array"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "title": "SemanticCoverage",
+      "type": "object"
+    },
+    "RealBenchmarkPhaseUsage": {
+      "additionalProperties": false,
+      "description": "Actual attempts retained even when a paired evaluation fails midway.",
+      "properties": {
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "provider_calls": {
+          "minimum": 0,
+          "title": "Provider Calls",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Input Tokens"
+        },
+        "reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Output Tokens"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "phase",
+        "provider_calls",
+        "estimated_input_tokens",
+        "duration_ms"
+      ],
+      "title": "RealBenchmarkPhaseUsage",
+      "type": "object"
+    },
+    "BenchmarkAnswerCitation": {
+      "additionalProperties": false,
+      "description": "One answer citation validated against a materialized source range.",
+      "properties": {
+        "assertion_id": {
+          "title": "Assertion Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "material_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Material Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "assertion_id",
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "title": "BenchmarkAnswerCitation",
+      "type": "object"
+    },
+    "BenchmarkAnswerEvaluation": {
+      "additionalProperties": false,
+      "description": "Quality and token accounting for one downstream answer.",
+      "properties": {
+        "answer": {
+          "default": "",
+          "title": "Answer",
+          "type": "string"
+        },
+        "assertion_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Assertion Ids",
+          "type": "array"
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchmarkAnswerCitation"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "valid_citation_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Valid Citation Count",
+          "type": "integer"
+        },
+        "invalid_citation_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Invalid Citation Count",
+          "type": "integer"
+        },
+        "assertion_recall": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Assertion Recall",
+          "type": "number"
+        },
+        "citation_validity": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Citation Validity",
+          "type": "number"
+        },
+        "assertion_evidence_support": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Assertion Evidence Support",
+          "type": "number"
+        },
+        "lexical_identifier_support": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Lexical Identifier Support",
+          "type": "number"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "provider_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "provider_http_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Http Calls",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assertion_recall",
+        "citation_validity"
+      ],
+      "title": "BenchmarkAnswerEvaluation",
+      "type": "object"
+    },
+    "BenchmarkGroundednessEvaluation": {
+      "additionalProperties": false,
+      "description": "Blinded majority judgment over one answer and its source evidence.",
+      "properties": {
+        "votes": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Votes",
+          "type": "array"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "unsupported_claims": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unsupported Claims",
+          "type": "array"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "provider_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "provider_http_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Provider Http Calls",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "votes",
+        "passed"
+      ],
+      "title": "BenchmarkGroundednessEvaluation",
+      "type": "object"
+    },
+    "BenchmarkPairedAnswerEvaluation": {
+      "additionalProperties": false,
+      "description": "Same-model ordinary, manual-oracle, and ContextForge comparison.",
+      "properties": {
+        "ordinary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "oracle": {
+          "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+        },
+        "contextforge": {
+          "$ref": "#/$defs/BenchmarkAnswerEvaluation"
+        },
+        "contextforge_groundedness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkGroundednessEvaluation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "input_token_reduction": {
+          "title": "Input Token Reduction",
+          "type": "number"
+        },
+        "quality_not_lower": {
+          "title": "Quality Not Lower",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oracle",
+        "contextforge",
+        "input_token_reduction",
+        "quality_not_lower"
+      ],
+      "title": "BenchmarkPairedAnswerEvaluation",
+      "type": "object"
+    },
+    "RealBenchmarkMode": {
+      "enum": [
+        "deterministic",
+        "planned"
+      ],
+      "title": "RealBenchmarkMode",
+      "type": "string"
+    },
+    "CandidateEvidenceRange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Id"
+        },
+        "strength": {
+          "enum": [
+            "verified",
+            "grounded"
+          ],
+          "title": "Strength",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_range",
+        "strength"
+      ],
+      "title": "CandidateEvidenceRange",
+      "type": "object"
+    },
+    "CompilationSufficiency": {
+      "additionalProperties": false,
+      "description": "Verified effective status after the compiler's real materialization.",
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "declared_status": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ],
+          "title": "Declared Status",
+          "type": "string"
+        },
+        "effective_status": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ],
+          "title": "Effective Status",
+          "type": "string"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "enum": [
+              "graph_endpoint_missing",
+              "declared_insufficient",
+              "empty_retrieval",
+              "empty_task_context",
+              "plan_replaced",
+              "planned_item_unmaterialized",
+              "planned_evidence_unmaterialized",
+              "planned_range_unmaterialized",
+              "budget_excluded_mandatory_item",
+              "mandatory_role_missing",
+              "planned_role_lost",
+              "required_source_evidence_missing",
+              "task_anchor_unresolved",
+              "behavioral_dependency_unresolved"
+            ],
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "planned_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Item Ids",
+          "type": "array"
+        },
+        "materialized_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Item Ids",
+          "type": "array"
+        },
+        "missing_planned_item_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Planned Item Ids",
+          "type": "array"
+        },
+        "planned_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Evidence Ids",
+          "type": "array"
+        },
+        "materialized_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Evidence Ids",
+          "type": "array"
+        },
+        "planned_range_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Planned Range Count",
+          "type": "integer"
+        },
+        "materialized_range_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Materialized Range Count",
+          "type": "integer"
+        },
+        "planned_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Planned Role Ids",
+          "type": "array"
+        },
+        "materialized_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Materialized Role Ids",
+          "type": "array"
+        },
+        "missing_mandatory_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Mandatory Role Ids",
+          "type": "array"
+        },
+        "replacement_used": {
+          "default": false,
+          "title": "Replacement Used",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "declared_status",
+        "effective_status"
+      ],
+      "title": "CompilationSufficiency",
+      "type": "object"
+    },
+    "CoverageLedger": {
+      "additionalProperties": false,
+      "description": "Verified coverage state with IDs and source addresses only, never prose.",
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stage": {
+          "enum": [
+            "retrieval",
+            "action",
+            "plan",
+            "materialization"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "bindings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoleEvidenceBinding"
+          },
+          "title": "Bindings",
+          "type": "array"
+        },
+        "covered_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Role Ids",
+          "type": "array"
+        },
+        "missing_role_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Role Ids",
+          "type": "array"
+        },
+        "unique_symbols": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unique Symbols",
+          "type": "array"
+        },
+        "concepts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Concepts",
+          "type": "array"
+        },
+        "ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CandidateEvidenceRange"
+          },
+          "title": "Ranges",
+          "type": "array"
+        },
+        "covered_graph_endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Graph Endpoints",
+          "type": "array"
+        },
+        "missing_graph_endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Graph Endpoints",
+          "type": "array"
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "missing_requirement_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Requirement Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stage",
+        "roles"
+      ],
+      "title": "CoverageLedger",
+      "type": "object"
+    },
+    "EvidenceRequirement": {
+      "additionalProperties": false,
+      "description": "Source-bound obligation derived locally, never from a model-created fact.",
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "role_id": {
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
+        },
+        "basis": {
+          "enum": [
+            "exact-symbol",
+            "verified-call",
+            "verified-source-test",
+            "verified-config",
+            "task-syntax",
+            "verified-behavior"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "anchor_candidate_id": {
+          "title": "Anchor Candidate Id",
+          "type": "string"
+        },
+        "anchor_symbol_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Symbol Id"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "role_id",
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "basis",
+        "anchor_candidate_id"
+      ],
+      "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "EvidenceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchors",
+          "type": "array"
+        },
+        "source_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "title": "Source Evidence",
+          "type": "array"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
+        },
+        "unresolved_dependency_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Dependency Ids",
+          "type": "array"
+        },
+        "topic_grounding": {
+          "default": "unresolved",
+          "enum": [
+            "exact-identifier",
+            "grounded-semantic",
+            "unresolved"
+          ],
+          "title": "Topic Grounding",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "title": "EvidenceRequirements",
+      "type": "object"
+    },
+    "RoleEvidenceBinding": {
+      "additionalProperties": false,
+      "description": "A role bound only to supplied candidate and evidence identities.",
+      "properties": {
+        "role_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "source": {
+          "default": "deterministic",
+          "enum": [
+            "deterministic",
+            "planner"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role_id",
+        "candidate_id"
+      ],
+      "title": "RoleEvidenceBinding",
+      "type": "object"
+    },
+    "SourceRange": {
+      "additionalProperties": false,
+      "description": "One-based lines and zero-based half-open source columns.",
+      "properties": {
+        "start_line": {
+          "exclusiveMinimum": 0,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "start_column": {
+          "minimum": 0,
+          "title": "Start Column",
+          "type": "integer"
+        },
+        "end_line": {
+          "exclusiveMinimum": 0,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "end_column": {
+          "minimum": 0,
+          "title": "End Column",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
+      "title": "SourceRange",
+      "type": "object"
+    },
+    "TaskEvidenceRole": {
+      "additionalProperties": false,
+      "description": "A closed evidence-diversity requirement derived from task syntax.",
+      "properties": {
+        "role_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Role Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "entrypoint",
+            "implementation",
+            "caller",
+            "callee",
+            "configuration",
+            "test",
+            "documentation",
+            "public_api",
+            "data_model",
+            "unknown"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role_id",
+        "kind"
+      ],
+      "title": "TaskEvidenceRole",
+      "type": "object"
+    },
+    "QueryIntent": {
+      "additionalProperties": false,
+      "description": "Original task syntax; search rewrites never become user-supplied anchors.",
+      "properties": {
+        "original_task": {
+          "title": "Original Task",
+          "type": "string"
+        },
+        "explicit_anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Explicit Anchors",
+          "type": "array"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "facet_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Facet Terms",
+          "type": "array"
+        },
+        "evidence_scope": {
+          "default": "unknown",
+          "enum": [
+            "lookup",
+            "behavior",
+            "unknown"
+          ],
+          "title": "Evidence Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_task"
+      ],
+      "title": "QueryIntent",
+      "type": "object"
+    }
+  }
+}

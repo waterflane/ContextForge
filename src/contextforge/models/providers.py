@@ -32,7 +32,7 @@ SUPPORTED_RESPONSE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
 DEFAULT_MAX_JSON_REPAIR_ATTEMPTS = 5
 MAX_JSON_REPAIR_ATTEMPTS = 10
-DEFAULT_CONTEXT_WINDOW_TOKENS = 4_096
+DEFAULT_CONTEXT_WINDOW_TOKENS = 16_384
 DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 256
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 DEFAULT_READ_TIMEOUT_SECONDS = 300.0
@@ -424,6 +424,7 @@ class ModelRequest:
     allowed_response_paths: frozenset[str] = frozenset()
     response_path_pointers: tuple[str, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
+    scheduler_owned_attempts: bool = False
     top_level_operation_id: str | None = None
     parent_operation_id: str | None = None
     phase_id: str | None = None
@@ -991,6 +992,8 @@ class ProviderCircuitOpenError(ModelProviderError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.circuit_opened = True
+        self.transport_attempts = 0
+        self.total_provider_http_calls = 0
 
 
 class ProviderCancelledError(ModelProviderError):
@@ -1213,6 +1216,9 @@ class ProviderRuntime:
         )
         transport_max = self.configuration.retry_limit + 1
         repair_max = self.configuration.max_json_repair_attempts
+        if request.scheduler_owned_attempts:
+            transport_max = 1
+            repair_max = 0
         transport_attempt = 1
         repair_attempt = 0
         model_generations = 0

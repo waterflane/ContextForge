@@ -1,0 +1,1686 @@
+{
+  "schema_version": 2,
+  "suite_name": "index-v3.1-real-repository",
+  "repositories": [
+    {
+      "repository_id": "contextforge",
+      "revision": "bacf0e90253ead68f5ff886f47e7c81e479169f3"
+    },
+    {
+      "repository_id": "dsh-contextforge",
+      "revision": "38ed6afb219b97b5f4b609555fe185df28f01fc0"
+    },
+    {
+      "repository_id": "planup",
+      "revision": "750c8bf406b85be980595e56597aceb05603d904"
+    },
+    {
+      "repository_id": "syncplayer",
+      "revision": "6e7154b6b0148a5a595e317ca78fa632ecf9f243"
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "dsh-active-model-config",
+      "repository_id": "dsh-contextforge",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Trace active-model configuration and the request path used to create an index.",
+      "required_files": [
+        "src/active-model-index-proxy.ts",
+        "src/config.ts",
+        "src/worker.ts"
+      ],
+      "relevant_top5": [
+        "src/active-model-index-proxy.ts",
+        "src/config.ts",
+        "src/worker.ts"
+      ],
+      "task_roles": [
+        {
+          "role_id": "configuration",
+          "description": "Resolves the active model configuration.",
+          "required_paths": [
+            "src/config.ts"
+          ]
+        },
+        {
+          "role_id": "proxy",
+          "description": "Forwards active-model requests.",
+          "required_paths": [
+            "src/active-model-index-proxy.ts"
+          ]
+        },
+        {
+          "role_id": "worker",
+          "description": "Consumes the configured request in the worker flow.",
+          "required_paths": [
+            "src/worker.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "active-model-flow",
+          "description": "completeWithActiveModel streams messages through the selected Harness model.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/active-model-index-proxy.ts",
+                "start_line": 189,
+                "end_line": 226
+              },
+              "material_evidence_ids": [
+                "structural-0450576c96189dcd4d37848403a602bf"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/active-model-index-proxy.ts",
+          "start_line": 189,
+          "end_line": 226
+        },
+        {
+          "path": "src/config.ts",
+          "start_line": 155,
+          "end_line": 160
+        },
+        {
+          "path": "src/worker.ts",
+          "start_line": 94,
+          "end_line": 109
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/active-model-index-proxy.ts",
+          "start_line": 189,
+          "end_line": 226
+        },
+        {
+          "path": "src/config.ts",
+          "start_line": 155,
+          "end_line": 160
+        },
+        {
+          "path": "src/worker.ts",
+          "start_line": 94,
+          "end_line": 109
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-capsule-pipeline",
+      "repository_id": "dsh-contextforge",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Trace a request from tool selection through capsule preparation and consolidation.",
+      "required_files": [
+        "src/consolidator.ts",
+        "src/pipeline.ts",
+        "src/tools.ts"
+      ],
+      "relevant_top5": [
+        "src/consolidator.ts",
+        "src/pipeline.ts",
+        "src/tools.ts"
+      ],
+      "task_roles": [
+        {
+          "role_id": "consolidation",
+          "description": "Stores the assembled result.",
+          "required_paths": [
+            "src/consolidator.ts"
+          ]
+        },
+        {
+          "role_id": "pipeline",
+          "description": "Prepares the capsule flow.",
+          "required_paths": [
+            "src/pipeline.ts"
+          ]
+        },
+        {
+          "role_id": "tool-entry",
+          "description": "Exposes the request entry point.",
+          "required_paths": [
+            "src/tools.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "capsule-flow",
+          "description": "prepare calls protocol.compile after checking the structural index and returns selected material paths.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/pipeline.ts",
+                "start_line": 38,
+                "end_line": 104
+              },
+              "material_evidence_ids": [
+                "structural-a4fb82f2b452d3cdccbe63ec1b220391"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/consolidator.ts",
+          "start_line": 33,
+          "end_line": 77
+        },
+        {
+          "path": "src/pipeline.ts",
+          "start_line": 38,
+          "end_line": 104
+        },
+        {
+          "path": "src/tools.ts",
+          "start_line": 92,
+          "end_line": 130
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/consolidator.ts",
+          "start_line": 33,
+          "end_line": 77
+        },
+        {
+          "path": "src/pipeline.ts",
+          "start_line": 38,
+          "end_line": 104
+        },
+        {
+          "path": "src/tools.ts",
+          "start_line": 92,
+          "end_line": 130
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-index-lifecycle",
+      "repository_id": "dsh-contextforge",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Review lifecycle ownership, retries, and worker coordination for a ContextForge index.",
+      "required_files": [
+        "src/index-lifecycle.ts",
+        "src/worker-manager.ts",
+        "tests/index-lifecycle.spec.ts"
+      ],
+      "relevant_top5": [
+        "src/index-lifecycle.ts",
+        "src/worker-manager.ts",
+        "tests/index-lifecycle.spec.ts"
+      ],
+      "task_roles": [
+        {
+          "role_id": "lifecycle",
+          "description": "Owns lifecycle transitions and retry rules.",
+          "required_paths": [
+            "src/index-lifecycle.ts"
+          ]
+        },
+        {
+          "role_id": "worker-manager",
+          "description": "Coordinates worker lifecycle ownership.",
+          "required_paths": [
+            "src/worker-manager.ts"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Verifies lifecycle behavior.",
+          "required_paths": [
+            "tests/index-lifecycle.spec.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "lifecycle-evidence",
+          "description": "dispose settles active proxies and closes those that started successfully.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/index-lifecycle.ts",
+                "start_line": 47,
+                "end_line": 119
+              },
+              "material_evidence_ids": [
+                "structural-de5c8a7ad2dde6d0cc20648f9f73b4ff"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 47,
+          "end_line": 119
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 52
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 47,
+          "end_line": 119
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 52
+        }
+      ]
+    },
+    {
+      "task_id": "dsh-symbol-index-managers",
+      "repository_id": "dsh-contextforge",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Locate ContextForgeIndexManager and ContextForgeWorkerManager, their coordination boundary, and focused tests.",
+      "required_files": [
+        "src/index-lifecycle.ts",
+        "src/worker-manager.ts",
+        "tests/index-lifecycle.spec.ts"
+      ],
+      "relevant_top5": [
+        "src/index-lifecycle.ts",
+        "src/worker-manager.ts",
+        "tests/index-lifecycle.spec.ts"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 33,
+          "end_line": 70
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 39
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "index-manager",
+          "description": "Defines index lifecycle ownership.",
+          "required_paths": [
+            "src/index-lifecycle.ts"
+          ]
+        },
+        {
+          "role_id": "worker-manager",
+          "description": "Defines worker coordination.",
+          "required_paths": [
+            "src/worker-manager.ts"
+          ]
+        },
+        {
+          "role_id": "focused-test",
+          "description": "Exercises manager lifecycle behavior.",
+          "required_paths": [
+            "tests/index-lifecycle.spec.ts"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "manager-boundary",
+          "description": "workerFor canonicalizes a workspace and reuses its cached worker.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/worker-manager.ts",
+                "start_line": 28,
+                "end_line": 47
+              },
+              "material_evidence_ids": [
+                "structural-e083d4af605e041f50dc6b4696aa319f"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/index-lifecycle.ts",
+          "start_line": 33,
+          "end_line": 70
+        },
+        {
+          "path": "src/worker-manager.ts",
+          "start_line": 28,
+          "end_line": 47
+        },
+        {
+          "path": "tests/index-lifecycle.spec.ts",
+          "start_line": 12,
+          "end_line": 39
+        }
+      ]
+    },
+    {
+      "task_id": "planup-agenda-russian-domain",
+      "repository_id": "planup",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Проверь построение повестки с повторениями и русскоязычными пользовательскими данными.",
+      "required_files": [
+        "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+        "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+        "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+        "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+        "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+      ],
+      "task_roles": [
+        {
+          "role_id": "repeat-rule",
+          "description": "Defines repeat semantics.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/model/RepeatRule.kt"
+          ]
+        },
+        {
+          "role_id": "agenda",
+          "description": "Builds the resulting agenda.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Verifies agenda behavior.",
+          "required_paths": [
+            "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "agenda-repeat",
+          "description": "BuildAgenda filters repeating entries with occursOn and tasks by date.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+                "start_line": 14,
+                "end_line": 29
+              },
+              "material_evidence_ids": [
+                "structural-7e09a419ea80fa3343938069ff73242c"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 28
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 28
+        }
+      ]
+    },
+    {
+      "task_id": "planup-android-startup",
+      "repository_id": "planup",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Trace Android application startup from the manifest to application container and activity UI.",
+      "required_files": [
+        "app/src/main/AndroidManifest.xml",
+        "app/src/main/java/com/planup/MainActivity.kt",
+        "app/src/main/java/com/planup/PlanUpApplication.kt",
+        "app/src/main/java/com/planup/di/AppContainer.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/AndroidManifest.xml",
+        "app/src/main/java/com/planup/MainActivity.kt",
+        "app/src/main/java/com/planup/PlanUpApplication.kt",
+        "app/src/main/java/com/planup/di/AppContainer.kt"
+      ],
+      "task_roles": [
+        {
+          "role_id": "manifest",
+          "description": "Declares Android startup components.",
+          "required_paths": [
+            "app/src/main/AndroidManifest.xml"
+          ]
+        },
+        {
+          "role_id": "activity",
+          "description": "Hosts the startup UI.",
+          "required_paths": [
+            "app/src/main/java/com/planup/MainActivity.kt"
+          ]
+        },
+        {
+          "role_id": "application",
+          "description": "Creates application state.",
+          "required_paths": [
+            "app/src/main/java/com/planup/PlanUpApplication.kt"
+          ]
+        },
+        {
+          "role_id": "container",
+          "description": "Supplies application dependencies.",
+          "required_paths": [
+            "app/src/main/java/com/planup/di/AppContainer.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "android-startup",
+          "description": "MainActivity obtains PlanUpApplication.container and supplies it to the app content.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/MainActivity.kt",
+                "start_line": 19,
+                "end_line": 37
+              },
+              "material_evidence_ids": [
+                "structural-7befa8a66feede41ba38f2f1cf78d4dc"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/AndroidManifest.xml",
+          "start_line": 3,
+          "end_line": 27
+        },
+        {
+          "path": "app/src/main/java/com/planup/MainActivity.kt",
+          "start_line": 19,
+          "end_line": 37
+        },
+        {
+          "path": "app/src/main/java/com/planup/PlanUpApplication.kt",
+          "start_line": 6,
+          "end_line": 8
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 21,
+          "end_line": 31
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/AndroidManifest.xml",
+          "start_line": 3,
+          "end_line": 27
+        },
+        {
+          "path": "app/src/main/java/com/planup/MainActivity.kt",
+          "start_line": 19,
+          "end_line": 37
+        },
+        {
+          "path": "app/src/main/java/com/planup/PlanUpApplication.kt",
+          "start_line": 6,
+          "end_line": 8
+        },
+        {
+          "path": "app/src/main/java/com/planup/di/AppContainer.kt",
+          "start_line": 21,
+          "end_line": 31
+        }
+      ]
+    },
+    {
+      "task_id": "planup-backup-flow",
+      "repository_id": "planup",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Review PlanUp backup encoding and restoration behavior with its focused tests.",
+      "required_files": [
+        "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+        "app/src/main/java/com/planup/domain/model/Task.kt",
+        "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+        "app/src/main/java/com/planup/domain/model/Task.kt",
+        "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt"
+      ],
+      "task_roles": [
+        {
+          "role_id": "codec",
+          "description": "Encodes and decodes backups.",
+          "required_paths": [
+            "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt"
+          ]
+        },
+        {
+          "role_id": "model",
+          "description": "Defines persisted task data.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/model/Task.kt"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Verifies backup round trips.",
+          "required_paths": [
+            "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "backup-roundtrip",
+          "description": "PlanBackupCodec.encode writes format, version, schedule, and tasks into JSON.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+                "start_line": 25,
+                "end_line": 125
+              },
+              "material_evidence_ids": [
+                "structural-825fa37e4023fd579e9239b1938dd9a9"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/Task.kt",
+          "start_line": 8,
+          "end_line": 24
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/Task.kt",
+          "start_line": 8,
+          "end_line": 24
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "task_id": "planup-symbol-backup-agenda-repeat",
+      "repository_id": "planup",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Locate PlanBackupCodec, BuildAgenda, and RepeatRule implementations with their focused tests.",
+      "required_files": [
+        "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+        "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+        "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+        "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+        "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+      ],
+      "relevant_top5": [
+        "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+        "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+        "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+        "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+        "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+      ],
+      "required_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 42
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "backup-codec",
+          "description": "Defines backup serialization.",
+          "required_paths": [
+            "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt"
+          ]
+        },
+        {
+          "role_id": "repeat-rule",
+          "description": "Defines repeat behavior.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/model/RepeatRule.kt"
+          ]
+        },
+        {
+          "role_id": "agenda",
+          "description": "Builds agenda entries.",
+          "required_paths": [
+            "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt"
+          ]
+        },
+        {
+          "role_id": "backup-test",
+          "description": "Tests backup serialization.",
+          "required_paths": [
+            "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt"
+          ]
+        },
+        {
+          "role_id": "agenda-test",
+          "description": "Tests agenda construction.",
+          "required_paths": [
+            "app/src/test/java/com/planup/domain/BuildAgendaTest.kt"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "symbol-results",
+          "description": "RepeatRule.occursOn checks date bounds, weekday, and week interval.",
+          "support": [
+            {
+              "citation": {
+                "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+                "start_line": 21,
+                "end_line": 28
+              },
+              "material_evidence_ids": [
+                "structural-5f2070a25b05f6c7d1c47aa4ba07751a"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "app/src/main/java/com/planup/data/backup/PlanBackupCodec.kt",
+          "start_line": 25,
+          "end_line": 125
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/model/RepeatRule.kt",
+          "start_line": 21,
+          "end_line": 28
+        },
+        {
+          "path": "app/src/main/java/com/planup/domain/usecase/BuildAgenda.kt",
+          "start_line": 14,
+          "end_line": 29
+        },
+        {
+          "path": "app/src/test/java/com/planup/data/backup/PlanBackupCodecTest.kt",
+          "start_line": 39,
+          "end_line": 73
+        },
+        {
+          "path": "app/src/test/java/com/planup/domain/BuildAgendaTest.kt",
+          "start_line": 14,
+          "end_line": 42
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-client-server-flow",
+      "repository_id": "syncplayer",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Trace the client and server flow for synchronized playback state.",
+      "required_files": [
+        "public/app.js",
+        "public/clock-sync.js",
+        "server.js",
+        "test/video-api.test.js"
+      ],
+      "relevant_top5": [
+        "public/app.js",
+        "public/clock-sync.js",
+        "server.js",
+        "test/video-api.test.js"
+      ],
+      "task_roles": [
+        {
+          "role_id": "client",
+          "description": "Applies playback state in the browser.",
+          "required_paths": [
+            "public/app.js"
+          ]
+        },
+        {
+          "role_id": "clock",
+          "description": "Aligns client time.",
+          "required_paths": [
+            "public/clock-sync.js"
+          ]
+        },
+        {
+          "role_id": "server",
+          "description": "Publishes synchronized state.",
+          "required_paths": [
+            "server.js"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Exercises client-server behavior.",
+          "required_paths": [
+            "test/video-api.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "client-server-flow",
+          "description": "connectSocket routes playback state and sync events to applyState.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/app.js",
+                "start_line": 108,
+                "end_line": 150
+              },
+              "material_evidence_ids": [
+                "structural-f44bb5d547cfe1fb9efdc59b1657b943"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "server.js",
+          "start_line": 199,
+          "end_line": 224
+        },
+        {
+          "path": "test/video-api.test.js",
+          "start_line": 236,
+          "end_line": 295
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "server.js",
+          "start_line": 199,
+          "end_line": 224
+        },
+        {
+          "path": "test/video-api.test.js",
+          "start_line": 236,
+          "end_line": 295
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-startup",
+      "repository_id": "syncplayer",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Trace SyncPlayer startup from the server entry point to browser application initialization.",
+      "required_files": [
+        "public/app.js",
+        "public/index.html",
+        "server.js",
+        "test/server-startup.test.js"
+      ],
+      "relevant_top5": [
+        "public/app.js",
+        "public/index.html",
+        "server.js",
+        "test/server-startup.test.js"
+      ],
+      "task_roles": [
+        {
+          "role_id": "server",
+          "description": "Starts and serves the application.",
+          "required_paths": [
+            "server.js"
+          ]
+        },
+        {
+          "role_id": "document",
+          "description": "Loads browser resources.",
+          "required_paths": [
+            "public/index.html"
+          ]
+        },
+        {
+          "role_id": "application",
+          "description": "Initializes browser behavior.",
+          "required_paths": [
+            "public/app.js"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Verifies startup behavior.",
+          "required_paths": [
+            "test/server-startup.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "startup-flow",
+          "description": "startServer listens on HOST and PORT and reports its address.",
+          "support": [
+            {
+              "citation": {
+                "path": "server.js",
+                "start_line": 1311,
+                "end_line": 1339
+              },
+              "material_evidence_ids": [
+                "structural-db23a6cb6ffcaf9a953c99b330588d32"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/index.html",
+          "start_line": 153,
+          "end_line": 163
+        },
+        {
+          "path": "server.js",
+          "start_line": 1311,
+          "end_line": 1339
+        },
+        {
+          "path": "test/server-startup.test.js",
+          "start_line": 1,
+          "end_line": 12
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 108,
+          "end_line": 150
+        },
+        {
+          "path": "public/index.html",
+          "start_line": 153,
+          "end_line": 163
+        },
+        {
+          "path": "server.js",
+          "start_line": 1311,
+          "end_line": 1339
+        },
+        {
+          "path": "test/server-startup.test.js",
+          "start_line": 1,
+          "end_line": 12
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-symbol-clock-policy",
+      "repository_id": "syncplayer",
+      "kind": "exact_symbol",
+      "dataset_split": "holdout",
+      "task": "Locate ServerClock and shouldAlignPosition, their caller, and focused synchronization test.",
+      "required_files": [
+        "public/app.js",
+        "public/clock-sync.js",
+        "public/sync-policy.js",
+        "test/clock-sync.test.js"
+      ],
+      "relevant_top5": [
+        "public/app.js",
+        "public/clock-sync.js",
+        "public/sync-policy.js",
+        "test/clock-sync.test.js"
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 321
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/clock-sync.test.js",
+          "start_line": 5,
+          "end_line": 19
+        }
+      ],
+      "task_roles": [
+        {
+          "role_id": "clock",
+          "description": "Defines ServerClock.",
+          "required_paths": [
+            "public/clock-sync.js"
+          ]
+        },
+        {
+          "role_id": "policy",
+          "description": "Defines position-alignment policy.",
+          "required_paths": [
+            "public/sync-policy.js"
+          ]
+        },
+        {
+          "role_id": "caller",
+          "description": "Calls synchronization behavior.",
+          "required_paths": [
+            "public/app.js"
+          ]
+        },
+        {
+          "role_id": "focused-test",
+          "description": "Exercises clock synchronization.",
+          "required_paths": [
+            "test/clock-sync.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "symbol-flow",
+          "description": "shouldAlignPosition always aligns hard mode and aligns soft mode for source or revision changes.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/sync-policy.js",
+                "start_line": 6,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-a7767194e6e29f5af56cc0f090ef3d41"
+              ]
+            }
+          ]
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 321
+        },
+        {
+          "path": "public/clock-sync.js",
+          "start_line": 22,
+          "end_line": 46
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/clock-sync.test.js",
+          "start_line": 5,
+          "end_line": 19
+        }
+      ]
+    },
+    {
+      "task_id": "syncplayer-sync-policy",
+      "repository_id": "syncplayer",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Review synchronization policy, browser application, and focused mode tests.",
+      "required_files": [
+        "public/app.js",
+        "public/sync-policy.js",
+        "test/sync-mode.test.js"
+      ],
+      "relevant_top5": [
+        "public/app.js",
+        "public/sync-policy.js",
+        "test/sync-mode.test.js"
+      ],
+      "task_roles": [
+        {
+          "role_id": "policy",
+          "description": "Defines synchronization decisions.",
+          "required_paths": [
+            "public/sync-policy.js"
+          ]
+        },
+        {
+          "role_id": "application",
+          "description": "Applies synchronization decisions.",
+          "required_paths": [
+            "public/app.js"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Exercises sync modes.",
+          "required_paths": [
+            "test/sync-mode.test.js"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "sync-policy",
+          "description": "mediaRequestPolicy grants viewer seeking only in soft mode and routes administrator actions.",
+          "support": [
+            {
+              "citation": {
+                "path": "public/sync-policy.js",
+                "start_line": 6,
+                "end_line": 24
+              },
+              "material_evidence_ids": [
+                "structural-b53eac2f009654092b2c7522dd5d57a1"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 334
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/sync-mode.test.js",
+          "start_line": 7,
+          "end_line": 28
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "public/app.js",
+          "start_line": 290,
+          "end_line": 334
+        },
+        {
+          "path": "public/sync-policy.js",
+          "start_line": 6,
+          "end_line": 24
+        },
+        {
+          "path": "test/sync-mode.test.js",
+          "start_line": 7,
+          "end_line": 28
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-structural-lifecycle",
+      "repository_id": "contextforge",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Trace structural index build, immutable publication, and manifest reuse across an update.",
+      "required_files": [
+        "src/contextforge/application.py",
+        "src/contextforge/intelligence/indexer.py",
+        "src/contextforge/intelligence/store.py",
+        "tests/test_intelligence_store.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/application.py",
+        "src/contextforge/intelligence/indexer.py",
+        "src/contextforge/intelligence/store.py",
+        "tests/test_intelligence_store.py"
+      ],
+      "task_roles": [
+        {
+          "role_id": "application",
+          "description": "Coordinates build and update.",
+          "required_paths": [
+            "src/contextforge/application.py"
+          ]
+        },
+        {
+          "role_id": "indexer",
+          "description": "Extracts verified CodeMaps and graph facts.",
+          "required_paths": [
+            "src/contextforge/intelligence/indexer.py"
+          ]
+        },
+        {
+          "role_id": "storage",
+          "description": "Publishes immutable generations and validates records.",
+          "required_paths": [
+            "src/contextforge/intelligence/store.py"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Exercises storage and reuse contracts.",
+          "required_paths": [
+            "tests/test_intelligence_store.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "contextforge-structural-lifecycle-flow",
+          "description": "build_structural_index reuses unchanged CodeMaps and constructs verified relationships.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/intelligence/indexer.py",
+                "start_line": 90,
+                "end_line": 245
+              },
+              "material_evidence_ids": [
+                "structural-dae76e3b517fa3614d9f69b3bfa15356"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 380,
+          "end_line": 520
+        },
+        {
+          "path": "src/contextforge/intelligence/indexer.py",
+          "start_line": 90,
+          "end_line": 245
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 95,
+          "end_line": 114
+        },
+        {
+          "path": "tests/test_intelligence_store.py",
+          "start_line": 56,
+          "end_line": 110
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 380,
+          "end_line": 520
+        },
+        {
+          "path": "src/contextforge/intelligence/indexer.py",
+          "start_line": 90,
+          "end_line": 245
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 95,
+          "end_line": 114
+        },
+        {
+          "path": "tests/test_intelligence_store.py",
+          "start_line": 56,
+          "end_line": 110
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-semantic-lexicon",
+      "repository_id": "contextforge",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Review how full-file callable descriptions and call expressions become grounded BM25 evidence.",
+      "required_files": [
+        "src/contextforge/intelligence/cards.py",
+        "src/contextforge/intelligence/retrieval.py",
+        "src/contextforge/intelligence/semantic_lexicon.py",
+        "tests/test_semantic_lexicon.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/intelligence/cards.py",
+        "src/contextforge/intelligence/retrieval.py",
+        "src/contextforge/intelligence/semantic_lexicon.py",
+        "tests/test_semantic_lexicon.py"
+      ],
+      "task_roles": [
+        {
+          "role_id": "lexicon",
+          "description": "Builds ID-bound callable descriptions and call expressions.",
+          "required_paths": [
+            "src/contextforge/intelligence/semantic_lexicon.py"
+          ]
+        },
+        {
+          "role_id": "cards",
+          "description": "Coordinates semantic card and lexicon publication.",
+          "required_paths": [
+            "src/contextforge/intelligence/cards.py"
+          ]
+        },
+        {
+          "role_id": "retrieval",
+          "description": "Indexes approved semantic expressions.",
+          "required_paths": [
+            "src/contextforge/intelligence/retrieval.py"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Checks full-file context and accepted expression postings.",
+          "required_paths": [
+            "tests/test_semantic_lexicon.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "contextforge-semantic-lexicon-flow",
+          "description": "analyze_file_lexicon verifies proposed model expressions before storing them.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/intelligence/semantic_lexicon.py",
+                "start_line": 278,
+                "end_line": 473
+              },
+              "material_evidence_ids": [
+                "structural-e6269c2429a7e3e7ad803e836eb2412d"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/intelligence/cards.py",
+          "start_line": 635,
+          "end_line": 743
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 897,
+          "end_line": 995
+        },
+        {
+          "path": "src/contextforge/intelligence/semantic_lexicon.py",
+          "start_line": 278,
+          "end_line": 473
+        },
+        {
+          "path": "tests/test_semantic_lexicon.py",
+          "start_line": 87,
+          "end_line": 115
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/intelligence/cards.py",
+          "start_line": 635,
+          "end_line": 743
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 897,
+          "end_line": 995
+        },
+        {
+          "path": "src/contextforge/intelligence/semantic_lexicon.py",
+          "start_line": 278,
+          "end_line": 473
+        },
+        {
+          "path": "tests/test_semantic_lexicon.py",
+          "start_line": 87,
+          "end_line": 115
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-capsule-evidence",
+      "repository_id": "contextforge",
+      "kind": "broad",
+      "dataset_split": "tuning",
+      "task": "Trace task role coverage from retrieval through materialized context capsule sufficiency.",
+      "required_files": [
+        "src/contextforge/context/capsule.py",
+        "src/contextforge/intelligence/coverage.py",
+        "src/contextforge/intelligence/retrieval.py",
+        "tests/test_context_capsule.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/context/capsule.py",
+        "src/contextforge/intelligence/coverage.py",
+        "src/contextforge/intelligence/retrieval.py",
+        "tests/test_context_capsule.py"
+      ],
+      "task_roles": [
+        {
+          "role_id": "coverage",
+          "description": "Tracks task role and evidence coverage.",
+          "required_paths": [
+            "src/contextforge/intelligence/coverage.py"
+          ]
+        },
+        {
+          "role_id": "retrieval",
+          "description": "Selects candidate evidence.",
+          "required_paths": [
+            "src/contextforge/intelligence/retrieval.py"
+          ]
+        },
+        {
+          "role_id": "compiler",
+          "description": "Materializes budgeted capsule evidence.",
+          "required_paths": [
+            "src/contextforge/context/capsule.py"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Checks capsule materialization and effective status.",
+          "required_paths": [
+            "tests/test_context_capsule.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "contextforge-capsule-evidence-flow",
+          "description": "compile_context_capsule recomputes sufficiency after materializing evidence.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/context/capsule.py",
+                "start_line": 580,
+                "end_line": 627
+              },
+              "material_evidence_ids": [
+                "structural-24b3fbb9b26ee8808d45fa5dd04d49a4"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/context/capsule.py",
+          "start_line": 580,
+          "end_line": 627
+        },
+        {
+          "path": "src/contextforge/intelligence/coverage.py",
+          "start_line": 57,
+          "end_line": 103
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 1259,
+          "end_line": 1355
+        },
+        {
+          "path": "tests/test_context_capsule.py",
+          "start_line": 125,
+          "end_line": 170
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/context/capsule.py",
+          "start_line": 580,
+          "end_line": 627
+        },
+        {
+          "path": "src/contextforge/intelligence/coverage.py",
+          "start_line": 57,
+          "end_line": 103
+        },
+        {
+          "path": "src/contextforge/intelligence/retrieval.py",
+          "start_line": 1259,
+          "end_line": 1355
+        },
+        {
+          "path": "tests/test_context_capsule.py",
+          "start_line": 125,
+          "end_line": 170
+        }
+      ]
+    },
+    {
+      "task_id": "contextforge-bridge-status",
+      "repository_id": "contextforge",
+      "kind": "broad",
+      "dataset_split": "holdout",
+      "task": "Trace index status and schema compatibility from application state to Bridge responses.",
+      "required_files": [
+        "src/contextforge/application.py",
+        "src/contextforge/bridge/server.py",
+        "src/contextforge/intelligence/store.py",
+        "tests/test_bridge.py"
+      ],
+      "relevant_top5": [
+        "src/contextforge/application.py",
+        "src/contextforge/bridge/server.py",
+        "src/contextforge/intelligence/store.py",
+        "tests/test_bridge.py"
+      ],
+      "task_roles": [
+        {
+          "role_id": "application",
+          "description": "Computes repository index status.",
+          "required_paths": [
+            "src/contextforge/application.py"
+          ]
+        },
+        {
+          "role_id": "storage",
+          "description": "Validates active schema and manifest records.",
+          "required_paths": [
+            "src/contextforge/intelligence/store.py"
+          ]
+        },
+        {
+          "role_id": "bridge",
+          "description": "Exposes status and capabilities over Bridge.",
+          "required_paths": [
+            "src/contextforge/bridge/server.py"
+          ]
+        },
+        {
+          "role_id": "verification",
+          "description": "Checks Bridge version and status responses.",
+          "required_paths": [
+            "tests/test_bridge.py"
+          ]
+        }
+      ],
+      "answer_assertions": [
+        {
+          "assertion_id": "contextforge-bridge-status-flow",
+          "description": "The Bridge _status response reports index generation and stale-file state.",
+          "support": [
+            {
+              "citation": {
+                "path": "src/contextforge/bridge/server.py",
+                "start_line": 918,
+                "end_line": 971
+              },
+              "material_evidence_ids": [
+                "structural-5487f5ab705956543088a2347dd7f6e5"
+              ]
+            }
+          ]
+        }
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 647,
+          "end_line": 875
+        },
+        {
+          "path": "src/contextforge/bridge/server.py",
+          "start_line": 918,
+          "end_line": 971
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 667,
+          "end_line": 701
+        },
+        {
+          "path": "tests/test_bridge.py",
+          "start_line": 138,
+          "end_line": 159
+        }
+      ],
+      "oracle_ranges": [
+        {
+          "path": "src/contextforge/application.py",
+          "start_line": 647,
+          "end_line": 875
+        },
+        {
+          "path": "src/contextforge/bridge/server.py",
+          "start_line": 918,
+          "end_line": 971
+        },
+        {
+          "path": "src/contextforge/intelligence/store.py",
+          "start_line": 667,
+          "end_line": 701
+        },
+        {
+          "path": "tests/test_bridge.py",
+          "start_line": 138,
+          "end_line": 159
+        }
+      ]
+    }
+  ]
+}

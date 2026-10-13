@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import html
 import math
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from contextforge.context.evidence_diagnostics import (
+    CompilationReasonCode,
+    EvidenceCoverageDiagnostics,
+    compiled_evidence_diagnostics,
+)
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.cards import SemanticCard, load_semantic_card
 from contextforge.intelligence.codemap import FileCodeMap, SourceRange
@@ -23,9 +29,15 @@ from contextforge.intelligence.models import IndexManifest, Sha256
 from contextforge.intelligence.retrieval import (
     CandidateCard,
     CandidateEvidenceRange,
+    CoverageLedger,
+    EvidenceRequirements,
     ExactGroup,
     PlannedEvidence,
     RetrievalResult,
+    build_coverage_ledger,
+    build_evidence_requirements,
+    parse_query_intent,
+    verified_source_lookup,
 )
 from contextforge.intelligence.store import IndexStorageError, load_manifest
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
@@ -156,7 +168,7 @@ class CapsuleSnapshot(CapsuleModel):
     generation_id: Sha256
     source_snapshot_digest: Sha256
     generation_kind: Literal["structural", "enriched"]
-    index_schema_version: Literal[3]
+    index_schema_version: Literal[4]
 
 
 class ContextCapsule(CapsuleModel):
@@ -170,6 +182,8 @@ class ContextCapsule(CapsuleModel):
     task_context: tuple[CapsuleMaterial, ...] = ()
     git_context: str = ""
     interpretations: tuple[str, ...] = ()
+    compact_profile: bool = False
+    evidence_diagnostics: EvidenceCoverageDiagnostics | None = None
     allocations: dict[str, NonNegativeInt]
     estimator_id: str = Field(min_length=1, max_length=200)
     token_count: NonNegativeInt
@@ -197,6 +211,12 @@ class CompiledContextCapsule(CapsuleModel):
     prompt: str
     token_count: NonNegativeInt
     estimator_id: str
+    coverage_ledger: CoverageLedger | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
+
+    @property
+    def evidence_diagnostics(self) -> EvidenceCoverageDiagnostics | None:
+        return self.capsule.evidence_diagnostics
 
     @model_validator(mode="after")
     def validate_metadata(self) -> CompiledContextCapsule:
@@ -205,6 +225,58 @@ class CompiledContextCapsule(CapsuleModel):
             or self.estimator_id != self.capsule.estimator_id
         ):
             raise ValueError("compiled capsule metadata is inconsistent")
+        return self
+
+
+class CompilationSufficiency(CapsuleModel):
+    """Verified effective status after the compiler's real materialization."""
+
+    schema_version: Literal[1] = 1
+    declared_status: Literal["sufficient", "insufficient"]
+    effective_status: Literal["sufficient", "insufficient"]
+    reason_codes: tuple[CompilationReasonCode, ...] = ()
+    planned_item_ids: tuple[str, ...] = ()
+    materialized_item_ids: tuple[str, ...] = ()
+    missing_planned_item_ids: tuple[str, ...] = ()
+    planned_evidence_ids: tuple[str, ...] = ()
+    materialized_evidence_ids: tuple[str, ...] = ()
+    planned_range_count: NonNegativeInt = 0
+    materialized_range_count: NonNegativeInt = 0
+    planned_role_ids: tuple[str, ...] = ()
+    materialized_role_ids: tuple[str, ...] = ()
+    missing_mandatory_role_ids: tuple[str, ...] = ()
+    replacement_used: bool = False
+
+    @model_validator(mode="after")
+    def validate_sufficiency(self) -> CompilationSufficiency:
+        for values, label in (
+            (self.reason_codes, "reason codes"),
+            (self.planned_item_ids, "planned item IDs"),
+            (self.materialized_item_ids, "materialized item IDs"),
+            (self.missing_planned_item_ids, "missing planned item IDs"),
+            (self.planned_evidence_ids, "planned evidence IDs"),
+            (self.materialized_evidence_ids, "materialized evidence IDs"),
+            (self.planned_role_ids, "planned role IDs"),
+            (self.materialized_role_ids, "materialized role IDs"),
+            (self.missing_mandatory_role_ids, "missing mandatory role IDs"),
+        ):
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"compilation {label} must be unique and canonical")
+        if self.missing_planned_item_ids != tuple(
+            item
+            for item in self.planned_item_ids
+            if item not in self.materialized_item_ids
+        ):
+            raise ValueError("compilation missing items must match materialization")
+        if (
+            self.declared_status == "insufficient"
+            and self.effective_status != "insufficient"
+        ):
+            raise ValueError("insufficient plan cannot become effectively sufficient")
+        if self.effective_status == "sufficient" and self.reason_codes:
+            raise ValueError(
+                "sufficient compilation cannot carry insufficiency reasons"
+            )
         return self
 
 
@@ -231,6 +303,19 @@ class _CompilerState:
     cards: dict[str, SemanticCard | None]
     sources: dict[str, tuple[str, int]]
     pinned_full: set[str]
+    mandatory_ranges: dict[str, tuple[SourceRange, ...]] = field(default_factory=dict)
+    mandatory_ids: dict[str, frozenset[str]] = field(default_factory=dict)
+    material_cache: dict[tuple[object, ...], CapsuleMaterial | None] = field(
+        default_factory=dict
+    )
+    material_candidates: dict[int, CandidateCard] = field(default_factory=dict)
+    material_options: dict[
+        tuple[int, bool, frozenset[str]], tuple[CapsuleMaterial, ...]
+    ] = field(default_factory=dict)
+    source_lookups: dict[str, dict[str, SourceRange]] = field(default_factory=dict)
+    coverage_cache: OrderedDict[
+        tuple[int, ...], tuple[tuple[CapsuleMaterial, ...], CoverageLedger]
+    ] = field(default_factory=OrderedDict)
 
 
 def compile_context_capsule(
@@ -250,9 +335,41 @@ def compile_context_capsule(
 
     if not isinstance(retrieval, RetrievalResult):
         raise TypeError("compiler requires a RetrievalResult")
+    if retrieval.requirements is None:
+        retrieval = retrieval.model_copy(
+            update={
+                "requirements": build_evidence_requirements(task, retrieval.candidates)
+            }
+        )
+    frozen = retrieval.requirements
+    if frozen is not None:
+        intent = frozen.query_intent or parse_query_intent(task)
+        if intent.evidence_scope != "lookup":
+            legacy_gaps = {
+                f"source-units-unavailable:{c.candidate_id}"
+                for c in retrieval.candidates
+                if c.candidate_id in frozen.anchors and c.source_evidence_version < 8
+            }
+            if legacy_gaps:
+                retrieval = retrieval.model_copy(
+                    update={
+                        "requirements": frozen.model_copy(
+                            update={
+                                "unresolved_dependency_ids": tuple(
+                                    sorted(
+                                        {
+                                            *frozen.unresolved_dependency_ids,
+                                            *legacy_gaps,
+                                        }
+                                    )
+                                ),
+                            }
+                        )
+                    }
+                )
     active = manifest if manifest is not None else load_manifest(repository_root)
-    if active.schema_version != 3:
-        raise ContextCompilerError("Context Capsule v2 requires Index v3")
+    if active.schema_version != 4:
+        raise ContextCompilerError("Context Capsule v2 requires Index v3.1")
     if (
         retrieval.generation_id != active.generation_id
         or retrieval.source_snapshot_digest != active.build.source_snapshot_digest
@@ -280,6 +397,21 @@ def compile_context_capsule(
         sources={},
         pinned_full=pinned,
     )
+    for requirement in (
+        () if retrieval.requirements is None else retrieval.requirements.source_evidence
+    ):
+        candidate_id = requirement.candidate_id
+        state.mandatory_ids[candidate_id] = state.mandatory_ids.get(
+            candidate_id, frozenset()
+        ) | frozenset(requirement.evidence_ids)
+        state.mandatory_ranges[candidate_id] = tuple(
+            dict.fromkeys(
+                (
+                    *state.mandatory_ranges.get(candidate_id, ()),
+                    *requirement.required_ranges,
+                )
+            )
+        )
     known_paths = {item.path for item in active.files}
     if not set(working) | pinned <= known_paths:
         raise ValueError("working and pinned files must belong to the generation")
@@ -430,70 +562,21 @@ def compile_context_capsule(
         candidate
         for candidate in retrieval.candidates
         if candidate.path not in set(working) and _is_automatic_candidate(candidate)
-    ][:8]
+    ]
     if retrieval.evidence_plan is None or plan_fallback:
-        remaining = list(eligible_candidates)
-        covered: set[str] = set()
-        while remaining:
-            selected_candidates = tuple(
-                candidate_by_path[item.path]
-                for item in evidence_material
-                if item.path in candidate_by_path
-            )
-            choices: list[
-                tuple[float, int, float, str, CandidateCard, CapsuleMaterial]
-            ] = []
-            for candidate in remaining:
-                gain = _coverage_keys(candidate) - covered
-                if not gain:
-                    continue
-                material = _planned_materialize(state, candidate, None)
-                if material is None:
-                    continue
-                if evidence_tokens + material.token_count > evidence_limit and (
-                    evidence_material or not allow_indivisible_automatic_upgrade
-                ):
-                    continue
-                ratio = _utility(
-                    candidate, RepresentationMode.MAP, selected_candidates
-                ) / max(material.token_count, 1)
-                choices.append(
-                    (
-                        ratio,
-                        _exact_group_rank(candidate.exact_group),
-                        candidate.score,
-                        candidate.path,
-                        candidate,
-                        material,
-                    )
-                )
-            added = False
-            for _, _, _, _, candidate, material in sorted(
-                choices,
-                key=lambda item: (item[1], -item[0], -item[2], item[3]),
-            ):
-                proposed = capsule.model_copy(
-                    update={"task_context": tuple((*evidence_material, material))}
-                )
-                if _fits(
-                    proposed,
-                    budget,
-                    selected_estimator,
-                    token_limit=automatic_limit,
-                ) or (
-                    not evidence_material
-                    and allow_indivisible_automatic_upgrade
-                    and _fits(proposed, budget, selected_estimator)
-                ):
-                    evidence_material.append(material)
-                    evidence_tokens += material.token_count
-                    covered.update(_coverage_keys(candidate))
-                    remaining.remove(candidate)
-                    capsule = proposed
-                    added = True
-                    break
-            if not added:
-                break
+        evidence_material, evidence_tokens, capsule = _select_automatic_evidence(
+            state,
+            task,
+            capsule,
+            retrieval.candidates,
+            eligible_candidates,
+            evidence_material,
+            evidence_tokens,
+            budget,
+            selected_estimator,
+            token_limit=automatic_limit,
+            requirements=retrieval.requirements,
+        )
     capsule = capsule.model_copy(update={"task_context": tuple(evidence_material)})
 
     if not explicit_material:
@@ -510,6 +593,7 @@ def compile_context_capsule(
     if retrieval.evidence_plan is None or plan_fallback:
         capsule = _apply_greedy_upgrades(
             state,
+            task,
             capsule,
             retrieval.candidates,
             lines,
@@ -517,6 +601,7 @@ def compile_context_capsule(
             selected_estimator,
             token_limit=automatic_limit,
             allow_indivisible_upgrade=allow_indivisible_automatic_upgrade,
+            requirements=retrieval.requirements,
         )
     rationales = list(dict.fromkeys((*capsule.interpretations, *interpretations)))
     if retrieval.evidence_plan is not None and not plan_fallback:
@@ -542,6 +627,12 @@ def compile_context_capsule(
                 "(interpretation)."
             )
     capsule = capsule.model_copy(update={"interpretations": tuple(rationales)})
+    if not explicit_material:
+        compact = _compact_profile(capsule, orientation, retrieval.candidates)
+        if compact is not None and selected_estimator.count(
+            _render_capsule(compact)
+        ) < selected_estimator.count(_render_capsule(capsule)):
+            capsule = compact
     prompt = _render_capsule(capsule)
     token_count = selected_estimator.count(prompt)
     if (
@@ -559,16 +650,546 @@ def compile_context_capsule(
     if token_count > budget.available_tokens:
         raise ContextBudgetError("indivisible selected context exceeds the hard budget")
     capsule = capsule.model_copy(update={"token_count": token_count})
+    materialization_ledger = _capsule_ledger(
+        task,
+        retrieval.candidates,
+        capsule,
+        requirements=retrieval.requirements,
+    )
+    sufficiency = _compilation_sufficiency(
+        retrieval,
+        capsule,
+        materialization_ledger,
+        plan_replaced=plan_fallback,
+    )
+    capsule = capsule.model_copy(
+        update={
+            "evidence_diagnostics": compiled_evidence_diagnostics(
+                retrieval,
+                materialization_ledger,
+                sufficiency,
+                compact_profile=capsule.compact_profile,
+            )
+        }
+    )
     return CompiledContextCapsule(
         capsule=capsule,
         prompt=prompt,
         token_count=token_count,
         estimator_id=selected_estimator.estimator_id,
+        coverage_ledger=materialization_ledger,
+        compilation_sufficiency=sufficiency,
     )
+
+
+def _compilation_sufficiency(
+    retrieval: RetrievalResult,
+    capsule: ContextCapsule,
+    materialization_ledger: CoverageLedger,
+    *,
+    plan_replaced: bool,
+) -> CompilationSufficiency:
+    """Derive effective status from actual materials without mutating retrieval."""
+
+    plan = retrieval.evidence_plan
+    declared_status = (
+        "sufficient"
+        if plan is None
+        and retrieval.requirements
+        and retrieval.requirements.source_evidence
+        else "insufficient"
+        if plan is None
+        else plan.sufficiency
+    )
+    candidates_by_id = {item.candidate_id: item for item in retrieval.candidates}
+    materials_by_path = {
+        item.path: item for item in (*capsule.working_set, *capsule.task_context)
+    }
+    planned_items = () if plan is None else plan.items
+    planned_item_ids = tuple(sorted(item.candidate_id for item in planned_items))
+    materialized_item_ids = tuple(
+        sorted(
+            item.candidate_id
+            for item in planned_items
+            if (
+                (material := materials_by_path.get(item.path)) is not None
+                and material.source_sha256 == item.source_sha256
+            )
+        )
+    )
+    missing_item_ids = tuple(
+        item for item in planned_item_ids if item not in set(materialized_item_ids)
+    )
+    planned_evidence_ids = tuple(
+        sorted(
+            {evidence_id for item in planned_items for evidence_id in item.evidence_ids}
+        )
+    )
+    materialized_evidence_ids = tuple(
+        sorted(
+            {
+                evidence_id
+                for item in materials_by_path.values()
+                for evidence_id in item.evidence_ids
+            }
+        )
+    )
+    planned_range_count = 0
+    for item in planned_items:
+        candidate = candidates_by_id.get(item.candidate_id)
+        if candidate is None:
+            continue
+        known_evidence_ids = {
+            evidence.evidence_id
+            for evidence in candidate.evidence_ranges
+            if evidence.evidence_id is not None
+        }
+        planned_range_count += len(set(item.evidence_ids) & known_evidence_ids)
+    materialized_range_count = sum(
+        len(item.ranges) for item in materials_by_path.values()
+    )
+    selected_plan_ids = tuple(item.candidate_id for item in planned_items)
+    planned_ledger = build_coverage_ledger(
+        retrieval.task,
+        retrieval.candidates,
+        selected_candidate_ids=selected_plan_ids,
+        stage="plan",
+        planner_bindings=() if plan is None else plan.role_bindings,
+        requirements=retrieval.requirements,
+    )
+    planned_role_ids = planned_ledger.covered_role_ids
+    materialized_role_ids = materialization_ledger.covered_role_ids
+    materialized_kinds = {
+        item.role_id: item.kind for item in materialization_ledger.roles
+    }
+    missing_mandatory_role_ids = tuple(
+        role_id
+        for role_id in materialization_ledger.missing_role_ids
+        if materialized_kinds[role_id] != "unknown"
+    )
+    reasons: set[CompilationReasonCode] = set()
+    if (
+        retrieval.requirements is not None
+        and retrieval.requirements.unresolved_dependency_ids
+    ):
+        reasons.add("behavioral_dependency_unresolved")
+    if (
+        retrieval.requirements is not None
+        and retrieval.requirements.topic_grounding == "unresolved"
+    ):
+        reasons.add("task_anchor_unresolved")
+    if declared_status == "insufficient":
+        reasons.add("declared_insufficient")
+    if not retrieval.candidates:
+        reasons.add("empty_retrieval")
+    if not capsule.task_context:
+        reasons.add("empty_task_context")
+    if plan_replaced:
+        reasons.add("plan_replaced")
+    if missing_item_ids:
+        reasons.add("planned_item_unmaterialized")
+        if plan_replaced:
+            reasons.add("budget_excluded_mandatory_item")
+    for item in planned_items:
+        candidate = candidates_by_id.get(item.candidate_id)
+        material = materials_by_path.get(item.path)
+        if candidate is None or material is None or item.evidence_ids == ():
+            continue
+        if not set(item.evidence_ids) <= set(material.evidence_ids):
+            reasons.add("planned_evidence_unmaterialized")
+            continue
+        if not _material_covers_planned_item(candidate, item, material):
+            reasons.add("planned_range_unmaterialized")
+    if set(planned_role_ids) - set(materialized_role_ids):
+        reasons.add("planned_role_lost")
+    if missing_mandatory_role_ids:
+        reasons.add("mandatory_role_missing")
+    if materialization_ledger.missing_graph_endpoints:
+        reasons.add("graph_endpoint_missing")
+    if materialization_ledger.missing_requirement_ids:
+        reasons.add("required_source_evidence_missing")
+    effective_status: Literal["sufficient", "insufficient"] = (
+        "sufficient"
+        if declared_status == "sufficient" and capsule.task_context and not reasons
+        else "insufficient"
+    )
+    return CompilationSufficiency(
+        declared_status=declared_status,
+        effective_status=effective_status,
+        reason_codes=tuple(sorted(reasons)),
+        planned_item_ids=planned_item_ids,
+        materialized_item_ids=materialized_item_ids,
+        missing_planned_item_ids=missing_item_ids,
+        planned_evidence_ids=planned_evidence_ids,
+        materialized_evidence_ids=materialized_evidence_ids,
+        planned_range_count=planned_range_count,
+        materialized_range_count=materialized_range_count,
+        planned_role_ids=planned_role_ids,
+        materialized_role_ids=materialized_role_ids,
+        missing_mandatory_role_ids=missing_mandatory_role_ids,
+        replacement_used=plan_replaced,
+    )
+
+
+def _capsule_ledger(
+    task: str,
+    candidates: tuple[CandidateCard, ...],
+    capsule: ContextCapsule,
+    requirements: EvidenceRequirements | None = None,
+    *,
+    state: _CompilerState | None = None,
+) -> CoverageLedger:
+    """Build coverage from actual material identities, never from ranking order."""
+
+    source_material = tuple((*capsule.working_set, *capsule.task_context))
+    cache_key = tuple(id(item) for item in source_material)
+    if state is not None and cache_key in state.coverage_cache:
+        state.coverage_cache.move_to_end(cache_key)
+        return state.coverage_cache[cache_key][1]
+    materials = {
+        item.path: item
+        for item in (*capsule.working_set, *capsule.task_context)
+        if item.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+    }
+    visible_candidates: list[CandidateCard] = []
+    selected_ids: list[str] = []
+    for candidate in candidates:
+        material = materials.get(candidate.path)
+        if material is not None and material.source_sha256 != candidate.source_sha256:
+            material = None
+        visible = (
+            ()
+            if material is None
+            else tuple(
+                evidence
+                for evidence in candidate.evidence_ranges
+                if evidence.evidence_id in material.evidence_ids
+                and (
+                    material.representation == RepresentationMode.FULL
+                    or any(
+                        actual.start_line <= evidence.source_range.start_line
+                        and evidence.source_range.end_line <= actual.end_line
+                        for actual in material.ranges
+                    )
+                )
+            )
+        )
+        visible_candidates.append(
+            candidate.model_copy(update={"evidence_ranges": visible})
+        )
+        if material is not None and (visible or not candidate.evidence_ranges):
+            selected_ids.append(candidate.candidate_id)
+    ledger = build_coverage_ledger(
+        task,
+        tuple(visible_candidates),
+        selected_candidate_ids=tuple(selected_ids),
+        stage="materialization",
+        requirements=requirements,
+    )
+    if state is not None:
+        # Retain the materials with the identity key, preventing object ID reuse.
+        state.coverage_cache[cache_key] = (source_material, ledger)
+        if len(state.coverage_cache) > 128:
+            state.coverage_cache.popitem(last=False)
+    return ledger
+
+
+def _mandatory_role_ids(ledger: CoverageLedger) -> tuple[str, ...]:
+    kinds = {item.role_id: item.kind for item in ledger.roles}
+    return tuple(role_id for role_id in kinds if kinds[role_id] != "unknown")
+
+
+def _automatic_material_options(
+    state: _CompilerState,
+    candidate: CandidateCard,
+    *,
+    required_evidence: bool = False,
+    required_ids: frozenset[str] = frozenset(),
+) -> tuple[CapsuleMaterial, ...]:
+    """Return the cheapest verified map/slice choices for one candidate."""
+    key = (id(candidate), required_evidence, required_ids)
+    if key in state.material_options:
+        return state.material_options[key]
+    options = [
+        material
+        for material in (
+            None
+            if required_evidence
+            else _materialize(
+                state, candidate.path, RepresentationMode.MAP, candidate, ()
+            ),
+            _materialize(
+                state,
+                candidate.path,
+                RepresentationMode.SLICE,
+                candidate,
+                tuple(
+                    dict.fromkeys(
+                        (
+                            *state.mandatory_ranges.get(candidate.candidate_id, ()),
+                            *tuple(
+                                item.source_range
+                                for item in candidate.evidence_ranges
+                                if not required_ids or item.evidence_id in required_ids
+                            ),
+                        )
+                    )
+                )
+                if required_evidence
+                or candidate.exact_group in {"exact_symbol", "exact_qualified_symbol"}
+                else _automatic_slice_ranges(state, candidate),
+                tuple(sorted(required_ids)),
+            ),
+            _materialize(state, candidate.path, RepresentationMode.FULL, candidate, ()),
+        )
+        if material is not None
+    ]
+    state.material_options[key] = tuple(
+        sorted(
+            options,
+            key=lambda item: (item.token_count, _mode_rank(item.representation)),
+        )
+    )
+    return state.material_options[key]
+
+
+def _supplemental_coverage_keys(candidate: CandidateCard) -> set[str]:
+    """Only independent concepts and ranges belong to the second greedy pass."""
+
+    return {
+        *(f"concept:{value.casefold()}" for value in candidate.matched_concepts),
+        *(f"symbol:{value.casefold()}" for value in candidate.matched_symbols),
+        *(
+            (f"exact:{candidate.exact_group}",)
+            if candidate.exact_group != "approximate"
+            else ()
+        ),
+        *(
+            "range:"
+            f"{item.path}:{item.source_range.start_line}:{item.source_range.end_line}:"
+            f"{item.evidence_id or ''}"
+            for item in candidate.evidence_ranges
+        ),
+        *(
+            f"provenance:{value}"
+            for value in candidate.provenance
+            if value in {"current-diff", "working-set"}
+        ),
+        *(f"graph-endpoint:{item.path}" for item in candidate.graph_neighbors),
+        *(
+            f"graph-flow:{item.distance}:{kind}:{provenance}"
+            for item in candidate.graph_neighbors
+            for kind in item.relationship_kinds
+            for provenance in item.provenance
+        ),
+    }
+
+
+def _select_automatic_evidence(
+    state: _CompilerState,
+    task: str,
+    capsule: ContextCapsule,
+    candidates: tuple[CandidateCard, ...],
+    eligible: list[CandidateCard],
+    selected: list[CapsuleMaterial],
+    selected_tokens: int,
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+    *,
+    token_limit: int,
+    requirements: EvidenceRequirements | None = None,
+) -> tuple[list[CapsuleMaterial], int, ContextCapsule]:
+    """Select coverage first, then independent detail, without evicting evidence.
+
+    The two phases deliberately use ledgers instead of score-only gains: a map is
+    selected for every still-coverable requested role and graph endpoint before
+    duplicate concepts, ranges, or source-detail upgrades compete for budget.
+    """
+
+    all_ledger = build_coverage_ledger(
+        task,
+        candidates,
+        stage="retrieval",
+        requirements=requirements,
+    )
+    remaining = list(eligible)
+
+    def current_ledger() -> CoverageLedger:
+        return _capsule_ledger(
+            task,
+            candidates,
+            capsule,
+            requirements=requirements,
+            state=state,
+        )
+
+    def append_for(
+        predicate: object,
+        *,
+        required_evidence: bool = False,
+        candidate_id: str | None = None,
+    ) -> bool:
+        nonlocal capsule, selected_tokens
+        before = current_ledger()
+        choices: list[
+            tuple[int, int, int, float, str, CandidateCard, CapsuleMaterial]
+        ] = []
+        for candidate in remaining:
+            if candidate_id is not None and candidate.candidate_id != candidate_id:
+                continue
+            options = _automatic_material_options(
+                state,
+                candidate,
+                required_evidence=required_evidence,
+                required_ids=state.mandatory_ids.get(
+                    candidate.candidate_id, frozenset()
+                ),
+            )
+            for material in options:
+                proposed = capsule.model_copy(
+                    update={"task_context": tuple((*selected, material))}
+                )
+                after = _capsule_ledger(
+                    task,
+                    candidates,
+                    proposed,
+                    requirements=requirements,
+                    state=state,
+                )
+                if not callable(predicate) or not predicate(before, after, candidate):
+                    continue
+                fits_limit = _fits(proposed, budget, estimator, token_limit=token_limit)
+                fits_first_indivisible = not selected and _fits(
+                    proposed, budget, estimator
+                )
+                fits_required = required_evidence and _fits(proposed, budget, estimator)
+                if not fits_limit and not fits_first_indivisible and not fits_required:
+                    continue
+                choices.append(
+                    (
+                        material.token_count,
+                        _mode_rank(material.representation),
+                        _exact_group_rank(candidate.exact_group),
+                        -candidate.score,
+                        candidate.path,
+                        candidate,
+                        material,
+                    )
+                )
+        if not choices:
+            return False
+        _, _, _, _, _, candidate, material = min(choices)
+        selected.append(material)
+        selected_tokens += material.token_count
+        remaining.remove(candidate)
+        capsule = capsule.model_copy(update={"task_context": tuple(selected)})
+        return True
+
+    # Frozen source obligations precede role alternatives and optional detail.
+    for requirement in () if requirements is None else requirements.source_evidence:
+        if requirement.requirement_id in current_ledger().missing_requirement_ids:
+            append_for(
+                lambda before, after, _candidate, expected=requirement.requirement_id: (
+                    expected in before.missing_requirement_ids
+                    and expected not in after.missing_requirement_ids
+                ),
+                required_evidence=True,
+                candidate_id=requirement.candidate_id,
+            )
+    # Mandatory roles and structural endpoints follow the source obligations.
+    for role_id in _mandatory_role_ids(all_ledger):
+        while role_id not in set(current_ledger().covered_role_ids):
+            if not append_for(
+                lambda before, after, _candidate, expected=role_id: (
+                    expected
+                    in set(after.covered_role_ids) - set(before.covered_role_ids)
+                ),
+                required_evidence=True,
+            ):
+                break
+    for endpoint in all_ledger.covered_graph_endpoints:
+        while endpoint not in set(current_ledger().covered_graph_endpoints):
+            if not append_for(
+                lambda before, after, _candidate, expected=endpoint: (
+                    expected
+                    in set(after.covered_graph_endpoints)
+                    - set(before.covered_graph_endpoints)
+                ),
+                required_evidence=True,
+            ):
+                break
+
+    # Preserve one verified structural counterpart for a single-file exact
+    # result.  This is deliberately a graph relation, not a filename heuristic;
+    # mandatory endpoint coverage above remains responsible for wider flows.
+    selected_paths = {item.path for item in selected}
+    related_paths = {
+        neighbor.path
+        for candidate in candidates
+        if candidate.path in selected_paths
+        for neighbor in candidate.graph_neighbors
+    } | {
+        candidate.path
+        for candidate in candidates
+        if any(
+            neighbor.path in selected_paths for neighbor in candidate.graph_neighbors
+        )
+    }
+    if related_paths:
+        append_for(lambda _before, _after, candidate: candidate.path in related_paths)
+    if len(selected) == 1:
+        append_for(
+            lambda _before, _after, candidate: any(
+                value.startswith("graph-") for value in candidate.provenance
+            )
+        )
+
+    # Only after coverage is protected may unique concepts and ranges use space.
+    covered_supplemental = {
+        key
+        for item in selected
+        for candidate in candidates
+        if candidate.path == item.path
+        for key in _supplemental_coverage_keys(candidate)
+    }
+    while remaining:
+
+        def adds_detail(
+            _before: CoverageLedger, _after: CoverageLedger, candidate: CandidateCard
+        ) -> bool:
+            keys = _supplemental_coverage_keys(candidate)
+            identity = {key for key in keys if key.startswith(("concept:", "symbol:"))}
+            exact = {key for key in keys if key.startswith("exact:")}
+            covered_identity = {
+                key
+                for key in covered_supplemental
+                if key.startswith(("concept:", "symbol:"))
+            }
+            covered_exact = {
+                key for key in covered_supplemental if key.startswith("exact:")
+            }
+            # A range is supplemental only for a file without duplicate task
+            # identifiers. This makes range diversity real rather than a path
+            # based way to repeat the same evidence across callers.
+            return (
+                bool(identity - covered_identity)
+                or bool(exact - covered_exact)
+                or (not identity and bool(keys - covered_supplemental))
+            )
+
+        if not append_for(adds_detail):
+            break
+        latest = selected[-1]
+        selected_candidate = next(
+            candidate for candidate in candidates if candidate.path == latest.path
+        )
+        covered_supplemental.update(_supplemental_coverage_keys(selected_candidate))
+    return selected, selected_tokens, capsule
 
 
 def _apply_greedy_upgrades(
     state: _CompilerState,
+    task: str,
     capsule: ContextCapsule,
     candidates: tuple[CandidateCard, ...],
     working_lines: dict[str, tuple[SourceRange, ...]],
@@ -577,6 +1198,7 @@ def _apply_greedy_upgrades(
     *,
     token_limit: int,
     allow_indivisible_upgrade: bool,
+    requirements: EvidenceRequirements | None = None,
 ) -> ContextCapsule:
     by_path = {item.path: item for item in candidates}
     current = {("working", item.path): item for item in capsule.working_set} | {
@@ -647,6 +1269,25 @@ def _apply_greedy_upgrades(
                     ),
                 }
             )
+            # An upgrade must be monotonic for verified coverage.  It normally
+            # replaces one material in place, but calculate from the ledger so
+            # later representation changes cannot silently evict last coverage.
+            before = _capsule_ledger(
+                task, candidates, capsule, requirements, state=state
+            )
+            after = _capsule_ledger(
+                task, candidates, candidate_capsule, requirements, state=state
+            )
+            if set(after.missing_requirement_ids) - set(before.missing_requirement_ids):
+                continue
+            if set(before.covered_role_ids) - set(after.covered_role_ids) or set(
+                before.covered_graph_endpoints
+            ) - set(after.covered_graph_endpoints):
+                continue
+            if {item.evidence_id for item in before.ranges} - {
+                item.evidence_id for item in after.ranges
+            }:
+                continue
             if _fits(
                 candidate_capsule,
                 budget,
@@ -727,6 +1368,8 @@ def _materialize_validated_plan(
             continue
         accepted = None
         for material in _planned_materializations(state, candidate, item):
+            if not _material_covers_planned_item(candidate, item, material):
+                continue
             if selected_tokens + material.token_count > evidence_limit:
                 continue
             proposed = capsule.model_copy(
@@ -740,6 +1383,36 @@ def _materialize_validated_plan(
         selected.append(accepted)
         selected_tokens += accepted.token_count
     return tuple(selected)
+
+
+def _material_covers_planned_item(
+    candidate: CandidateCard,
+    item: PlannedEvidence,
+    material: CapsuleMaterial,
+) -> bool:
+    if material.source_sha256 != item.source_sha256:
+        return False
+    if not item.evidence_ids:
+        return True
+    if not set(item.evidence_ids) <= set(material.evidence_ids):
+        return False
+    if material.representation == RepresentationMode.FULL:
+        return True
+    if material.representation != RepresentationMode.SLICE:
+        return False
+    expected_ranges = {
+        evidence.evidence_id: evidence.source_range
+        for evidence in candidate.evidence_ranges
+        if evidence.evidence_id in set(item.evidence_ids)
+    }
+    return all(
+        any(
+            actual.start_line <= expected.start_line
+            and actual.end_line >= expected.end_line
+            for actual in material.ranges
+        )
+        for expected in expected_ranges.values()
+    )
 
 
 def _planned_materializations(
@@ -759,7 +1432,18 @@ def _planned_materializations(
     evidence_ids = tuple(
         evidence_id for evidence_id in plan.evidence_ids if evidence_id in selected
     )
-    ranges = tuple(selected[evidence_id].source_range for evidence_id in evidence_ids)
+    required_ids = state.mandatory_ids.get(candidate.candidate_id, frozenset())
+    if not required_ids <= selected.keys():
+        return ()
+    evidence_ids = tuple(sorted({*evidence_ids, *required_ids}))
+    ranges = tuple(
+        dict.fromkeys(
+            (
+                *state.mandatory_ranges.get(candidate.candidate_id, ()),
+                *(selected[evidence_id].source_range for evidence_id in evidence_ids),
+            )
+        )
+    )
     requested_mode = RepresentationMode(plan.representation)
     fallback_modes = {
         RepresentationMode.FULL: (
@@ -776,6 +1460,11 @@ def _planned_materializations(
     }[requested_mode]
     materials: list[CapsuleMaterial] = []
     for mode in fallback_modes:
+        if required_ids and mode in {
+            RepresentationMode.MAP,
+            RepresentationMode.SUMMARY,
+        }:
+            continue
         if mode == RepresentationMode.SLICE and not ranges:
             continue
         material = _materialize(
@@ -817,6 +1506,11 @@ def _coverage_keys(candidate: CandidateCard) -> set[str]:
 def _automatic_slice_ranges(
     state: _CompilerState, candidate: CandidateCard | None
 ) -> tuple[SourceRange, ...]:
+    if candidate is not None and candidate.exact_group in {
+        "exact_symbol",
+        "exact_qualified_symbol",
+    }:
+        return tuple(item.source_range for item in candidate.evidence_ranges)
     if candidate is None:
         return ()
     ordered = sorted(
@@ -888,6 +1582,40 @@ def _materialize(
     if candidate is not None and candidate.source_sha256 != expected_sha:
         raise ContextFreshnessError(f"candidate source identity is stale: {path}")
     _assert_fresh(state, path, expected_sha)
+    if candidate is not None:
+        state.material_candidates[id(candidate)] = candidate
+    key = (
+        path,
+        mode,
+        id(candidate),
+        requested_evidence_ids,
+        tuple(
+            (r.start_line, r.start_column, r.end_line, r.end_column)
+            for r in requested_ranges
+        ),
+    )
+    if key not in state.material_cache:
+        state.material_cache[key] = _materialize_uncached(
+            state,
+            path,
+            mode,
+            candidate,
+            requested_ranges,
+            requested_evidence_ids,
+        )
+    return state.material_cache[key]
+
+
+def _materialize_uncached(
+    state: _CompilerState,
+    path: str,
+    mode: RepresentationMode,
+    candidate: CandidateCard | None,
+    requested_ranges: tuple[SourceRange, ...],
+    requested_evidence_ids: tuple[str, ...],
+) -> CapsuleMaterial | None:
+    code_map = _code_map(state, path)
+    expected_sha = code_map.source_sha256
     ranges: tuple[CapsuleRange, ...] = ()
     provenance = ["verified-structure"]
     if mode == RepresentationMode.MAP:
@@ -916,17 +1644,43 @@ def _materialize(
         content = source
         provenance.append("verified-full-source")
     relevance = 1.0 if candidate is None else candidate.score
-    material_evidence_ids = requested_evidence_ids
-    if not material_evidence_ids and candidate is not None:
+    material_evidence_ids: tuple[str, ...] = ()
+    if candidate is not None and mode in {
+        RepresentationMode.SLICE,
+        RepresentationMode.FULL,
+    }:
+        if path not in state.source_lookups:
+            state.source_lookups[path] = verified_source_lookup(code_map)
+        known_ranges = state.source_lookups[path]
+        card = _card(state, path)
+        if card is not None:
+            known_ranges.update(
+                (e.evidence_id, e.source_range)
+                for e in card.evidence
+                if e.source_range is not None
+            )
+            if card.lexicon is not None:
+                owners = {s.symbol_id: s for s in code_map.symbols}
+                for function in card.lexicon.functions:
+                    owner = owners.get(function.symbol_id)
+                    if owner is not None:
+                        end = owner.body_range or owner.declaration_range
+                        known_ranges[f"lexicon:{owner.symbol_id}"] = (
+                            owner.declaration_range.model_copy(
+                                update={
+                                    "end_line": end.end_line,
+                                    "end_column": end.end_column,
+                                }
+                            )
+                        )
         material_evidence_ids = tuple(
-            item.evidence_id
-            for item in candidate.evidence_ranges
-            if item.evidence_id is not None
-            and (
+            identity
+            for identity, address in known_ranges.items()
+            if (
                 mode != RepresentationMode.SLICE
                 or any(
-                    item.source_range.start_line <= value.end_line
-                    and item.source_range.end_line >= value.start_line
+                    value.start_line <= address.start_line
+                    and address.end_line <= value.end_line
                     for value in ranges
                 )
             )
@@ -1071,6 +1825,11 @@ def _slice_ranges(
 ) -> tuple[CapsuleRange, ...]:
     expanded: list[tuple[int, int]] = []
     for evidence in evidence_ranges:
+        # A requested evidence address is indivisible. Context/header expansion
+        # may add lines, but must never replace the address with a cheap header.
+        expanded.append(
+            (max(1, evidence.start_line), min(line_count, evidence.end_line))
+        )
         overlapping = []
         for symbol in code_map.symbols:
             declaration_start = symbol.declaration_range.start_line
@@ -1198,6 +1957,50 @@ def _render_orientation(
         if estimator.count(candidate) <= token_limit:
             lines.append(f"central-file {file_entry.path}")
     return "\n".join(lines)
+
+
+def _compact_repository_map(orientation: OrientationMap, path: str) -> str:
+    """Minimal verified envelope for a short exact-file capsule."""
+
+    selected = next((item for item in orientation.files if item.path == path), None)
+    if selected is None:
+        return f"selected-file {path}"
+    return (
+        f"selected-file {selected.path} | module={selected.module} | "
+        f"language={selected.language or 'unknown'} | lines={selected.line_count} | "
+        f"symbols={selected.symbol_count}"
+    )
+
+
+def _compact_profile(
+    capsule: ContextCapsule,
+    orientation: OrientationMap,
+    candidates: tuple[CandidateCard, ...],
+) -> ContextCapsule | None:
+    """Make a smaller exact-file envelope without weakening evidence rules."""
+
+    if (
+        capsule.working_set
+        or capsule.git_context
+        or len(capsule.task_context) != 1
+        or capsule.interpretations
+    ):
+        return None
+    material = capsule.task_context[0]
+    candidate = next((item for item in candidates if item.path == material.path), None)
+    if (
+        candidate is None
+        or candidate.exact_group == "approximate"
+        or material.representation
+        not in {RepresentationMode.SLICE, RepresentationMode.FULL}
+    ):
+        return None
+    return capsule.model_copy(
+        update={
+            "repository_map": _compact_repository_map(orientation, material.path),
+            "compact_profile": True,
+        }
+    )
 
 
 def _git_text(value: str | object | None) -> str:
@@ -1349,6 +2152,39 @@ def _fits(
 
 def _render_capsule(capsule: ContextCapsule) -> str:
     escape = html.escape
+    usage_rules = (
+        (
+            "    <rule>Repository maps verify indexed structure; quote or cite "
+            "source only from exact lines in materialized SLICE or FULL "
+            "sections.</rule>",
+            "    <rule>Grounded summaries are evidence-linked interpretation, "
+            "not source guarantees; report it as unknown when evidence does not "
+            "establish a claim.</rule>",
+        )
+        if capsule.compact_profile
+        else (
+            (
+                "    <rule>Repository maps verify indexed structure, not source "
+                "contents, behavior, or guarantees.</rule>"
+            ),
+            (
+                "    <rule>Quote or cite source only when its exact lines are present "
+                "in a materialized SLICE or FULL section.</rule>"
+            ),
+            (
+                "    <rule>Grounded summaries are evidence-linked interpretation, "
+                "not source text or a guarantee.</rule>"
+            ),
+            (
+                "    <rule>Interpretations are unverified selection rationale and "
+                "are separate from verified facts and source.</rule>"
+            ),
+            (
+                "    <rule>When supplied evidence does not establish a claim, "
+                "report it as unknown.</rule>"
+            ),
+        )
+    )
     lines = [
         '<contextforge schema_version="2">',
         (
@@ -1359,26 +2195,7 @@ def _render_capsule(capsule: ContextCapsule) -> str:
         ),
         f"  <task>{escape(capsule.task)}</task>",
         '  <usage_rules provenance="contextforge-verified">',
-        (
-            "    <rule>Repository maps verify indexed structure, not source "
-            "contents, behavior, or guarantees.</rule>"
-        ),
-        (
-            "    <rule>Quote or cite source only when its exact lines are present "
-            "in a materialized SLICE or FULL section.</rule>"
-        ),
-        (
-            "    <rule>Grounded summaries are evidence-linked interpretation, "
-            "not source text or a guarantee.</rule>"
-        ),
-        (
-            "    <rule>Interpretations are unverified selection rationale and "
-            "are separate from verified facts and source.</rule>"
-        ),
-        (
-            "    <rule>When supplied evidence does not establish a claim, "
-            "report it as unknown.</rule>"
-        ),
+        *usage_rules,
         "  </usage_rules>",
         "  <verified_repository_map>",
         escape(capsule.repository_map),

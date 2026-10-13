@@ -17,7 +17,7 @@ from contextforge.intelligence import (
     load_semantic_card,
 )
 from contextforge.intelligence import cards as cards_module
-from contextforge.models import FakeModelProvider, ProviderConfiguration
+from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
 from contextforge.repositories import scan_repository
 
 
@@ -72,6 +72,173 @@ def test_inferred_relationship_evidence_ids_are_canonical() -> None:
         )
 
 
+def test_semantic_card_rejects_stale_lexicon_and_duplicate_coverage(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    payload = card.model_dump(mode="json")
+    payload["lexicon"] = {
+        "schema_version": 1,
+        "path": "other.py",
+        "source_sha256": card.source_sha256,
+        "context_mode": "full_graph",
+        "functions": [],
+        "calls": [],
+    }
+    with pytest.raises(ValueError, match="lexicon identity"):
+        type(card).model_validate_json(json.dumps(payload))
+
+    payload = card.model_dump(mode="json")
+    span = {"start_line": 1, "start_column": 0, "end_line": 1, "end_column": 1}
+    payload["coverage_ranges"] = [span, span]
+    with pytest.raises(ValueError, match="coverage ranges"):
+        type(card).model_validate_json(json.dumps(payload))
+
+
+def test_semantic_card_rejects_duplicate_and_self_inferred_edges(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    relation = SemanticInferredRelationship(
+        target_candidate_id="target:" + "a" * 64,
+        target_path="other.py",
+        target_source_sha256="b" * 64,
+        evidence_ids=("file",),
+    ).model_dump(mode="json")
+    payload = card.model_dump(mode="json")
+    payload["inferred_relationships"] = [relation, relation]
+    with pytest.raises(ValueError, match="unique and canonical"):
+        type(card).model_validate_json(json.dumps(payload))
+    payload["inferred_relationships"] = [{**relation, "target_path": "app.py"}]
+    with pytest.raises(ValueError, match="self-referential"):
+        type(card).model_validate_json(json.dumps(payload))
+
+
+def test_semantic_card_enforces_serialized_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    report = asyncio.run(
+        build_repository_index(tmp_path, provider=None, provider_configuration=None)
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    monkeypatch.setattr(cards_module, "MAX_SEMANTIC_CARD_BYTES", 10)
+    with pytest.raises(ValueError, match="bounded record size"):
+        type(card).model_validate_json(card.model_dump_json())
+
+
+def test_invalid_grounded_model_card_publishes_retryable_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+
+    def invalid_grounding(*args: object, **kwargs: object) -> None:
+        raise ValueError("invalid required grounding")
+
+    monkeypatch.setattr(cards_module, "_ground_raw_card", invalid_grounding)
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    card = load_semantic_card(tmp_path, "app.py", manifest=report.manifest)
+    assert report.semantic is not None
+    assert report.semantic.failed_paths == ("app.py",)
+    assert card.provenance.method == "deterministic-fallback"
+    assert card.quality == "partial"
+    assert card.file_tags
+    assert all(tag.provenance == "structural-fallback" for tag in card.file_tags)
+
+
+def test_noop_update_retries_failed_card_without_reextracting_source(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+
+    def respond(request: ModelRequest, call: int) -> str:
+        return _response(synopsis_evidence="unknown" if call < 2 else "file")
+
+    provider = _provider(respond)
+    initial = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    assert initial.semantic is not None and initial.semantic.failed_paths == ("app.py",)
+    before = provider.call_count
+    updated = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    assert updated.structural.extracted_paths == ()
+    assert provider.call_count > before
+    assert updated.semantic is not None and updated.semantic.failed_paths == ()
+    card = load_semantic_card(tmp_path, "app.py", manifest=updated.manifest)
+    assert card.provenance.method == "model"
+    assert card.file_tags
+    assert all(tag.provenance == "model" for tag in card.file_tags)
+
+
+def test_unusable_model_tags_remain_partial_and_retry_uncached(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+
+    def respond(request: ModelRequest, call: int) -> str:
+        answer = json.loads(_response())
+        if call == 0:
+            answer["concepts"][0]["text"] = " ".join(["request"] * 12)
+        return json.dumps(answer)
+
+    provider = _provider(respond)
+    first = asyncio.run(
+        build_repository_index(
+            tmp_path, provider=provider, provider_configuration=provider.configuration
+        )
+    )
+    assert first.partial
+    assert first.semantic is not None and first.semantic.failed_paths == ("app.py",)
+    first_card = load_semantic_card(tmp_path, "app.py", manifest=first.manifest)
+    assert first_card.quality == "partial"
+    assert all(tag.provenance == "structural-fallback" for tag in first_card.file_tags)
+
+    before = provider.call_count
+    updated = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+            update_only=True,
+        )
+    )
+    assert updated.structural.extracted_paths == ()
+    assert provider.call_count > before
+    assert updated.semantic is not None and updated.semantic.failed_paths == ()
+    card = load_semantic_card(tmp_path, "app.py", manifest=updated.manifest)
+    assert any(tag.provenance == "model" for tag in card.file_tags)
+
+
 def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     tmp_path: Path,
 ) -> None:
@@ -95,6 +262,37 @@ def test_semantic_card_keeps_grounded_items_and_drops_bad_optional_claim(
     assert card.key_symbols[0].name == "handle"
     assert "Invalid optional claim" not in card.ranking_text()
     assert provider.call_count == 1
+
+
+def test_semantic_scheduler_records_selection_reason_and_retrieval_value(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "def handle(request: str) -> str:\n    return request\n", encoding="utf-8"
+    )
+    provider = _provider(lambda request, call: _response())
+
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+
+    assert report.semantic is not None
+    outcomes = report.semantic.model_file_outcomes  # type: ignore[union-attr]
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert outcome.path == "main.py"
+    assert "entrypoint" in outcome.selection_reasons
+    assert outcome.grounded_terms_added > 0
+    assert outcome.retrieval_value == (
+        outcome.grounded_terms_added + outcome.grounded_relationships_added
+    )
+    assert outcome.status == "complete"
+    card = load_semantic_card(tmp_path, "main.py", manifest=report.manifest)
+    assert any(item.code == "semantic_scheduler_value" for item in card.diagnostics)
 
 
 def test_repository_maps_project_grounded_claims_and_enriched_graph(
@@ -137,10 +335,11 @@ def test_repository_maps_project_grounded_claims_and_enriched_graph(
         "source-test",
         "entrypoint-handler",
     }
-    assert {item.provenance for item in relationships} >= {
-        "verified",
-        "best-effort-structural",
-    }
+    handler_relationships = [
+        item for item in relationships if item.kind == "entrypoint-handler"
+    ]
+    assert handler_relationships
+    assert {item.provenance for item in handler_relationships} == {"verified"}
     assert any(
         claim.text == "request handling"
         and claim.provenance == "grounded-semantic-card"
@@ -205,7 +404,7 @@ def test_content_cache_rebinds_unchanged_source_after_rename(tmp_path: Path) -> 
     assert all(item.path == "new.py" for item in card.evidence)
 
 
-def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
+def test_unrelated_rename_retries_uncached_fallback_card(tmp_path: Path) -> None:
     (tmp_path / "failed.py").write_text(
         "def failed(request: str) -> str:\n    return request\n", encoding="utf-8"
     )
@@ -244,9 +443,9 @@ def test_unrelated_rename_reuses_uncached_fallback_card(tmp_path: Path) -> None:
     )
 
     reused_failed = load_semantic_card(tmp_path, "failed.py", manifest=updated.manifest)
-    assert provider.call_count == initial_calls
+    assert provider.call_count > initial_calls
     assert updated.semantic is not None
-    assert "failed.py" in updated.semantic.reused_paths
+    assert "failed.py" not in updated.semantic.reused_paths
     assert reused_failed.provenance.method == "deterministic-fallback"
 
 
@@ -760,7 +959,7 @@ def test_lexically_unanchored_optional_claim_is_not_ranking_text(
     assert "likely" not in card.ranking_text().casefold()
 
 
-def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
+def test_large_code_file_is_not_chunked_when_it_exceeds_context(
     tmp_path: Path,
 ) -> None:
     source = "\n".join(
@@ -831,17 +1030,96 @@ def test_semantic_card_chunks_large_utf8_source_and_scopes_evidence(
     )
     card = load_semantic_card(tmp_path, "large.py", manifest=report.manifest)
 
-    assert 2 <= provider.call_count <= 4
-    assert observed == [
-        (index, observed[0][1]) for index in range(1, len(observed) + 1)
-    ]
-    assert all(count <= 4 for _, count in observed)
-    assert card.provenance.method == "model"
-    assert card.quality in {"complete", "partial"}
-    assert len(card.coverage_ranges) == len(observed)
-    assert tuple(item.start_line for item in card.coverage_ranges) == tuple(
-        sorted(item.start_line for item in card.coverage_ranges)
+    assert provider.call_count == 0
+    assert observed == []
+    assert card.provenance.method == "deterministic-fallback"
+    assert report.semantic is not None
+    assert "large.py" in report.semantic.failed_paths
+
+
+def test_long_documentation_retains_bounded_chunk_planning(tmp_path: Path) -> None:
+    source = "# Guide\n" + "\n".join(
+        f"Section {number}: explains repository behavior and configuration."
+        for number in range(240)
     )
+    (tmp_path / "README.md").write_text(source, encoding="utf-8")
+    code_map = next(
+        item
+        for item in extract_code_maps(scan_repository(tmp_path))
+        if item.path == "README.md"
+    )
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="small-context",
+            context_window=2048,
+        ),
+        responder=lambda request, call: _response(),
+    )
+    chunks, truncated = cards_module._plan_card_chunks(
+        provider,
+        code_map,
+        source,
+        (),
+        SemanticCardOptions(max_chunks_per_file=4),
+    )
+    assert 1 <= len(chunks) <= 4
+    assert all(chunk.text for chunk in chunks)
+    assert chunks[0].text != source
+    assert truncated
+
+
+def test_documentation_chunks_merge_grounded_claims(tmp_path: Path) -> None:
+    source = "# Guide\n" + "\n".join(
+        f"Section {number}: explains repository behavior and configuration."
+        for number in range(160)
+    )
+    (tmp_path / "README.md").write_text(source, encoding="utf-8")
+    observed = []
+
+    def respond(request: ModelRequest, call: int) -> str:
+        observed.append(request)
+        evidence_id = request.trusted_code_map_facts["allowed_evidence_ids"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": "Repository behavior and configuration",
+                    "evidence_ids": [evidence_id],
+                },
+                "concepts": [
+                    {"text": "repository configuration", "evidence_ids": [evidence_id]}
+                ],
+                "responsibilities": [],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+            }
+        )
+
+    provider = FakeModelProvider(
+        ProviderConfiguration(
+            provider_id="fake",
+            endpoint="http://127.0.0.1:1",
+            model_id="small-context",
+            context_window=4096,
+            retry_limit=0,
+            max_json_repair_attempts=0,
+        ),
+        responder=respond,
+    )
+    report = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=provider,
+            provider_configuration=provider.configuration,
+        )
+    )
+    card = load_semantic_card(tmp_path, "README.md", manifest=report.manifest)
+    assert len(observed) >= 2
+    assert card.synopsis.text == "Repository behavior and configuration"
+    assert card.coverage_ranges
 
 
 def test_source_first_request_covers_142_line_typescript_in_one_call(
@@ -1202,6 +1480,24 @@ def test_barrel_policy_distinguishes_reexports_from_executable_initializer(
 
     assert cards_module._requires_deterministic_card(maps["barrel/__init__.py"])
     assert not cards_module._requires_deterministic_card(maps["executable/__init__.py"])
+
+
+def test_scope_all_analyzes_callable_code_before_other_files(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "empty.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "module.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    maps = {item.path: item for item in extract_code_maps(scan_repository(tmp_path))}
+
+    assert cards_module._semantic_processing_paths(maps, "all") == (
+        "module.py",
+        "empty.py",
+        "README.md",
+    )
+    assert cards_module._semantic_processing_paths(maps, "priority") == (
+        "README.md",
+        "empty.py",
+        "module.py",
+    )
 
 
 def test_inferred_relationships_validate_and_rebind_both_renames(

@@ -86,6 +86,18 @@ class BenchmarkSourceRange(BenchmarkModel):
         return self
 
 
+class BenchmarkAssertionSupport(BenchmarkModel):
+    """Expected source address and material evidence identity for one assertion."""
+
+    citation: BenchmarkSourceRange
+    material_evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("material_evidence_ids")
+    @classmethod
+    def validate_evidence_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_canonical(value, label="assertion evidence IDs")
+
+
 class BenchmarkExpectedAssertion(BenchmarkModel):
     """One answer fact whose support is compared across paired contexts."""
 
@@ -93,6 +105,7 @@ class BenchmarkExpectedAssertion(BenchmarkModel):
         min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
     )
     description: str = Field(min_length=1, max_length=2_000)
+    support: tuple[BenchmarkAssertionSupport, ...] = ()
 
     @field_validator("description")
     @classmethod
@@ -107,12 +120,18 @@ class BenchmarkAnswerCitation(BenchmarkModel):
     path: RepositoryRelativePath
     start_line: PositiveInt
     end_line: PositiveInt
+    material_evidence_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_order(self) -> BenchmarkAnswerCitation:
         if self.end_line < self.start_line:
             raise ValueError("citation end must not precede its start")
         return self
+
+    @field_validator("material_evidence_ids")
+    @classmethod
+    def validate_evidence_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_canonical(value, label="citation evidence IDs")
 
 
 class BenchmarkAnswerEvaluation(BenchmarkModel):
@@ -125,6 +144,8 @@ class BenchmarkAnswerEvaluation(BenchmarkModel):
     invalid_citation_count: NonNegativeInt = 0
     assertion_recall: Rate
     citation_validity: Rate
+    assertion_evidence_support: Rate = 0.0
+    lexical_identifier_support: Rate = 0.0
     input_tokens: NonNegativeInt = 0
     estimated_input_tokens: NonNegativeInt = 0
     provider_input_tokens: NonNegativeInt = 0
@@ -523,6 +544,18 @@ class BenchmarkFailure(BenchmarkModel):
     message: str = Field(min_length=1, max_length=2_000)
 
 
+class BenchmarkSemanticRetrievalComparison(BenchmarkModel):
+    """Deterministic retrieval-only comparison for one enrichment run."""
+
+    with_cards_paths: tuple[RepositoryRelativePath, ...] = ()
+    without_cards_paths: tuple[RepositoryRelativePath, ...] = ()
+    added_candidate_paths: tuple[RepositoryRelativePath, ...] = ()
+    removed_candidate_paths: tuple[RepositoryRelativePath, ...] = ()
+    grounded_terms_added: NonNegativeInt = 0
+    grounded_relationships_added: NonNegativeInt = 0
+    status: Literal["complete", "partial"] = "partial"
+
+
 class BenchmarkRunResult(BenchmarkModel):
     """Canonical result for one task, mode, and repetition."""
 
@@ -561,6 +594,7 @@ class BenchmarkRunResult(BenchmarkModel):
     index_output_tokens: NonNegativeInt = 0
     planning_input_tokens: NonNegativeInt = 0
     planning_output_tokens: NonNegativeInt = 0
+    semantic_retrieval_comparison: BenchmarkSemanticRetrievalComparison | None = None
     paired_answer: BenchmarkPairedAnswerEvaluation | None = None
     latency_kind: Literal["cold", "warm", "incremental"] = "cold"
     expectations: BenchmarkExpectationEvaluation

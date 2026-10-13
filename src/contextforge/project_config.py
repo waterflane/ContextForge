@@ -21,6 +21,8 @@ from pydantic import (
 
 from contextforge.logging import LogFormat, LoggingConfiguration, LogLevel
 from contextforge.models import (
+    CODEX_ENDPOINT,
+    CODEX_PROVIDER_ID,
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -30,6 +32,7 @@ from contextforge.models import (
     DEFAULT_OPERATION_TIMEOUT_SECONDS,
     DEFAULT_READ_TIMEOUT_SECONDS,
     OPENAI_COMPATIBLE_PROVIDER_ID,
+    CodexCLIModelProvider,
     FakeModelProvider,
     ModelProvider,
     ModelRequest,
@@ -93,11 +96,11 @@ class ProjectModelSettings(_ConfigModel):
     concurrency_limit: int = 2
     retry_limit: int = 2
     semantic_max_output_tokens: int = Field(default=1024, ge=96, le=32_768, strict=True)
-    semantic_scope: Literal["priority", "all", "none"] = "priority"
+    semantic_scope: Literal["priority", "all", "none"] = "all"
     semantic_max_model_files: int = Field(default=64, ge=1, le=100_000, strict=True)
-    semantic_max_requests: int = Field(default=96, ge=1, le=100_000, strict=True)
+    semantic_max_requests: int = Field(default=100_000, ge=1, le=100_000, strict=True)
     semantic_max_input_tokens: int = Field(
-        default=256_000, ge=1, le=100_000_000, strict=True
+        default=100_000_000, ge=1, le=100_000_000, strict=True
     )
     semantic_max_chunks_per_file: int = Field(default=4, ge=1, le=4, strict=True)
     context_planning_mode: Literal["off", "auto", "required"] = "auto"
@@ -253,6 +256,10 @@ def resolve_provider_configuration(
     endpoint = settings.endpoint
     if provider_id == OPENAI_COMPATIBLE_PROVIDER_ID:
         endpoint = base_url or settings.base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+    elif provider_id == CODEX_PROVIDER_ID:
+        if base_url is not None:
+            raise ProjectConfigError("--base-url is not supported by Codex")
+        endpoint = CODEX_ENDPOINT
     elif base_url is not None:
         raise ProjectConfigError(
             "--base-url is only supported by the OpenAI-compatible provider"
@@ -621,6 +628,8 @@ def create_model_provider(configuration: ProviderConfiguration) -> ModelProvider
         return OpenAICompatibleModelProvider(configuration)
     if configuration.provider_id == "fake":
         return FakeModelProvider(configuration, responder=_fixture_response)
+    if configuration.provider_id == CODEX_PROVIDER_ID:
+        return CodexCLIModelProvider(configuration)
     raise ProviderConfigurationError(
         f"unsupported model provider: {configuration.provider_id}"
     )

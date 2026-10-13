@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from enum import StrEnum
 from pathlib import Path
@@ -16,7 +17,9 @@ from contextforge.benchmarks import (
     BenchmarkMode,
     BenchmarkTask,
     load_benchmark_manifest,
+    load_real_repository_benchmark_manifest,
     run_discovery_benchmark,
+    run_pinned_real_repository_benchmark,
 )
 from contextforge.benchmarks.renderers import (
     render_benchmark_json,
@@ -25,7 +28,13 @@ from contextforge.benchmarks.renderers import (
 )
 from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
-from contextforge.models import ModelProvider, ModelProviderError
+from contextforge.models import (
+    CODEX_ENDPOINT,
+    CODEX_PROVIDER_ID,
+    ModelProvider,
+    ModelProviderError,
+    ProviderConfiguration,
+)
 from contextforge.project_config import (
     ProjectConfigError,
     ProjectConfiguration,
@@ -52,6 +61,101 @@ benchmark_app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
+
+@benchmark_app.command("real-repositories")
+def benchmark_real_repositories(
+    manifest_path: Annotated[
+        Path,
+        typer.Option("--manifest", exists=True, dir_okay=False, readable=True),
+    ],
+    sources: Annotated[
+        list[str],
+        typer.Option("--source", help="Pinned repository ID=local Git path; repeat."),
+    ],
+    endpoint: Annotated[str, typer.Option("--endpoint")] = ("http://127.0.0.1:1919/v1"),
+    provider: Annotated[str, typer.Option("--provider")] = "openai-compatible",
+    allow_repository_code: Annotated[
+        bool, typer.Option("--allow-repository-code")
+    ] = False,
+    model_id: Annotated[str | None, typer.Option("--model-id")] = None,
+    context_window: Annotated[int, typer.Option("--context-window", min=1024)] = (
+        16_384
+    ),
+    repetitions: Annotated[int, typer.Option("--repetitions", min=1)] = 3,
+    model_repetitions: Annotated[int, typer.Option("--model-repetitions", min=1)] = 3,
+    hash_seed_reloads: Annotated[
+        int, typer.Option("--hash-seed-reloads", min=0, max=100)
+    ] = 100,
+    semantic_max_files: Annotated[
+        int | None, typer.Option("--semantic-max-files", min=1)
+    ] = None,
+    semantic_max_requests: Annotated[
+        int, typer.Option("--semantic-max-requests", min=1)
+    ] = 4_096,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+) -> None:
+    """Run both retrieval modes and paired answers on fresh pinned clones."""
+
+    try:
+        manifest = load_real_repository_benchmark_manifest(manifest_path)
+        parsed_sources: dict[str, Path] = {}
+        known = {item.repository_id for item in manifest.repositories}
+        for item in sources:
+            name, separator, location = item.partition("=")
+            if not separator or name not in known or not location:
+                raise ValueError("--source requires a manifest repository ID=path")
+            if name in parsed_sources:
+                raise ValueError("--source IDs must be unique")
+            parsed_sources[name] = Path(location)
+        if provider not in {"openai-compatible", CODEX_PROVIDER_ID}:
+            raise ValueError("--provider must be openai-compatible or codex")
+        if provider == CODEX_PROVIDER_ID and not allow_repository_code:
+            raise ValueError("Codex requires --allow-repository-code")
+        if provider == CODEX_PROVIDER_ID and model_id is None:
+            raise ValueError("Codex requires an explicit --model-id")
+        if provider != CODEX_PROVIDER_ID and allow_repository_code:
+            raise ValueError("--allow-repository-code requires --provider codex")
+        configuration = ProviderConfiguration(
+            provider_id=provider,
+            endpoint=CODEX_ENDPOINT if provider == CODEX_PROVIDER_ID else endpoint,
+            model_id=model_id or "Qwen3.6-35B-A3B-NVFP4",
+            context_window=context_window,
+            reasoning_effort="off",
+            local_only=provider != CODEX_PROVIDER_ID,
+            external_data_policy=(
+                "allow_repository" if provider == CODEX_PROVIDER_ID else "deny"
+            ),
+        )
+        destination = output or (
+            Path.cwd()
+            / ".contextforge"
+            / "benchmark-results"
+            / f"{manifest.suite_name}-{time.time_ns()}.json"
+        )
+        result = asyncio.run(
+            run_pinned_real_repository_benchmark(
+                manifest,
+                parsed_sources,
+                configuration,
+                repetitions=repetitions,
+                model_repetitions=model_repetitions,
+                report_path=destination,
+                hash_seed_reloads=hash_seed_reloads,
+                semantic_max_files=semantic_max_files,
+                semantic_max_requests=semantic_max_requests,
+                progress=lambda message: typer.echo(message, err=True),
+            )
+        )
+        write_output_atomic(destination, result.model_dump_json(indent=2) + "\n")
+    except (OSError, ValueError, ValidationError, OutputWriteError) as exc:
+        _exit_with_error(str(exc), code=2)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    typer.echo(f"Report: {destination}")
+    typer.echo(f"Status: {'passed' if result.passed else 'quality_gate_failed'}")
+    if not result.passed:
+        raise typer.Exit(code=BENCHMARK_REGRESSION_EXIT_CODE)
 
 
 @benchmark_app.command("discovery")

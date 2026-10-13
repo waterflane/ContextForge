@@ -292,7 +292,12 @@ async def compile_capsule(request: CompileRequest) -> dict[str, object]:
             pinned_full_files=request.pinned_full_files,
             git_diff=request.git_diff,
         )
-        return compiled.model_dump(mode="json")
+        diagnostics = compiled.evidence_diagnostics
+        assert diagnostics is not None
+        return {
+            **compiled.model_dump(mode="json"),
+            "evidence_diagnostics": diagnostics.model_dump(mode="json"),
+        }
     except (
         ContextCompilerError,
         OSError,

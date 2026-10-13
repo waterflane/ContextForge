@@ -95,6 +95,36 @@ This roadmap describes broad milestones only. It does not promise dates.
   analyzer identity across endpoint changes, and return safe typed Bridge
   integration errors.
 
+## v0.6: Index v3.1 and evidence compilation (beta)
+
+- [x] Retain the `contextforge-repo` PyPI distribution, `contextforge` import,
+  and existing `contextforge` / `ctxf` commands.
+- [x] Publish structural-first immutable Index v3.1 generations, followed by
+  optional source-grounded semantic enrichment with explicit partial coverage.
+- [x] Add deterministic exact/BM25/verified-graph retrieval and a bounded planner
+  with search, symbol, graph, map, and grounded query expansion actions.
+- [x] Compile Context Capsule v2 with frozen evidence requirements, source
+  identity checks, effective sufficiency, and a hard token budget.
+- [x] Expose source-bound function descriptions and function-level discovery in
+  the Python API, plus optional compact source prompt export.
+- [x] Preserve mandatory material within the hard budget and verified discovery
+  after planner failure; reduce repeated planner input.
+- [x] Prepare standard `0.6.0b1` wheel and source distributions and validate clean
+  installations, public schemas, and the existing aggregate coverage gate.
+- [ ] Improve descriptive function selection and delivery of implementation
+  ranges through standard retrieval; finding a file is not complete source
+  coverage. Keep planner request/session limits visible when they cause fallback.
+- [ ] Complete independent full-semantic quality acceptance in both deterministic
+  and planned modes across the pinned real repositories.
+- [ ] Confirm citation support, groundedness, oracle comparison, and token savings
+  on quality-passed tasks; practical lookup checks alone do not close this gate.
+- [ ] Publish the beta through the existing PyPI release workflow after separate
+  authorization. Local artifacts are not a published release.
+
+See the [beta package guide](docs/guides/release-0.6.0b1.md) and
+[practical function lookup guide](docs/guides/function-lookup.md). The presentation
+web application remains separate from the Python package.
+
 ## Later
 
 - Full multi-root workspaces.

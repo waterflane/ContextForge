@@ -19,6 +19,7 @@ from contextforge.intelligence.codemap import (
     SourceRange,
     stable_fact_id,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.manifest import (
     build_index_manifest,
@@ -2289,12 +2290,7 @@ def _package_key(path: str) -> str:
 
 
 def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    return (
-        "tests" in pure.parts
-        or pure.name.startswith("test_")
-        or pure.stem.endswith("_test")
-    )
+    return FILE_POLICY_REGISTRY.is_test(path)
 
 
 def _scope_id(prefix: str, *parts: object) -> str:

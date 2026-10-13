@@ -19,13 +19,14 @@ from contextforge.intelligence import (
     RetrievalDocument,
     RetrievalField,
     RetrievalIndex,
-    RetrievalIndexShardManifest,
+    RetrievalSemanticOverlayManifest,
     SourceRange,
     build_retrieval_index,
     load_file_code_map,
     load_retrieval_index,
     retrieve_context_candidates,
 )
+from contextforge.intelligence.retrieval import FIELD_WEIGHTS
 from contextforge.models import FakeModelProvider, ProviderConfiguration
 
 
@@ -54,6 +55,201 @@ def _provider(responder: object) -> FakeModelProvider:
         max_json_repair_attempts=0,
     )
     return FakeModelProvider(configuration, responder=responder)  # type: ignore[arg-type]
+
+
+def test_complementary_pool_uses_complete_verified_projection(tmp_path: Path) -> None:
+    _write(tmp_path, "core.py", "def dispatch_job():\n    return 1\n")
+    for ordinal in range(18):
+        _write(tmp_path, f"consumer{ordinal:02}.py", "from core import dispatch_job\n")
+    _write(
+        tmp_path,
+        "tests/test_core.py",
+        "from core import dispatch_job\ndef test_result():\n"
+        "    assert dispatch_job() == 1\n",
+    )
+    _write(tmp_path, "unrelated.py", "def unused():\n    return 0\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "dispatch_job implementation tests",
+            manifest=report.manifest,
+        )
+    )
+    core = next(c for c in result.candidates if c.path == "core.py")
+    assert len(core.graph_neighbors) > 12
+    test = next(c for c in result.candidates if c.path == "tests/test_core.py")
+    assert any(
+        reason.startswith("verified-source-test:") for reason in test.selection_reasons
+    )
+    assert "unrelated.py" not in {c.path for c in result.candidates}
+    assert len(result.candidates) <= 64
+
+
+def test_lexical_discovery_seeds_cover_distinct_facets(tmp_path: Path) -> None:
+    from contextforge.intelligence.retrieval import _topical_seeds
+
+    for name in ("amber", "cobalt", "ivory", "jade", "unused"):
+        _write(tmp_path, f"{name}.py", f"def {name}_stage():\n    return 1\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Explain amber cobalt ivory jade implementation tests",
+            manifest=report.manifest,
+        )
+    )
+    assert (
+        sum("lexical-discovery-seed" in c.selection_reasons for c in result.candidates)
+        == 4
+    )
+    assert "unused.py" not in {c.path for c in result.candidates}
+    assert result.requirements is not None
+    assert result.requirements.topic_grounding == "unresolved"
+    reference = report.manifest.artifacts.structural_retrieval
+    assert reference is not None
+    index = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    seeds, _ = _topical_seeds(
+        "Explain implementation tests", index, list(result.candidates)
+    )
+    assert seeds == []
+
+
+def test_planned_search_can_start_with_an_empty_lexical_pool(tmp_path: Path) -> None:
+    _write(tmp_path, "worker.py", "def hidden_flow():\n    return 1\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            assert facts["candidates"] == []
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "search", "query": "hidden_flow", "limit": 1}
+                    ],
+                }
+            )
+        candidate = facts["candidates"][0]
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "sufficiency": "insufficient",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "evidence_ids": [],
+                                "representation": "full",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "unmappedword",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode=ContextPlanningMode.AUTO,
+        )
+    )
+    assert result.provider_calls == 2
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.candidates[0].path == "worker.py"
+    assert result.candidates[0].resolved_symbols == ()
+    assert result.candidates[0].match_origin != "explicit-anchor"
+    assert result.requirements is not None
+    assert result.requirements.query_intent is not None
+    assert result.requirements.query_intent.original_task == "unmappedword"
+    assert result.requirements.query_intent.explicit_anchors == ("unmappedword",)
+
+
+@pytest.mark.parametrize(
+    "record",
+    ["codemap", "graph-header", "graph-shard", "retrieval-header", "retrieval-shard"],
+)
+def test_warm_caches_still_reject_changed_immutable_records(
+    tmp_path: Path, record: str
+) -> None:
+    from contextforge.intelligence.store import (
+        IndexManifestReadError,
+        load_generation_record,
+    )
+
+    _write(tmp_path, "jobs.py", "def execute_job():\n    return 7\n")
+    _write(
+        tmp_path,
+        "main.py",
+        "from jobs import execute_job\ndef invoke():\n    return execute_job()\n",
+    )
+    report = _build(tmp_path)
+    first = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job implementation",
+            manifest=report.manifest,
+        )
+    )
+    assert (
+        asyncio.run(
+            retrieve_context_candidates(
+                tmp_path,
+                "execute_job implementation",
+                manifest=report.manifest,
+            )
+        )
+        == first
+    )
+    if record == "codemap":
+        location = next(
+            s.record_location for s in report.manifest.files if s.path == "jobs.py"
+        )
+        assert location is not None
+    else:
+        reference = (
+            report.manifest.artifacts.structural_retrieval
+            if record.startswith("retrieval-")
+            else report.manifest.artifacts.relationship_graph
+        )
+        assert reference is not None
+        location = reference.location
+        if record in {"graph-shard", "retrieval-shard"}:
+            header = json.loads(
+                load_generation_record(
+                    tmp_path,
+                    location,
+                    manifest=report.manifest,
+                )
+            )
+            field = (
+                "document_shards"
+                if record == "retrieval-shard"
+                else "file_projection_shards"
+            )
+            location = header[field][0]["artifact"]["location"]
+    destination = (
+        tmp_path
+        / ".contextforge/index/generations"
+        / report.manifest.generation_id
+        / location
+    )
+    destination.write_bytes(b"invalid record")
+    with pytest.raises((IndexManifestReadError, ValueError)):
+        asyncio.run(
+            retrieve_context_candidates(
+                tmp_path,
+                "execute_job implementation",
+                manifest=report.manifest,
+            )
+        )
 
 
 def test_exact_symbol_precedes_graph_related_approximate_candidates(
@@ -90,11 +286,93 @@ def test_exact_symbol_precedes_graph_related_approximate_candidates(
     assert result.candidates[0].exact_group == "exact_symbol"
     assert "handle_request" in result.candidates[0].matched_symbols
     assert result.candidates[0].evidence_ranges
+    assert result.candidates[0].bm25_score == sum(
+        result.candidates[0].bm25_field_scores.values()
+    )
+    assert "exact_symbol" in result.candidates[0].selection_reasons
     app = next(item for item in result.candidates if item.path == "src/app.py")
     assert app.exact_group == "exact_source_identifier"
     assert app.evidence_ranges
     assert any(item.path == "src/service.py" for item in app.graph_neighbors)
     assert report.manifest.artifacts.semantic_retrieval is not None
+
+
+def test_code_and_test_documents_have_source_bound_tags_before_enrichment(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "src/app.py", "def start():\n    return 1\n")
+    _write(tmp_path, "tests/test_app.py", "def test_start():\n    assert True\n")
+    _write(tmp_path, "README.md", "Project documentation.\n")
+    report = _build(tmp_path)
+    assert report.manifest.artifacts.structural_retrieval is not None
+    index = load_retrieval_index(
+        tmp_path,
+        report.manifest.artifacts.structural_retrieval,
+        manifest=report.manifest,
+    )
+    by_path = {item.path: item for item in index.documents}
+    for path in ("src/app.py", "tests/test_app.py"):
+        assert by_path[path].file_tags
+        assert all(
+            tag.provenance == "structural-fallback" for tag in by_path[path].file_tags
+        )
+    assert by_path["README.md"].file_tags == ()
+
+
+def test_complementary_test_is_recovered_before_pool_cutoff(tmp_path: Path) -> None:
+    _write(tmp_path, "codec.py", "def restore_encoding(value):\n    return value\n")
+    _write(
+        tmp_path,
+        "tests/test_codec.py",
+        "from codec import restore_encoding\ndef test_roundtrip():\n"
+        "    assert restore_encoding(1) == 1\n",
+    )
+    for index in range(25):
+        _write(
+            tmp_path,
+            f"other{index}.py",
+            f"def encoding{index}(value):\n    return value\n",
+        )
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review restoration encoding behavior and tests",
+            limit=5,
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    paths = [candidate.path for candidate in result.candidates]
+    assert "codec.py" in paths
+    assert "tests/test_codec.py" in paths
+    assert result.provider_calls == 0
+    candidate = next(
+        item for item in result.candidates if item.path == "tests/test_codec.py"
+    )
+    assert candidate.evidence_ranges
+    assert any(
+        "verified" in neighbor.provenance for neighbor in candidate.graph_neighbors
+    )
+
+
+def test_complementary_selection_keeps_explicit_exact_symbol_first(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "impl.py", "def restore_encoding(value):\n    return value\n")
+    _write(tmp_path, "tests/test_impl.py", "from impl import restore_encoding\n")
+    report = _build(tmp_path)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review restore_encoding behavior and tests",
+            limit=5,
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert result.candidates[0].path == "impl.py"
+    assert result.candidates[0].exact_group == "exact_symbol"
 
 
 def test_working_set_and_diff_boosts_are_deterministic(tmp_path: Path) -> None:
@@ -180,7 +458,7 @@ def test_rerank_rejects_unknown_ids_after_one_repair(tmp_path: Path) -> None:
     result = asyncio.run(
         retrieve_context_candidates(
             tmp_path,
-            "change functions",
+            "change one two functions",
             manifest=report.manifest,
             provider=provider,
             rerank=True,
@@ -232,6 +510,17 @@ def test_grounded_semantics_supply_ranked_concepts_and_ranges(tmp_path: Path) ->
             provider_configuration=provider.configuration,
         )
     )
+    semantic_reference = report.manifest.artifacts.semantic_retrieval
+    assert semantic_reference is not None
+    semantic_index = load_retrieval_index(
+        tmp_path, semantic_reference, manifest=report.manifest
+    )
+    document = next(
+        item for item in semantic_index.documents if item.path == "handler.py"
+    )
+    assert any(tag.provenance == "model" for tag in document.file_tags)
+    tag_field = next(item for item in document.fields if item.name == "file_tags")
+    assert tag_field.terms["normalization"] > 0
 
     result = asyncio.run(
         retrieve_context_candidates(
@@ -273,12 +562,14 @@ def test_valid_rerank_can_only_reorder_and_represent_supplied_candidates(
 
     provider = _provider(respond)
     deterministic = asyncio.run(
-        retrieve_context_candidates(tmp_path, "functions", manifest=report.manifest)
+        retrieve_context_candidates(
+            tmp_path, "one two functions", manifest=report.manifest
+        )
     )
     reranked = asyncio.run(
         retrieve_context_candidates(
             tmp_path,
-            "functions",
+            "one two functions",
             manifest=report.manifest,
             provider=provider,
             rerank=True,
@@ -287,6 +578,8 @@ def test_valid_rerank_can_only_reorder_and_represent_supplied_candidates(
 
     assert reranked.reranked is True
     assert reranked.provider_calls == 1
+    assert reranked.planning_diagnostics is not None
+    assert reranked.planning_diagnostics.estimated_input_tokens > 0
     assert [item.candidate_id for item in reranked.candidates] == list(
         reversed([item.candidate_id for item in deterministic.candidates])
     )
@@ -301,7 +594,7 @@ def test_retrieval_schemas_reject_noncanonical_postings() -> None:
         RetrievalField(name="path", length=2, terms={"z": 1, "a": 1})
     field_values = tuple(
         RetrievalField(name=name, length=0, terms={})  # type: ignore[arg-type]
-        for name in ("path", "symbols", "source_identifiers", "grounded_semantics")
+        for name in FIELD_WEIGHTS
     )
     with pytest.raises(ValidationError, match="unique and canonical"):
         RetrievalDocument(
@@ -396,6 +689,36 @@ def test_structural_generation_retrieval_needs_no_semantic_cards(
     assert candidate.synopsis == "Structural map for service.py."
     assert candidate.estimated_cost.summary is None
     assert candidate.matched_concepts == ()
+
+
+def test_large_source_keeps_role_coverage_without_overflowing_binding(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "work.py",
+        "".join(
+            f"def operation_{index}():\n    return {index}\n\n" for index in range(30)
+        ),
+    )
+    report = _build(tmp_path)
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "review work implementation "
+            + " ".join(f"operation_{index}" for index in range(30)),
+            manifest=report.manifest,
+            planning_mode=ContextPlanningMode.OFF,
+        )
+    )
+
+    assert len(result.candidates[0].evidence_ranges) > 16
+    assert result.coverage_ledger is not None
+    assert "implementation" in result.coverage_ledger.covered_role_ids
+    assert all(
+        len(binding.evidence_ids) <= 16 for binding in result.coverage_ledger.bindings
+    )
 
 
 def test_retrieval_rejects_missing_and_stale_generation_artifacts(
@@ -628,6 +951,71 @@ def test_evidence_planner_selects_only_supplied_ranges(tmp_path: Path) -> None:
     assert set(result.evidence_plan.items[0].evidence_ids) <= supplied
 
 
+def test_evidence_planner_retains_only_supplied_role_bindings(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "handler.py",
+        "__all__ = ['startup']\ndef startup() -> None:\n    return None\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "from handler import startup\n\ndef boot():\n    startup()\n",
+    )
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        del call
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "main.py"
+        )
+        role_ids = {item["role_id"] for item in facts["task_evidence_roles"]}
+        assert {"entrypoint", "implementation"} <= role_ids
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "selected": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                        "representation": "slice",
+                    }
+                ],
+                "role_bindings": [
+                    {
+                        "role_id": "entrypoint",
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                    },
+                    {
+                        "role_id": "unknown",
+                        "candidate_id": candidate["candidate_id"],
+                        "evidence_ids": [candidate["evidence"][0]["evidence_id"]],
+                    },
+                ],
+                "sufficiency": "sufficient",
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review startup implementation.",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode=ContextPlanningMode.AUTO,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert [
+        (item.role_id, item.source) for item in result.evidence_plan.role_bindings
+    ] == [("entrypoint", "planner")]
+    assert result.coverage_ledger is not None
+    assert "entrypoint" in result.coverage_ledger.covered_role_ids
+
+
 def test_planner_does_not_advertise_full_for_large_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -739,7 +1127,7 @@ def test_agentic_planner_discovers_candidate_outside_initial_pool(
     assert result.provider_calls == 2
 
 
-def test_agentic_planner_combines_search_graph_and_map_expansion(
+def test_agentic_planner_records_measured_search_expansion(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "helper.py", "def support():\n    return 'ready'\n")
@@ -754,19 +1142,11 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     def respond(request: object, call: int) -> str:
         facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
         if call == 0:
-            initial = facts["candidates"][0]
-            module = facts["modules"][0]
             return json.dumps(
                 {
                     "schema_version": 1,
                     "actions": [
-                        {"action": "search", "query": "hidden_flow", "limit": 4},
-                        {
-                            "action": "graph",
-                            "candidate_id": initial["candidate_id"],
-                            "hops": 2,
-                        },
-                        {"action": "map", "module_id": module["module_id"]},
+                        {"action": "search", "query": "hidden_flow", "limit": 1},
                     ],
                 }
             )
@@ -774,9 +1154,12 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
             item for item in facts["candidates"] if item["path"] == "flow.py"
         )
         assert {item["action"] for item in facts["completed_actions"]} == {
-            "graph",
-            "map",
+            "search",
         }
+        assert all(
+            item["coverage_delta"]["new_evidence_ids"]
+            for item in facts["completed_actions"]
+        )
         return json.dumps(
             {
                 "schema_version": 1,
@@ -809,6 +1192,161 @@ def test_agentic_planner_combines_search_graph_and_map_expansion(
     assert result.evidence_plan is not None
     assert result.evidence_plan.items[0].path == "flow.py"
     assert result.evidence_plan.diagnostics.rounds == 2
+    assert [item.stage for item in result.coverage_history] == [
+        "retrieval",
+        "action",
+        "plan",
+    ]
+
+
+def test_agentic_planner_records_grounded_query_expansion(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def start():\n    return 'ready'\n")
+    _write(tmp_path, "flow.py", "def hidden_flow():\n    return 'complete'\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        if call == 0:
+            vocabulary = facts["repository_vocabulary"]
+            assert "hidden_flow" in vocabulary["symbols"]
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "expand_query", "expressions": ["hidden_flow"]}
+                    ],
+                }
+            )
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "flow.py"
+        )
+        assert facts["completed_actions"][0]["expansions"] == (
+            {
+                "expression": "hidden_flow",
+                "result_candidate_ids": (candidate["candidate_id"],),
+            },
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "start",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.items[0].path == "flow.py"
+    assert (
+        result.evidence_plan.diagnostics.query_expansions[0].expression == "hidden_flow"
+    )
+    assert result.evidence_plan.diagnostics.query_expansions[0].result_candidate_ids
+
+
+def test_agentic_no_gain_action_finalizes_insufficient_without_another_call(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "service.py", "def service() -> None:\n    return None\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        assert call == 0
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        assert facts["coverage_ledger"]["missing_role_ids"] == ("unknown",)
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [{"action": "search", "query": "service", "limit": 1}],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "service",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+            planning_max_candidates=1,
+        )
+    )
+
+    assert result.provider_calls == 1
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.evidence_plan.items == ()
+    assert result.diagnostics == ("planner_no_coverage_gain",)
+
+
+def test_agentic_sufficient_is_downgraded_when_a_mandatory_role_is_missing(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        assert call == 0
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        candidate = next(
+            item for item in facts["candidates"] if item["path"] == "main.py"
+        )
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "representation": "map",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "Review startup implementation tests.",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+
+    assert result.provider_calls == 1
+    assert result.evidence_plan is not None
+    assert result.evidence_plan.sufficiency == "insufficient"
+    assert result.coverage_ledger is not None
+    assert "test" in result.coverage_ledger.missing_role_ids
+    assert "planner_missing_mandatory_roles" in result.diagnostics
 
 
 def test_agentic_planner_shrinks_each_round_to_provider_context(tmp_path: Path) -> None:
@@ -967,6 +1505,150 @@ def test_planner_previews_sample_late_evidence_and_bound_large_declarations() ->
     assert "line 109" in preview
     assert "line 145" in preview
     assert len(preview.splitlines()) < 50
+
+
+def test_compact_planner_retains_required_units_without_full_file_catalog(
+    tmp_path: Path,
+) -> None:
+    from contextforge.context import ContextBudget, compile_context_capsule
+    from contextforge.intelligence.retrieval import (
+        _planner_candidate,
+        _planner_previews,
+    )
+    from contextforge.intelligence.source_evidence import derive_source_evidence_units
+
+    _write(
+        tmp_path,
+        "service.py",
+        "LIMIT = 7\ndef helper():\n    return LIMIT\n"
+        "def target_action():\n    return helper()\n"
+        + "\n".join(f"def unused_{i}():\n    return {i}\n" for i in range(180)),
+    )
+    report = _build(tmp_path)
+    plain = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path, "Explain `target_action`.", manifest=report.manifest
+        )
+    )
+    candidate = next(c for c in plain.candidates if c.path == "service.py")
+    code_map = load_file_code_map(tmp_path, "service.py", manifest=report.manifest)
+    catalog = tuple(
+        CandidateEvidenceRange(
+            path=unit.path,
+            source_range=unit.source_range,
+            evidence_id=unit.evidence_id,
+            strength="verified",
+        )
+        for unit in derive_source_evidence_units(code_map)
+    )
+    candidate = candidate.model_copy(
+        update={
+            "evidence_ranges": tuple(
+                dict.fromkeys((*candidate.evidence_ranges, *catalog))
+            )
+        }
+    )
+    assert len(candidate.evidence_ranges) > 180
+    assert plain.requirements is not None
+    required = {
+        evidence_id
+        for r in plain.requirements.source_evidence
+        if r.candidate_id == candidate.candidate_id
+        for evidence_id in r.evidence_ids
+    }
+    assert required
+    projected = _planner_candidate(
+        candidate, allow_full=False, requirements=plain.requirements
+    )
+    projected_evidence = projected["evidence"]
+    assert isinstance(projected_evidence, list)
+    supplied = {e["evidence_id"] for e in projected_evidence}
+    assert required <= supplied
+    assert supplied <= {e.evidence_id for e in candidate.evidence_ranges}
+    assert projected["source_sha256"] == candidate.source_sha256
+    assert len(projected_evidence) < 20
+    assert len(json.dumps(projected)) < 8_000
+    previews = _planner_previews(
+        tmp_path, (candidate,), requirements=plain.requirements
+    )
+    assert "target_action" in previews["service.py"].text
+    assert len(previews["service.py"].text.encode()) <= 2048
+
+    def respond(request: object, call: int) -> str:
+        facts = request.trusted_code_map_facts  # type: ignore[attr-defined]
+        card = facts["candidates"][0]
+        assert required <= {e["evidence_id"] for e in card["evidence"]}
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "actions": [
+                    {
+                        "action": "finalize",
+                        "selected": [
+                            {
+                                "candidate_id": card["candidate_id"],
+                                "evidence_ids": sorted(required),
+                                "representation": "slice",
+                            }
+                        ],
+                        "sufficiency": "sufficient",
+                    }
+                ],
+            }
+        )
+
+    planned = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            plain.task,
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert planned.requirements == plain.requirements
+    compiled = compile_context_capsule(
+        tmp_path,
+        plain.task,
+        planned,
+        budget=ContextBudget(
+            context_window_tokens=8192, response_tokens=512, safety_margin_tokens=128
+        ),
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert "def target_action" in compiled.prompt
+    assert "def helper" in compiled.prompt
+    assert "LIMIT = 7" in compiled.prompt
+
+
+def test_compact_planner_history_keeps_counts_without_mutating_diagnostics() -> None:
+    from contextforge.intelligence.retrieval import _planner_action_summary
+
+    original = {
+        "action": "search",
+        "result_candidate_ids": tuple(f"candidate-{i}" for i in range(60)),
+        "result_count": 60,
+        "coverage_delta": {
+            "new_evidence_ids": tuple(f"evidence-{i}" for i in range(1000)),
+            "new_role_ids": ("implementation",),
+        },
+    }
+    compact = _planner_action_summary(original)
+    compact_ids = compact["result_candidate_ids"]
+    compact_delta = compact["coverage_delta"]
+    compact_counts = compact["coverage_delta_counts"]
+    original_delta = original["coverage_delta"]
+    assert isinstance(compact_ids, (tuple, list))
+    assert isinstance(compact_delta, dict)
+    assert isinstance(compact_counts, dict)
+    assert isinstance(original_delta, dict)
+    assert len(compact_ids) == 8
+    assert compact["result_count"] == 60
+    assert len(compact_delta["new_evidence_ids"]) == 8
+    assert compact_counts["new_evidence_ids"] == 1000
+    assert len(original_delta["new_evidence_ids"]) == 1000
+    assert _planner_action_summary({"action": "finalize"}) == {"action": "finalize"}
 
 
 def test_required_evidence_planning_fails_without_provider(tmp_path: Path) -> None:
@@ -1134,14 +1816,78 @@ def test_retrieval_cache_revalidates_digest_bound_shards(tmp_path: Path) -> None
         / "generations"
         / report.manifest.generation_id
     )
-    header = RetrievalIndexShardManifest.model_validate_json(
+    header = RetrievalSemanticOverlayManifest.model_validate_json(
         (generation / reference.location).read_bytes()
     )
     shard = generation / header.document_shards[0].artifact.location
     shard.write_bytes(shard.read_bytes() + b" ")
 
-    with pytest.raises(ValueError, match="shard digest"):
+    with pytest.raises(ValueError, match="rebuild_required"):
         load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+
+
+@pytest.mark.parametrize("corruption", ["bytes", "count", "identity"])
+def test_source_unit_shards_preserve_complete_units_and_reject_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    from contextforge.intelligence import retrieval as retrieval_module
+    from contextforge.intelligence.source_evidence import derive_source_evidence_units
+
+    monkeypatch.setattr(retrieval_module, "RETRIEVAL_SHARD_MAX_BYTES", 96 * 1024)
+    _write(tmp_path, "large.py", "".join(f"value_{i} = {i}\n" for i in range(250)))
+    report = _build(tmp_path)
+    reference = report.manifest.artifacts.structural_retrieval
+    assert reference is not None
+    index = load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    document = index.documents[0]
+    assert len(document.source_unit_shards) >= 2
+    assert document.source_units == derive_source_evidence_units(
+        report.structural.code_maps[0]
+    )
+    locations = retrieval_module.retrieval_index_record_locations(
+        tmp_path, report.manifest
+    )
+    generation = (
+        tmp_path / ".contextforge/index/generations" / report.manifest.generation_id
+    )
+    assert all(
+        (generation / s.artifact.location).stat().st_size <= 96 * 1024
+        for s in document.source_unit_shards
+    )
+    assert set(s.artifact.location for s in document.source_unit_shards) <= set(
+        locations
+    )
+    assert load_retrieval_index(tmp_path, reference, manifest=report.manifest) is index
+    if corruption == "bytes":
+        from contextforge.intelligence.store import load_generation_record
+
+        target = generation / document.source_unit_shards[0].artifact.location
+        target.write_bytes(
+            load_generation_record(
+                tmp_path,
+                document.source_unit_shards[0].artifact.location,
+                manifest=report.manifest,
+            )
+            + b" "
+        )
+        with pytest.raises(ValueError, match="source-unit shard digest"):
+            load_retrieval_index(tmp_path, reference, manifest=report.manifest)
+    elif corruption == "count":
+        first = document.source_unit_shards[0]
+        changed = document.model_copy(
+            update={
+                "source_unit_shards": (
+                    first.model_copy(update={"record_count": first.record_count + 1}),
+                    *document.source_unit_shards[1:],
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="source-unit shard count"):
+            retrieval_module._load_unit_shards(tmp_path, report.manifest, changed)
+    else:
+        changed = document.model_copy(update={"source_sha256": "f" * 64})
+        with pytest.raises(ValueError, match="source-unit identity is stale"):
+            retrieval_module._load_unit_shards(tmp_path, report.manifest, changed)
 
 
 def test_retrieval_internal_guards_and_tokenization() -> None:
@@ -1167,3 +1913,168 @@ def test_retrieval_internal_guards_and_tokenization() -> None:
             working_set=(),
             diff_paths=(),
         )
+
+
+def test_query_stage_measurements_preserve_deterministic_result(tmp_path: Path) -> None:
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    timings = {"previous_query": 999.0}
+    measured = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+            query_stage_timings_ms=timings,
+        )
+    )
+    ordinary = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert measured == ordinary
+    assert set(timings) == {
+        "load_and_digest_checks",
+        "bm25_and_graph_routing",
+        "source_restoration",
+        "requirements_and_coverage",
+    }
+    assert all(value >= 0 for value in timings.values())
+
+
+def test_validated_query_cache_does_not_share_mutable_diagnostics(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    first = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    expected = first.model_dump(mode="json")
+    first.candidates[0].bm25_field_scores["symbols"] = -999.0
+    warm = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            planning_mode="off",
+        )
+    )
+    assert warm.model_dump(mode="json") == expected
+    assert warm.provider_calls == 0
+
+
+@pytest.mark.parametrize("rejection", ["explicit_zero", "open_circuit"])
+def test_planner_preflight_rejection_counts_zero_dispatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+) -> None:
+    from contextforge.models import (
+        ModelProviderError,
+        ModelResponse,
+        ProviderCircuitOpenError,
+    )
+
+    _write(tmp_path, "task.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    provider = _provider(lambda _request, _attempt: "{}")
+    attempted = []
+
+    async def reject(*_args: object, **_kwargs: object) -> ModelResponse:
+        attempted.append(True)
+        error: ModelProviderError
+        if rejection == "open_circuit":
+            error = ProviderCircuitOpenError("provider disabled before dispatch")
+        else:
+            error = ModelProviderError("dispatch rejected before transport")
+            error.total_provider_http_calls = 0
+            error.transport_attempts = 0
+        raise error
+
+    monkeypatch.setattr(provider, "complete_structured", reject)
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            provider=provider,
+            planning_mode="auto",
+        )
+    )
+    assert attempted == [True]
+    assert result.provider_calls == 0
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"
+    assert result.planning_diagnostics.estimated_input_tokens == 0
+    assert result.planning_diagnostics.reported_input_tokens is None
+
+
+def test_verified_discovery_survives_later_provider_failure(tmp_path: Path) -> None:
+    _write(tmp_path, "lifecycle.py", "def shutdown_worker():\n    return 'stopped'\n")
+    report = _build(tmp_path)
+
+    def respond(request: object, call: int) -> str:
+        if call == 0:
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {"action": "search", "query": "shutdown_worker", "limit": 4}
+                    ],
+                }
+            )
+        raise ValueError("Later transport failed")
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "unmatched description",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert result.candidates
+    assert any(c.path == "lifecycle.py" for c in result.candidates)
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"
+    assert result.coverage_history[-1].stage == "action"
+    assert result.requirements is not None
+    assert result.requirements.query_intent is not None
+    assert result.requirements.query_intent.original_task == "unmatched description"
+
+
+def test_zero_repairs_does_not_redispatch_invalid_planner_response(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "worker.py", "def execute_job():\n    return 1\n")
+    report = _build(tmp_path)
+    calls = []
+
+    def respond(request: object, call: int) -> str:
+        calls.append(call)
+        return json.dumps({"schema_version": 1, "actions": []})
+
+    result = asyncio.run(
+        retrieve_context_candidates(
+            tmp_path,
+            "execute_job",
+            manifest=report.manifest,
+            provider=_provider(respond),
+            planning_mode="auto",
+        )
+    )
+    assert len(calls) == 1
+    assert result.candidates
+    assert result.planning_diagnostics is not None
+    assert result.planning_diagnostics.status == "fallback"

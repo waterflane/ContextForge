@@ -8,6 +8,8 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+## [0.6.0b1] - 2026-10-13
+
 ### Added
 
 - Added Index v3 structural-first generations containing deterministic
@@ -34,14 +36,32 @@ and Python distribution versions follow PEP 440.
   negotiation, and paired same-model answer regressions with an ordinary
   full-file baseline, range-validated citations, three-vote blinded
   groundedness judging, and phase-separated token accounting.
+- Added closed task-evidence roles and ID-only CoverageLedger diagnostics across
+  retrieval, planning, and materialization. Bridge 2.2, MCP, HTTP, and CLI
+  compilation results expose additive evidence-coverage diagnostics without
+  changing legacy Bridge or artifact contracts.
+- Added bounded multilingual planner query expansion from supplied repository
+  vocabulary, including expression/result-ID diagnostics, without domain
+  dictionaries or model-created source facts.
+- Added semantic-retrieval comparison reporting and per-file deterministic
+  scheduler/value diagnostics, separating grounded retrieval value from model
+  request cost.
+- Added source-bound function descriptions and deterministic function-level
+  discovery over immutable CodeMaps, plus compact numbered source prompt export
+  through the Python API and `context create --compact-prompt`.
 
 ### Changed
 
+- Kept the existing `contextforge-repo` PyPI distribution, `contextforge` import,
+  and `contextforge` / `ctxf` commands. Beta artifacts are a normal wheel and
+  source distribution; an optional transfer archive is not a new package format.
+- Updated the roadmap and practical function lookup documentation to distinguish
+  function discovery, source materialization, and full semantic acceptance.
 - Index build/update now publish a usable structural generation before semantic
   enrichment. Enrichment failure, timeout, or cancellation leaves that
   structural generation active; old immutable generations remain until explicit
   `index clean`.
-- Index/manifest/record schemas are version 3. Index v2 is status-readable as
+- Index/manifest/record schemas are version 4. Earlier schemas are status-readable as
   `rebuild_required`, excluded from retrieval, rejected by `index update`, and
   replaced only by a full build without semantic migration.
 - Task-based `context suggest` and `context create` default to Index v3 retrieval
@@ -53,8 +73,21 @@ and Python distribution versions follow PEP 440.
 - Semantic enrichment now uses analyzer 7 / `semantic-card-v3.4`, declaration-
   aware one-to-four chunk planning, full-request/schema token accounting, one
   scheduler-owned repair authority, and lexical anchors for ranking prose.
+- Enriched retrieval generations now store a digest-bound semantic overlay over
+  structural postings, preserving the public RetrievalIndex API while avoiding
+  a second near-complete postings corpus.
 
 ### Fixed
+
+- Kept descriptive verbs after "which function" as topical search terms while
+  retaining explicit named identifiers and directed caller/callee requests.
+
+- Retained verified planner discovery after later provider failures and honored
+  explicitly disabled structured-response repairs without a hidden local retry.
+- Reduced planner menus and previews while retaining available required evidence,
+  resolved source anchors and complete local diagnostics.
+- Materialized mandatory source above the automatic soft target when it fits
+  inside the unchanged hard context budget.
 
 - Stabilized config-key digests, parse-error reuse, and no-op updates; added
   Kotlin structural extraction and compact bounded occurrence/card evidence.
@@ -111,6 +144,30 @@ and Python distribution versions follow PEP 440.
   operation timeout. Client timeout leaves the job tracked by `operation_id`
   with its writer lock held through completion/cleanup; explicit cancellation
   and shutdown still cancel it.
+- Resolved relative TypeScript emitted import suffixes only through the declared
+  `.js`/`.jsx`/`.mjs`/`.cjs` to source-suffix table. Exact files still win,
+  package imports remain external, and ambiguity remains unresolved with
+  best-effort structural provenance.
+- Replaced the isolated Python test-path policy with a declarative shared file
+  policy. Source-test edges now prefer resolved test imports, calls, and
+  references, carry provenance, and remain excluded from centrality.
+- Constrained entrypoint-handler edges to verified callback or direct bootstrap
+  shapes instead of promoting every entrypoint import/call.
+- Made every planner action demonstrate a measurable evidence-coverage gain;
+  no-gain actions cannot extend a bounded session.
+- Validated plan sufficiency after actual capsule materialization. Missing
+  planned items, evidence/ranges, mandatory role coverage, or task material now
+  downgrade effective sufficiency with bounded reason codes.
+- Made automatic capsule selection coverage-first and prevented upgrades from
+  displacing the final evidence for a required role. Added an automatic compact
+  profile for one short exact file only when it is cheaper than the ordinary
+  verified capsule.
+- Bound `--force-reanalyze` to semantic cache/card reuse. Structural reanalysis
+  has an explicit internal control, and a semantic-force no-op does not publish
+  an unchanged enriched generation.
+- Strengthened paired answer evaluation: assertion evidence support and
+  lexical/identifier support are distinct from citation containment, and the
+  blinded judge sees only answer assertions and cited material ranges.
 
 ## [0.5.1] - 2026-09-05
 

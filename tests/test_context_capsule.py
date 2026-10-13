@@ -69,7 +69,7 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
         "def greet(name: str) -> str:\n    return f'<hello>{name}</hello>'\n",
     )
     report = _build(tmp_path)
-    retrieval = _retrieve(tmp_path, report, "change greet")
+    retrieval = _retrieve(tmp_path, report, "change <greet>")
 
     first = compile_context_capsule(
         tmp_path, "change <greet>", retrieval, budget=_budget(4_000)
@@ -80,20 +80,49 @@ def test_compiler_renders_stable_full_capsule_for_small_source(tmp_path: Path) -
 
     assert first == second
     assert first.capsule.schema_version == 2
+    assert first.coverage_ledger is not None
+    assert first.coverage_ledger.stage == "materialization"
+    assert first.coverage_ledger.ranges
+    assert first.compilation_sufficiency is not None
+    assert first.compilation_sufficiency.effective_status == "sufficient"
+    diagnostics = first.evidence_diagnostics
+    assert diagnostics is not None
+    assert diagnostics == first.capsule.evidence_diagnostics
+    assert diagnostics.compiler_materialized
+    assert not diagnostics.plan_requested
+    assert not diagnostics.plan_validated
+    assert diagnostics.effective_sufficiency == "sufficient"
+    assert diagnostics.covered_role_ids == first.coverage_ledger.covered_role_ids
+    assert diagnostics.missing_role_ids == first.coverage_ledger.missing_role_ids
+    assert (
+        diagnostics.effective_reason_codes == first.compilation_sufficiency.reason_codes
+    )
+    assert diagnostics.compact_profile == first.capsule.compact_profile
+    assert (
+        ContextCapsule.model_validate(first.capsule.model_dump(mode="json"))
+        == first.capsule
+    )
     assert first.capsule.task_context[0].representation == RepresentationMode.FULL
     assert "&lt;greet&gt;" in first.prompt
     assert "&lt;hello&gt;" in first.prompt
     assert first.prompt.startswith('<contextforge schema_version="2">')
     assert '<usage_rules provenance="contextforge-verified">' in first.prompt
-    assert "verify indexed structure, not source contents" in first.prompt
-    assert "exact lines are present" in first.prompt
+    assert first.capsule.compact_profile
+    assert "Repository maps verify indexed structure; quote or cite" in first.prompt
+    assert "exact lines in materialized SLICE or FULL" in first.prompt
     assert "evidence-linked interpretation" in first.prompt
     assert "report it as unknown" in first.prompt
+    from contextforge.context import capsule as capsule_module
+
+    ordinary = first.capsule.model_copy(update={"compact_profile": False})
+    assert first.token_count < ConservativeTokenEstimator().count(
+        capsule_module._render_capsule(ordinary)
+    )
     assert first.prompt.endswith("</contextforge>\n")
     assert first.token_count <= first.capsule.allocations["task_evidence"] + 4_000
 
 
-def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None:
+def test_compiler_restores_known_ids_in_planned_source_ranges(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "service.py",
@@ -137,8 +166,28 @@ def test_compiler_materializes_only_planned_evidence_ids(tmp_path: Path) -> None
     material = compiled.capsule.task_context[0]
     assert material.path == "service.py"
     assert material.representation == RepresentationMode.SLICE
-    assert material.evidence_ids == (evidence_id,)
-    assert f'evidence_ids="{evidence_id}"' in compiled.prompt
+    assert evidence_id in material.evidence_ids
+    assert evidence_id in compiled.prompt
+    from contextforge.intelligence.retrieval import verified_source_lookup
+
+    known = verified_source_lookup(
+        load_file_code_map(tmp_path, "service.py", manifest=report.manifest)
+    )
+    covered = {
+        identity
+        for identity, address in known.items()
+        if any(
+            region.start_line <= address.start_line
+            and address.end_line <= region.end_line
+            for region in material.ranges
+        )
+    }
+    assert covered <= set(material.evidence_ids)
+    card = load_semantic_card(tmp_path, "service.py", manifest=report.manifest)
+    assert set(material.evidence_ids) <= {
+        *known,
+        *(entry.evidence_id for entry in card.evidence),
+    }
 
 
 def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
@@ -155,8 +204,12 @@ def test_compiler_preserves_complete_model_plan_order(tmp_path: Path) -> None:
                 candidate_id=item.candidate_id,
                 path=item.path,
                 source_sha256=item.source_sha256,
-                evidence_ids=(),
-                representation="map",
+                evidence_ids=tuple(
+                    sorted(
+                        {e.evidence_id for e in item.evidence_ranges if e.evidence_id}
+                    )
+                ),
+                representation="slice",
             )
             for item in ordered
         ),
@@ -220,6 +273,12 @@ def test_compiler_replaces_entire_stale_plan_with_deterministic_selection(
     )
     assert all(
         "Use a missing file" not in value for value in compiled.capsule.interpretations
+    )
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.replacement_used is True
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert (
+        "planned_item_unmaterialized" in compiled.compilation_sufficiency.reason_codes
     )
 
 
@@ -286,13 +345,146 @@ def test_planned_full_large_file_downgrades_to_selected_slice(tmp_path: Path) ->
         tmp_path,
         "process",
         retrieval.model_copy(update={"evidence_plan": plan}),
-        budget=_budget(5_000),
+        budget=_budget(10_000),
     )
 
     material = compiled.capsule.task_context[0]
     assert material.representation == RepresentationMode.SLICE
-    assert material.evidence_ids == (evidence_id,)
-    assert material.token_count < candidate.estimated_cost.full
+    assert evidence_id in material.evidence_ids
+    assert "return value" in material.content
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert compiled.token_count <= 10_000
+    tight = compile_context_capsule(
+        tmp_path,
+        "process",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
+    )
+    assert tight.token_count <= 5_000
+    assert tight.compilation_sufficiency is not None
+    assert tight.compilation_sufficiency.effective_status == "insufficient"
+
+
+def test_sufficient_planup_agenda_plan_cannot_survive_empty_task_context(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "agenda.py", "def build_agenda() -> list[str]:\n    return []\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, "review agenda implementation")
+    candidate = retrieval.candidates[0]
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review agenda implementation",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(900),
+        working_files=("agenda.py",),
+    )
+
+    assert compiled.capsule.task_context == ()
+    assert compiled.token_count <= 900
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.declared_status == "sufficient"
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert "empty_task_context" in compiled.compilation_sufficiency.reason_codes
+
+
+def test_startup_one_of_four_cannot_be_effectively_sufficient(tmp_path: Path) -> None:
+    _write(tmp_path, "main.py", "def startup() -> None:\n    return None\n")
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    _write(tmp_path, "config/settings.toml", "enabled = true\n")
+    _write(tmp_path, "docs/api.md", "# API\n")
+    report = _build(tmp_path)
+    retrieval = _retrieve(
+        tmp_path,
+        report,
+        "review startup implementation tests configuration documentation API",
+    )
+    candidate = next(item for item in retrieval.candidates if item.path == "main.py")
+    plan = EvidencePlan(
+        source_snapshot_digest=retrieval.source_snapshot_digest,
+        items=(
+            PlannedEvidence(
+                candidate_id=candidate.candidate_id,
+                path=candidate.path,
+                source_sha256=candidate.source_sha256,
+                evidence_ids=(),
+                representation="map",
+            ),
+        ),
+        sufficiency="sufficient",
+        diagnostics=PlanningDiagnostics(
+            mode=ContextPlanningMode.AUTO, status="planned"
+        ),
+    )
+
+    compiled = compile_context_capsule(
+        tmp_path,
+        "review startup implementation tests configuration documentation API",
+        retrieval.model_copy(update={"evidence_plan": plan}),
+        budget=_budget(5_000),
+    )
+
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+    assert set(compiled.compilation_sufficiency.missing_mandatory_role_ids) >= {
+        "test",
+        "configuration",
+        "documentation",
+    }
+
+
+def test_automatic_selection_does_not_certify_unrelated_role_files(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "handler.py",
+        "__all__ = ['startup']\ndef startup() -> None:\n    return None\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "from handler import startup\n\ndef boot():\n    startup()\n",
+    )
+    _write(tmp_path, "tests/test_main.py", "from main import startup\n")
+    _write(tmp_path, "config/settings.toml", "enabled = true\n")
+    _write(tmp_path, "docs/api.md", "# API\n")
+    report = _build(tmp_path)
+    task = "review startup implementation tests configuration documentation API"
+    compiled = compile_context_capsule(
+        tmp_path,
+        task,
+        _retrieve(tmp_path, report, task),
+        budget=_budget(8_000),
+    )
+
+    assert compiled.coverage_ledger is not None
+    assert {"entrypoint", "implementation"} <= set(
+        compiled.coverage_ledger.covered_role_ids
+    )
+    assert {
+        "test",
+        "configuration",
+        "documentation",
+    } <= set(compiled.coverage_ledger.missing_role_ids)
 
 
 def test_tight_budget_keeps_indivisible_map_instead_of_partial_source(
@@ -400,7 +592,7 @@ def test_large_full_file_requires_explicit_pin(tmp_path: Path) -> None:
     assert pinned.capsule.working_set[0].content == source
 
 
-def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
+def test_automatic_slice_preserves_explicit_large_declaration_ranges(
     tmp_path: Path,
 ) -> None:
     body = "".join(
@@ -428,11 +620,15 @@ def test_automatic_slice_keeps_large_declaration_header_and_local_windows(
     )
 
     material = compiled.capsule.task_context[0]
-    assert material.representation == RepresentationMode.SLICE
+    assert material.representation in {
+        RepresentationMode.SLICE,
+        RepresentationMode.FULL,
+    }
     assert "def process_value" in material.content
     assert "target_marker = target_step(value)" in material.content
-    assert "padding_120" not in material.content
-    assert material.token_count < 800
+    assert "padding_120" in material.content
+    assert "return target_marker" in material.content
+    assert compiled.token_count <= 10_000
 
 
 def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
@@ -489,6 +685,42 @@ def test_centrality_only_is_not_task_material_but_graph_and_diff_are(
     }
 
 
+def test_multiple_mandatory_implementations_can_exceed_soft_target(
+    tmp_path: Path,
+) -> None:
+    for name in ("alpha", "beta"):
+        body = "".join(
+            f"    result += {line}  # independently verified calculation step\n"
+            for line in range(1, 121)
+        )
+        _write(
+            tmp_path,
+            f"{name}.py",
+            f"def {name}():\n    result = 0\n{body}    return result\n",
+        )
+    report = _build(tmp_path)
+    task = "Explain `alpha` and `beta`"
+    retrieval = _retrieve(tmp_path, report, task)
+    budget = _budget(10_000)
+    compiled = compile_context_capsule(tmp_path, task, retrieval, budget=budget)
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "sufficient"
+    assert compiled.coverage_ledger is not None
+    assert not compiled.coverage_ledger.missing_requirement_ids
+    assert {m.path for m in compiled.capsule.task_context} == {"alpha.py", "beta.py"}
+    assert all(
+        "return result" in m.content
+        and m.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for m in compiled.capsule.task_context
+    )
+    assert compiled.token_count > budget.available_tokens * 0.3
+    assert compiled.token_count <= budget.available_tokens
+    tight = compile_context_capsule(tmp_path, task, retrieval, budget=_budget(3_000))
+    assert tight.compilation_sufficiency is not None
+    assert tight.compilation_sufficiency.effective_status == "insufficient"
+    assert tight.token_count <= _budget(3_000).available_tokens
+
+
 def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> None:
     for index in range(10):
         body = "".join(
@@ -514,7 +746,7 @@ def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> Non
         automatic_retrieval,
         budget=_budget(10_000),
     )
-    assert automatic.token_count <= 3_000
+    assert automatic.token_count <= 3_100  # soft target includes indivisible evidence
     assert sum(automatic.capsule.allocations.values()) <= 3_000
 
     pinned_retrieval = _retrieve(tmp_path, report, "large.txt")
@@ -530,7 +762,7 @@ def test_automatic_soft_target_and_explicit_full_override(tmp_path: Path) -> Non
     assert explicit.token_count <= 10_000
 
 
-def test_complementary_maps_are_seeded_before_representation_upgrades(
+def test_required_source_coverage_precedes_supplemental_maps(
     tmp_path: Path,
 ) -> None:
     for name in ("alpha", "beta", "gamma"):
@@ -541,7 +773,7 @@ def test_complementary_maps_are_seeded_before_representation_upgrades(
             f"def {name}_flow():\n{body}    return {name}_120\n",
         )
     report = _build(tmp_path)
-    retrieval = _retrieve(tmp_path, report, "flow")
+    retrieval = _retrieve(tmp_path, report, "review flow")
     concepts = {"alpha.py": "ingest", "beta.py": "validate", "gamma.py": "persist"}
     candidates = tuple(
         item.model_copy(
@@ -562,12 +794,64 @@ def test_complementary_maps_are_seeded_before_representation_upgrades(
         budget=_budget(3_000),
     )
 
-    assert {item.path for item in compiled.capsule.task_context} == {
-        "alpha.py",
-        "beta.py",
-        "gamma.py",
-    }
-    assert compiled.token_count <= 900
+    assert compiled.coverage_ledger is not None
+    assert "implementation" in compiled.coverage_ledger.covered_role_ids
+    assert any(
+        item.representation in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for item in compiled.capsule.task_context
+    )
+    assert compiled.token_count <= 3_000
+    assert compiled.compilation_sufficiency is not None
+    assert compiled.compilation_sufficiency.effective_status == "insufficient"
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Trace alpha_stage beta_stage gamma_stage delta_stage implementation tests",
+        "Объясни alpha_stage beta_stage gamma_stage delta_stage и проверь tests",
+    ],
+)
+def test_required_flow_ranges_survive_automatic_materialization(
+    tmp_path: Path, task: str
+) -> None:
+    names = ("alpha_stage", "beta_stage", "gamma_stage", "delta_stage")
+    _write(
+        tmp_path,
+        "engine.py",
+        "\n".join(
+            f"def {name}():\n"
+            + "".join(f"    value_{i} = {i}\n" for i in range(55))
+            + f"    return '{name} complete'\n"
+            for name in names
+        ),
+    )
+    _write(
+        tmp_path,
+        "tests/test_engine.py",
+        "from engine import "
+        + ", ".join(names)
+        + "\ndef test_stages():\n"
+        + "".join(f"    assert {name}()\n" for name in names),
+    )
+    report = _build(tmp_path)
+    retrieval = _retrieve(tmp_path, report, task)
+    compiled = compile_context_capsule(
+        tmp_path, task, retrieval, budget=_budget(24_000)
+    )
+    materials = {item.path: item for item in compiled.capsule.task_context}
+    assert "engine.py" in materials
+    assert "tests/test_engine.py" in materials
+    assert all(
+        materials[path].representation
+        in {RepresentationMode.SLICE, RepresentationMode.FULL}
+        for path in materials
+    )
+    engine = materials["engine.py"]
+    assert all(f"{name} complete" in engine.content for name in names)
+    assert compiled.coverage_ledger is not None
+    assert "test" in compiled.coverage_ledger.covered_role_ids
+    assert compiled.token_count <= 24_000
 
 
 def test_deterministic_fallback_stops_after_duplicate_identifier_coverage(
@@ -808,7 +1092,7 @@ def test_capsule_models_reject_invalid_ranges_duplicates_and_empty_budget() -> N
             "generation_id": "0" * 64,
             "source_snapshot_digest": "0" * 64,
             "generation_kind": "structural",
-            "index_schema_version": 3,
+            "index_schema_version": 4,
         },
         "repository_map": "",
         "working_set": [material.model_dump(mode="json")],
@@ -1017,7 +1301,7 @@ def test_capsule_metadata_and_range_order_validation() -> None:
             "generation_id": "0" * 64,
             "source_snapshot_digest": "0" * 64,
             "generation_kind": "structural",
-            "index_schema_version": 3,
+            "index_schema_version": 4,
         },
         "repository_map": "",
         "allocations": {"z": 0, "a": 0},

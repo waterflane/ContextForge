@@ -255,15 +255,19 @@ def test_mcp_v3_map_search_symbol_and_capsule_compile(tmp_path: Path) -> None:
     assert mapped["relationship_graph"]["record_kind"] == "relationship_graph"
     assert "relationship_graph" not in orientation_only
     assert searched["provider_calls"] == 0
+    assert not searched["evidence_diagnostics"]["compiler_materialized"]
     assert searched["candidates"][0]["path"] == "app.py"
     assert symbols["symbols"][0]["name"] == "run"
     assert compiled["capsule"]["schema_version"] == 2
+    assert (
+        compiled["evidence_diagnostics"] == compiled["capsule"]["evidence_diagnostics"]
+    )
     assert compiled["token_count"] <= 1_700
 
     manifest_resource = asyncio.run(
         foundation.read_resource("contextforge://index/manifest")
     )
-    assert manifest_resource["schema_version"] == 3
+    assert manifest_resource["schema_version"] == 4
     architecture = asyncio.run(foundation.read_resource("contextforge://architecture"))
     features = asyncio.run(foundation.read_resource("contextforge://features"))
     assert architecture["schema_version"] == 3

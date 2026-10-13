@@ -127,7 +127,11 @@ def _registry_write_lock(repository_root: Path) -> Iterator[None]:
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
                 0o600,
             )
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as exc:
+            if isinstance(exc, PermissionError) and not lock_path.exists():
+                raise GeneratedArtifactRegistryError(
+                    "unable to acquire generated artifact registry lock"
+                ) from exc
             if lock_path.is_symlink():
                 raise GeneratedArtifactRegistryError(
                     "generated artifact registry lock must not be a link"

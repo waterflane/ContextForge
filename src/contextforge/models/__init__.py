@@ -1,5 +1,10 @@
 """Provider-independent structured model analysis foundation."""
 
+from contextforge.models.codex_cli import (
+    CODEX_ENDPOINT,
+    CODEX_PROVIDER_ID,
+    CodexCLIModelProvider,
+)
 from contextforge.models.fake import FakeModelProvider, FakeResponder, FakeScript
 from contextforge.models.ollama import (
     DEFAULT_OLLAMA_ENDPOINT,
@@ -91,6 +96,9 @@ from contextforge.models.providers import (
 )
 
 __all__ = [
+    "CODEX_ENDPOINT",
+    "CODEX_PROVIDER_ID",
+    "CodexCLIModelProvider",
     "AdditionalPropertyIssue",
     "ArrayLimitExceededIssue",
     "DEFAULT_CONNECT_TIMEOUT_SECONDS",

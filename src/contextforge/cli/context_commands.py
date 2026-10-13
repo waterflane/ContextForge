@@ -25,7 +25,9 @@ from contextforge.cli.progress import CLIProgressRenderer, ProgressMode
 from contextforge.cli.scan_output import OutputWriteError, write_output_atomic
 from contextforge.context import (
     MAX_JSON_PACKAGE_BYTES,
+    ConservativeTokenEstimator,
     ContextBudget,
+    ContextBudgetError,
     ContextBuildError,
     ContextBuildLimitError,
     ContextBuildOptions,
@@ -42,6 +44,7 @@ from contextforge.context import (
     compile_context_capsule,
     inspect_context_package_json,
     parse_line_range_request,
+    render_capsule_source_context,
     render_context_inspection,
     render_context_package_json,
     render_context_package_markdown,
@@ -710,11 +713,20 @@ def create_context(
             help="Use the deprecated TaskHandoff/compile_prompt flow.",
         ),
     ] = False,
+    compact_prompt: Annotated[
+        bool,
+        typer.Option(
+            "--compact-prompt",
+            help="Export compact numbered source; preserve the full capsule for audit.",
+        ),
+    ] = False,
 ) -> None:
     """Build a manual package or an automatic reviewable compiled handoff."""
 
     if task is not None and not task.strip():
         _exit_with_error("task description must not be empty", code=2)
+    if compact_prompt and task is None:
+        _exit_with_error("--compact-prompt requires --task", code=2)
     rerank_source = ctx.get_parameter_source("rerank")
     rerank_alias = (
         rerank
@@ -723,6 +735,8 @@ def create_context(
     )
 
     if discovery is not None or legacy_handoff:
+        if compact_prompt:
+            _exit_with_error("--compact-prompt requires the Index v3.1 flow", code=2)
         _create_automatic_context(
             path,
             task=task,
@@ -762,6 +776,7 @@ def create_context(
             rerank,
             planning is not None,
             planning_rounds is not None,
+            compact_prompt,
         )
     )
     if task is not None and (
@@ -789,6 +804,7 @@ def create_context(
             rerank=rerank,
             planning=planning,
             planning_rounds=planning_rounds,
+            compact_prompt=compact_prompt,
             rerank_alias=rerank_alias,
             output_format=output_format,
             output=output,
@@ -943,6 +959,7 @@ def _create_capsule_context(
     output: Path | None,
     prompt_output: Path | None,
     force: bool,
+    compact_prompt: bool = False,
 ) -> None:
     provider: ModelProvider | None = None
     try:
@@ -1067,13 +1084,20 @@ def _create_capsule_context(
             pinned_full_files=full_files,
             git_diff=diff_context,
         )
+        prompt = compiled.prompt
+        if compact_prompt:
+            prompt = render_capsule_source_context(compiled)
+            if ConservativeTokenEstimator().count(prompt) > budget.available_tokens:
+                raise ContextBudgetError(
+                    "Compact source prompt exceeds the hard budget"
+                )
         representation = (
             canonical_json(compiled.capsule.model_dump(mode="json"))
             if output_format is ContextFormat.json
-            else compiled.prompt
+            else prompt
         )
         if prompt_output is not None:
-            written = write_output_atomic(prompt_output, compiled.prompt, force=force)
+            written = write_output_atomic(prompt_output, prompt, force=force)
             register_generated_artifact(path, written, kind="prompt")
             typer.echo(f"Compiled prompt written to {written}", err=True)
     except (
@@ -1161,8 +1185,47 @@ def _render_capsule_review(capsule: ContextCapsule) -> str:
         f"Task: {capsule.task}",
         f"Estimator: {capsule.estimator_id}",
         f"Tokens: {capsule.token_count}",
-        "Working Set:",
     ]
+    diagnostics = capsule.evidence_diagnostics
+    if diagnostics is not None:
+        lines.extend(
+            (
+                f"Plan requested: {str(diagnostics.plan_requested).lower()}",
+                f"Plan validated: {str(diagnostics.plan_validated).lower()}",
+                "Compiler materialized: "
+                + str(diagnostics.compiler_materialized).lower(),
+                "Declared sufficiency: "
+                + (diagnostics.declared_sufficiency or "unknown"),
+                "Effective sufficiency: "
+                + (diagnostics.effective_sufficiency or "unknown"),
+                "Covered roles: "
+                + (", ".join(diagnostics.covered_role_ids) or "(none)"),
+                "Missing roles: "
+                + (", ".join(diagnostics.missing_role_ids) or "(none)"),
+                "Materialization downgrade codes: "
+                + (
+                    ", ".join(diagnostics.materialization_downgrade_reason_codes)
+                    or "(none)"
+                ),
+                "Materialization drop codes: "
+                + (
+                    ", ".join(diagnostics.materialization_drop_reason_codes) or "(none)"
+                ),
+                "Effective reason codes: "
+                + (", ".join(diagnostics.effective_reason_codes) or "(none)"),
+                f"Planner action deltas: {len(diagnostics.planner_action_deltas)}",
+                f"Compact profile: {str(diagnostics.compact_profile).lower()}",
+            )
+        )
+        lines.extend(
+            "  action "
+            f"{delta.action_index}: roles={','.join(delta.new_role_ids) or '-'} "
+            f"identifiers+{delta.new_identifier_count} "
+            f"evidence+{delta.new_evidence_count} "
+            f"graph+{delta.new_graph_endpoint_count}"
+            for delta in diagnostics.planner_action_deltas
+        )
+    lines.append("Working Set:")
     lines.extend(
         f"  {item.path} | {item.representation.value} | {item.token_count} tokens"
         for item in capsule.working_set

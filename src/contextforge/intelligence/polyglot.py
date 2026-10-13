@@ -12,9 +12,11 @@ from tree_sitter import Language, Node, Parser
 
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
+    CallbackArgument,
     CallReference,
     FileCodeMap,
     ImportRecord,
+    InitializationOccurrence,
     ParserDiagnostic,
     ReferenceOccurrence,
     SourceRange,
@@ -28,7 +30,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 POLYGLOT_ANALYZER = AnalyzerIdentity(
     analyzer_id="tree-sitter-polyglot",
-    analyzer_version="8",
+    analyzer_version="16",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -303,6 +305,50 @@ def extract_polyglot_code_map(
                 )
 
     visit(tree.root_node, None)
+    # Append syntax-owned scopes after named declarations to keep existing named
+    # identities and lexical qualification stable. Their labels are addresses,
+    # not source identifiers or inferred public APIs.
+    anonymous_nodes: set[tuple[int, int]] = set()
+
+    def anonymous_scopes(node: Node) -> None:
+        verified = _declaration_node_is_verified(node, language_name)
+        ancestor = node.parent
+        while verified and ancestor is not None:
+            verified = not ancestor.is_error and not ancestor.is_missing
+            ancestor = ancestor.parent
+        if (
+            language_name in {"JavaScript", "TypeScript"}
+            and node.type in {"arrow_function", "function_expression"}
+            and verified
+            and not any(d.callable_node == node for d in drafts)
+        ):
+            containers = [
+                (i, d)
+                for i, d in enumerate(drafts)
+                if _contains_range(_range(d.node), _range(node))
+            ]
+            parent = min(
+                containers,
+                key=lambda item: item[1].node.end_byte - item[1].node.start_byte,
+                default=None,
+            )
+            address = _range(node)
+            drafts.append(
+                _Draft(
+                    node,
+                    f"@callback:{address.start_line}:{address.start_column}",
+                    SymbolKind.ASYNC_FUNCTION
+                    if _is_async(node, source_bytes)
+                    else SymbolKind.FUNCTION,
+                    None if parent is None else parent[0],
+                    callable_node=node,
+                )
+            )
+            anonymous_nodes.add((node.start_byte, node.end_byte))
+        for child in node.named_children:
+            anonymous_scopes(child)
+
+    anonymous_scopes(tree.root_node)
     for draft in drafts:
         owner_name = _method_owner(draft.node, language_name, source_bytes)
         if owner_name is not None:
@@ -368,10 +414,19 @@ def extract_polyglot_code_map(
             source_range.start_column,
         )
 
+    class_ids = {
+        (draft.node.start_byte, draft.node.end_byte): draft.symbol_id
+        for draft in drafts
+        if draft.kind == SymbolKind.CLASS
+    }
     symbols: list[SymbolRecord] = []
     for index, draft in enumerate(drafts):
         callable_node = draft.callable_node or draft.node
         body = callable_node.child_by_field_name("body")
+        parameter_defaults = _parameter_default_ranges(callable_node)
+        receiver_class, static_member = _class_receiver_binding(
+            callable_node, class_ids, language_name
+        )
         contained = tuple(
             child.symbol_id
             for child in drafts
@@ -393,11 +448,19 @@ def extract_polyglot_code_map(
                 name=draft.name,
                 qualified_name=draft.qualified_name,
                 kind=draft.kind,
+                is_anonymous=(draft.node.start_byte, draft.node.end_byte)
+                in anonymous_nodes,
                 is_async=(
                     draft.kind in {SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
                     and _is_async(callable_node, source_bytes)
                 ),
                 signature=_signature(source_bytes, draft.node, body),
+                parameter_bindings=_parameter_bindings(
+                    callable_node, source_bytes, parameter_defaults
+                ),
+                parameter_default_ranges=parameter_defaults,
+                receiver_class_symbol_id=receiver_class,
+                is_static_member=static_member,
                 declaration_range=_range(draft.node),
                 body_range=None if body is None else _range(body),
                 parent_symbol_id=(
@@ -412,7 +475,12 @@ def extract_polyglot_code_map(
     imports = _extract_imports(source, project_file.path, language_name)
     symbols = list(
         _attach_occurrences(
-            tree.root_node, tuple(symbols), imports, source_bytes, rules
+            tree.root_node,
+            tuple(symbols),
+            imports,
+            source_bytes,
+            rules,
+            project_file.path,
         )
     )
     return FileCodeMap(
@@ -425,7 +493,19 @@ def extract_polyglot_code_map(
         line_count=selected.source_line_count,
         module_has_executable_code=_module_has_executable_code(tree.root_node, rules),
         imports=imports,
-        symbols=tuple(symbols),
+        symbols=tuple(
+            sorted(
+                symbols,
+                key=lambda item: (
+                    item.declaration_range.start_line,
+                    item.declaration_range.start_column,
+                    item.declaration_range.end_line,
+                    item.declaration_range.end_column,
+                    item.qualified_name,
+                    item.symbol_id,
+                ),
+            )
+        ),
         diagnostics=tuple(
             sorted(
                 (*diagnostics, *omitted),
@@ -644,6 +724,7 @@ def _attach_occurrences(
     imports: tuple[ImportRecord, ...],
     source: bytes,
     rules: StructuralCaptureRules,
+    source_path: str,
 ) -> tuple[SymbolRecord, ...]:
     del imports
     calls: dict[str, list[CallReference]] = {item.symbol_id: [] for item in symbols}
@@ -658,6 +739,7 @@ def _attach_occurrences(
         for item in symbols
     }
     call_target_ranges: list[SourceRange] = []
+    callback_nodes: dict[tuple[int, int], Node] = {}
 
     def owner(node: Node) -> SymbolRecord | None:
         region = _range(node)
@@ -665,6 +747,7 @@ def _attach_occurrences(
             item
             for item in symbols
             if _contains_range(item.body_range or item.declaration_range, region)
+            or any(_contains_range(r, region) for r in item.parameter_default_ranges)
         ]
         return min(
             candidates,
@@ -676,6 +759,45 @@ def _attach_occurrences(
             default=None,
         )
 
+    def execution_owner(node: Node) -> SymbolRecord | None:
+        region = _range(node)
+        return min(
+            (
+                item
+                for item in symbols
+                if item.kind
+                in {
+                    SymbolKind.FUNCTION,
+                    SymbolKind.ASYNC_FUNCTION,
+                    SymbolKind.METHOD,
+                    SymbolKind.CONSTRUCTOR,
+                }
+                and (
+                    _contains_range(item.body_range or item.declaration_range, region)
+                    or any(
+                        _contains_range(r, region)
+                        for r in item.parameter_default_ranges
+                    )
+                )
+            ),
+            key=lambda item: (
+                (item.body_range or item.declaration_range).end_line
+                - (item.body_range or item.declaration_range).start_line,
+                (item.body_range or item.declaration_range).end_column
+                - (item.body_range or item.declaration_range).start_column,
+                item.qualified_name,
+            ),
+            default=None,
+        )
+
+    def owners(node: Node) -> tuple[SymbolRecord, ...]:
+        # Keep the original declaration occurrence as well as its execution
+        # owner; old source-bound IDs remain independently verifiable.
+        values = (owner(node), execution_owner(node))
+        return tuple(
+            {item.symbol_id: item for item in values if item is not None}.values()
+        )
+
     def in_import(node: Node) -> bool:
         current: Node | None = node
         while current is not None:
@@ -685,6 +807,9 @@ def _attach_occurrences(
         return False
 
     def visit_calls(node: Node) -> None:
+        if node.type in {"arrow_function", "function_expression"}:
+            region = _range(node)
+            callback_nodes[(region.start_line, region.start_column)] = node
         if node.type in rules.call_captures and not node.has_error:
             target = (
                 node.child_by_field_name("function")
@@ -692,62 +817,144 @@ def _attach_occurrences(
                 or node.child_by_field_name("method")
                 or next(iter(node.named_children), None)
             )
-            selected_owner = owner(node)
-            if target is not None and selected_owner is not None:
+            selected_owners = owners(node)
+            if target is not None and selected_owners:
                 observed = _text(source, target).strip()
                 if observed and len(observed) <= 500:
                     region = _range(target)
                     call_target_ranges.append(region)
-                    calls[selected_owner.symbol_id].append(
-                        CallReference(
-                            observed_name=observed,
-                            source_range=region,
-                            detection_method="polyglot_ast_call",
+                    for selected_owner in selected_owners:
+                        calls[selected_owner.symbol_id].append(
+                            CallReference(
+                                observed_name=observed,
+                                source_range=region,
+                                detection_method="polyglot_ast_call",
+                                callback_arguments=_callback_arguments(node, source),
+                            )
                         )
-                    )
         for child in node.named_children:
             visit_calls(child)
 
+    initializations: dict[str, list[InitializationOccurrence]] = {}
+
     def visit_references(node: Node) -> None:
+        if node.type == "assignment_expression" and not node.has_error:
+            left = node.child_by_field_name("left")
+            operator = node.child_by_field_name("operator") or next(
+                (child for child in node.children if child.type == "="), None
+            )
+            selected_owner = owner(node)
+            if (
+                left is not None
+                and selected_owner is not None
+                and operator is not None
+                and _text(source, operator) == "="
+                and re.fullmatch(r"this\.[A-Za-z_$][\w$]*", _text(source, left))
+            ):
+                initializations.setdefault(selected_owner.symbol_id, []).append(
+                    InitializationOccurrence(
+                        observed_name=_text(source, left), source_range=_range(node)
+                    )
+                )
         if (
             node.type in rules.reference_captures
             and not node.has_error
             and not in_import(node)
         ):
-            selected_owner = owner(node)
+            selected_owners = owners(node)
             region = _range(node)
+            member = node.parent
+            receiver = None if member is None else member.child_by_field_name("object")
+            receiver_reference = (
+                member is not None
+                and member.type == "member_expression"
+                and (
+                    member.child_by_field_name("object") == node
+                    or (
+                        receiver is not None
+                        and receiver.type == "this"
+                        and member.parent is not None
+                        and member.parent.type == "member_expression"
+                        and member.parent.child_by_field_name("object") == member
+                    )
+                )
+            ) or (
+                member is not None
+                and member.type == "navigation_expression"
+                and len(member.named_children) > 1
+                and member.named_children[0] == node
+            )
             if (
-                selected_owner is not None
-                and not any(
-                    target.start_line <= region.start_line
-                    and region.end_line <= target.end_line
-                    and (
-                        target.start_line != region.start_line
-                        or target.start_column <= region.start_column
+                selected_owners
+                and (
+                    receiver_reference
+                    or not any(
+                        target.start_line <= region.start_line
+                        and region.end_line <= target.end_line
+                        and (
+                            target.start_line != region.start_line
+                            or target.start_column <= region.start_column
+                        )
+                        and (
+                            target.end_line != region.end_line
+                            or region.end_column <= target.end_column
+                        )
+                        for target in call_target_ranges
                     )
-                    and (
-                        target.end_line != region.end_line
-                        or region.end_column <= target.end_column
-                    )
-                    for target in call_target_ranges
                 )
                 and (region.start_line, region.start_column) not in declaration_ranges
                 and not _is_declaration_name(node)
             ):
                 observed = _text(source, node).strip()
+                member = node.parent
+                if member is not None and member.type == "member_expression":
+                    receiver = member.child_by_field_name("object")
+                    if receiver is not None and receiver.type == "this":
+                        assignment = member.parent
+                        if (
+                            assignment is not None
+                            and assignment.type == "assignment_expression"
+                            and assignment.child_by_field_name("left") == member
+                        ):
+                            return
+                        observed = _text(source, member).strip()
+                        region = _range(member)
                 if observed and len(observed) <= 500:
-                    references[selected_owner.symbol_id].append(
-                        ReferenceOccurrence(
-                            observed_name=observed,
-                            source_range=region,
-                            detection_method="polyglot_ast_reference",
+                    for selected_owner in selected_owners:
+                        references[selected_owner.symbol_id].append(
+                            ReferenceOccurrence(
+                                observed_name=observed,
+                                source_range=region,
+                                detection_method="polyglot_ast_reference",
+                            )
                         )
-                    )
         for child in node.named_children:
             visit_references(child)
 
     visit_calls(root)
     visit_references(root)
+    for symbol in symbols:
+        if not symbol.is_anonymous:
+            continue
+        node = callback_nodes.get(
+            (symbol.declaration_range.start_line, symbol.declaration_range.start_column)
+        )
+        if node is None:
+            continue
+        enclosing = execution_owner(node)
+        if enclosing is not None and enclosing.symbol_id != symbol.symbol_id:
+            references[enclosing.symbol_id].append(
+                ReferenceOccurrence(
+                    observed_name=_signature(
+                        source, node, node.child_by_field_name("body")
+                    ),
+                    source_range=symbol.declaration_range,
+                    resolution="internal",
+                    target_symbol_id=symbol.symbol_id,
+                    target_file_path=source_path,
+                    detection_method="polyglot_ast_callback_binding",
+                )
+            )
     return tuple(
         item.model_copy(
             update={
@@ -785,9 +992,57 @@ def _attach_occurrences(
                         ),
                     )
                 ),
+                "initializations": tuple(initializations.get(item.symbol_id, ())),
             }
         )
         for item in symbols
+    )
+
+
+_CALLABLE_ARGUMENT = re.compile(
+    r"[$A-Za-z_][\w$]*(?:\s*(?:\.|::|->)\s*[$A-Za-z_][\w$]*)*\Z"
+)
+
+
+def _callback_arguments(node: Node, source: bytes) -> tuple[CallbackArgument, ...]:
+    """Capture direct callable arguments without recognizing framework APIs."""
+
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None:
+        return ()
+    values: list[CallbackArgument] = []
+    for argument in arguments.named_children:
+        candidate = (
+            argument.child_by_field_name("value")
+            or argument.child_by_field_name("expression")
+            or argument
+        )
+        observed = _text(source, candidate).strip()
+        if not _CALLABLE_ARGUMENT.fullmatch(observed):
+            continue
+        values.append(
+            CallbackArgument(observed_name=observed, source_range=_range(candidate))
+        )
+    return tuple(
+        sorted(
+            {
+                (
+                    item.source_range.start_line,
+                    item.source_range.start_column,
+                    item.source_range.end_line,
+                    item.source_range.end_column,
+                    item.observed_name,
+                ): item
+                for item in values
+            }.values(),
+            key=lambda item: (
+                item.source_range.start_line,
+                item.source_range.start_column,
+                item.source_range.end_line,
+                item.source_range.end_column,
+                item.observed_name,
+            ),
+        )
     )
 
 
@@ -1074,6 +1329,175 @@ def _c_prototype(node: Node) -> tuple[Node | None, Node | None]:
     if ancestor is None or ancestor.type not in {"declaration", "field_declaration"}:
         return None, None
     return name, ancestor
+
+
+def _class_receiver_binding(
+    node: Node, class_ids: dict[tuple[int, int], str], language: str
+) -> tuple[str | None, bool]:
+    """Bind source-level `this` without crossing a dynamic function receiver."""
+    if language not in {"JavaScript", "TypeScript"}:
+        return None, False
+    current: Node | None = node
+    static = False
+    while current is not None:
+        if current.type in {
+            "function_declaration",
+            "generator_function_declaration",
+            "function_expression",
+            "generator_function",
+        }:
+            return None, False
+        if current.type in {
+            "method_definition",
+            "public_field_definition",
+            "field_definition",
+        }:
+            static = any(child.type == "static" for child in current.children)
+            parent = current.parent
+            if parent is None or parent.type != "class_body":
+                return None, False
+        if current.type in {"class_declaration", "abstract_class_declaration", "class"}:
+            return class_ids.get((current.start_byte, current.end_byte)), static
+        current = current.parent
+    return None, False
+
+
+def _parameter_default_ranges(node: Node) -> tuple[SourceRange, ...]:
+    parameters = _callable_parameters(node)
+    ranges: list[SourceRange] = []
+
+    def collect(pattern: Node) -> None:
+        if pattern.type in {"type_annotation", "type_parameters", "type_parameter"}:
+            return
+        if pattern.type in {"assignment_pattern", "object_assignment_pattern"}:
+            value = pattern.child_by_field_name("right")
+        elif pattern.type in {"required_parameter", "optional_parameter"}:
+            value = pattern.child_by_field_name("value")
+        else:
+            value = pattern.child_by_field_name("default_value")
+        if value is None:
+            operator = next((c for c in pattern.children if c.type == "="), None)
+            if operator is not None:
+                value = next(
+                    (
+                        c
+                        for c in pattern.named_children
+                        if c.start_byte >= operator.end_byte
+                    ),
+                    None,
+                )
+        if value is not None:
+            ranges.append(_range(value))
+        for child in pattern.named_children:
+            # Defaults inside deferred function bodies belong to their own scope.
+            if child != value:
+                collect(child)
+
+    if parameters is not None:
+        collect(parameters)
+    return tuple(ranges)
+
+
+def _callable_parameters(node: Node) -> Node | None:
+    parameters = node.child_by_field_name("parameters") or node.child_by_field_name(
+        "parameter"
+    )
+    if parameters is None:
+        parameters = next(
+            (
+                n
+                for n in node.named_children
+                if n.type
+                in {
+                    "function_value_parameters",
+                    "class_parameters",
+                    "primary_constructor",
+                    "method_parameters",
+                }
+            ),
+            None,
+        )
+    declarator = node.child_by_field_name("declarator")
+    if parameters is None and declarator is not None:
+        return _callable_parameters(declarator)
+    return parameters
+
+
+def _parameter_bindings(
+    node: Node, source: bytes, default_ranges: tuple[SourceRange, ...]
+) -> tuple[str, ...]:
+    parameters = _callable_parameters(node)
+    names: set[str] = set()
+
+    def collect(pattern: Node) -> None:
+        if any(_contains_range(r, _range(pattern)) for r in default_ranges):
+            return
+        if pattern.type in {
+            "identifier",
+            "shorthand_property_identifier_pattern",
+            "self",
+        }:
+            names.add(_text(source, pattern))
+            return
+        if pattern.type == "pair_pattern":
+            target = pattern.child_by_field_name("value")
+        else:
+            declared_names = tuple(
+                child
+                for index, child in enumerate(pattern.children)
+                if pattern.field_name_for_child(index) == "name"
+            )
+            if declared_names:
+                for child in declared_names:
+                    collect(child)
+                return
+            target = (
+                pattern.child_by_field_name("pattern")
+                or pattern.child_by_field_name("left")
+                or pattern.child_by_field_name("declarator")
+            )
+        if target is not None:
+            collect(target)
+        elif pattern.type in {
+            "formal_parameters",
+            "parameter_list",
+            "parameters",
+            "function_value_parameters",
+            "class_parameters",
+            "primary_constructor",
+            "array_pattern",
+            "object_pattern",
+            "rest_pattern",
+        }:
+            for child in pattern.named_children:
+                collect(child)
+        elif (
+            pattern.type
+            in {
+                "parameter",
+                "parameter_declaration",
+                "class_parameter",
+                "formal_parameter",
+                "required_parameter",
+                "optional_parameter",
+            }
+            and pattern.named_children
+        ):
+            binding = next(
+                (
+                    child
+                    for child in pattern.named_children
+                    if child.type
+                    in {"identifier", "object_pattern", "array_pattern", "rest_pattern"}
+                ),
+                None,
+            )
+            if binding is not None:
+                collect(binding)
+
+    if parameters is not None:
+        collect(parameters)
+    return tuple(sorted(names))
 
 
 def _range(node: Node) -> SourceRange:

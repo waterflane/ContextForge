@@ -51,6 +51,28 @@ Python and all ten Tree-sitter languages extract imports, calls, and non-call
 references. Declarations, imports, and call targets are excluded from reference
 occurrences. Exact relative paths and unambiguous snapshot symbols are verified;
 package/convention resolution is best-effort and ambiguity remains unresolved.
+For relative TypeScript/TSX imports, the resolver has a closed emitted-to-source
+table: `.js` may resolve to `.ts` or `.tsx`, `.jsx` to `.tsx`, `.mjs` to `.mts`,
+and `.cjs` to `.cts`. An exact snapshot `.js` always wins; more than one source
+candidate remains unresolved. Such substitutions carry
+`best-effort-structural` provenance and the
+`polyglot_typescript_emitted_suffix_resolution` detection method. Package
+imports are never resolved by basename, and `tsconfig` aliases are not executed
+or treated as source.
+
+Test classification is shared by the declarative `FilePolicyRegistry` across
+languages, including `test`, `tests`, `__tests__`, `spec`, `specs`, `src/test`,
+and recognized test filename forms. A primary `source-test` link must come from
+a verified or best-effort resolved test import, call, or reference to non-test
+source. A naming convention may supply a link only for one snapshot target and
+is best-effort structural. Reverse links remain navigable, while test
+connectivity is measured separately and source-test edges do not influence
+centrality.
+
+`entrypoint-handler` is also constrained: it requires a captured callback
+registration, an exported top-level handler called by the entrypoint, or an
+imported top-level callable used as a direct bootstrap endpoint. Other imports
+and calls remain ordinary edges; framework names receive no bonus.
 Module-level `os.getenv`,
 `os.environ.get`, and `os.environ[...]` reads contribute config keys even when
 they appear in assignments or constants. Only SHA-256 digests of key names are

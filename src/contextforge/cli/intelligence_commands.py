@@ -27,6 +27,7 @@ from contextforge.intelligence import (
     SemanticAnalysisError,
     SemanticScope,
 )
+from contextforge.intelligence.cards import SemanticCardBuildResult
 from contextforge.models import ModelProvider, ModelProviderError
 from contextforge.project_config import (
     ProjectConfigError,
@@ -175,6 +176,12 @@ def _index_operation(
 
     if progress_mode is not ProgressMode.JSONL:
         typer.echo(_render_build_summary(report), nl=False)
+    if report.semantic is not None and report.semantic.failed_paths:
+        typer.echo(
+            "Unfinished semantic file IDs: " + ", ".join(report.semantic.failed_paths),
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @index_app.command("build")
@@ -244,7 +251,10 @@ def build_index(
         bool,
         typer.Option(
             "--fail-on-error",
-            help="Keep the prior active generation on any model-analysis failure.",
+            help=(
+                "Report incomplete semantic analysis as an error after publishing "
+                "the partial generation."
+            ),
         ),
     ] = False,
     fail_fast: Annotated[
@@ -579,6 +589,22 @@ def _render_build_summary(report: IndexBuildReport) -> str:
         f"Repository maps: {map_status}",
         f"Status: {'partial' if report.partial else 'complete'}",
     ]
+    if isinstance(semantic, SemanticCardBuildResult) and semantic.coverage is not None:
+        coverage = semantic.coverage
+        lines.extend(
+            [
+                "Semantic files eligible/selected/completed: "
+                f"{len(coverage.eligible_files)}/{len(coverage.selected_files)}/"
+                f"{len(coverage.completed_files)}",
+                "Semantic functions completed/requested: "
+                f"{len(coverage.completed_function_ids)}/"
+                f"{len(coverage.requested_function_ids)}",
+                "Semantic calls completed/requested: "
+                f"{len(coverage.completed_call_ids)}/{len(coverage.requested_call_ids)}",
+                "Semantic incomplete reasons: "
+                f"{', '.join(coverage.reason_codes) or 'none'}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 

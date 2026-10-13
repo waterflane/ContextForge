@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import tempfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,18 @@ def test_existing_valid_index_round_trips_through_atomic_pointer(
     )
 
 
+def test_generation_record_checks_direct_and_shard_references(tmp_path: Path) -> None:
+    source = _file("src/app.py", "pass")
+    manifest, _ = _publish(tmp_path, "authorized-records", (source,))
+
+    assert store_module.load_generation_record(
+        tmp_path, manifest.files[0].record_location or "", manifest=manifest
+    ) == _record_content(source)
+    for location in ("files/other.json", "graph/other.json", "retrieval/other.json"):
+        with pytest.raises(IndexManifestReadError, match="not referenced"):
+            store_module.load_generation_record(tmp_path, location, manifest=manifest)
+
+
 def test_publication_prunes_unreferenced_interrupted_records(
     tmp_path: Path,
 ) -> None:
@@ -377,12 +390,12 @@ def test_malformed_generation_manifest_is_a_typed_error(tmp_path: Path) -> None:
 
 def test_unsupported_pointer_schema_version_is_not_guessed(tmp_path: Path) -> None:
     layout = initialize_index(tmp_path)
-    layout.active_manifest.write_text('{"schema_version":4}\n', encoding="utf-8")
+    layout.active_manifest.write_text('{"schema_version":5}\n', encoding="utf-8")
 
     with pytest.raises(UnsupportedIndexSchemaError) as error:
         load_manifest(tmp_path)
 
-    assert error.value.schema_version == 4
+    assert error.value.schema_version == 5
 
 
 def test_inspect_status_before_and_after_publication(tmp_path: Path) -> None:
@@ -419,6 +432,29 @@ def test_record_replacement_is_atomic_and_leaves_no_temporary(tmp_path: Path) ->
         assert destination.read_bytes() == b'{"value":"new"}\n'
         assert list(destination.parent.glob("*.contextforge-tmp")) == []
         assert list(destination.parent.glob(".*.contextforge-tmp")) == []
+
+
+def test_large_internal_record_is_bounded_and_digest_checked(tmp_path: Path) -> None:
+    payload = b'{"value":"' + b"a" * 12_000 + b'"}\n'
+    location = "files/large.facts.json"
+    with acquire_index_lock(tmp_path, "compressed") as lock:
+        digest = write_index_record(lock, location, payload)
+        stored = begin_index_build(lock) / location
+        encoded = stored.read_bytes()
+        assert encoded.startswith(b"CFZ1")
+        assert len(encoded) < len(payload)
+        assert digest == _sha(payload)
+        assert store_module.load_staged_index_record(lock, location) == payload
+
+        stored.write_bytes(encoded + b"tampered")
+        with pytest.raises(IndexManifestReadError, match="compressed index record"):
+            store_module.load_staged_index_record(lock, location)
+
+        stored.write_bytes(
+            b"CFZ1" + zlib.compress(b"x" * (store_module.MAX_RECORD_BYTES + 1))
+        )
+        with pytest.raises(IndexManifestReadError, match="exceeds its limit"):
+            store_module.load_staged_index_record(lock, location)
 
 
 def test_failed_temporary_write_preserves_previous_record(

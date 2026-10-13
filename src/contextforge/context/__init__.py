@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         CapsuleMaterial,
         CapsuleRange,
         CapsuleSnapshot,
+        CompilationSufficiency,
         CompiledContextCapsule,
         ConservativeTokenEstimator,
         ContextBudget,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
         calculate_context_statistics,
         canonical_line_count,
     )
+    from contextforge.context.projection import render_capsule_source_context
     from contextforge.context.reader import (
         ContextLimitError,
         ContextReaderError,
@@ -111,6 +113,7 @@ if TYPE_CHECKING:
     )
 
 _MODULE_EXPORTS = {
+    "projection": ("render_capsule_source_context",),
     "builder": (
         "ContextBuilder",
         "ContextBuildError",
@@ -130,6 +133,7 @@ _MODULE_EXPORTS = {
         "CapsuleMaterial",
         "CapsuleRange",
         "CapsuleSnapshot",
+        "CompilationSufficiency",
         "CompiledContextCapsule",
         "ConservativeTokenEstimator",
         "ContextBudget",

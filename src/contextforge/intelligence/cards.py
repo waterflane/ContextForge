@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -45,7 +45,15 @@ from contextforge.intelligence.models import (
     analyzer_identity_key,
     validate_portable_relative_path,
 )
+from contextforge.intelligence.polyglot import SUPPORTED_POLYGLOT_LANGUAGES
 from contextforge.intelligence.repository_maps_v3 import build_repository_maps_v3
+from contextforge.intelligence.semantic_lexicon import (
+    FileSemanticLexicon,
+    SemanticContextOverflow,
+    analyze_file_lexicon_resumable,
+    callable_symbols,
+    missing_call_ids,
+)
 from contextforge.intelligence.store import (
     IndexWriteLock,
     load_generation_manifest,
@@ -55,6 +63,7 @@ from contextforge.intelligence.store import (
 )
 from contextforge.models import (
     ModelProvider,
+    ModelProviderError,
     ModelRequest,
     UntrustedSource,
     estimate_request_context,
@@ -62,8 +71,8 @@ from contextforge.models import (
 from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 SEMANTIC_CARD_SCHEMA_VERSION: Literal[3] = 3
-SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.4"
-SEMANTIC_CARD_ANALYZER_VERSION = "7"
+SEMANTIC_CARD_PROMPT_VERSION = "semantic-card-v3.6"
+SEMANTIC_CARD_ANALYZER_VERSION = "9"
 MAX_SEMANTIC_EVIDENCE = 32
 MAX_SEMANTIC_CARD_BYTES = 128 * 1024
 DEFAULT_MODEL_FILE_LIMIT = 64
@@ -125,6 +134,21 @@ class GroundedClaim(IndexModel):
     def validate_evidence_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if value != tuple(sorted(set(value))):
             raise ValueError("claim evidence IDs must be unique and canonical")
+        return value
+
+
+class FileSearchTag(IndexModel):
+    """A bounded search expression with explicit source and origin."""
+
+    text: str = Field(min_length=1, max_length=80)
+    evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    provenance: Literal["model", "structural-fallback"]
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def validate_evidence_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("tag evidence IDs must be unique and canonical")
         return value
 
 
@@ -197,6 +221,8 @@ class SemanticCard(IndexModel):
     inferred_relationships: tuple[SemanticInferredRelationship, ...] = Field(
         default=(), max_length=24
     )
+    lexicon: FileSemanticLexicon | None = None
+    file_tags: tuple[FileSearchTag, ...] = Field(default=(), max_length=12)
     coverage_ranges: tuple[SourceRange, ...] = ()
     evidence: tuple[SemanticEvidence, ...] = Field(
         min_length=1, max_length=MAX_SEMANTIC_EVIDENCE
@@ -208,6 +234,15 @@ class SemanticCard(IndexModel):
     @classmethod
     def validate_path(cls, value: str) -> str:
         return validate_portable_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_lexicon(self) -> SemanticCard:
+        if self.lexicon is not None and (
+            self.lexicon.path != self.path
+            or self.lexicon.source_sha256 != self.source_sha256
+        ):
+            raise ValueError("semantic lexicon identity does not match its card")
+        return self
 
     @model_validator(mode="after")
     def validate_grounding(self) -> SemanticCard:
@@ -237,6 +272,18 @@ class SemanticCard(IndexModel):
         )
         if any(not set(claim.evidence_ids) <= known for claim in claims):
             raise ValueError("semantic claim references unknown evidence")
+        lexicon_ids = (
+            set()
+            if self.lexicon is None
+            else {f"lexicon:{item.symbol_id}" for item in self.lexicon.functions}
+        )
+        if any(
+            not set(tag.evidence_ids) <= known | lexicon_ids for tag in self.file_tags
+        ):
+            raise ValueError("file tag references unknown evidence")
+        tag_keys = tuple(tag.text.casefold() for tag in self.file_tags)
+        if tag_keys != tuple(sorted(set(tag_keys))):
+            raise ValueError("file tags must be unique and canonical")
         relationship_ids = tuple(
             item.target_candidate_id for item in self.inferred_relationships
         )
@@ -263,7 +310,7 @@ class SemanticCard(IndexModel):
             raise ValueError("semantic card exceeds the bounded record size")
         return self
 
-    def ranking_text(self) -> str:
+    def ranking_text(self, *, include_call_expressions: bool = True) -> str:
         """Return only prose already validated against current evidence."""
 
         claims = [
@@ -275,7 +322,14 @@ class SemanticCard(IndexModel):
         claims.extend(
             claim for values in self.profile_facts.values() for claim in values
         )
-        return "\n".join(claim.text for claim in claims)
+        text = [claim.text for claim in claims]
+        if self.lexicon is not None:
+            for function in self.lexicon.functions:
+                text.extend((function.summary, *function.expressions))
+            if include_call_expressions:
+                for call in self.lexicon.calls:
+                    text.extend(call.expressions)
+        return "\n".join(text)
 
 
 class _RawClaim(BaseModel):
@@ -353,6 +407,41 @@ class SemanticCardOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticModelFileOutcome:
+    """Why a file used model budget and the grounded retrieval value it produced."""
+
+    path: str
+    selection_reasons: tuple[str, ...]
+    grounded_terms_added: int
+    grounded_relationships_added: int
+    retrieval_value: int
+    status: Literal["complete", "partial", "fallback"]
+
+
+class SemanticCoverage(IndexModel):
+    """Completeness of requested enrichment, independently of provider errors."""
+
+    eligible_files: tuple[str, ...] = ()
+    selected_files: tuple[str, ...] = ()
+    completed_files: tuple[str, ...] = ()
+    requested_function_ids: tuple[str, ...] = ()
+    completed_function_ids: tuple[str, ...] = ()
+    requested_call_ids: tuple[str, ...] = ()
+    completed_call_ids: tuple[str, ...] = ()
+    missing_function_ids: tuple[str, ...] = ()
+    missing_call_ids: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+
+    @property
+    def partial(self) -> bool:
+        return bool(
+            set(self.eligible_files) - set(self.completed_files)
+            or self.missing_function_ids
+            or self.missing_call_ids
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticCardBuildResult:
     manifest: IndexManifest
     cards: tuple[SemanticCard, ...]
@@ -362,6 +451,8 @@ class SemanticCardBuildResult:
     cache_hits: int
     failed_paths: tuple[str, ...]
     reused_card_paths: tuple[str, ...] = ()
+    model_file_outcomes: tuple[SemanticModelFileOutcome, ...] = ()
+    coverage: SemanticCoverage | None = None
 
     @property
     def analyzed_paths(self) -> tuple[str, ...]:
@@ -379,6 +470,93 @@ class SemanticCardBuildResult:
                 }
             )
         )
+
+
+def _semantic_coverage(
+    code_maps: tuple[FileCodeMap, ...],
+    cards: tuple[SemanticCard, ...],
+    graph: RelationshipGraph,
+    selected: set[str],
+    options: SemanticCardOptions,
+    provider: ModelProvider | None,
+    request_count: int,
+    estimated_tokens: int,
+) -> SemanticCoverage | None:
+    if provider is None or options.scope == "none":
+        return None
+    eligible = {m.path for m in code_maps if not _requires_deterministic_card(m)}
+    requested_paths = eligible if options.scope == "all" else selected
+    functions = (
+        {
+            s.symbol_id
+            for m in code_maps
+            if m.path in requested_paths
+            for s in callable_symbols(m)
+        }
+        if options.scope == "all"
+        else set()
+    )
+    nodes = {n.node_id for n in graph.nodes if n.symbol_id in functions}
+    calls = {
+        e.edge_id
+        for e in graph.edges
+        if e.kind == "call"
+        and e.provenance != "model-inferred"
+        and e.source_node_id in nodes
+    }
+    completed_functions = {
+        f.symbol_id for c in cards if c.lexicon for f in c.lexicon.functions
+    } & functions
+    completed_calls = {
+        e.edge_id for c in cards if c.lexicon for e in c.lexicon.calls if e.expressions
+    } & calls
+    completed_files = {
+        c.path
+        for c in cards
+        if c.path in requested_paths
+        and c.provenance.method == "model"
+        and c.quality == "complete"
+    }
+    reasons: set[str] = set()
+    if requested_paths - selected:
+        reasons.add("file_limit")
+    if request_count >= options.max_requests and requested_paths - completed_files:
+        reasons.add("request_limit")
+    if (
+        estimated_tokens >= options.max_estimated_input_tokens
+        and requested_paths - completed_files
+    ):
+        reasons.add("token_limit")
+    for card in cards:
+        for code in () if card.lexicon is None else card.lexicon.failure_codes:
+            if (
+                "Budget" in code
+                and card.lexicon is not None
+                and card.lexicon.budget_reason
+            ):
+                reasons.add(card.lexicon.budget_reason)
+            elif "Budget" not in code:
+                reasons.add(
+                    "context_overflow"
+                    if "Overflow" in code
+                    else "provider_failure"
+                    if "Provider" in code
+                    else "validation_failure"
+                )
+        if card.path in selected and card.quality == "partial" and not reasons:
+            reasons.add("validation_failure")
+    return SemanticCoverage(
+        eligible_files=tuple(sorted(requested_paths)),
+        selected_files=tuple(sorted(selected)),
+        completed_files=tuple(sorted(completed_files)),
+        requested_function_ids=tuple(sorted(functions)),
+        completed_function_ids=tuple(sorted(completed_functions)),
+        requested_call_ids=tuple(sorted(calls)),
+        completed_call_ids=tuple(sorted(completed_calls)),
+        missing_function_ids=tuple(sorted(functions - completed_functions)),
+        missing_call_ids=tuple(sorted(calls - completed_calls)),
+        reason_codes=tuple(sorted(reasons)),
+    )
 
 
 async def build_semantic_card_index(
@@ -400,6 +578,18 @@ async def build_semantic_card_index(
     maps = {item.path: item for item in code_maps}
     states = {item.path: item for item in structural.files}
     files = {item.path: item for item in snapshot.files}
+    source_texts: dict[str, str] = {}
+    if provider is not None and active_options.scope == "all":
+        for candidate in code_maps:
+            if not callable_symbols(candidate):
+                continue
+            try:
+                source_texts[candidate.path] = _read_source(
+                    snapshot, files[candidate.path]
+                )
+            except (OSError, ValueError):
+                continue
+
     graph = relationship_graph or _load_relationship_graph(lock, structural)
     if graph.source_snapshot_digest != structural.build.source_snapshot_digest:
         raise ValueError("relationship graph does not match the structural snapshot")
@@ -419,6 +609,7 @@ async def build_semantic_card_index(
             cache_hits=0,
             failed_paths=(),
             reused_card_paths=tuple(card.path for card in reusable),
+            model_file_outcomes=(),
         )
     _copy_structural_generation(lock, structural)
     previous_cards = _previous_reusable_cards(
@@ -436,31 +627,16 @@ async def build_semantic_card_index(
     estimated_tokens = 0
     failed: list[str] = []
     reused_card_paths: list[str] = []
+    model_file_outcomes: list[SemanticModelFileOutcome] = []
     analyzers: set[AnalyzerIdentity] = {DETERMINISTIC_CARD_ANALYZER}
 
-    for path in sorted(maps):
+    for path in _semantic_processing_paths(maps, active_options.scope):
         _raise_if_cancelled(cancellation)
         code_map = maps[path]
         state = states[path]
         project_file = files[path]
         evidence = _evidence_table(code_map)
         deterministic_only = _requires_deterministic_card(code_map)
-        if (
-            provider is not None
-            and active_options.scope != "none"
-            and path not in selected
-            and not deterministic_only
-        ):
-            next_states.append(
-                state.model_copy(
-                    update={
-                        "interpretation_record_location": None,
-                        "interpretation_record_sha256": None,
-                        "semantic_status": "skipped",
-                    }
-                )
-            )
-            continue
         should_model = (
             provider is not None
             and active_options.scope != "none"
@@ -468,6 +644,7 @@ async def build_semantic_card_index(
             and path in selected
             and request_count < active_options.max_requests
         )
+        model_selected = should_model
         relationship_candidates: tuple[_RelationshipCandidate, ...] = ()
         previous_card = previous_cards.get(path)
         if previous_card is not None:
@@ -484,7 +661,13 @@ async def build_semantic_card_index(
                 relationship_candidates,
             )
             reused_card_paths.append(path)
-            should_model = False
+            should_model = should_model and (
+                card.provenance.method != "model"
+                or (
+                    card.profile in {"code", "test"}
+                    and not any(tag.provenance == "model" for tag in card.file_tags)
+                )
+            )
         else:
             card = _deterministic_card(
                 code_map,
@@ -494,6 +677,7 @@ async def build_semantic_card_index(
                 diagnostic="semantic_scope_or_budget",
             )
         source: str | None = None
+        raw_to_cache: tuple[str, _RawSemanticCard] | None = None
         if should_model:
             source = _read_source(snapshot, project_file)
 
@@ -569,9 +753,10 @@ async def build_semantic_card_index(
                 repair_count += int(repair_attempted)
                 incomplete = incomplete or request_incomplete
                 if raw is not None and not incomplete:
-                    _store_cached_raw(lock, cache_key, raw)
+                    raw_to_cache = (cache_key, raw)
             if raw is not None:
                 try:
+                    previous_lexicon = card.lexicon
                     card = _ground_raw_card(
                         raw,
                         code_map,
@@ -585,6 +770,8 @@ async def build_semantic_card_index(
                         force_partial=incomplete,
                         coverage_ranges=coverage_ranges,
                     )
+                    if previous_lexicon is not None:
+                        card = card.model_copy(update={"lexicon": previous_lexicon})
                 except ValueError:
                     failed.append(path)
                     card = _deterministic_card(
@@ -594,6 +781,7 @@ async def build_semantic_card_index(
                         method="deterministic-fallback",
                         diagnostic="invalid_required_grounding",
                     )
+                    card = card.model_copy(update={"quality": "partial"})
             else:
                 failed.append(path)
                 card = _deterministic_card(
@@ -603,6 +791,7 @@ async def build_semantic_card_index(
                     method="deterministic-fallback",
                     diagnostic="model_card_unavailable",
                 )
+                card = card.model_copy(update={"quality": "partial"})
         elif previous_card is None:
             card = _deterministic_card(
                 code_map,
@@ -614,6 +803,206 @@ async def build_semantic_card_index(
                     if deterministic_only
                     else "semantic_scope_or_budget"
                 ),
+            )
+        if (
+            provider is not None
+            and active_options.scope == "all"
+            and path in selected
+            and callable_symbols(code_map)
+            and (
+                card.lexicon is None
+                or card.lexicon.missing_symbol_ids
+                or card.lexicon.missing_call_ids
+                or missing_call_ids(code_map, graph, card.lexicon)
+            )
+        ):
+            lexicon_calls = [0]
+            lexicon_tokens = [0]
+            try:
+                source_text = source_texts[path]
+                lexicon = await analyze_file_lexicon_resumable(
+                    provider,
+                    code_map,
+                    source_text,
+                    graph,
+                    maps,
+                    source_texts,
+                    call_counter=lexicon_calls,
+                    token_counter=lexicon_tokens,
+                    request_budget=active_options.max_requests - request_count,
+                    estimated_input_budget=active_options.max_estimated_input_tokens
+                    - estimated_tokens,
+                    previous=card.lexicon,
+                )
+                payload = card.model_dump(mode="json")
+                payload["lexicon"] = lexicon.model_dump(mode="json")
+                payload["diagnostics"] = [
+                    item
+                    for item in payload["diagnostics"]
+                    if item["code"]
+                    not in {
+                        "semantic_lexicon_partial",
+                        "semantic_lexicon_full_file_overflow",
+                    }
+                ]
+                if lexicon.context_mode == "file_only":
+                    effective_window = (
+                        lexicon.reported_context_window
+                        or provider.configuration.context_window
+                    )
+                    payload["diagnostics"].append(
+                        SemanticCardDiagnostic(
+                            code="semantic_lexicon_file_only",
+                            message=(
+                                "Direct callee code omitted; effective context "
+                                f"window {effective_window} "
+                                "tokens."
+                            ),
+                        ).model_dump(mode="json")
+                    )
+                card = SemanticCard.model_validate(payload)
+                analyzers.add(_model_analyzer(provider))
+                if lexicon.missing_symbol_ids or lexicon.missing_call_ids:
+                    failed.append(path)
+                    card = card.model_copy(
+                        update={
+                            "quality": "partial",
+                            "diagnostics": (
+                                *card.diagnostics,
+                                SemanticCardDiagnostic(
+                                    code=(
+                                        "semantic_lexicon_full_file_overflow"
+                                        if "SemanticContextOverflow"
+                                        in lexicon.failure_codes
+                                        else "semantic_lexicon_partial"
+                                    ),
+                                    message=(
+                                        f"Missing {len(lexicon.missing_symbol_ids)} "
+                                        "function description(s)."
+                                    ),
+                                    dropped_items=len(lexicon.missing_symbol_ids),
+                                ),
+                            ),
+                        }
+                    )
+                elif card.provenance.method == "model" and not any(
+                    item.code
+                    in {
+                        "optional_claims_dropped",
+                        "semantic_chunk_coverage_incomplete",
+                        "stale_inferred_relationships_dropped",
+                    }
+                    for item in card.diagnostics
+                ):
+                    card = card.model_copy(update={"quality": "complete"})
+            except Exception as exc:
+                failed.append(path)
+                effective_window = (
+                    getattr(exc, "effective_window", None)
+                    or provider.configuration.context_window
+                )
+                card = card.model_copy(
+                    update={
+                        "quality": "partial",
+                        "diagnostics": (
+                            *card.diagnostics,
+                            SemanticCardDiagnostic(
+                                code=(
+                                    "semantic_lexicon_full_file_overflow"
+                                    if isinstance(exc, SemanticContextOverflow)
+                                    else "semantic_lexicon_unavailable"
+                                ),
+                                message=(
+                                    f"Lexicon incomplete ({type(exc).__name__}); "
+                                    "effective context window "
+                                    f"{effective_window} tokens."
+                                ),
+                            ),
+                        ),
+                    }
+                )
+
+            finally:
+                estimated_tokens += lexicon_tokens[0]
+                request_count += lexicon_calls[0]
+        if (
+            provider is not None
+            and not deterministic_only
+            and card.provenance.method != "model"
+        ):
+            card = card.model_copy(update={"quality": "partial"})
+        card = _with_file_tags(card, code_map)
+        if (
+            model_selected
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
+        ):
+            failed.append(path)
+        elif raw_to_cache is not None and card.provenance.method == "model":
+            _store_cached_raw(lock, *raw_to_cache)
+        if model_selected:
+            selection_reasons = _model_selection_reasons(
+                path,
+                code_map,
+                graph,
+                changed_paths=changed_paths,
+            )
+            grounded_terms, grounded_relationships = _grounded_retrieval_value(card)
+            retrieval_value = grounded_terms + grounded_relationships
+            if retrieval_value == 0 and card.quality != "deterministic":
+                card = card.model_copy(
+                    update={
+                        "quality": "partial",
+                        "diagnostics": tuple(
+                            (
+                                *card.diagnostics,
+                                SemanticCardDiagnostic(
+                                    code="semantic_retrieval_value_empty",
+                                    message=(
+                                        "Model card added no grounded retrieval terms "
+                                        "or relationships."
+                                    ),
+                                ),
+                            )
+                        ),
+                    }
+                )
+            card = card.model_copy(
+                update={
+                    "diagnostics": tuple(
+                        (
+                            *card.diagnostics,
+                            SemanticCardDiagnostic(
+                                code="semantic_scheduler_value",
+                                message=(
+                                    "Selected for "
+                                    + ", ".join(selection_reasons)
+                                    + "; added "
+                                    + str(grounded_terms)
+                                    + " grounded retrieval terms and "
+                                    + str(grounded_relationships)
+                                    + " grounded relationships."
+                                ),
+                            ),
+                        )
+                    )
+                }
+            )
+            model_file_outcomes.append(
+                SemanticModelFileOutcome(
+                    path=path,
+                    selection_reasons=selection_reasons,
+                    grounded_terms_added=grounded_terms,
+                    grounded_relationships_added=grounded_relationships,
+                    retrieval_value=retrieval_value,
+                    status=(
+                        "fallback"
+                        if card.provenance.method != "model"
+                        else "partial"
+                        if card.quality == "partial"
+                        else "complete"
+                    ),
+                )
             )
 
         content = canonical_json_bytes(card.model_dump(mode="json"))
@@ -632,6 +1021,9 @@ async def build_semantic_card_index(
             )
         )
 
+    cards.sort(key=lambda item: item.path)
+    next_states.sort(key=lambda item: item.path)
+    model_file_outcomes.sort(key=lambda item: item.path)
     interpretations_digest = hashlib.sha256(
         canonical_json_bytes(
             [(state.path, state.interpretation_record_sha256) for state in next_states]
@@ -670,10 +1062,16 @@ async def build_semantic_card_index(
     )
 
     semantic_retrieval = build_retrieval_index(
-        code_maps, tuple(cards), structural.build.source_snapshot_digest
+        code_maps,
+        tuple(cards),
+        structural.build.source_snapshot_digest,
+        relationship_graph=graph,
     )
     semantic_retrieval_digest = write_retrieval_index(
-        lock, "retrieval-semantic.json", semantic_retrieval
+        lock,
+        "retrieval-semantic.json",
+        semantic_retrieval,
+        base_structural_reference=structural.artifacts.structural_retrieval,
     )
     artifacts = structural.artifacts.model_copy(
         update={
@@ -695,6 +1093,35 @@ async def build_semantic_card_index(
             ),
         }
     )
+    # Semantic force bypasses card reuse, not publication identity.  A repeat
+    # request that grounds to byte-identical cards and maps leaves the enriched
+    # generation pinned instead of manufacturing a no-op generation.
+    if (
+        structural.generation_kind == "enriched"
+        and tuple(next_states) == structural.files
+        and artifacts == structural.artifacts
+    ):
+        return SemanticCardBuildResult(
+            manifest=structural,
+            cards=tuple(cards),
+            generation_path=lock.layout.generations / structural.generation_id,
+            request_count=request_count,
+            repair_count=repair_count,
+            cache_hits=cache_hits,
+            failed_paths=tuple(sorted(set(failed))),
+            reused_card_paths=tuple(sorted(reused_card_paths)),
+            model_file_outcomes=tuple(model_file_outcomes),
+            coverage=_semantic_coverage(
+                code_maps,
+                tuple(cards),
+                graph,
+                selected,
+                active_options,
+                provider,
+                request_count,
+                estimated_tokens,
+            ),
+        )
     build = IndexBuildState(
         source_snapshot_digest=structural.build.source_snapshot_digest,
         index_config_digest=structural.build.index_config_digest,
@@ -720,8 +1147,19 @@ async def build_semantic_card_index(
         request_count=request_count,
         repair_count=repair_count,
         cache_hits=cache_hits,
-        failed_paths=tuple(sorted(failed)),
+        failed_paths=tuple(sorted(set(failed))),
         reused_card_paths=tuple(sorted(reused_card_paths)),
+        model_file_outcomes=tuple(model_file_outcomes),
+        coverage=_semantic_coverage(
+            code_maps,
+            tuple(cards),
+            graph,
+            selected,
+            active_options,
+            provider,
+            request_count,
+            estimated_tokens,
+        ),
     )
 
 
@@ -784,6 +1222,31 @@ def _reusable_cards(
             )
         except ValueError:
             return None
+        if (
+            provider is not None
+            and state.path in selected
+            and card.provenance.method != "model"
+        ):
+            return None
+        if (
+            provider is not None
+            and state.path in selected
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
+        ):
+            return None
+        if (
+            provider is not None
+            and options.scope == "all"
+            and state.path in selected
+            and callable_symbols(code_maps[state.path])
+            and (
+                card.lexicon is None
+                or card.lexicon.missing_symbol_ids
+                or card.lexicon.missing_call_ids
+            )
+        ):
+            return None
         analyzer = card.provenance.analyzer
         if card.provenance.method == "model" and analyzer != expected_model:
             return None
@@ -804,7 +1267,11 @@ def _previous_reusable_cards(
 ) -> dict[str, SemanticCard]:
     """Load unchanged cards from the generation preceding a structural update."""
 
-    previous_id = structural.build.previous_generation_id
+    previous_id = (
+        structural.generation_id
+        if structural.generation_kind == "enriched"
+        else structural.build.previous_generation_id
+    )
     if options.force_reanalyze or previous_id is None:
         return {}
     try:
@@ -832,6 +1299,21 @@ def _previous_reusable_cards(
                 manifest=previous,
             )
         except ValueError:
+            continue
+        if (
+            provider is not None
+            and options.scope != "none"
+            and card.provenance.method != "model"
+            and not (card.lexicon is not None and card.lexicon.functions)
+        ):
+            continue
+        if (
+            provider is not None
+            and options.scope != "none"
+            and card.profile in {"code", "test"}
+            and not any(tag.provenance == "model" for tag in card.file_tags)
+            and not (card.lexicon is not None and card.lexicon.functions)
+        ):
             continue
         analyzer = card.provenance.analyzer
         if card.provenance.method == "model":
@@ -936,6 +1418,7 @@ async def _request_card(
                 chunk_index=chunk_index,
                 chunk_count=len(chunks),
             )
+            request = replace(request, scheduler_owned_attempts=True)
             budget = estimate_request_context(request, provider.configuration)
             cost = _card_request_token_cost(request, provider)
             if not budget.fits or used_tokens + cost > remaining_tokens:
@@ -947,11 +1430,17 @@ async def _request_card(
                 response = await provider.complete_structured(
                     request, cancellation=cancellation
                 )
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, ModelProviderError):
+                    used_requests += max(exc.total_provider_http_calls - 1, 0)
                 if attempt == 0 and used_requests < remaining_requests:
                     repair_attempted = True
                     continue
                 break
+            if response.diagnostic is not None:
+                used_requests += max(
+                    response.diagnostic.total_provider_http_calls - 1, 0
+                )
             if isinstance(
                 response.value, _RawSemanticCard
             ) and _mandatory_grounding_valid(
@@ -1029,8 +1518,9 @@ def _card_request(
         ),
         purpose="semantic-card" if attempt == 0 else "semantic-card-repair",
         system_instructions=(
-            "Return a sparse semantic card for only the supplied source chunk. Every "
-            "claim must cite only IDs listed in trusted_code_map_facts."
+            "Return a sparse semantic card for the supplied source. Write the file "
+            "synopsis as one concise sentence. Every claim must cite only IDs "
+            "listed in trusted_code_map_facts."
             "allowed_evidence_ids and include an exact identifier or at least two "
             "meaningful lexical anchors from that evidence. Speculative wording "
             "such as likely, probably, or may is interpretation and is excluded "
@@ -1096,6 +1586,8 @@ def _plan_card_chunks(
     )
     full_budget = estimate_request_context(full_request, provider.configuration)
     if full_budget.fits:
+        return full, False
+    if _profile_for_path(code_map.path) in {"code", "test"}:
         return full, False
 
     available_source_tokens = max(
@@ -1353,8 +1845,11 @@ def _deterministic_card(
     public = [
         symbol
         for symbol in code_map.symbols
-        if symbol.visibility in {"public", "explicit_export"}
-        or symbol.parent_symbol_id is None
+        if not symbol.is_anonymous
+        and (
+            symbol.visibility in {"public", "explicit_export"}
+            or symbol.parent_symbol_id is None
+        )
     ][:12]
     evidence_by_symbol = {
         item.symbol_id: item.evidence_id
@@ -1412,6 +1907,78 @@ def _deterministic_card(
                 message="A deterministic grounded card was used.",
             ),
         ),
+    )
+
+
+def _with_file_tags(card: SemanticCard, code_map: FileCodeMap) -> SemanticCard:
+    """Attach canonical model tags or source-derived fallback tags to code and tests."""
+
+    if card.profile not in {"code", "test"}:
+        return card
+    known = {item.evidence_id for item in card.evidence}
+    model_tags = [
+        FileSearchTag(
+            text=claim.text,
+            evidence_ids=claim.evidence_ids,
+            provenance="model",
+        )
+        for claim in card.concepts
+        if card.provenance.method == "model"
+        and len(claim.text) <= 80
+        and len(claim.text.split()) <= 8
+        and set(claim.evidence_ids) <= known
+    ]
+    if card.lexicon is not None:
+        model_tags.extend(
+            FileSearchTag(
+                text=expression,
+                evidence_ids=(f"lexicon:{function.symbol_id}",),
+                provenance="model",
+            )
+            for function in card.lexicon.functions
+            for expression in function.expressions
+            if len(expression) <= 80
+        )
+    if model_tags:
+        chosen = model_tags[:12]
+    else:
+        by_symbol = {
+            item.symbol_id: item.evidence_id
+            for item in card.evidence
+            if item.symbol_id is not None
+        }
+        root = next(
+            (
+                item.evidence_id
+                for item in card.evidence
+                if item.evidence_id == "file" or item.evidence_id.startswith("chunk:")
+            ),
+            card.evidence[0].evidence_id,
+        )
+        chosen = [
+            FileSearchTag(
+                text=symbol.name,
+                evidence_ids=(by_symbol.get(symbol.symbol_id, root),),
+                provenance="structural-fallback",
+            )
+            for symbol in code_map.symbols
+            if symbol.name.strip() and len(symbol.name) <= 80
+        ][:11]
+        stem = PurePosixPath(code_map.path).stem
+        chosen.append(
+            FileSearchTag(
+                text=stem[:80] or card.profile,
+                evidence_ids=(root,),
+                provenance="structural-fallback",
+            )
+        )
+    unique = {tag.text.casefold(): tag for tag in chosen}
+    tags = tuple(unique[key] for key in sorted(unique))
+    quality = card.quality
+    if not model_tags and card.provenance.method == "model":
+        quality = "partial"
+    return SemanticCard.model_validate(
+        {**card.model_dump(mode="json"), "file_tags": tags, "quality": quality}
     )
 
 
@@ -1850,8 +2417,6 @@ def _priority_paths(
     eligible = {
         item.path: item for item in code_maps if not _requires_deterministic_card(item)
     }
-    if options.scope == "all":
-        return set(eligible)
     metrics = {item.path: item for item in graph.file_metrics}
 
     def ordered(paths: set[str]) -> list[str]:
@@ -1863,6 +2428,9 @@ def _priority_paths(
                 path,
             ),
         )
+
+    if options.scope == "all":
+        return set(ordered(set(eligible))[: options.max_model_files])
 
     selected: list[str] = []
     seen: set[str] = set()
@@ -1910,6 +2478,44 @@ def _priority_score(code_map: FileCodeMap) -> int:
     return score
 
 
+def _model_selection_reasons(
+    path: str,
+    code_map: FileCodeMap,
+    graph: RelationshipGraph,
+    *,
+    changed_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Explain deterministic scheduler admission without source content."""
+
+    reasons: list[str] = []
+    if path in set(changed_paths):
+        reasons.append("changed_path")
+    if _is_entrypoint(path):
+        reasons.append("entrypoint")
+    if _has_public_api(code_map):
+        reasons.append("public_api")
+    if _profile_for_path(path) in {"documentation", "config", "test"}:
+        reasons.append("supporting_profile")
+    metrics = {item.path: item for item in graph.file_metrics}
+    metric = metrics.get(path)
+    if metric is not None and metric.normalized_centrality > 0:
+        reasons.append("structural_centrality")
+    if not reasons:
+        reasons.append("priority_score")
+    return tuple(reasons)
+
+
+def _grounded_retrieval_value(card: SemanticCard) -> tuple[int, int]:
+    """Count only grounded semantic terms and closed inferred relationships."""
+
+    terms = {
+        value
+        for value in re.findall(r"[^\W_]+", card.ranking_text().casefold(), re.UNICODE)
+        if value
+    }
+    return len(terms), len(card.inferred_relationships)
+
+
 def _has_public_api(code_map: FileCodeMap) -> bool:
     return bool(code_map.exports) or any(
         symbol.parent_symbol_id is None
@@ -1935,6 +2541,24 @@ def _related_test_paths(graph: RelationshipGraph, selected: set[str]) -> set[str
 
 def _requires_deterministic_card(code_map: FileCodeMap) -> bool:
     return FILE_POLICY_REGISTRY.requires_deterministic_card(code_map)
+
+
+def _semantic_processing_paths(
+    maps: dict[str, FileCodeMap], scope: SemanticScope
+) -> tuple[str, ...]:
+    if scope != "all":
+        return tuple(sorted(maps))
+    code_languages = frozenset({"Python", *SUPPORTED_POLYGLOT_LANGUAGES})
+
+    def priority(path: str) -> tuple[int, str]:
+        code_map = maps[path]
+        if callable_symbols(code_map):
+            return (0, path)
+        if code_map.language in code_languages:
+            return (1, path)
+        return (2, path)
+
+    return tuple(sorted(maps, key=priority))
 
 
 def _profile_for_path(path: str) -> SemanticProfile:
@@ -2170,6 +2794,7 @@ __all__ = [
     "SemanticCard",
     "SemanticCardBuildResult",
     "SemanticCardDiagnostic",
+    "SemanticModelFileOutcome",
     "SemanticCardOptions",
     "SemanticCardProvenance",
     "SemanticEvidence",

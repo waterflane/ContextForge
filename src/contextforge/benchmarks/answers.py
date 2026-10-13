@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -18,9 +20,23 @@ from contextforge.benchmarks.models import (
     BenchmarkPairedAnswerEvaluation,
     BenchmarkSourceRange,
 )
+from contextforge.benchmarks.support import (
+    assertion_support_is_materialized,
+    public_assertions,
+    range_is_materialized,
+)
 from contextforge.context import CompiledContextCapsule, RepresentationMode
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
-from contextforge.models import ModelProvider, ModelRequest, UntrustedSource
+from contextforge.intelligence.indexer import load_file_code_map
+from contextforge.intelligence.retrieval import _all_structural_postings
+from contextforge.intelligence.source_evidence import derive_source_evidence_units
+from contextforge.intelligence.store import load_manifest
+from contextforge.models import (
+    ContextWindowExceededError,
+    ModelProvider,
+    ModelRequest,
+    UntrustedSource,
+)
 from contextforge.repositories import ProjectFile, ProjectSnapshot, scan_repository
 
 
@@ -31,6 +47,7 @@ class _AnswerCitation(BaseModel):
     path: str
     start_line: int = Field(ge=1, strict=True)
     end_line: int = Field(ge=1, strict=True)
+    material_evidence_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_order(self) -> _AnswerCitation:
@@ -56,6 +73,10 @@ class _GroundednessResponse(BaseModel):
     unsupported_claims: tuple[str, ...] = ()
 
 
+class OrdinaryBaselineContextOverflow(ValueError):
+    """The unmodified ordinary baseline cannot fit the selected model."""
+
+
 async def run_paired_answer_regression(
     repository_root: str | Path,
     task: str,
@@ -76,20 +97,30 @@ async def run_paired_answer_regression(
         root, selected_ordinary_paths
     )
     oracle_context = render_oracle_context(root, oracle_ranges)
-    capsule_ranges = _capsule_source_ranges(compiled)
-    ordinary = _measure_answer_input(
-        task,
-        assertions,
-        ordinary_context,
-        ordinary_ranges,
-        label="ordinary-client",
-    )
+    capsule_ranges, capsule_evidence = _capsule_material_evidence(compiled)
+    ordinary_evidence = _source_material_evidence(root, ordinary_ranges)
+    oracle_evidence = _source_material_evidence(root, oracle_ranges)
+    try:
+        ordinary = await _run_answer(
+            provider,
+            task,
+            assertions,
+            ordinary_context,
+            ordinary_ranges,
+            ordinary_evidence,
+            label="ordinary-client",
+        )
+    except ContextWindowExceededError as exc:
+        raise OrdinaryBaselineContextOverflow(
+            "ordinary baseline exceeds the model context window"
+        ) from exc
     oracle = await _run_answer(
         provider,
         task,
         assertions,
         oracle_context,
         oracle_ranges,
+        oracle_evidence,
         label="manual-oracle",
     )
     contextforge = await _run_answer(
@@ -98,13 +129,14 @@ async def run_paired_answer_regression(
         assertions,
         compiled.prompt,
         capsule_ranges,
+        capsule_evidence,
         label="contextforge-capsule",
     )
     groundedness = await _run_groundedness_judge(
         provider,
-        task,
+        assertions,
         contextforge,
-        render_oracle_context(root, capsule_ranges),
+        render_oracle_context(root, _cited_ranges(contextforge, capsule_ranges)),
     )
     reduction = (
         0.0
@@ -120,6 +152,10 @@ async def run_paired_answer_regression(
         quality_not_lower=(
             contextforge.assertion_recall >= oracle.assertion_recall
             and contextforge.citation_validity >= oracle.citation_validity
+            and contextforge.assertion_evidence_support
+            >= oracle.assertion_evidence_support
+            and contextforge.lexical_identifier_support
+            >= oracle.lexical_identifier_support
             and groundedness.passed
         ),
     )
@@ -203,7 +239,7 @@ def _read_source(
 
 async def _run_groundedness_judge(
     provider: ModelProvider,
-    task: str,
+    assertions: tuple[BenchmarkExpectedAssertion, ...],
     answer: BenchmarkAnswerEvaluation,
     source_context: str,
 ) -> BenchmarkGroundednessEvaluation:
@@ -220,6 +256,13 @@ async def _run_groundedness_judge(
             "answer": answer.answer,
             "assertion_ids": answer.assertion_ids,
             "citations": [item.model_dump(mode="json") for item in answer.citations],
+            "assertions": public_assertions(
+                tuple(
+                    item
+                    for item in assertions
+                    if item.assertion_id in answer.assertion_ids
+                )
+            ),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -236,7 +279,10 @@ async def _run_groundedness_judge(
                 "facts from filenames, wrappers, or missing code. Return "
                 "grounded=false when any material claim lacks direct support."
             ),
-            analysis_task=task,
+            analysis_task=(
+                "Decide support only from the supplied candidate answer and "
+                "cited ranges."
+            ),
             trusted_code_map_facts={"judge_repetition": repetition},
             untrusted_sources=(
                 UntrustedSource.from_text("candidate-answer.json", candidate_payload),
@@ -301,6 +347,7 @@ async def _run_answer(
     assertions: tuple[BenchmarkExpectedAssertion, ...],
     context: str,
     allowed_ranges: tuple[BenchmarkSourceRange, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
     *,
     label: str,
 ) -> BenchmarkAnswerEvaluation:
@@ -309,6 +356,7 @@ async def _run_answer(
         assertions,
         context,
         allowed_ranges,
+        material_evidence,
         label=label,
     )
     started = time.perf_counter()
@@ -324,6 +372,7 @@ async def _run_answer(
             path=item.path,
             start_line=item.start_line,
             end_line=item.end_line,
+            material_evidence_ids=tuple(sorted(set(item.material_evidence_ids))),
         )
         for item in response.value.citations
     )
@@ -333,6 +382,21 @@ async def _run_answer(
         for item in citations
     )
     invalid = len(citations) - valid
+    assertion_by_id = {item.assertion_id: item for item in assertions}
+    supported_assertions = {
+        assertion_id
+        for assertion_id in assertion_ids
+        if _assertion_has_evidence_support(
+            assertion_by_id[assertion_id], citations, material_evidence
+        )
+    }
+    lexical_supported = {
+        assertion_id
+        for assertion_id in assertion_ids
+        if _assertion_has_lexical_support(
+            assertion_by_id[assertion_id], citations, context
+        )
+    }
     estimated_input_tokens = _request_tokens(request)
     usage = response.usage
     provider_input_tokens = (
@@ -354,6 +418,12 @@ async def _run_answer(
         invalid_citation_count=invalid,
         assertion_recall=(len(assertion_ids) / len(expected) if expected else 1.0),
         citation_validity=(valid / len(citations) if citations else 0.0),
+        assertion_evidence_support=(
+            len(supported_assertions) / len(expected) if expected else 1.0
+        ),
+        lexical_identifier_support=(
+            len(lexical_supported) / len(expected) if expected else 1.0
+        ),
         input_tokens=input_tokens,
         estimated_input_tokens=estimated_input_tokens,
         provider_input_tokens=provider_input_tokens,
@@ -367,37 +437,12 @@ async def _run_answer(
     )
 
 
-def _measure_answer_input(
-    task: str,
-    assertions: tuple[BenchmarkExpectedAssertion, ...],
-    context: str,
-    allowed_ranges: tuple[BenchmarkSourceRange, ...],
-    *,
-    label: str,
-) -> BenchmarkAnswerEvaluation:
-    """Measure an ordinary full-file payload without requiring it to fit Qwen."""
-
-    request = _answer_request(
-        task,
-        assertions,
-        context,
-        allowed_ranges,
-        label=label,
-    )
-    estimated = _request_tokens(request)
-    return BenchmarkAnswerEvaluation(
-        assertion_recall=0.0,
-        citation_validity=0.0,
-        input_tokens=estimated,
-        estimated_input_tokens=estimated,
-    )
-
-
 def _answer_request(
     task: str,
     assertions: tuple[BenchmarkExpectedAssertion, ...],
     context: str,
     allowed_ranges: tuple[BenchmarkSourceRange, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
     *,
     label: str,
 ) -> ModelRequest:
@@ -418,9 +463,16 @@ def _answer_request(
         ),
         analysis_task=task,
         trusted_code_map_facts={
-            "assertions": [item.model_dump(mode="json") for item in assertions],
+            "assertions": public_assertions(assertions),
             "allowed_citation_ranges": [
                 item.model_dump(mode="json") for item in allowed_ranges
+            ],
+            "material_evidence": [
+                {
+                    "range": source_range.model_dump(mode="json"),
+                    "evidence_ids": evidence_ids,
+                }
+                for source_range, evidence_ids in material_evidence
             ],
         },
         untrusted_sources=(UntrustedSource.from_text(f"{label}.xml", context),),
@@ -433,16 +485,20 @@ def _answer_request(
     )
 
 
-def _capsule_source_ranges(
+def _capsule_material_evidence(
     compiled: CompiledContextCapsule,
-) -> tuple[BenchmarkSourceRange, ...]:
+) -> tuple[
+    tuple[BenchmarkSourceRange, ...],
+    tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
+]:
     values: list[BenchmarkSourceRange] = []
+    evidence: list[tuple[BenchmarkSourceRange, tuple[str, ...]]] = []
     for material in (
         *compiled.capsule.working_set,
         *compiled.capsule.task_context,
     ):
         if material.representation is RepresentationMode.SLICE:
-            values.extend(
+            ranges = tuple(
                 BenchmarkSourceRange(
                     path=material.path,
                     start_line=item.start_line,
@@ -450,17 +506,142 @@ def _capsule_source_ranges(
                 )
                 for item in material.ranges
             )
+            values.extend(ranges)
+            evidence.extend((item, material.evidence_ids) for item in ranges)
         elif material.representation is RepresentationMode.FULL:
             line_count = len(material.content.splitlines())
             if line_count:
-                values.append(
-                    BenchmarkSourceRange(
-                        path=material.path,
-                        start_line=1,
-                        end_line=line_count,
-                    )
+                source_range = BenchmarkSourceRange(
+                    path=material.path,
+                    start_line=1,
+                    end_line=line_count,
                 )
-    return tuple(values)
+                values.append(source_range)
+                evidence.append((source_range, material.evidence_ids))
+    return tuple(values), tuple(evidence)
+
+
+def _source_material_evidence(
+    root: Path, ranges: tuple[BenchmarkSourceRange, ...]
+) -> tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...]:
+    """Bind fully covered verified facts to actual material, without answer keys."""
+
+    manifest = load_manifest(root)
+    evidence: list[tuple[BenchmarkSourceRange, tuple[str, ...]]] = []
+    for path in sorted({item.path for item in ranges}):
+        code_map = load_file_code_map(root, path, manifest=manifest)
+        if (
+            hashlib.sha256((root / path).read_bytes()).hexdigest()
+            != code_map.source_sha256
+        ):
+            raise ValueError(f"material source SHA is stale: {path}")
+        visible_material = tuple((r, ()) for r in ranges if r.path == path)
+        identities: dict[BenchmarkSourceRange, set[str]] = {
+            visible: set() for visible, _ in visible_material
+        }
+        facts = (
+            *(
+                (p.evidence_id, p.source_range)
+                for p in _all_structural_postings(code_map)
+            ),
+            *(
+                (u.evidence_id, u.source_range)
+                for u in derive_source_evidence_units(code_map)
+            ),
+        )
+        for identity, source_range in facts:
+            fact_range = BenchmarkSourceRange(
+                path=path,
+                start_line=source_range.start_line,
+                end_line=source_range.end_line,
+            )
+            if not range_is_materialized(fact_range, visible_material):
+                continue
+            for visible, _ in visible_material:
+                if (
+                    visible.start_line <= fact_range.end_line
+                    and fact_range.start_line <= visible.end_line
+                ):
+                    identities[visible].add(identity)
+        evidence.extend(
+            (visible, tuple(sorted(identities[visible])))
+            for visible, _ in visible_material
+        )
+    return tuple(evidence)
+
+
+def _cited_ranges(
+    answer: BenchmarkAnswerEvaluation,
+    allowed: tuple[BenchmarkSourceRange, ...],
+) -> tuple[BenchmarkSourceRange, ...]:
+    values = tuple(
+        BenchmarkSourceRange(
+            path=item.path, start_line=item.start_line, end_line=item.end_line
+        )
+        for item in answer.citations
+        if any(_contains(source_range, item) for source_range in allowed)
+    )
+    return values
+
+
+def _assertion_has_evidence_support(
+    assertion: BenchmarkExpectedAssertion,
+    citations: tuple[BenchmarkAnswerCitation, ...],
+    material_evidence: tuple[tuple[BenchmarkSourceRange, tuple[str, ...]], ...],
+) -> bool:
+    if not assertion.support:
+        return any(item.assertion_id == assertion.assertion_id for item in citations)
+    if not assertion_support_is_materialized(assertion, material_evidence):
+        return False
+    cited_material = tuple(
+        (
+            BenchmarkSourceRange(
+                path=citation.path,
+                start_line=citation.start_line,
+                end_line=citation.end_line,
+            ),
+            citation.material_evidence_ids,
+        )
+        for citation in citations
+        if citation.assertion_id == assertion.assertion_id
+        and any(_contains(source, citation) for source, _ in material_evidence)
+        and set(citation.material_evidence_ids)
+        <= {
+            identity
+            for source, identities in material_evidence
+            if _contains(source, citation)
+            for identity in identities
+        }
+    )
+    return assertion_support_is_materialized(assertion, cited_material)
+
+
+def _assertion_has_lexical_support(
+    assertion: BenchmarkExpectedAssertion,
+    citations: tuple[BenchmarkAnswerCitation, ...],
+    context: str,
+) -> bool:
+    identifiers = {
+        value.casefold()
+        for value in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", assertion.description)
+        if len(value) > 2
+    }
+    if not identifiers:
+        return bool(citations)
+    cited = "\n".join(
+        _source_block_for_citation(context, citation)
+        for citation in citations
+        if citation.assertion_id == assertion.assertion_id
+    ).casefold()
+    return bool(identifiers & set(re.findall(r"[a-z_][a-z0-9_]*", cited)))
+
+
+def _source_block_for_citation(context: str, citation: BenchmarkAnswerCitation) -> str:
+    pattern = (
+        rf'<(?:source|material) path="{re.escape(citation.path)}"[^>]*>'
+        r"(.*?)</(?:source|material)>"
+    )
+    return "\n".join(re.findall(pattern, context, flags=re.DOTALL))
 
 
 def _contains(allowed: BenchmarkSourceRange, citation: BenchmarkAnswerCitation) -> bool:
@@ -479,6 +660,7 @@ def _request_tokens(request: ModelRequest) -> int:
 
 
 __all__ = [
+    "OrdinaryBaselineContextOverflow",
     "render_oracle_context",
     "render_ordinary_context",
     "run_paired_answer_regression",

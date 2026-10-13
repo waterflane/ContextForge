@@ -1,5 +1,15 @@
 # CLI logging and diagnostics reference
 
+## Compact source export
+
+The indexed `context create` flow accepts `--compact-prompt`. It changes prompt
+output to a compact XML source projection with file paths and actual line numbers.
+`--format json --output capsule.json --prompt-output source.xml` retains the full
+proof-bearing capsule separately. The normal compiler prompt is still the default.
+Compact output must fit the same hard budget and cannot replace missing source,
+change sufficiency or turn MAP/SUMMARY into behavioral evidence. The option requires
+`--task` and is unavailable in manual and legacy handoff flows.
+
 The `contextforge` and `ctxf` entry points share one Typer application and one
 logging policy. Command results use stdout. Progress, logs, and unavoidable
 fatal diagnostics use stderr. `--version` and `version` remain clean.

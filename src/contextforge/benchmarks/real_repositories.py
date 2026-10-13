@@ -1,0 +1,1174 @@
+"""Immutable contracts and opt-in execution for real-repository benchmarks.
+
+The discovery benchmark runner deliberately operates on a caller supplied
+working tree.  This module is the narrower contract used for reviewed external
+repositories: a manifest pins the revision and expected evidence, while the
+live harness clones that source into a disposable directory before evaluation.
+It contains no retrieval policy; observations are supplied by the evaluated
+pipeline so the contract cannot become a corpus-specific ranking rule.
+"""
+
+from __future__ import annotations
+
+import inspect
+import subprocess
+import tempfile
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from contextforge.benchmarks.models import (
+    BenchmarkExpectedAssertion,
+    BenchmarkPairedAnswerEvaluation,
+    BenchmarkSourceRange,
+)
+from contextforge.benchmarks.support import assertion_support_is_materialized
+from contextforge.context.capsule import CompilationSufficiency
+from contextforge.core.validation import validate_portable_relative_path
+from contextforge.intelligence.cards import SemanticCoverage
+from contextforge.intelligence.retrieval import CoverageLedger
+
+CompilationCalibration = Literal[
+    "consistent_sufficient", "false_sufficient", "insufficient", "unverified"
+]
+
+REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION: Literal[2] = 2
+MAX_FINAL_ANSWER_MS = 90_000
+RepositoryRelativePath = Annotated[str, AfterValidator(validate_portable_relative_path)]
+Rate = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)]
+NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
+GitRevision = Annotated[str, Field(pattern=r"^[0-9a-f]{40,64}$", strict=True)]
+
+
+class RealBenchmarkModel(BaseModel):
+    """Closed and immutable model base for an auditable benchmark contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class RealBenchmarkTaskKind(StrEnum):
+    BROAD = "broad"
+    EXACT_SYMBOL = "exact_symbol"
+
+
+class RealBenchmarkMode(StrEnum):
+    DETERMINISTIC = "deterministic"
+    PLANNED = "planned"
+
+
+class _ExternalRepositoryUnavailable(RuntimeError):
+    """A pinned source cannot be cloned or checked out."""
+
+
+class RealBenchmarkTaskRole(RealBenchmarkModel):
+    """An independently necessary evidence role for a task."""
+
+    role_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    description: str = Field(min_length=1, max_length=500)
+    required_paths: tuple[RepositoryRelativePath, ...] = Field(min_length=1)
+
+    @field_validator("required_paths")
+    @classmethod
+    def canonical_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("role required_paths must be sorted and unique")
+        return value
+
+
+class RealBenchmarkRepository(RealBenchmarkModel):
+    repository_id: str = Field(
+        min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$"
+    )
+    revision: GitRevision
+
+
+class RealBenchmarkTask(RealBenchmarkModel):
+    """One reviewed task, expressed only as expected evidence and assertions."""
+
+    task_id: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    repository_id: str = Field(min_length=1, max_length=100)
+    kind: RealBenchmarkTaskKind
+    dataset_split: Literal["tuning", "holdout"]
+    task: str = Field(min_length=1, max_length=4_000)
+    required_files: tuple[RepositoryRelativePath, ...] = Field(
+        min_length=1, max_length=5
+    )
+    relevant_top5: tuple[RepositoryRelativePath, ...] = Field(
+        min_length=1, max_length=5
+    )
+    required_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    oracle_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    task_roles: tuple[RealBenchmarkTaskRole, ...] = Field(min_length=1)
+    answer_assertions: tuple[BenchmarkExpectedAssertion, ...] = ()
+
+    @field_validator("required_files", "relevant_top5")
+    @classmethod
+    def canonical_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("benchmark paths must be unique")
+        return value
+
+    @field_validator("required_ranges", "oracle_ranges")
+    @classmethod
+    def canonical_ranges(
+        cls, value: tuple[BenchmarkSourceRange, ...]
+    ) -> tuple[BenchmarkSourceRange, ...]:
+        keys = tuple((item.path, item.start_line, item.end_line) for item in value)
+        if keys != tuple(sorted(set(keys))):
+            raise ValueError("required_ranges must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_evidence_contract(self) -> RealBenchmarkTask:
+        required = set(self.required_files)
+        role_paths = {path for role in self.task_roles for path in role.required_paths}
+        if role_paths != required:
+            raise ValueError("task roles must cover exactly the required files")
+        if (
+            not {item.path for item in (*self.required_ranges, *self.oracle_ranges)}
+            <= required
+        ):
+            raise ValueError("required/oracle ranges must refer to required_files")
+        assertion_ids = tuple(item.assertion_id for item in self.answer_assertions)
+        if assertion_ids != tuple(sorted(set(assertion_ids))):
+            raise ValueError("answer assertions must have canonical unique IDs")
+        return self
+
+
+class RealRepositoryBenchmarkManifest(RealBenchmarkModel):
+    schema_version: Literal[1, 2]
+    suite_name: str = Field(min_length=1, max_length=200)
+    repositories: tuple[RealBenchmarkRepository, ...] = Field(min_length=1)
+    tasks: tuple[RealBenchmarkTask, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_repositories_and_tasks(self) -> RealRepositoryBenchmarkManifest:
+        repository_ids = tuple(item.repository_id for item in self.repositories)
+        if repository_ids != tuple(sorted(set(repository_ids))):
+            raise ValueError("repositories must use sorted unique repository_id values")
+        task_ids = tuple(item.task_id for item in self.tasks)
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("tasks must use unique task_id values")
+        if {task.repository_id for task in self.tasks} - set(repository_ids):
+            raise ValueError("task references an unknown repository")
+        for task in self.tasks:
+            required = set(task.required_files)
+            relevant = set(task.relevant_top5)
+            if self.schema_version == 1:
+                if not relevant <= required:
+                    raise ValueError("relevant_top5 must be a subset of required_files")
+                continue
+            if not required <= relevant:
+                raise ValueError("relevant_top5 must include required_files")
+            if not task.required_ranges or not task.oracle_ranges:
+                raise ValueError("v2 tasks need required and manual oracle ranges")
+            if {item.path for item in task.required_ranges} != required or {
+                item.path for item in task.oracle_ranges
+            } != required:
+                raise ValueError("v2 ranges must cover every required file")
+            if not task.answer_assertions or any(
+                not assertion.support for assertion in task.answer_assertions
+            ):
+                raise ValueError("every benchmark assertion needs reviewed support")
+            if any(
+                support.citation.path not in required
+                or not any(
+                    item.path == support.citation.path
+                    and item.start_line <= support.citation.start_line
+                    and support.citation.end_line <= item.end_line
+                    for item in task.oracle_ranges
+                )
+                for assertion in task.answer_assertions
+                for support in assertion.support
+            ):
+                raise ValueError("assertion support must fit a manual oracle range")
+        return self
+
+
+class CandidateSelectionDiagnostic(RealBenchmarkModel):
+    """Bounded ranking facts, without source content or model rationale."""
+
+    candidate_id: str
+    path: RepositoryRelativePath
+    source_sha256: str
+    rank: Annotated[int, Field(ge=1)]
+    exact_group: str
+    match_origin: (
+        Literal[
+            "explicit-anchor",
+            "lexical-discovery",
+            "grounded-semantic",
+            "verified-expansion",
+        ]
+        | None
+    ) = None
+    bm25_field_scores: dict[str, float] = Field(default_factory=dict)
+    topical_term_weights: dict[str, float] = Field(default_factory=dict)
+    selection_reasons: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
+    graph_paths: tuple[RepositoryRelativePath, ...] = ()
+
+
+EvidenceLossReason = Literal[
+    "covered",
+    "absent_from_pool",
+    "selection_lost",
+    "range_not_found",
+    "budget_excluded",
+    "source_stale",
+]
+
+
+class EvidenceSelectionTransition(RealBenchmarkModel):
+    """Evaluator-only source address and its actual pipeline coverage."""
+
+    source_range: BenchmarkSourceRange
+    candidate_id: str | None = None
+    retrieval_evidence_ids: tuple[str, ...] = ()
+    planned_evidence_ids: tuple[str, ...] = ()
+    materialized_evidence_ids: tuple[str, ...] = ()
+    source_current: bool = True
+    reason: EvidenceLossReason
+
+
+class RealBenchmarkObservation(RealBenchmarkModel):
+    """One pipeline measurement; the evaluator owns how it obtained it."""
+
+    mode: RealBenchmarkMode
+    retrieved_top5: tuple[RepositoryRelativePath, ...] = Field(max_length=5)
+    materialized_files: tuple[RepositoryRelativePath, ...]
+    materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    candidate_diagnostics: tuple[CandidateSelectionDiagnostic, ...] = Field(
+        default=(), max_length=64
+    )
+    evidence_transitions: tuple[EvidenceSelectionTransition, ...] = ()
+    capsule_tokens: NonNegativeInt
+    ordinary_tokens: NonNegativeInt
+    planner_calls: NonNegativeInt = 0
+    planner_input_tokens: NonNegativeInt = 0
+    planner_output_tokens: NonNegativeInt = 0
+    planner_estimated_input_tokens: NonNegativeInt = 0
+    planner_reported_input_tokens: NonNegativeInt | None = None
+    planner_reported_output_tokens: NonNegativeInt | None = None
+    planner_status: str | None = None
+    planner_messages: tuple[str, ...] = ()
+    latency_ms: NonNegativeInt = 0
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    deterministic_warm_query_ms: NonNegativeInt | None = None
+    agentic_planner_ms: NonNegativeInt | None = None
+    compiler_ms: NonNegativeInt | None = None
+    query_stage_timings_ms: dict[str, Annotated[float, Field(ge=0)]] = Field(
+        default_factory=dict
+    )
+    final_answer_ms: NonNegativeInt | None = None
+    final_answer_provider_calls: NonNegativeInt | None = None
+    final_answer_estimated_input_tokens: NonNegativeInt | None = None
+    final_answer_reported_input_tokens: NonNegativeInt | None = None
+    phase_errors: tuple[str, ...] = ()
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_requested_functions: NonNegativeInt | None = None
+    semantic_described_functions: NonNegativeInt | None = None
+    semantic_file_only_functions: NonNegativeInt | None = None
+    plan_sufficient: bool | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
+    materialization_coverage: CoverageLedger | None = None
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
+    citation_validity: Rate = 0.0
+    assertion_recall: Rate = 0.0
+    assertion_evidence_support: Rate = 0.0
+    lexical_identifier_support: Rate = 0.0
+    groundedness_majority: bool = False
+    quality_not_lower_than_oracle: bool = False
+
+    @field_validator("retrieved_top5", "materialized_files")
+    @classmethod
+    def canonical_observed_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(dict.fromkeys(value)):
+            raise ValueError("observed paths must be unique in observed order")
+        return value
+
+    @model_validator(mode="after")
+    def validate_semantic_counts(self) -> RealBenchmarkObservation:
+        requested = self.semantic_requested_functions
+        described = self.semantic_described_functions
+        file_only = self.semantic_file_only_functions
+        if any(
+            value is not None for value in (requested, described, file_only)
+        ) and any(value is None for value in (requested, described, file_only)):
+            raise ValueError("semantic function counts must be reported together")
+        if requested is not None and described is not None and described > requested:
+            raise ValueError("described functions cannot exceed requested functions")
+        if described is not None and file_only is not None and file_only > described:
+            raise ValueError("file_only functions cannot exceed described functions")
+        return self
+
+
+class RealBenchmarkPhaseUsage(RealBenchmarkModel):
+    """Actual attempts retained even when a paired evaluation fails midway."""
+
+    phase: str
+    provider_calls: NonNegativeInt
+    estimated_input_tokens: NonNegativeInt
+    reported_input_tokens: NonNegativeInt | None = None
+    reported_output_tokens: NonNegativeInt | None = None
+    duration_ms: NonNegativeInt
+    error: str | None = None
+
+
+class RealBenchmarkTaskReport(RealBenchmarkModel):
+    task_id: str
+    repository_id: str
+    mode: RealBenchmarkMode
+    repetition: NonNegativeInt = 1
+    clone_repetition: NonNegativeInt | None = None
+    model_repetition: NonNegativeInt = 1
+    phase_usage: tuple[RealBenchmarkPhaseUsage, ...] = ()
+    status: Literal["complete", "skipped"]
+    skip_reason: str | None = None
+    retrieved_top5: tuple[RepositoryRelativePath, ...] = ()
+    materialized_files: tuple[RepositoryRelativePath, ...] = ()
+    materialized_ranges: tuple[BenchmarkSourceRange, ...] = ()
+    material_evidence_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    candidate_diagnostics: tuple[CandidateSelectionDiagnostic, ...] = Field(
+        default=(), max_length=64
+    )
+    evidence_transitions: tuple[EvidenceSelectionTransition, ...] = ()
+    failure_reasons: tuple[str, ...] = ()
+    required_file_recall_at_5: Rate | None = None
+    precision_at_5: Rate | None = None
+    precision_at_r: Rate | None = None
+    materialized_required_file_recall: Rate | None = None
+    range_recall: Rate | None = None
+    capsule_tokens: NonNegativeInt = 0
+    ordinary_tokens: NonNegativeInt = 0
+    token_savings: float = Field(default=0.0, allow_inf_nan=False)
+    valid_token_savings: float = Field(default=0.0, allow_inf_nan=False)
+    planner_calls: NonNegativeInt = 0
+    planner_input_tokens: NonNegativeInt = 0
+    planner_output_tokens: NonNegativeInt = 0
+    planner_estimated_input_tokens: NonNegativeInt = 0
+    planner_reported_input_tokens: NonNegativeInt | None = None
+    planner_reported_output_tokens: NonNegativeInt | None = None
+    planner_status: str | None = None
+    planner_messages: tuple[str, ...] = ()
+    latency_ms: NonNegativeInt = 0
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    deterministic_warm_query_ms: NonNegativeInt | None = None
+    agentic_planner_ms: NonNegativeInt | None = None
+    compiler_ms: NonNegativeInt | None = None
+    query_stage_timings_ms: dict[str, Annotated[float, Field(ge=0)]] = Field(
+        default_factory=dict
+    )
+    final_answer_ms: NonNegativeInt | None = None
+    final_answer_provider_calls: NonNegativeInt | None = None
+    final_answer_estimated_input_tokens: NonNegativeInt | None = None
+    final_answer_reported_input_tokens: NonNegativeInt | None = None
+    phase_errors: tuple[str, ...] = ()
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_requested_functions: NonNegativeInt | None = None
+    semantic_described_functions: NonNegativeInt | None = None
+    semantic_file_only_functions: NonNegativeInt | None = None
+    plan_sufficient: bool | None = None
+    compilation_sufficiency: CompilationSufficiency | None = None
+    materialization_coverage: CoverageLedger | None = None
+    compilation_calibration: CompilationCalibration = "unverified"
+    semantic_calibration: Literal["verified", "unverified"] = "unverified"
+    calibration_reasons: tuple[str, ...] = ()
+    paired_answer: BenchmarkPairedAnswerEvaluation | None = None
+    citation_validity: Rate | None = None
+    assertion_recall: Rate | None = None
+    assertion_evidence_support: Rate | None = None
+    lexical_identifier_support: Rate | None = None
+    groundedness_majority: bool | None = None
+    quality_not_lower_than_oracle: bool | None = None
+    quality_gate_failed: bool
+
+    @model_validator(mode="after")
+    def validate_status(self) -> RealBenchmarkTaskReport:
+        if self.clone_repetition is None:
+            object.__setattr__(self, "clone_repetition", self.repetition)
+        if self.clone_repetition != self.repetition or self.model_repetition < 1:
+            raise ValueError("clone alias and model repetition must be valid")
+        if self.repetition < 1:
+            raise ValueError("repetition must be positive")
+        if self.status == "skipped":
+            if self.skip_reason is None or not self.quality_gate_failed:
+                raise ValueError(
+                    "a skipped result needs a reason and failed quality gate"
+                )
+        elif self.skip_reason is not None:
+            raise ValueError("a complete result cannot have a skip reason")
+        return self
+
+
+class RealBenchmarkAggregate(RealBenchmarkModel):
+    mode: RealBenchmarkMode
+    task_count: NonNegativeInt
+    completed_task_count: NonNegativeInt
+    skipped_task_count: NonNegativeInt
+    required_file_recall_at_5: Rate | None = None
+    precision_at_5: Rate | None = None
+    precision_at_r: Rate | None = None
+    materialized_required_file_recall: Rate | None = None
+    range_recall: Rate | None = None
+    capsule_tokens: NonNegativeInt = 0
+    ordinary_tokens: NonNegativeInt = 0
+    planner_calls: NonNegativeInt = 0
+    planner_input_tokens: NonNegativeInt = 0
+    planner_output_tokens: NonNegativeInt = 0
+    mean_latency_ms: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+    mean_cold_structural_ms: float | None = None
+    mean_semantic_offline_ms: float | None = None
+    mean_deterministic_warm_query_ms: float | None = None
+    mean_agentic_planner_ms: float | None = None
+    mean_final_answer_ms: float | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_input_tokens: NonNegativeInt | None = None
+    semantic_output_tokens: NonNegativeInt | None = None
+    final_answer_input_tokens: NonNegativeInt | None = None
+    final_answer_output_tokens: NonNegativeInt | None = None
+    semantic_function_coverage: Rate | None = None
+    semantic_file_only_rate: Rate | None = None
+    plan_sufficient_count: NonNegativeInt = 0
+    planned_task_count: NonNegativeInt = 0
+    consistent_sufficient_count: NonNegativeInt = 0
+    false_sufficient_count: NonNegativeInt = 0
+    insufficient_count: NonNegativeInt = 0
+    unverified_count: NonNegativeInt = 0
+    citation_containment: Rate | None = None
+    assertion_recall: Rate | None = None
+    assertion_evidence_support: Rate | None = None
+    lexical_identifier_support: Rate | None = None
+    groundedness_majority_rate: Rate | None = None
+    quality_gate_failed_count: NonNegativeInt = 0
+    headline_token_savings: float = Field(default=0.0, allow_inf_nan=False)
+
+
+class RealBenchmarkBuildReport(RealBenchmarkModel):
+    """One independently cloned and measured repository build."""
+
+    repository_id: str
+    repetition: NonNegativeInt
+    clone_repetition: NonNegativeInt | None = None
+    phase_usage: tuple[RealBenchmarkPhaseUsage, ...] = ()
+    status: Literal["complete", "skipped", "partial"]
+    reason: str | None = None
+    failed_paths: tuple[RepositoryRelativePath, ...] = ()
+    failure_code_counts: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    semantic_coverage: SemanticCoverage | None = None
+    cold_structural_ms: NonNegativeInt | None = None
+    semantic_offline_ms: NonNegativeInt | None = None
+    semantic_provider_calls: NonNegativeInt | None = None
+    semantic_estimated_input_tokens: NonNegativeInt | None = None
+    semantic_reported_input_tokens: NonNegativeInt | None = None
+    semantic_reported_output_tokens: NonNegativeInt | None = None
+    requested_functions: NonNegativeInt | None = None
+    described_functions: NonNegativeInt | None = None
+    file_only_functions: NonNegativeInt | None = None
+    code_test_files: NonNegativeInt | None = None
+    tagged_code_test_files: NonNegativeInt | None = None
+    model_tagged_code_test_files: NonNegativeInt | None = None
+    noop_update_ms: NonNegativeInt | None = None
+    noop_provider_calls: NonNegativeInt | None = None
+    noop_generation_unchanged: bool | None = None
+    active_amplification: float | None = Field(default=None, ge=0)
+    maximum_shard_bytes: NonNegativeInt | None = None
+    fresh_process_reload_successes: NonNegativeInt | None = None
+    noop_structurally_reanalyzed_files: NonNegativeInt | None = None
+
+    @model_validator(mode="after")
+    def validate_clone_coordinate(self) -> RealBenchmarkBuildReport:
+        if self.clone_repetition is None:
+            object.__setattr__(self, "clone_repetition", self.repetition)
+        if self.repetition < 1 or self.clone_repetition != self.repetition:
+            raise ValueError("build clone repetition must match its legacy alias")
+        return self
+
+
+class RealRepositoryBenchmarkReport(RealBenchmarkModel):
+    schema_version: Literal[2] = REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION
+    suite_name: str
+    verified_pipeline: bool = False
+    provider_endpoint: str | None = None
+    model_id: str | None = None
+    requested_context_window: NonNegativeInt | None = None
+    reasoning_effort: str | None = None
+    dispatch_stop_reasons: tuple[str, ...] = ()
+    dispatch_calls: NonNegativeInt | None = None
+    dispatch_estimated_input_tokens: NonNegativeInt | None = None
+    builds: tuple[RealBenchmarkBuildReport, ...] = ()
+    runs: tuple[RealBenchmarkTaskReport, ...]
+    aggregates: tuple[RealBenchmarkAggregate, ...]
+    passed: bool
+
+
+def load_real_repository_benchmark_manifest(
+    path: str | Path,
+) -> RealRepositoryBenchmarkManifest:
+    return RealRepositoryBenchmarkManifest.model_validate_json(Path(path).read_bytes())
+
+
+def evaluate_real_repository_observation(
+    task: RealBenchmarkTask,
+    observation: RealBenchmarkObservation,
+    *,
+    repetition: int = 1,
+    model_repetition: int = 1,
+) -> RealBenchmarkTaskReport:
+    """Score an observation with fixed evidence gates, never task-specific rules."""
+
+    required = set(task.required_files)
+    retrieved = set(observation.retrieved_top5)
+    materialized = set(observation.materialized_files)
+    retrieval_recall = len(required & retrieved) / len(required)
+    precision = len(set(task.relevant_top5) & retrieved) / 5
+    relevance_depth = min(5, len(task.relevant_top5))
+    precision_at_r = (
+        len(set(task.relevant_top5) & set(observation.retrieved_top5[:relevance_depth]))
+        / relevance_depth
+    )
+    materialized_recall = len(required & materialized) / len(required)
+    measured_range_recall = _range_recall(
+        task.required_ranges, observation.materialized_ranges
+    )
+    paired = observation.paired_answer
+    ordinary_answer = None if paired is None else paired.ordinary
+    capsule_answer = None if paired is None else paired.contextforge
+    oracle_answer = None if paired is None else paired.oracle
+    groundedness = None if paired is None else paired.contextforge_groundedness
+    ordinary_tokens = 0 if ordinary_answer is None else ordinary_answer.input_tokens
+    capsule_tokens = 0 if capsule_answer is None else capsule_answer.input_tokens
+    token_savings = (
+        0.0
+        if ordinary_tokens == 0
+        else (ordinary_tokens - capsule_tokens) / ordinary_tokens
+    )
+    oracle_valid = (
+        oracle_answer is not None
+        and oracle_answer.assertion_recall == 1.0
+        and oracle_answer.citation_validity == 1.0
+        and oracle_answer.assertion_evidence_support == 1.0
+        and oracle_answer.lexical_identifier_support == 1.0
+        and oracle_answer.provider_http_calls > 0
+    )
+    quality_not_lower = (
+        oracle_valid
+        and oracle_answer is not None
+        and capsule_answer is not None
+        and capsule_answer.assertion_recall >= oracle_answer.assertion_recall
+        and capsule_answer.citation_validity >= oracle_answer.citation_validity
+        and capsule_answer.assertion_evidence_support
+        >= oracle_answer.assertion_evidence_support
+        and capsule_answer.lexical_identifier_support
+        >= oracle_answer.lexical_identifier_support
+        and groundedness is not None
+        and groundedness.passed
+    )
+    calibration, calibration_reasons = _audit_compilation(task, observation)
+    gate_failed = not (
+        retrieval_recall >= 0.90
+        and precision_at_r > 0.80
+        and materialized_recall >= 0.90
+        and measured_range_recall >= 0.85
+        and capsule_answer is not None
+        and capsule_answer.citation_validity == 1.0
+        and capsule_answer.assertion_recall == 1.0
+        and capsule_answer.assertion_evidence_support == 1.0
+        and capsule_answer.lexical_identifier_support == 1.0
+        and capsule_answer.provider_http_calls > 0
+        and capsule_answer.duration_ms <= MAX_FINAL_ANSWER_MS
+        and ordinary_answer is not None
+        and ordinary_answer.provider_http_calls > 0
+        and ordinary_tokens > 0
+        and groundedness is not None
+        and groundedness.passed
+        and groundedness.provider_http_calls >= 3
+        and quality_not_lower
+        and observation.planner_calls <= 3
+        and calibration != "false_sufficient"
+        and (
+            observation.compilation_sufficiency is not None
+            or observation.mode is RealBenchmarkMode.DETERMINISTIC
+            or observation.plan_sufficient is True
+        )
+        and (
+            observation.mode is not RealBenchmarkMode.DETERMINISTIC
+            or observation.planner_calls == 0
+        )
+    )
+    return RealBenchmarkTaskReport(
+        task_id=task.task_id,
+        repository_id=task.repository_id,
+        mode=observation.mode,
+        repetition=repetition,
+        model_repetition=model_repetition,
+        status="complete",
+        retrieved_top5=observation.retrieved_top5,
+        materialized_files=observation.materialized_files,
+        materialized_ranges=observation.materialized_ranges,
+        material_evidence_ids=observation.material_evidence_ids,
+        failure_reasons=tuple(
+            name
+            for name, passed in (
+                ("required_file_recall", retrieval_recall >= 0.90),
+                ("precision_at_r", precision_at_r > 0.80),
+                ("materialized_recall", materialized_recall >= 0.90),
+                ("range_recall", measured_range_recall >= 0.85),
+                ("oracle_quality", oracle_valid),
+                ("quality_not_lower", quality_not_lower),
+                ("answer_present", capsule_answer is not None),
+                (
+                    "citation_containment",
+                    capsule_answer is not None
+                    and capsule_answer.citation_validity == 1.0,
+                ),
+                (
+                    "assertion_support",
+                    capsule_answer is not None
+                    and capsule_answer.assertion_evidence_support == 1.0,
+                ),
+                (
+                    "semantic_grounding",
+                    groundedness is not None and groundedness.passed,
+                ),
+                (
+                    "planner_sufficiency",
+                    observation.compilation_sufficiency is not None
+                    or observation.mode is RealBenchmarkMode.DETERMINISTIC
+                    or observation.plan_sufficient is True,
+                ),
+                ("false_sufficient", calibration != "false_sufficient"),
+            )
+            if not passed
+        )
+        + observation.phase_errors,
+        required_file_recall_at_5=retrieval_recall,
+        precision_at_5=precision,
+        precision_at_r=precision_at_r,
+        materialized_required_file_recall=materialized_recall,
+        range_recall=(measured_range_recall if task.required_ranges else None),
+        capsule_tokens=capsule_tokens,
+        ordinary_tokens=ordinary_tokens,
+        token_savings=token_savings,
+        valid_token_savings=0.0 if gate_failed else token_savings,
+        planner_calls=observation.planner_calls,
+        planner_input_tokens=observation.planner_input_tokens,
+        planner_output_tokens=observation.planner_output_tokens,
+        planner_estimated_input_tokens=observation.planner_estimated_input_tokens,
+        planner_reported_input_tokens=observation.planner_reported_input_tokens,
+        planner_reported_output_tokens=observation.planner_reported_output_tokens,
+        candidate_diagnostics=observation.candidate_diagnostics,
+        evidence_transitions=observation.evidence_transitions,
+        planner_status=observation.planner_status,
+        planner_messages=observation.planner_messages,
+        latency_ms=observation.latency_ms,
+        cold_structural_ms=observation.cold_structural_ms,
+        compiler_ms=observation.compiler_ms,
+        query_stage_timings_ms=observation.query_stage_timings_ms,
+        semantic_offline_ms=observation.semantic_offline_ms,
+        deterministic_warm_query_ms=observation.deterministic_warm_query_ms,
+        agentic_planner_ms=observation.agentic_planner_ms,
+        final_answer_ms=observation.final_answer_ms,
+        final_answer_provider_calls=observation.final_answer_provider_calls,
+        final_answer_estimated_input_tokens=(
+            observation.final_answer_estimated_input_tokens
+        ),
+        final_answer_reported_input_tokens=(
+            observation.final_answer_reported_input_tokens
+        ),
+        phase_errors=observation.phase_errors,
+        semantic_provider_calls=observation.semantic_provider_calls,
+        semantic_input_tokens=observation.semantic_input_tokens,
+        semantic_output_tokens=observation.semantic_output_tokens,
+        final_answer_input_tokens=(
+            None if capsule_answer is None else capsule_answer.input_tokens
+        ),
+        final_answer_output_tokens=(
+            None if capsule_answer is None else capsule_answer.output_tokens
+        ),
+        semantic_requested_functions=observation.semantic_requested_functions,
+        semantic_described_functions=observation.semantic_described_functions,
+        semantic_file_only_functions=observation.semantic_file_only_functions,
+        plan_sufficient=observation.plan_sufficient,
+        compilation_sufficiency=observation.compilation_sufficiency,
+        materialization_coverage=observation.materialization_coverage,
+        compilation_calibration=calibration,
+        calibration_reasons=calibration_reasons,
+        semantic_calibration=(
+            "verified"
+            if capsule_answer is not None
+            and groundedness is not None
+            and capsule_answer.provider_http_calls > 0
+            and groundedness.provider_http_calls >= 3
+            else "unverified"
+        ),
+        paired_answer=paired,
+        citation_validity=(
+            None if capsule_answer is None else capsule_answer.citation_validity
+        ),
+        assertion_recall=(
+            None if capsule_answer is None else capsule_answer.assertion_recall
+        ),
+        assertion_evidence_support=(
+            None
+            if capsule_answer is None
+            else capsule_answer.assertion_evidence_support
+        ),
+        lexical_identifier_support=(
+            None
+            if capsule_answer is None
+            else capsule_answer.lexical_identifier_support
+        ),
+        groundedness_majority=(None if groundedness is None else groundedness.passed),
+        quality_not_lower_than_oracle=quality_not_lower,
+        quality_gate_failed=gate_failed,
+    )
+
+
+def aggregate_real_repository_report(
+    manifest: RealRepositoryBenchmarkManifest,
+    runs: tuple[RealBenchmarkTaskReport, ...],
+    *,
+    verified_pipeline: bool = False,
+    builds: tuple[RealBenchmarkBuildReport, ...] = (),
+) -> RealRepositoryBenchmarkReport:
+    """Aggregate separately by mode and exclude failed gates from savings."""
+
+    expected = {task.task_id: task.repository_id for task in manifest.tasks}
+    repetitions = {run.repetition for run in runs}
+    if not repetitions or repetitions != set(range(1, max(repetitions) + 1)):
+        raise ValueError("report repetitions must be contiguous from one")
+    model_repetitions = {run.model_repetition for run in runs}
+    if model_repetitions != set(range(1, max(model_repetitions) + 1)):
+        raise ValueError("model repetitions must be contiguous from one")
+    modes = tuple(RealBenchmarkMode) if verified_pipeline else (None,)
+    expected_keys = {
+        (task_id, repetition, model_repetition, mode)
+        for task_id in expected
+        for repetition in repetitions
+        for model_repetition in model_repetitions
+        for mode in modes
+    }
+    actual_keys = {
+        (
+            run.task_id,
+            run.repetition,
+            run.model_repetition,
+            run.mode if verified_pipeline else None,
+        )
+        for run in runs
+    }
+    if (
+        actual_keys != expected_keys
+        or len(runs) != len(expected_keys)
+        or any(run.repository_id != expected.get(run.task_id) for run in runs)
+    ):
+        raise ValueError("report must contain exactly one run per task and repetition")
+    aggregates = tuple(
+        _aggregate(mode, tuple(run for run in runs if run.mode == mode))
+        for mode in RealBenchmarkMode
+    )
+    return RealRepositoryBenchmarkReport(
+        suite_name=manifest.suite_name,
+        verified_pipeline=verified_pipeline,
+        builds=builds,
+        runs=tuple(
+            sorted(
+                runs,
+                key=lambda item: (
+                    item.task_id,
+                    item.repetition,
+                    item.model_repetition,
+                    item.mode,
+                ),
+            )
+        ),
+        aggregates=aggregates,
+        passed=(
+            manifest.schema_version == 2
+            and verified_pipeline
+            and len(manifest.tasks) >= 16
+            and {task.dataset_split for task in manifest.tasks} == {"tuning", "holdout"}
+            and len(repetitions) >= 3
+            and len(model_repetitions) >= 3
+            and len(builds) == len(manifest.repositories) * len(repetitions)
+            and all(
+                build.status == "complete"
+                and build.noop_update_ms is not None
+                and build.noop_generation_unchanged is True
+                and build.noop_provider_calls == 0
+                and build.noop_structurally_reanalyzed_files == 0
+                and build.active_amplification is not None
+                and build.active_amplification <= 12
+                and build.maximum_shard_bytes is not None
+                and build.maximum_shard_bytes <= 4 * 1_024 * 1_024
+                and build.fresh_process_reload_successes == 100
+                and build.requested_functions == build.described_functions
+                and build.code_test_files is not None
+                and build.tagged_code_test_files == build.code_test_files
+                for build in builds
+            )
+            and all(
+                run.status == "complete"
+                and not run.quality_gate_failed
+                and run.compilation_calibration
+                in {"consistent_sufficient", "insufficient"}
+                and run.semantic_calibration == "verified"
+                for run in runs
+            )
+            and all(
+                run.deterministic_warm_query_ms is not None
+                and run.deterministic_warm_query_ms < 1_000
+                for run in runs
+                if run.mode is RealBenchmarkMode.DETERMINISTIC
+            )
+            and sum(run.valid_token_savings for run in runs) / len(runs) >= 0.30
+        ),
+    )
+
+
+def _aggregate(
+    mode: RealBenchmarkMode, runs: tuple[RealBenchmarkTaskReport, ...]
+) -> RealBenchmarkAggregate:
+    complete = tuple(item for item in runs if item.status == "complete")
+
+    def mean(attribute: str) -> float | None:
+        values = tuple(getattr(item, attribute) for item in complete)
+        usable = tuple(value for value in values if value is not None)
+        return None if not usable else sum(usable) / len(usable)
+
+    def total(attribute: str) -> int | None:
+        if not complete:
+            return None
+        result = 0
+        for item in complete:
+            value: int | None = getattr(item, attribute)
+            if value is None:
+                return None
+            result += value
+        return result
+
+    requested = total("semantic_requested_functions")
+    described = total("semantic_described_functions")
+    file_only = total("semantic_file_only_functions")
+
+    quality_valid = tuple(item for item in complete if not item.quality_gate_failed)
+    return RealBenchmarkAggregate(
+        mode=mode,
+        task_count=len(runs),
+        completed_task_count=len(complete),
+        skipped_task_count=len(runs) - len(complete),
+        required_file_recall_at_5=mean("required_file_recall_at_5"),
+        precision_at_5=mean("precision_at_5"),
+        precision_at_r=mean("precision_at_r"),
+        materialized_required_file_recall=mean("materialized_required_file_recall"),
+        range_recall=mean("range_recall"),
+        capsule_tokens=sum(item.capsule_tokens for item in complete),
+        ordinary_tokens=sum(item.ordinary_tokens for item in complete),
+        planner_calls=sum(item.planner_calls for item in complete),
+        planner_input_tokens=sum(item.planner_input_tokens for item in complete),
+        planner_output_tokens=sum(item.planner_output_tokens for item in complete),
+        mean_latency_ms=mean("latency_ms"),
+        mean_cold_structural_ms=mean("cold_structural_ms"),
+        mean_semantic_offline_ms=mean("semantic_offline_ms"),
+        mean_deterministic_warm_query_ms=mean("deterministic_warm_query_ms"),
+        mean_agentic_planner_ms=mean("agentic_planner_ms"),
+        mean_final_answer_ms=mean("final_answer_ms"),
+        semantic_provider_calls=total("semantic_provider_calls"),
+        semantic_input_tokens=total("semantic_input_tokens"),
+        semantic_output_tokens=total("semantic_output_tokens"),
+        final_answer_input_tokens=total("final_answer_input_tokens"),
+        final_answer_output_tokens=total("final_answer_output_tokens"),
+        semantic_function_coverage=(
+            described / requested
+            if requested is not None and described is not None and requested > 0
+            else None
+        ),
+        semantic_file_only_rate=(
+            file_only / described
+            if file_only is not None and described is not None and described > 0
+            else None
+        ),
+        plan_sufficient_count=sum(item.plan_sufficient is True for item in complete),
+        planned_task_count=sum(item.plan_sufficient is not None for item in complete),
+        consistent_sufficient_count=sum(
+            item.compilation_calibration == "consistent_sufficient" for item in complete
+        ),
+        false_sufficient_count=sum(
+            item.compilation_calibration == "false_sufficient" for item in complete
+        ),
+        insufficient_count=sum(
+            item.compilation_calibration == "insufficient" for item in complete
+        ),
+        unverified_count=sum(
+            item.compilation_calibration == "unverified" for item in complete
+        ),
+        citation_containment=mean("citation_validity"),
+        assertion_recall=mean("assertion_recall"),
+        assertion_evidence_support=mean("assertion_evidence_support"),
+        lexical_identifier_support=mean("lexical_identifier_support"),
+        groundedness_majority_rate=(
+            None
+            if not complete
+            else sum(item.groundedness_majority is True for item in complete)
+            / len(complete)
+        ),
+        quality_gate_failed_count=sum(item.quality_gate_failed for item in runs),
+        headline_token_savings=(
+            sum(item.valid_token_savings for item in quality_valid) / len(quality_valid)
+            if quality_valid
+            else 0.0
+        ),
+    )
+
+
+def _audit_compilation(
+    task: RealBenchmarkTask, observation: RealBenchmarkObservation
+) -> tuple[CompilationCalibration, tuple[str, ...]]:
+    """Audit real material against frozen obligations and evaluator-only support."""
+    status = observation.compilation_sufficiency
+    if status is None:
+        return "unverified", ("compilation_status_absent",)
+    if status.effective_status == "insufficient":
+        return "insufficient", status.reason_codes
+    ledger = observation.materialization_coverage
+    reasons: list[str] = []
+    if ledger is None:
+        return "unverified", ("materialization_coverage_absent",)
+    if ledger.missing_requirement_ids or ledger.missing_graph_endpoints:
+        reasons.append("mandatory_evidence_missing")
+    kinds = {r.role_id: r.kind for r in ledger.roles}
+    if any(kinds[r] != "unknown" for r in ledger.missing_role_ids):
+        reasons.append("mandatory_role_missing")
+    requirements = ledger.requirements
+    if requirements is None or requirements.topic_grounding == "unresolved":
+        reasons.append("topic_unverified")
+    if requirements is not None:
+        for requirement in requirements.source_evidence:
+            actual_ids = observation.material_evidence_ids.get(requirement.path, ())
+            if (
+                requirement.path not in observation.materialized_files
+                or not requirement.evidence_ids
+                or not set(requirement.evidence_ids) <= set(actual_ids)
+            ):
+                reasons.append("mandatory_material_missing")
+                break
+    for assertion in task.answer_assertions:
+        if not assertion_support_is_materialized(
+            assertion,
+            tuple(
+                (source, observation.material_evidence_ids.get(source.path, ()))
+                for source in observation.materialized_ranges
+                if source.path in observation.materialized_files
+            ),
+        ):
+            reasons.append("reviewed_assertion_material_missing")
+            break
+    paired = observation.paired_answer
+    if paired is not None and paired.contextforge.assertion_evidence_support != 1.0:
+        reasons.append("assertion_support_failed")
+    if reasons:
+        return "false_sufficient", tuple(sorted(set(reasons)))
+    if paired is None or paired.contextforge_groundedness is None:
+        return "unverified", ("semantic_calibration_unverified",)
+    return "consistent_sufficient", ()
+
+
+def _range_recall(
+    required: tuple[BenchmarkSourceRange, ...],
+    selected: tuple[BenchmarkSourceRange, ...],
+) -> float:
+    if not required:
+        return 1.0
+    required_lines = sum(item.end_line - item.start_line + 1 for item in required)
+    covered = 0
+    for required_range in required:
+        intervals = sorted(
+            (
+                max(required_range.start_line, item.start_line),
+                min(required_range.end_line, item.end_line),
+            )
+            for item in selected
+            if item.path == required_range.path
+            and item.end_line >= required_range.start_line
+            and item.start_line <= required_range.end_line
+        )
+        if not intervals:
+            continue
+        start, end = intervals[0]
+        for next_start, next_end in intervals[1:]:
+            if next_start <= end + 1:
+                end = max(end, next_end)
+            else:
+                covered += end - start + 1
+                start, end = next_start, next_end
+        covered += end - start + 1
+    return covered / required_lines
+
+
+@contextmanager
+def temporary_read_only_clone(source: str | Path, revision: str) -> Iterator[Path]:
+    """Clone a pinned external repository and always remove the clone afterwards."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="contextforge-real-benchmark-"
+    ) as directory:
+        target = Path(directory) / "repository"
+        try:
+            source_path = Path(source).expanduser().resolve(strict=True)
+            if not source_path.is_dir():
+                raise _ExternalRepositoryUnavailable(
+                    "external source is not a directory"
+                )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={source_path}",
+                    "clone",
+                    "--quiet",
+                    "--no-local",
+                    str(source_path),
+                    str(target),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(target), "checkout", "--quiet", "--detach", revision],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise _ExternalRepositoryUnavailable(
+                "external repository clone or revision checkout failed"
+            ) from exc
+        yield target
+
+
+RealRepositoryEvaluator = Callable[
+    [Path, RealBenchmarkTask],
+    RealBenchmarkObservation | Awaitable[RealBenchmarkObservation],
+]
+
+
+async def run_real_repository_benchmark(
+    manifest: RealRepositoryBenchmarkManifest,
+    sources: Mapping[str, str | Path],
+    evaluator: RealRepositoryEvaluator,
+    *,
+    repetitions: int = 1,
+    model_repetitions: int = 1,
+) -> RealRepositoryBenchmarkReport:
+    """One independent clone per repository; model repeats share that index."""
+    if repetitions < 1 or model_repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    reports: list[RealBenchmarkTaskReport] = []
+    for repository in manifest.repositories:
+        tasks = tuple(
+            t for t in manifest.tasks if t.repository_id == repository.repository_id
+        )
+        source = sources.get(repository.repository_id)
+        for repetition in range(1, repetitions + 1):
+            reason = "external_source_missing"
+            try:
+                if source is not None:
+                    with temporary_read_only_clone(
+                        source, repository.revision
+                    ) as clone:
+                        for model_repetition in range(1, model_repetitions + 1):
+                            for task in tasks:
+                                observed = evaluator(clone, task)
+                                observation = (
+                                    await observed
+                                    if inspect.isawaitable(observed)
+                                    else observed
+                                )
+                                reports.append(
+                                    evaluate_real_repository_observation(
+                                        task,
+                                        observation,
+                                        repetition=repetition,
+                                        model_repetition=model_repetition,
+                                    )
+                                )
+                    continue
+            except _ExternalRepositoryUnavailable:
+                reason = "external_source_unavailable"
+            reports.extend(
+                _skipped(
+                    task,
+                    RealBenchmarkMode.DETERMINISTIC,
+                    reason,
+                    repetition=repetition,
+                    model_repetition=model_repetition,
+                )
+                for model_repetition in range(1, model_repetitions + 1)
+                for task in tasks
+            )
+    return aggregate_real_repository_report(manifest, tuple(reports))
+
+
+def _skipped(
+    task: RealBenchmarkTask,
+    mode: RealBenchmarkMode,
+    reason: str,
+    *,
+    repetition: int = 1,
+    model_repetition: int = 1,
+) -> RealBenchmarkTaskReport:
+    return RealBenchmarkTaskReport(
+        task_id=task.task_id,
+        repository_id=task.repository_id,
+        mode=mode,
+        repetition=repetition,
+        model_repetition=model_repetition,
+        status="skipped",
+        skip_reason=reason,
+        quality_gate_failed=True,
+    )
+
+
+__all__ = [
+    "REAL_REPOSITORY_BENCHMARK_SCHEMA_VERSION",
+    "RealBenchmarkBuildReport",
+    "RealBenchmarkMode",
+    "RealBenchmarkObservation",
+    "RealBenchmarkTask",
+    "RealBenchmarkTaskKind",
+    "RealBenchmarkTaskReport",
+    "RealBenchmarkTaskRole",
+    "RealRepositoryBenchmarkManifest",
+    "RealRepositoryBenchmarkReport",
+    "aggregate_real_repository_report",
+    "evaluate_real_repository_observation",
+    "load_real_repository_benchmark_manifest",
+    "run_real_repository_benchmark",
+    "temporary_read_only_clone",
+]

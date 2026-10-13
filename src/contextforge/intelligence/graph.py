@@ -13,8 +13,10 @@ from contextforge.intelligence.codemap import (
     FileCodeMap,
     SourceRange,
     SymbolKind,
+    SymbolRecord,
     configuration_key_digest,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.manifest import canonical_json_bytes
 from contextforge.intelligence.models import (
     ArtifactReference,
@@ -144,6 +146,7 @@ class FileRelationshipProjection(IndexModel):
     target_path: str
     relationship_kinds: tuple[RelationshipKind, ...]
     provenance: tuple[EdgeProvenance, ...]
+    verified_relationship_kinds: tuple[RelationshipKind, ...] | None = None
 
     @field_validator("source_path", "target_path")
     @classmethod
@@ -189,6 +192,7 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
     """Collapse symbol edges into deterministic file-to-file routing facts."""
 
     node_paths = {item.node_id: item.path for item in graph.nodes}
+    verified: dict[tuple[str, str], set[RelationshipKind]] = defaultdict(set)
     grouped: dict[
         tuple[str, str], tuple[set[RelationshipKind], set[EdgeProvenance]]
     ] = {}
@@ -202,6 +206,8 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
         )
         kinds.add(edge.kind)
         provenance.add(edge.provenance)
+        if edge.provenance == "verified":
+            verified[(source_path, target_path)].add(edge.kind)
     return RelationshipGraphProjection(
         source_snapshot_digest=graph.source_snapshot_digest,
         relationships=tuple(
@@ -210,6 +216,7 @@ def project_relationship_graph(graph: RelationshipGraph) -> RelationshipGraphPro
                 target_path=target,
                 relationship_kinds=tuple(sorted(kinds)),
                 provenance=tuple(sorted(provenance)),
+                verified_relationship_kinds=tuple(sorted(verified[(source, target)])),
             )
             for (source, target), (kinds, provenance) in sorted(grouped.items())
         ),
@@ -515,8 +522,10 @@ def _relationship_kind(kind: str) -> RelationshipKind:
 def _structural_provenance(detection_method: str) -> EdgeProvenance:
     if detection_method in {
         "python_test_path_convention",
+        "file_policy_test_naming_convention",
         "polyglot_package_resolution",
         "polyglot_convention_resolution",
+        "polyglot_typescript_emitted_suffix_resolution",
     }:
         return "best-effort-structural"
     return "verified"
@@ -559,24 +568,137 @@ def _add_entrypoint_edges(
     nodes: dict[str, RelationshipGraphNode],
     edges: dict[str, RelationshipGraphEdge],
 ) -> None:
-    entrypoints = {item.path for item in code_maps if _is_entrypoint(item.path)}
-    for existing in tuple(edges.values()):
-        if existing.source_file_path not in entrypoints or existing.kind not in {
-            "import",
-            "call",
-        }:
+    """Project only structurally evidenced entrypoint-to-handler flows."""
+
+    by_path = {item.path: item for item in code_maps}
+    for code_map in code_maps:
+        if not _is_entrypoint(code_map.path):
             continue
-        edge = _edge(
-            "entrypoint-handler",
-            file_node_id(existing.source_file_path),
-            existing.target_node_id,
-            existing.source_file_path,
-            existing.source_range,
-            "best-effort-structural",
-            "entrypoint_import_or_call",
+        for target_path, source_range, method in _entrypoint_handler_candidates(
+            code_map, by_path
+        ):
+            edge = _edge(
+                "entrypoint-handler",
+                file_node_id(code_map.path),
+                file_node_id(target_path),
+                code_map.path,
+                source_range,
+                "verified",
+                method,
+            )
+            if edge.target_node_id in nodes:
+                edges[edge.edge_id] = edge
+
+
+_CALLABLE_SYMBOL_KINDS = frozenset(
+    {SymbolKind.FUNCTION, SymbolKind.ASYNC_FUNCTION, SymbolKind.METHOD}
+)
+
+
+def _entrypoint_handler_candidates(
+    code_map: FileCodeMap,
+    by_path: dict[str, FileCodeMap],
+) -> tuple[tuple[str, SourceRange, str], ...]:
+    """Return candidates backed by captured call shape or callable resolution."""
+
+    candidates: dict[
+        tuple[str, int, int, int, int, str], tuple[str, SourceRange, str]
+    ] = {}
+
+    def add(target_path: str, source_range: SourceRange, method: str) -> None:
+        candidates.setdefault(
+            (target_path, *_range_tuple(source_range), method),
+            (target_path, source_range, method),
         )
-        if edge.target_node_id in nodes:
-            edges[edge.edge_id] = edge
+
+    for symbol in code_map.symbols:
+        references = {
+            (
+                reference.observed_name,
+                _range_tuple(reference.source_range),
+            ): reference
+            for reference in symbol.direct_references
+            if reference.resolution == "internal"
+        }
+        for call in symbol.direct_calls:
+            for argument in call.callback_arguments:
+                reference = references.get(
+                    (argument.observed_name, _range_tuple(argument.source_range))
+                )
+                if reference is None or not _resolved_callable(reference, by_path):
+                    continue
+                assert reference.target_file_path is not None
+                add(
+                    reference.target_file_path,
+                    argument.source_range,
+                    "entrypoint_callback_argument",
+                )
+            if _resolved_exported_top_level_callable(call, by_path):
+                assert call.target_file_path is not None
+                add(
+                    call.target_file_path,
+                    call.source_range,
+                    "entrypoint_exported_callable",
+                )
+
+    return tuple(
+        sorted(
+            candidates.values(),
+            key=lambda item: (
+                item[0],
+                *_range_tuple(item[1]),
+                item[2],
+            ),
+        )
+    )
+
+
+def _resolved_callable(occurrence: object, by_path: dict[str, FileCodeMap]) -> bool:
+    target_path = getattr(occurrence, "target_file_path", None)
+    target_symbol_id = getattr(occurrence, "target_symbol_id", None)
+    if target_path is None or target_symbol_id is None:
+        return False
+    target_map = by_path.get(target_path)
+    if target_map is None:
+        return False
+    return any(
+        symbol.symbol_id == target_symbol_id and symbol.kind in _CALLABLE_SYMBOL_KINDS
+        for symbol in target_map.symbols
+    )
+
+
+def _resolved_exported_top_level_callable(
+    occurrence: object, by_path: dict[str, FileCodeMap]
+) -> bool:
+    target_path = getattr(occurrence, "target_file_path", None)
+    target_symbol_id = getattr(occurrence, "target_symbol_id", None)
+    if target_path is None or target_symbol_id is None:
+        return False
+    target_map = by_path.get(target_path)
+    if target_map is None:
+        return False
+    return any(
+        symbol.symbol_id == target_symbol_id
+        and _is_exported_callable(symbol, target_map)
+        for symbol in target_map.symbols
+    )
+
+
+def _is_exported_callable(symbol: SymbolRecord, code_map: FileCodeMap) -> bool:
+    return (
+        symbol.parent_symbol_id is None
+        and symbol.kind in _CALLABLE_SYMBOL_KINDS
+        and (
+            symbol.visibility == "explicit_export"
+            or any(
+                item.target_symbol_id == symbol.symbol_id for item in code_map.exports
+            )
+        )
+    )
+
+
+def _range_tuple(value: SourceRange) -> tuple[int, int, int, int]:
+    return (value.start_line, value.start_column, value.end_line, value.end_column)
 
 
 def _add_config_consumer_edges(
@@ -702,11 +824,7 @@ def _is_entrypoint(path: str) -> bool:
 
 
 def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    name = pure.name.casefold()
-    return any(
-        part.casefold() in {"test", "tests", "spec", "specs"} for part in pure.parts
-    ) or name.startswith(("test_", "spec_"))
+    return FILE_POLICY_REGISTRY.is_test(path)
 
 
 def _is_config_path(path: str) -> bool:

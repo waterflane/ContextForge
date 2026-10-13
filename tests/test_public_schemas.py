@@ -46,6 +46,35 @@ def test_public_artifact_schemas_are_closed_and_versioned(
     assert "schema_version" in schema["required"]
 
 
+def test_retrieval_storage_schema_exposes_compatible_source_unit_shards() -> None:
+    from contextforge.intelligence.retrieval import RetrievalIndexShardManifest
+
+    schema = _schema("retrieval-storage-v4.schema.json")
+    assert schema["additionalProperties"] is False
+    assert (
+        schema["properties"]
+        == RetrievalIndexShardManifest.model_json_schema()["properties"]
+    )
+    document = schema["$defs"]["RetrievalDocument"]
+    assert document["properties"]["source_unit_shards"]["default"] == []
+    assert schema["$defs"]["RetrievalSourceUnitShard"]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    "name", ["retrieval-storage-v4.schema.json", "retrieval-result-v3.schema.json"]
+)
+def test_source_unit_schemas_accept_current_endpoint_gap_metadata(name: str) -> None:
+    from contextforge.intelligence.source_evidence import SourceEvidenceUnit
+
+    unit = _schema(name)["$defs"]["SourceEvidenceUnit"]
+    runtime = SourceEvidenceUnit.model_json_schema()
+    assert unit["additionalProperties"] is False
+    assert unit["properties"] == runtime["properties"]
+    assert unit["required"] == runtime["required"]
+    assert unit["properties"]["unresolved_endpoint"]["default"] is False
+    assert "unresolved_endpoint" not in unit["required"]
+
+
 def test_capsule_and_retrieval_schemas_expose_representation_contract() -> None:
     capsule = _schema("context-capsule-v2.schema.json")
     retrieval = _schema("retrieval-result-v3.schema.json")
@@ -112,7 +141,9 @@ def test_public_artifact_schema_fields_match_runtime_models() -> None:
     )
 
     for model, schema in pairs:
-        assert set(schema["properties"]) == set(model.model_fields)
+        assert set(schema["properties"]) == (
+            set(model.model_fields) | set(model.model_computed_fields)
+        )
 
 
 def test_public_index_api_imports_in_a_fresh_process() -> None:

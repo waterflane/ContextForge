@@ -13,11 +13,13 @@ from typing import Literal, Protocol, cast
 from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.codemap import (
     RESOLVER_VERSION,
+    CallbackArgument,
     CallReference,
     DecoratorRecord,
     ExportRecord,
     FileCodeMap,
     ImportRecord,
+    InitializationOccurrence,
     ParameterRecord,
     ParserDiagnostic,
     ReferenceOccurrence,
@@ -33,7 +35,7 @@ from contextforge.repositories import ProjectFile, ProjectSnapshot
 
 PYTHON_ANALYZER = AnalyzerIdentity(
     analyzer_id="python-ast",
-    analyzer_version="5",
+    analyzer_version="12",
     analysis_prompt_version="none",
     response_schema_version=1,
 )
@@ -69,6 +71,32 @@ class _DirectFactVisitor(ast.NodeVisitor):
         self.references: list[ReferenceOccurrence] = []
         self.raises: list[tuple[SourceRange, str]] = []
         self.configuration_keys: set[str] = set()
+        self.initializations: list[InitializationOccurrence] = []
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            name = _dotted_name(target)
+            if name is not None and isinstance(target, ast.Attribute):
+                self.initializations.append(
+                    InitializationOccurrence(
+                        observed_name=name, source_range=_node_range(node)
+                    )
+                )
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        name = _dotted_name(node.target)
+        if (
+            node.value is not None
+            and name is not None
+            and isinstance(node.target, ast.Attribute)
+        ):
+            self.initializations.append(
+                InitializationOccurrence(
+                    observed_name=name, source_range=_node_range(node)
+                )
+            )
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return None
@@ -80,7 +108,33 @@ class _DirectFactVisitor(ast.NodeVisitor):
         return None
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return None
+        # Defaults execute in the enclosing scope; the body is deferred. Its
+        # uses are reference facts, never invented calls from the enclosing
+        # function. Lambda parameters shadow names from that outer scope.
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        nested = _DirectFactVisitor(self._source)
+        nested.visit(node.body)
+        parameters = {
+            a.arg
+            for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+        }
+        parameters.update(
+            a.arg for a in (node.args.vararg, node.args.kwarg) if a is not None
+        )
+        uses = [
+            *nested.references,
+            *(
+                ReferenceOccurrence(
+                    observed_name=c.observed_name, source_range=c.source_range
+                )
+                for c in nested.calls
+            ),
+        ]
+        self.references.extend(
+            r for r in uses if r.observed_name.split(".")[0] not in parameters
+        )
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _dotted_name(node.func)
@@ -89,9 +143,14 @@ class _DirectFactVisitor(ast.NodeVisitor):
                 CallReference(
                     observed_name=name,
                     source_range=_node_range(node.func),
+                    callback_arguments=_callback_arguments(node),
                 )
             )
         self._record_call_configuration(node)
+        if isinstance(node.func, ast.Attribute):
+            self.visit(node.func.value)
+        elif not isinstance(node.func, ast.Name):
+            self.visit(node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
@@ -115,7 +174,6 @@ class _DirectFactVisitor(ast.NodeVisitor):
                     source_range=_node_range(node),
                 )
             )
-            return
         self.generic_visit(node)
 
     def visit_Raise(self, node: ast.Raise) -> None:
@@ -140,6 +198,31 @@ class _DirectFactVisitor(ast.NodeVisitor):
         key = _literal_string(node.args[0])
         if key is not None:
             self.configuration_keys.add(key)
+
+
+def _callback_arguments(node: ast.Call) -> tuple[CallbackArgument, ...]:
+    """Capture direct callable arguments without interpreting registration APIs."""
+
+    arguments = (*node.args, *(keyword.value for keyword in node.keywords))
+    values = [
+        CallbackArgument(observed_name=name, source_range=_node_range(argument))
+        for argument in arguments
+        if (
+            name := "<lambda>"
+            if isinstance(argument, ast.Lambda)
+            else _dotted_name(argument)
+        )
+        is not None
+    ]
+    return tuple(
+        sorted(
+            {
+                (*_range_tuple(item.source_range), item.observed_name): item
+                for item in values
+            }.values(),
+            key=lambda item: (*_range_tuple(item.source_range), item.observed_name),
+        )
+    )
 
 
 class _BoundNameVisitor(ast.NodeVisitor):
@@ -304,7 +387,7 @@ def _collect_symbol_drafts(module: ast.Module, path: str) -> list[_SymbolDraft]:
                     parent_qualified=qualified,
                     parent_is_class=True,
                 )
-            elif parent_index is None and isinstance(
+            elif (parent_index is None or parent_is_class) and isinstance(
                 statement, (ast.Assign, ast.AnnAssign, ast.TypeAlias)
             ):
                 for name in _assignment_names(statement):
@@ -319,7 +402,7 @@ def _collect_symbol_drafts(module: ast.Module, path: str) -> list[_SymbolDraft]:
                             name=name,
                             qualified_name=f"{parent_qualified}.{name}",
                             kind=kind,
-                            parent_index=None,
+                            parent_index=parent_index,
                         )
                     )
             else:
@@ -424,6 +507,24 @@ def _build_symbols(
         )
         callable_node = node if isinstance(node, _Callable) else None
         class_node = node if isinstance(node, ast.ClassDef) else None
+        positional = (
+            (*callable_node.args.posonlyargs, *callable_node.args.args)
+            if callable_node is not None
+            else ()
+        )
+        static = any(
+            d.expression in {"staticmethod", "builtins.staticmethod"}
+            for d in decorators
+        )
+        class_receiver = (
+            parent_id
+            if callable_node is not None
+            and positional
+            and not static
+            and draft.parent_index is not None
+            and drafts[draft.parent_index].kind == SymbolKind.CLASS
+            else None
+        )
         result.append(
             SymbolRecord(
                 symbol_id=draft.symbol_id,
@@ -439,6 +540,11 @@ def _build_symbols(
                 declaration_range=_node_range(node),
                 body_range=_body_range(node),
                 parent_symbol_id=parent_id,
+                receiver_class_symbol_id=class_receiver,
+                receiver_parameter_name=positional[0].arg
+                if class_receiver is not None
+                else None,
+                is_static_member=static,
                 docstring=(
                     ast.get_docstring(node, clean=False)
                     if isinstance(node, _Definition)
@@ -447,6 +553,18 @@ def _build_symbols(
                 decorators=decorators,
                 parameters=(
                     _parameters(callable_node, source)
+                    if callable_node is not None
+                    else ()
+                ),
+                parameter_default_ranges=(
+                    tuple(
+                        _node_range(value)
+                        for value in (
+                            *callable_node.args.defaults,
+                            *callable_node.args.kw_defaults,
+                        )
+                        if value is not None
+                    )
                     if callable_node is not None
                     else ()
                 ),
@@ -463,6 +581,7 @@ def _build_symbols(
                 contained_methods=contained_methods,
                 direct_calls=tuple(direct.calls),
                 direct_references=tuple(direct.references),
+                initializations=tuple(direct.initializations),
                 raised_exceptions=tuple(name for _, name in direct.raises),
                 configuration_keys=tuple(sorted(direct.configuration_keys)),
                 visibility="private" if draft.name.startswith("_") else "public",
@@ -475,6 +594,30 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
     visitor = _DirectFactVisitor(source)
     if isinstance(node, _Callable):
         arguments = node.args
+        # Defaults execute at definition time. Retain their dependencies as
+        # references without claiming calls from the function's invocation body.
+        defaults = _DirectFactVisitor(source)
+        for value in (*arguments.defaults, *arguments.kw_defaults):
+            if value is not None:
+                defaults.visit(value)
+        uses = [
+            *defaults.references,
+            *(
+                ReferenceOccurrence(
+                    observed_name=c.observed_name, source_range=c.source_range
+                )
+                for c in defaults.calls
+            ),
+        ]
+        visitor.references.extend(
+            {
+                (*_range_tuple(r.source_range), r.observed_name): r.model_copy(
+                    update={"detection_method": "python_default_reference"}
+                )
+                for r in uses
+            }.values()
+        )
+        visitor.configuration_keys.update(defaults.configuration_keys)
         annotations = [
             argument.annotation
             for argument in (
@@ -522,6 +665,13 @@ def _direct_facts(node: ast.AST, source: str) -> _DirectFactVisitor:
         )
     )
     visitor.raises.sort(key=lambda item: (*_range_tuple(item[0]), item[1]))
+    initialization_by_key = {
+        (*_range_tuple(item.source_range), item.observed_name): item
+        for item in visitor.initializations
+    }
+    visitor.initializations = [
+        initialization_by_key[key] for key in sorted(initialization_by_key)
+    ]
     return visitor
 
 
@@ -531,11 +681,52 @@ def _resolve_local_calls(
     by_name: dict[str, list[SymbolRecord]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
+    by_id = {s.symbol_id: s for s in symbols}
+    body_bindings = {
+        s.symbol_id: _body_bound_names(d.node)
+        for s, d in zip(symbols, drafts, strict=True)
+    }
     result: list[SymbolRecord] = []
     for symbol, draft in zip(symbols, drafts, strict=True):
         shadowed_names = _shadowed_names(draft.node)
         calls: list[CallReference] = []
         for call in symbol.direct_calls:
+            receiver_bound, members = _python_receiver_members(
+                symbol,
+                call.observed_name,
+                call.source_range,
+                by_id,
+                by_name,
+                body_bindings,
+            )
+            if receiver_bound:
+                targets = [
+                    s
+                    for s in members
+                    if s.kind
+                    in {
+                        SymbolKind.METHOD,
+                        SymbolKind.ASYNC_FUNCTION,
+                        SymbolKind.CONSTRUCTOR,
+                    }
+                ]
+                calls.append(
+                    call.model_copy(
+                        update={
+                            "resolution": "internal"
+                            if len(targets) == 1
+                            else "unresolved",
+                            "target_symbol_id": targets[0].symbol_id
+                            if len(targets) == 1
+                            else None,
+                            "target_file_path": path if len(targets) == 1 else None,
+                            "detection_method": "python_lexical_name"
+                            if len(targets) == 1
+                            else "python_receiver_unresolved",
+                        }
+                    )
+                )
+                continue
             candidates = (
                 by_name.get(call.observed_name, [])
                 if "." not in call.observed_name
@@ -550,7 +741,8 @@ def _resolve_local_calls(
                     for item in candidates
                     if item.parent_symbol_id == symbol.parent_symbol_id
                 ]
-                if symbol.kind != SymbolKind.METHOD
+                if draft.parent_index is None
+                or drafts[draft.parent_index].kind != SymbolKind.CLASS
                 else []
             )
             module_level = [
@@ -596,11 +788,40 @@ def _resolve_local_references(
     by_name: dict[str, list[SymbolRecord]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
+    by_id = {symbol.symbol_id: symbol for symbol in symbols}
+    draft_by_id = {
+        symbol.symbol_id: draft for symbol, draft in zip(symbols, drafts, strict=True)
+    }
+    shadowed_by_id = {
+        symbol_id: _shadowed_names(draft.node)
+        for symbol_id, draft in draft_by_id.items()
+    }
+    body_bindings = {sid: _body_bound_names(d.node) for sid, d in draft_by_id.items()}
     result: list[SymbolRecord] = []
-    for symbol, draft in zip(symbols, drafts, strict=True):
-        shadowed_names = _shadowed_names(draft.node)
+    for symbol in symbols:
+        shadowed_names = shadowed_by_id[symbol.symbol_id]
         references: list[ReferenceOccurrence] = []
         for reference in symbol.direct_references:
+            receiver_bound, members = _python_receiver_members(
+                symbol,
+                reference.observed_name,
+                reference.source_range,
+                by_id,
+                by_name,
+                body_bindings,
+            )
+            if receiver_bound and len(members) == 1:
+                references.append(
+                    reference.model_copy(
+                        update={
+                            "resolution": "internal",
+                            "target_file_path": path,
+                            "target_symbol_id": members[0].symbol_id,
+                            "detection_method": "python_lexical_reference",
+                        }
+                    )
+                )
+                continue
             observed_root = reference.observed_name.split(".", maxsplit=1)[0]
             candidates = (
                 by_name.get(reference.observed_name, [])
@@ -612,15 +833,53 @@ def _resolve_local_references(
                 for item in candidates
                 if item.parent_symbol_id == symbol.parent_symbol_id
                 and item.symbol_id != symbol.symbol_id
+                and not (
+                    by_id.get(symbol.parent_symbol_id or "") is not None
+                    and by_id[symbol.parent_symbol_id or ""].kind == SymbolKind.CLASS
+                    and symbol.kind
+                    in {
+                        SymbolKind.METHOD,
+                        SymbolKind.ASYNC_FUNCTION,
+                        SymbolKind.CONSTRUCTOR,
+                    }
+                )
             ]
             module_level = [
                 item
                 for item in candidates
                 if item.parent_symbol_id is None and item.symbol_id != symbol.symbol_id
             ]
-            selected = [] if observed_root in shadowed_names else siblings
-            if not selected and observed_root not in shadowed_names:
-                selected = module_level
+            shadowed = observed_root in shadowed_names
+            is_default = any(
+                (r.start_line, r.start_column)
+                <= (
+                    reference.source_range.start_line,
+                    reference.source_range.start_column,
+                )
+                and (reference.source_range.end_line, reference.source_range.end_column)
+                <= (r.end_line, r.end_column)
+                for r in symbol.parameter_default_ranges
+            )
+            if is_default:
+                selected = []
+                shadowed = False
+                parent = by_id.get(symbol.parent_symbol_id or "")
+                while parent is not None:
+                    selected = [
+                        c for c in candidates if c.parent_symbol_id == parent.symbol_id
+                    ]
+                    if selected:
+                        break
+                    if observed_root in shadowed_by_id[parent.symbol_id]:
+                        shadowed = True
+                        break
+                    parent = by_id.get(parent.parent_symbol_id or "")
+                if not selected and not shadowed:
+                    selected = module_level
+            else:
+                selected = [] if shadowed else siblings
+                if not selected and not shadowed:
+                    selected = module_level
             unique = {item.symbol_id: item for item in selected}
             if len(unique) == 1:
                 target = next(iter(unique.values()))
@@ -634,7 +893,7 @@ def _resolve_local_references(
                         }
                     )
                 )
-            elif observed_root in shadowed_names:
+            elif shadowed:
                 references.append(
                     reference.model_copy(
                         update={"detection_method": "python_shadowed_reference"}
@@ -646,6 +905,55 @@ def _resolve_local_references(
             symbol.model_copy(update={"direct_references": tuple(references)})
         )
     return tuple(result)
+
+
+def _python_receiver_members(
+    symbol: SymbolRecord,
+    observed: str,
+    address: SourceRange,
+    by_id: dict[str, SymbolRecord],
+    by_name: dict[str, list[SymbolRecord]],
+    body_bindings: dict[str, set[str]],
+) -> tuple[bool, list[SymbolRecord]]:
+    parts = observed.split(".")
+    if len(parts) != 2:
+        return False, []
+    current: SymbolRecord | None = symbol
+    while current is not None:
+        in_default = any(
+            (r.start_line, r.start_column) <= (address.start_line, address.start_column)
+            and (address.end_line, address.end_column) <= (r.end_line, r.end_column)
+            for r in current.parameter_default_ranges
+        )
+        if not in_default:
+            if (
+                current.receiver_parameter_name == parts[0]
+                and current.receiver_class_symbol_id is not None
+            ):
+                return True, (
+                    [
+                        s
+                        for s in by_name.get(parts[1], [])
+                        if s.parent_symbol_id == current.receiver_class_symbol_id
+                    ]
+                    if parts[0] not in body_bindings[current.symbol_id]
+                    else []
+                )
+            if parts[0] in body_bindings[current.symbol_id] or any(
+                p.name == parts[0] for p in current.parameters
+            ):
+                return False, []
+        current = by_id.get(current.parent_symbol_id or "")
+    return False, []
+
+
+def _body_bound_names(node: ast.stmt) -> set[str]:
+    visitor = _BoundNameVisitor()
+    body = getattr(node, "body", ())
+    if isinstance(body, list):
+        for statement in body:
+            visitor.visit(statement)
+    return visitor.names
 
 
 def _shadowed_names(node: ast.stmt) -> set[str]:
