@@ -8,6 +8,8 @@ and Python distribution versions follow PEP 440.
 
 ## [Unreleased]
 
+## [0.6.0b1] - 2026-10-13
+
 ### Added
 
 - Added Index v3 structural-first generations containing deterministic
@@ -44,6 +46,9 @@ and Python distribution versions follow PEP 440.
 - Added semantic-retrieval comparison reporting and per-file deterministic
   scheduler/value diagnostics, separating grounded retrieval value from model
   request cost.
+- Added source-bound function descriptions and deterministic function-level
+  discovery over immutable CodeMaps, plus compact numbered source prompt export
+  through the Python API and `context create --compact-prompt`.
 
 ### Changed
 
@@ -51,7 +56,7 @@ and Python distribution versions follow PEP 440.
   enrichment. Enrichment failure, timeout, or cancellation leaves that
   structural generation active; old immutable generations remain until explicit
   `index clean`.
-- Index/manifest/record schemas are version 3. Index v2 is status-readable as
+- Index/manifest/record schemas are version 4. Earlier schemas are status-readable as
   `rebuild_required`, excluded from retrieval, rejected by `index update`, and
   replaced only by a full build without semantic migration.
 - Task-based `context suggest` and `context create` default to Index v3 retrieval
@@ -68,6 +73,13 @@ and Python distribution versions follow PEP 440.
   a second near-complete postings corpus.
 
 ### Fixed
+
+- Retained verified planner discovery after later provider failures and honored
+  explicitly disabled structured-response repairs without a hidden local retry.
+- Reduced planner menus and previews while retaining available required evidence,
+  resolved source anchors and complete local diagnostics.
+- Materialized mandatory source above the automatic soft target when it fits
+  inside the unchanged hard context budget.
 
 - Stabilized config-key digests, parse-error reuse, and no-op updates; added
   Kotlin structural extraction and compact bounded occurrence/card evidence.

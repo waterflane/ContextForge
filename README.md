@@ -28,7 +28,7 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. The current development branch introduces
+> ContextForge 0.6.0b1 is a beta release. This version introduces
 > Index v3.1, grounded Semantic Cards, BM25/graph retrieval, Context Capsule v2,
 > and Bridge 2.2. Discovery benchmarking is experimental and its results should
 > be reviewed alongside the recorded provider, model, configuration, and source
