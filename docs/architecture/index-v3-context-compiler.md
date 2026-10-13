@@ -543,3 +543,26 @@ falling back. A live preflight must establish that the selected model supports
 the requested effort. Unsupported settings block that protocol until an
 explicit supported setting is selected. Login preflight failures count zero
 model dispatches.
+
+Planner menus retain every available frozen evidence ID plus a bounded optional
+sample. Full source catalogues and diagnostic histories stay local; transmitted
+previews and completed-action summaries are smaller. Search, symbol, graph, map
+and grounded query expansion retain their original contracts and limits. A later
+provider failure preserves previously verified discovery and its requirements.
+Disabling JSON repair also disables the planner's local structured-response retry.
+
+Mandatory implementation material can exceed the automatic soft target only
+inside the unchanged hard budget. Optional material still obeys the soft target.
+The source projection exported by `--compact-prompt` presents physical source once
+with file paths and line numbers, omitting duplicated proof metadata from model
+input. The full capsule retains that metadata and all sufficiency diagnostics.
+`render_capsule_source_context` provides the same projection to Python callers;
+consumers must budget their complete request including model instructions.
+
+`FunctionCatalogue` reads immutable CodeMaps and validates current source identity
+before building a function-level lexical catalogue. Descriptions report docstrings,
+declared parameters/return annotations, observed calls and exceptions rather than
+runtime guarantees. Verified call endpoints can supplement discovery within two
+hops. Heuristic matches remain hints; the catalogue cannot certify task coverage
+or change frozen evidence obligations. It neither replaces the agentic planner nor
+removes graph/map actions or unresolved dependency diagnostics.

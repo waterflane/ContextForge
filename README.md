@@ -166,6 +166,23 @@ contextforge context create . --task "Trace configuration precedence" `
 
 ## Common use cases
 
+For a compact model input, export numbered materialized source while keeping
+the full capsule for verification:
+
+```bash
+contextforge context create . --task "Explain the context budget calculation" \
+  --planning off --compact-prompt --format json \
+  --output capsule.json --prompt-output source.xml
+```
+
+The compact prompt contains paths, source ranges and code once, while the capsule
+retains hashes, evidence identities and sufficiency diagnostics. The same
+projection is available as `render_capsule_source_context` from
+`contextforge.context`. `FunctionCatalogue` from `contextforge.intelligence`
+offers source-bound function descriptions and deterministic function-level search
+over saved CodeMaps. These helpers do not replace verified graph dependencies,
+grounded semantic enrichment or compiler requirements.
+
 - create a compact review packet for an external coding agent;
 - map a repository without sending source to a model;
 - inspect stale, missing, or failed index records;

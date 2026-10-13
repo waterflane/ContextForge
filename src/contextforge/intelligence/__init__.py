@@ -52,6 +52,11 @@ from contextforge.intelligence.fallback import (
     FALLBACK_ANALYZER,
     extract_fallback_code_map,
 )
+from contextforge.intelligence.function_catalogue import (
+    FunctionCatalogue,
+    FunctionEntry,
+    describe_function,
+)
 from contextforge.intelligence.graph import (
     GRAPH_SCHEMA_VERSION,
     ORIENTATION_MAP_SCHEMA_VERSION,
@@ -266,6 +271,9 @@ from contextforge.intelligence.store import (
 )
 
 __all__ = [
+    "FunctionCatalogue",
+    "FunctionEntry",
+    "describe_function",
     "DEFAULT_CONFIG",
     "BM25_B",
     "BM25_K1",
