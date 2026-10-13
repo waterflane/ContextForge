@@ -74,6 +74,9 @@ and Python distribution versions follow PEP 440.
 
 ### Fixed
 
+- Kept descriptive verbs after "which function" as topical search terms while
+  retaining explicit named identifiers and directed caller/callee requests.
+
 - Retained verified planner discovery after later provider failures and honored
   explicitly disabled structured-response repairs without a hidden local retry.
 - Reduced planner menus and previews while retaining available required evidence,

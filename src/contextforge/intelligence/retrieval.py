@@ -6097,11 +6097,19 @@ def parse_query_intent(task: str) -> QueryIntent:
     if re.fullmatch(identifier, task.strip()):
         anchors.add(task.strip())
     for match in re.finditer(
-        rf"\b(?:callers?|callees?|symbols?|functions?|methods?|classes)\s+(?:of\s+)?({identifier})",
+        rf"\b(?:callers?|callees?)\s+(?:of\s+)?({identifier})",
         task,
         flags=re.IGNORECASE,
     ):
         anchors.add(match.group(1))
+    for match in re.finditer(
+        rf"\b(?:symbols?|functions?|methods?|classes)\s+"
+        rf"(?P<named>(?:named|called|of)\s+)?(?P<identifier>{identifier})",
+        task,
+        flags=re.IGNORECASE,
+    ):
+        if match.group("named") or not task[match.end() :].strip(" \t\n.!?:;"):
+            anchors.add(match.group("identifier"))
     # Role nouns can also be task subjects; retain them unless syntax consumes them.
     content = task
     for anchor in sorted(anchors, key=lambda value: (-len(value), value)):

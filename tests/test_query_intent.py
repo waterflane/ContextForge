@@ -52,6 +52,11 @@ def test_prose_symbol_matches_do_not_override_topical_source(
         ("Review src/widget.py", ("src/widget.py",)),
         ("run", ("run",)),
         ("Trace the request pipeline", ()),
+        ("Which function normalizes structured nested records?", ()),
+        ("Find the function that removes credentials from logs", ()),
+        ("Find function build", ("build",)),
+        ("Explain the function named build and its behavior", ("build",)),
+        ("Find callers of build in the request flow", ("build",)),
     ],
 )
 def test_explicit_anchor_syntax_has_one_canonical_intent(
