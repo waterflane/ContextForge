@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -11,12 +13,44 @@ from contextforge.intelligence.codemap import (
     CallReference,
     FileCodeMap,
     ImportRecord,
+    ReferenceOccurrence,
     RelationshipRecord,
     RelationshipTarget,
     SourceRange,
+    StructuralOccurrenceCount,
+    SymbolKind,
     SymbolRecord,
     stable_fact_id,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
+
+# TypeScript commonly writes source imports with the suffix that its emitted
+# JavaScript will have. These are the only source/emitted substitutions the
+# structural resolver is allowed to make. In particular, it must never strip
+# an arbitrary suffix and search by basename.
+_TYPESCRIPT_EMITTED_SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    ".cjs": (".cts",),
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts",),
+}
+_TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION = "polyglot_typescript_emitted_suffix_resolution"
+
+
+@dataclass(frozen=True)
+class _PolyglotScopes:
+    by_id: dict[str, SymbolRecord]
+    bindings: dict[tuple[str | None, str], tuple[SymbolRecord, ...]]
+
+    @classmethod
+    def from_symbols(cls, symbols: tuple[SymbolRecord, ...]) -> _PolyglotScopes:
+        bindings: dict[tuple[str | None, str], list[SymbolRecord]] = defaultdict(list)
+        for symbol in symbols:
+            bindings[(symbol.parent_symbol_id, symbol.name)].append(symbol)
+        return cls(
+            {s.symbol_id: s for s in symbols},
+            {key: tuple(values) for key, values in bindings.items()},
+        )
 
 
 def resolve_relationships(
@@ -39,23 +73,38 @@ def resolve_relationships(
 
     resolved: list[FileCodeMap] = []
     for code_map in ordered:
-        if code_map.parse_status != "parsed" or code_map.language != "Python":
+        if code_map.parse_status != "parsed":
             resolved.append(code_map)
             continue
-        imports = tuple(
-            _resolve_import(item, code_map.path, module_paths)
-            for item in code_map.imports
-        )
-        symbols = tuple(
-            _resolve_imported_calls(symbol, imports, code_map.symbols, by_path)
-            for symbol in code_map.symbols
-        )
+        if code_map.language == "Python":
+            imports = tuple(
+                _resolve_import(item, code_map.path, module_paths)
+                for item in code_map.imports
+            )
+            symbols = tuple(
+                _resolve_imported_calls(symbol, imports, code_map.symbols, by_path)
+                for symbol in code_map.symbols
+            )
+        else:
+            imports = tuple(
+                _resolve_polyglot_import(item, code_map.path, ordered)
+                for item in code_map.imports
+            )
+            scopes = _PolyglotScopes.from_symbols(code_map.symbols)
+            symbols = tuple(
+                _resolve_polyglot_symbol(
+                    symbol, imports, code_map.symbols, by_path, code_map.path, scopes
+                )
+                for symbol in code_map.symbols
+            )
+        symbols, occurrence_counts = _compact_occurrences(symbols)
         relationships = _rebuild_resolved_relationships(code_map, imports, symbols)
         resolved.append(
             code_map.model_copy(
                 update={
                     "imports": imports,
                     "symbols": symbols,
+                    "occurrence_counts": occurrence_counts,
                     "relationships": relationships,
                 }
             )
@@ -82,7 +131,11 @@ def _clear_repository_resolution(code_map: FileCodeMap) -> FileCodeMap:
                 "direct_calls": tuple(
                     _clear_call_resolution(call, code_map.path)
                     for call in symbol.direct_calls
-                )
+                ),
+                "direct_references": tuple(
+                    _clear_reference_resolution(reference, code_map.path)
+                    for reference in symbol.direct_references
+                ),
             }
         )
         for symbol in code_map.symbols
@@ -97,6 +150,14 @@ def _clear_repository_resolution(code_map: FileCodeMap) -> FileCodeMap:
 
 
 def _clear_call_resolution(call: CallReference, source_path: str) -> CallReference:
+    if call.detection_method == "python_receiver_unresolved":
+        return call.model_copy(
+            update={
+                "resolution": "unresolved",
+                "target_symbol_id": None,
+                "target_file_path": None,
+            }
+        )
     if call.detection_method == "python_shadowed_name":
         return call
     if (
@@ -105,12 +166,44 @@ def _clear_call_resolution(call: CallReference, source_path: str) -> CallReferen
         and call.detection_method == "python_lexical_name"
     ):
         return call
+    method = (
+        "polyglot_ast_call"
+        if call.detection_method.startswith("polyglot_")
+        else "python_ast_call"
+    )
     return call.model_copy(
         update={
             "resolution": "unresolved",
             "target_symbol_id": None,
             "target_file_path": None,
-            "detection_method": "python_ast_call",
+            "detection_method": method,
+        }
+    )
+
+
+def _clear_reference_resolution(
+    reference: ReferenceOccurrence, source_path: str
+) -> ReferenceOccurrence:
+    if reference.detection_method == "python_shadowed_reference":
+        return reference
+    if (
+        reference.resolution == "internal"
+        and reference.target_file_path == source_path
+        and reference.detection_method
+        in {"python_lexical_reference", "polyglot_ast_callback_binding"}
+    ):
+        return reference
+    method = (
+        "polyglot_ast_reference"
+        if reference.detection_method.startswith("polyglot_")
+        else "python_ast_reference"
+    )
+    return reference.model_copy(
+        update={
+            "resolution": "unresolved",
+            "target_symbol_id": None,
+            "target_file_path": None,
+            "detection_method": method,
         }
     )
 
@@ -174,6 +267,384 @@ def _resolve_import(
     return item.model_copy(update={"resolution": "unresolved"})
 
 
+def _resolve_polyglot_import(
+    item: ImportRecord,
+    source_path: str,
+    code_maps: tuple[FileCodeMap, ...],
+) -> ImportRecord:
+    source_language = next(
+        (item.language for item in code_maps if item.path == source_path), None
+    )
+    candidates = _polyglot_import_candidates(
+        item, source_path, code_maps, source_language
+    )
+    if len(candidates) == 1:
+        return item.model_copy(
+            update={
+                "resolution": "internal",
+                "target_file_path": next(iter(candidates)),
+            }
+        )
+    relative = (item.module or "").startswith((".", "crate::", "self::"))
+    return item.model_copy(
+        update={"resolution": "unresolved" if relative or candidates else "external"}
+    )
+
+
+def _polyglot_import_candidates(
+    item: ImportRecord,
+    source_path: str,
+    code_maps: tuple[FileCodeMap, ...],
+    source_language: str | None,
+) -> set[str]:
+    module = (item.module or "").strip()
+    if not module:
+        return set()
+    source_parent = PurePosixPath(source_path).parent
+    relative = module.startswith((".", "crate::", "self::"))
+    normalized = module.replace("::", "/").replace("\\", "/")
+    normalized = normalized.removeprefix("crate/").removeprefix("self/")
+    if source_language in {"Java", "C#", "Kotlin"}:
+        normalized = normalized.replace(".", "/")
+    normalized = normalized.strip("/")
+    # TypeScript package specifiers are external. Only an explicit relative
+    # specifier can name a snapshot file or use the controlled emitted suffix
+    # substitutions below; this prevents basename resolution of packages.
+    if source_language == "TypeScript" and not relative:
+        return set()
+    bases = [normalized]
+    if item.imported_name:
+        bases.append(f"{normalized}/{item.imported_name}".strip("/"))
+    candidates: set[str] = set()
+    exact: set[str] = set()
+    emitted: set[str] = set()
+    for code_map in code_maps:
+        if code_map.path == source_path:
+            continue
+        pure = PurePosixPath(code_map.path)
+        without_suffix = pure.with_suffix("").as_posix()
+        variants = {pure.as_posix(), without_suffix}
+        if pure.stem in {"index", "mod", "lib"}:
+            variants.add(pure.parent.as_posix())
+        for base in bases:
+            target = (source_parent / base).as_posix() if relative else base
+            target = _normalize_posix(target)
+            if target in variants:
+                exact.add(code_map.path)
+            elif _is_typescript_emitted_source_target(
+                module, source_language, relative, target, code_map.path
+            ):
+                emitted.add(code_map.path)
+            elif not relative and any(
+                value == target or value.endswith(f"/{target}") for value in variants
+            ):
+                candidates.add(code_map.path)
+    return exact or emitted or candidates
+
+
+def _is_typescript_emitted_source_target(
+    module: str,
+    source_language: str | None,
+    relative: bool,
+    target: str,
+    candidate_path: str,
+) -> bool:
+    """Match only one declared emitted suffix to its valid source suffixes."""
+
+    if source_language != "TypeScript" or not relative:
+        return False
+    emitted_suffix = PurePosixPath(module).suffix
+    source_suffixes = _TYPESCRIPT_EMITTED_SOURCE_SUFFIXES.get(emitted_suffix)
+    if source_suffixes is None:
+        return False
+    target_path = PurePosixPath(target)
+    return any(
+        target_path.with_suffix(source_suffix).as_posix() == candidate_path
+        for source_suffix in source_suffixes
+    )
+
+
+def _is_typescript_emitted_import(
+    item: ImportRecord, source_path: str, source_language: str | None
+) -> bool:
+    """Determine whether an already-resolved import used an emitted suffix."""
+
+    if item.target_file_path is None:
+        return False
+    module = item.module or ""
+    target = _normalize_posix((PurePosixPath(source_path).parent / module).as_posix())
+    return _is_typescript_emitted_source_target(
+        module,
+        source_language,
+        module.startswith("."),
+        target,
+        item.target_file_path,
+    )
+
+
+def _normalize_posix(value: str) -> str:
+    parts: list[str] = []
+    for part in PurePosixPath(value).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _resolve_polyglot_symbol(
+    symbol: SymbolRecord,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+    source_path: str,
+    scopes: _PolyglotScopes,
+) -> SymbolRecord:
+    calls = tuple(
+        _resolve_polyglot_occurrence(
+            call,
+            imports,
+            symbols,
+            maps_by_path,
+            source_path,
+            owner=symbol,
+            scopes=scopes,
+            is_call=True,
+        )
+        for call in symbol.direct_calls
+    )
+    references = tuple(
+        _resolve_polyglot_occurrence(
+            reference,
+            imports,
+            symbols,
+            maps_by_path,
+            source_path,
+            owner=symbol,
+            scopes=scopes,
+            is_call=False,
+        )
+        for reference in symbol.direct_references
+    )
+    return symbol.model_copy(
+        update={"direct_calls": calls, "direct_references": references}
+    )
+
+
+def _resolve_polyglot_occurrence(
+    occurrence: CallReference | ReferenceOccurrence,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+    source_path: str,
+    *,
+    owner: SymbolRecord,
+    scopes: _PolyglotScopes,
+    is_call: bool,
+) -> CallReference | ReferenceOccurrence:
+    if occurrence.detection_method == "polyglot_ast_callback_binding":
+        target = next(
+            (s for s in symbols if s.symbol_id == occurrence.target_symbol_id), None
+        )
+        if (
+            not is_call
+            and target is not None
+            and target.is_anonymous
+            and occurrence.target_file_path == source_path
+            and occurrence.source_range == target.declaration_range
+        ):
+            return occurrence
+        return occurrence.model_copy(
+            update={
+                "resolution": "unresolved",
+                "target_symbol_id": None,
+                "target_file_path": None,
+                "detection_method": "polyglot_ast_reference",
+            }
+        )
+    observed = occurrence.observed_name
+    if observed.startswith("this."):
+        bound = True
+        parts = observed.split(".")
+        receiver = scopes.by_id.get(owner.receiver_class_symbol_id or "")
+        local = (
+            tuple(
+                s
+                for s in scopes.bindings.get((receiver.symbol_id, parts[1]), ())
+                if s.is_static_member == owner.is_static_member
+            )
+            if receiver is not None
+            and receiver.kind == SymbolKind.CLASS
+            and len(parts) == 2
+            else ()
+        )
+    else:
+        bound, local = _polyglot_lexical_binding(
+            observed,
+            owner,
+            scopes,
+            source_range=occurrence.source_range,
+            class_members=maps_by_path[source_path].language
+            not in {"JavaScript", "TypeScript"},
+        )
+    if len(local) == 1:
+        if is_call and local[0].kind not in {
+            SymbolKind.FUNCTION,
+            SymbolKind.ASYNC_FUNCTION,
+            SymbolKind.METHOD,
+            SymbolKind.CONSTRUCTOR,
+            SymbolKind.CLASS,
+            SymbolKind.STRUCT,
+        }:
+            return occurrence
+        return occurrence.model_copy(
+            update={
+                "resolution": "internal",
+                "target_file_path": source_path,
+                "target_symbol_id": local[0].symbol_id,
+                "detection_method": (
+                    "polyglot_local_call" if is_call else "polyglot_local_reference"
+                ),
+            }
+        )
+    if bound:
+        return occurrence
+    targets: set[tuple[str, str, bool, bool]] = set()
+    for item in imports:
+        if item.resolution != "internal" or item.target_file_path is None:
+            continue
+        qualified_target: str | None = None
+        if maps_by_path[source_path].language in {"JavaScript", "TypeScript"}:
+            binding = item.alias or item.imported_name
+            parts = observed.split(".")
+            if (
+                binding is None
+                or parts[0] != binding
+                or (item.imported_name is None and len(parts) < 2)
+            ):
+                continue
+            qualified_target = ".".join(
+                (
+                    *((item.imported_name,) if item.imported_name is not None else ()),
+                    *parts[1:],
+                )
+            )
+        target_names = (
+            {qualified_target.rsplit(".", 1)[-1]}
+            if qualified_target is not None
+            else _polyglot_target_names(observed, item)
+        )
+        if not target_names:
+            continue
+        target_map = maps_by_path[item.target_file_path]
+        matches = [
+            candidate
+            for candidate in target_map.symbols
+            if candidate.name in target_names
+            and (
+                qualified_target is None or candidate.qualified_name == qualified_target
+            )
+        ]
+        if len(matches) == 1:
+            package = not _is_exact_polyglot_import(
+                item, maps_by_path[source_path].language
+            )
+            emitted_suffix = _is_typescript_emitted_import(
+                item, source_path, maps_by_path[source_path].language
+            )
+            targets.add(
+                (item.target_file_path, matches[0].symbol_id, package, emitted_suffix)
+            )
+    identities = {(path, symbol_id) for path, symbol_id, _, _ in targets}
+    if len(identities) != 1:
+        return occurrence
+    target_path, target_id = next(iter(identities))
+    package = any(value[2] for value in targets)
+    emitted_suffix = any(value[3] for value in targets)
+    return occurrence.model_copy(
+        update={
+            "resolution": "internal",
+            "target_file_path": target_path,
+            "target_symbol_id": target_id,
+            "detection_method": (
+                _TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION
+                if emitted_suffix
+                else "polyglot_package_resolution"
+                if package
+                else (
+                    "polyglot_unambiguous_import_call"
+                    if is_call
+                    else "polyglot_unambiguous_import_reference"
+                )
+            ),
+        }
+    )
+
+
+def _polyglot_lexical_binding(
+    observed: str,
+    owner: SymbolRecord,
+    scopes: _PolyglotScopes,
+    *,
+    class_members: bool,
+    source_range: SourceRange,
+) -> tuple[bool, tuple[SymbolRecord, ...]]:
+    # A lexical binding may shadow an import or outer declaration, but a
+    # receiver member is never resolved by its final component alone.
+    binding = observed.split(".", 1)[0]
+    current: SymbolRecord | None = owner
+    visited: set[str] = set()
+    while current is not None and current.symbol_id not in visited:
+        visited.add(current.symbol_id)
+        if binding in current.parameter_bindings or any(
+            p.name == binding for p in current.parameters
+        ):
+            return True, ()
+        matches = (
+            scopes.bindings.get((current.symbol_id, binding), ())
+            if (class_members or current.kind != SymbolKind.CLASS)
+            and not any(
+                (r.start_line, r.start_column)
+                <= (source_range.start_line, source_range.start_column)
+                and (source_range.end_line, source_range.end_column)
+                <= (r.end_line, r.end_column)
+                for r in current.parameter_default_ranges
+            )
+            else ()
+        )
+        if matches:
+            return True, matches if observed == binding else ()
+        current = scopes.by_id.get(current.parent_symbol_id or "")
+    matches = scopes.bindings.get((None, binding), ())
+    return bool(matches), matches if observed == binding else ()
+
+
+def _polyglot_target_names(observed_name: str, item: ImportRecord) -> set[str]:
+    parts = [
+        part.lstrip("$")
+        for part in observed_name.replace("::", ".").replace("->", ".").split(".")
+        if part
+    ]
+    if not parts:
+        return set()
+    if item.imported_name is None:
+        return {parts[-1]}
+    binding = item.alias or item.imported_name
+    if len(parts) == 1:
+        return {parts[0]}
+    if parts[0] != binding:
+        return set()
+    return {parts[-1] if len(parts) > 1 else item.imported_name}
+
+
+def _final_observed_name(value: str) -> str:
+    cleaned = value.replace("::", ".").replace("->", ".")
+    return cleaned.rsplit(".", 1)[-1].lstrip("$")
+
+
 def _absolute_import_modules(item: ImportRecord, source_path: str) -> tuple[str, ...]:
     if item.level == 0:
         return (item.module or "",)
@@ -206,7 +677,10 @@ def _resolve_imported_calls(
         if call.resolution == "internal":
             calls.append(call)
             continue
-        if call.detection_method == "python_shadowed_name":
+        if call.detection_method in {
+            "python_shadowed_name",
+            "python_receiver_unresolved",
+        }:
             calls.append(call)
             continue
         if call.observed_name.split(".")[0] in {
@@ -248,7 +722,77 @@ def _resolve_imported_calls(
             )
         else:
             calls.append(call)
-    return symbol.model_copy(update={"direct_calls": tuple(calls)})
+    references = _resolve_imported_references(symbol, imports, symbols, maps_by_path)
+    return symbol.model_copy(
+        update={
+            "direct_calls": tuple(calls),
+            "direct_references": references,
+        }
+    )
+
+
+def _resolve_imported_references(
+    symbol: SymbolRecord,
+    imports: tuple[ImportRecord, ...],
+    symbols: tuple[SymbolRecord, ...],
+    maps_by_path: dict[str, FileCodeMap],
+) -> tuple[ReferenceOccurrence, ...]:
+    references: list[ReferenceOccurrence] = []
+    parameter_names = {parameter.name for parameter in symbol.parameters}
+    for reference in symbol.direct_references:
+        if reference.resolution == "internal":
+            references.append(reference)
+            continue
+        if reference.detection_method == "python_shadowed_reference":
+            references.append(reference)
+            continue
+        is_default = any(
+            (r.start_line, r.start_column)
+            <= (reference.source_range.start_line, reference.source_range.start_column)
+            and (reference.source_range.end_line, reference.source_range.end_column)
+            <= (r.end_line, r.end_column)
+            for r in symbol.parameter_default_ranges
+        )
+        if not is_default and reference.observed_name.split(".")[0] in parameter_names:
+            references.append(reference)
+            continue
+        targets: set[tuple[str, str]] = set()
+        for item in imports:
+            if item.resolution != "internal" or item.target_file_path is None:
+                continue
+            containing_symbol = _containing_symbol(symbols, item.source_range)
+            if containing_symbol is not None and (
+                is_default or containing_symbol != symbol.symbol_id
+            ):
+                continue
+            target_map = maps_by_path.get(item.target_file_path)
+            if target_map is None:
+                continue
+            target_name = _call_target_from_import(reference.observed_name, item)
+            if target_name is None:
+                continue
+            matches = [
+                candidate
+                for candidate in target_map.symbols
+                if candidate.parent_symbol_id is None and candidate.name == target_name
+            ]
+            if len(matches) == 1:
+                targets.add((item.target_file_path, matches[0].symbol_id))
+        if len(targets) == 1:
+            target_path, target_id = next(iter(targets))
+            references.append(
+                reference.model_copy(
+                    update={
+                        "resolution": "internal",
+                        "target_file_path": target_path,
+                        "target_symbol_id": target_id,
+                        "detection_method": "python_unambiguous_import_reference",
+                    }
+                )
+            )
+        else:
+            references.append(reference)
+    return tuple(references)
 
 
 def _call_target_from_import(observed_name: str, item: ImportRecord) -> str | None:
@@ -274,6 +818,7 @@ def _rebuild_resolved_relationships(
     symbols: tuple[SymbolRecord, ...],
 ) -> tuple[RelationshipRecord, ...]:
     relationships: list[RelationshipRecord] = []
+    prefix = "python" if code_map.language == "Python" else "polyglot"
     for symbol in symbols:
         if symbol.parent_symbol_id is not None:
             relationships.append(
@@ -288,10 +833,12 @@ def _rebuild_resolved_relationships(
                         file_path=code_map.path,
                         symbol_id=symbol.symbol_id,
                     ),
-                    method="python_lexical_parent",
+                    method=f"{prefix}_lexical_parent",
                 )
             )
     for export in code_map.exports:
+        if export.target_symbol_id is None:
+            continue
         relationships.append(
             _relationship(
                 kind="export",
@@ -300,21 +847,17 @@ def _rebuild_resolved_relationships(
                 source_range=export.source_range,
                 observed_text=export.name,
                 target=RelationshipTarget(
-                    resolution=(
-                        "internal"
-                        if export.target_symbol_id is not None
-                        else "unresolved"
-                    ),
-                    file_path=(
-                        code_map.path if export.target_symbol_id is not None else None
-                    ),
+                    resolution="internal",
+                    file_path=code_map.path,
                     symbol_id=export.target_symbol_id,
                     observed_name=export.name,
                 ),
-                method=f"python_{export.kind}_export",
+                method=f"{prefix}_{export.kind}_export",
             )
         )
     for item in imports:
+        if item.resolution != "internal":
+            continue
         module_name = "." * item.level + (item.module or "")
         relationships.append(
             _relationship(
@@ -331,13 +874,27 @@ def _rebuild_resolved_relationships(
                 ),
                 method=(
                     "python_snapshot_module_resolution"
-                    if item.resolution == "internal"
+                    if prefix == "python" and item.resolution == "internal"
                     else "python_ast_import"
+                    if prefix == "python"
+                    else _TYPESCRIPT_EMITTED_SUFFIX_RESOLUTION
+                    if item.resolution == "internal"
+                    and _is_typescript_emitted_import(
+                        item, code_map.path, code_map.language
+                    )
+                    else "polyglot_snapshot_path_resolution"
+                    if item.resolution == "internal"
+                    and _is_exact_polyglot_import(item, code_map.language)
+                    else "polyglot_package_resolution"
+                    if item.resolution == "internal"
+                    else "polyglot_ast_import"
                 ),
             )
         )
     for symbol in symbols:
         for call in symbol.direct_calls:
+            if call.resolution != "internal":
+                continue
             relationships.append(
                 _relationship(
                     kind="call",
@@ -354,48 +911,163 @@ def _rebuild_resolved_relationships(
                     method=call.detection_method,
                 )
             )
+        for reference in symbol.direct_references:
+            if reference.resolution != "internal":
+                continue
+            relationships.append(
+                _relationship(
+                    kind="reference",
+                    source_path=code_map.path,
+                    source_symbol_id=symbol.symbol_id,
+                    source_range=reference.source_range,
+                    observed_text=reference.observed_name,
+                    target=RelationshipTarget(
+                        resolution=reference.resolution,
+                        file_path=reference.target_file_path,
+                        symbol_id=reference.target_symbol_id,
+                        observed_name=reference.observed_name,
+                    ),
+                    method=reference.detection_method,
+                )
+            )
     return tuple(sorted(relationships, key=_relationship_key))
+
+
+_MAX_RETAINED_POSITIONS_PER_IDENTIFIER = 8
+_MAX_OCCURRENCE_COUNTS_PER_FILE = 256
+
+
+def _compact_occurrences(
+    symbols: tuple[SymbolRecord, ...],
+) -> tuple[tuple[SymbolRecord, ...], tuple[StructuralOccurrenceCount, ...]]:
+    """Retain bounded positions and summarize only the omitted repetitions."""
+
+    totals: Counter[tuple[str, Literal["call", "reference"]]] = Counter()
+    retained: Counter[tuple[str, Literal["call", "reference"]]] = Counter()
+    spellings: dict[tuple[str, Literal["call", "reference"]], str] = {}
+    compacted: list[SymbolRecord] = []
+
+    def keep(observed_name: str, fact_kind: Literal["call", "reference"]) -> bool:
+        key = (observed_name.casefold(), fact_kind)
+        totals[key] += 1
+        existing = spellings.get(key)
+        if existing is None or (observed_name.casefold(), observed_name) < (
+            existing.casefold(),
+            existing,
+        ):
+            spellings[key] = observed_name
+        if retained[key] >= _MAX_RETAINED_POSITIONS_PER_IDENTIFIER:
+            return False
+        retained[key] += 1
+        return True
+
+    for symbol in symbols:
+        calls = tuple(
+            item for item in symbol.direct_calls if keep(item.observed_name, "call")
+        )
+        references = tuple(
+            item
+            for item in symbol.direct_references
+            if keep(item.observed_name, "reference")
+        )
+        compacted.append(
+            symbol.model_copy(
+                update={"direct_calls": calls, "direct_references": references}
+            )
+        )
+
+    repeated = [
+        StructuralOccurrenceCount(
+            identifier=spellings[key],
+            fact_kind=key[1],
+            total_count=count,
+            retained_count=retained[key],
+        )
+        for key, count in totals.items()
+        if count > retained[key]
+    ]
+    repeated.sort(
+        key=lambda item: (item.identifier.casefold(), item.identifier, item.fact_kind)
+    )
+    return tuple(compacted), tuple(repeated[:_MAX_OCCURRENCE_COUNTS_PER_FILE])
+
+
+def _is_exact_polyglot_import(item: ImportRecord, language: str | None) -> bool:
+    module = item.module or ""
+    if module.startswith((".", "crate::", "self::", "super::")):
+        return True
+    if language == "Rust" and item.observed_text.lstrip().startswith("mod "):
+        return True
+    return language in {"C", "C++"} and '"' in item.observed_text
 
 
 def _add_test_relationships(
     code_maps: tuple[FileCodeMap, ...],
 ) -> tuple[FileCodeMap, ...]:
+    """Link tests to resolved sources plus unambiguous naming fallbacks."""
+
     by_path = {item.path: item for item in code_maps}
     additions: dict[str, list[RelationshipRecord]] = {path: [] for path in by_path}
     implementation_by_basename: dict[str, list[str]] = {}
     for code_map in code_maps:
-        if not _is_test_path(code_map.path):
+        if not FILE_POLICY_REGISTRY.is_test(code_map.path):
             implementation_by_basename.setdefault(
                 PurePosixPath(code_map.path).name, []
             ).append(code_map.path)
 
     for test_map in code_maps:
-        if test_map.parse_status != "parsed" or not _is_test_path(test_map.path):
+        if test_map.parse_status != "parsed" or not FILE_POLICY_REGISTRY.is_test(
+            test_map.path
+        ):
             continue
         links: dict[str, tuple[SourceRange, str]] = {}
-        for item in test_map.imports:
+        for relationship in test_map.relationships:
             if (
-                item.resolution == "internal"
-                and item.target_file_path is not None
-                and not _is_test_path(item.target_file_path)
-                and by_path[item.target_file_path].parse_status == "parsed"
+                relationship.kind in {"import", "call", "reference"}
+                and relationship.target.resolution == "internal"
+                and relationship.target.file_path is not None
+                and not FILE_POLICY_REGISTRY.is_test(relationship.target.file_path)
+                and by_path[relationship.target.file_path].parse_status == "parsed"
             ):
-                links[item.target_file_path] = (
-                    item.source_range,
-                    "python_unambiguous_test_import",
+                target_path = relationship.target.file_path
+                links.setdefault(
+                    target_path,
+                    (relationship.source_range, relationship.detection_method),
                 )
-        conventional = _conventional_implementation_name(test_map.path)
-        candidates = (
-            implementation_by_basename.get(conventional, []) if conventional else []
-        )
-        if len(candidates) == 1 and by_path[candidates[0]].parse_status == "parsed":
-            links.setdefault(
-                candidates[0],
-                (
-                    SourceRange(start_line=1, start_column=0, end_line=1, end_column=0),
-                    "python_test_path_convention",
-                ),
-            )
+                if relationship.kind in {"call", "reference"}:
+                    additions[test_map.path].append(
+                        _relationship(
+                            kind="test_reference",
+                            source_path=test_map.path,
+                            source_symbol_id=relationship.source_symbol_id,
+                            source_range=relationship.source_range,
+                            observed_text=relationship.observed_text,
+                            target=relationship.target,
+                            method=relationship.detection_method,
+                        )
+                    )
+                for barrel_target in _resolved_barrel_targets(target_path, by_path):
+                    links.setdefault(
+                        barrel_target,
+                        (relationship.source_range, relationship.detection_method),
+                    )
+        candidates = {
+            target
+            for name in FILE_POLICY_REGISTRY.conventional_source_names(test_map.path)
+            for target in implementation_by_basename.get(name, ())
+        }
+        if len(candidates) == 1:
+            candidate = next(iter(candidates))
+            if by_path[candidate].parse_status == "parsed":
+                links.setdefault(
+                    candidate,
+                    (
+                        SourceRange(
+                            start_line=1, start_column=0, end_line=1, end_column=0
+                        ),
+                        "file_policy_test_naming_convention",
+                    ),
+                )
         for implementation_path, (source_range, method) in sorted(links.items()):
             additions[test_map.path].append(
                 _relationship(
@@ -425,27 +1097,6 @@ def _add_test_relationships(
                     method=method,
                 )
             )
-        for relationship in test_map.relationships:
-            if (
-                relationship.kind != "call"
-                or relationship.target.resolution != "internal"
-            ):
-                continue
-            target_path = relationship.target.file_path
-            if target_path is None or _is_test_path(target_path):
-                continue
-            additions[test_map.path].append(
-                _relationship(
-                    kind="test_reference",
-                    source_path=test_map.path,
-                    source_symbol_id=relationship.source_symbol_id,
-                    source_range=relationship.source_range,
-                    observed_text=relationship.observed_text,
-                    target=relationship.target,
-                    method="python_resolved_test_call",
-                )
-            )
-
     results: list[FileCodeMap] = []
     for code_map in code_maps:
         combined = {
@@ -457,10 +1108,39 @@ def _add_test_relationships(
     return tuple(results)
 
 
+def _resolved_barrel_targets(
+    target_path: str, by_path: dict[str, FileCodeMap]
+) -> tuple[str, ...]:
+    """Follow direct imports of a passive barrel without filesystem inference."""
+
+    target_map = by_path[target_path]
+    if not FILE_POLICY_REGISTRY.is_structural_barrel(target_map):
+        return ()
+    return tuple(
+        sorted(
+            {
+                item.target_file_path
+                for item in target_map.imports
+                if item.resolution == "internal"
+                and item.target_file_path is not None
+                and not FILE_POLICY_REGISTRY.is_test(item.target_file_path)
+                and by_path[item.target_file_path].parse_status == "parsed"
+            }
+        )
+    )
+
+
 def _relationship(
     *,
     kind: Literal[
-        "import", "contains", "call", "export", "tests", "tested_by", "test_reference"
+        "import",
+        "contains",
+        "call",
+        "reference",
+        "export",
+        "tests",
+        "tested_by",
+        "test_reference",
     ],
     source_path: str,
     source_symbol_id: str | None,
@@ -511,24 +1191,6 @@ def _containing_symbol(
             symbol.declaration_range.start_column,
         ),
     ).symbol_id
-
-
-def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    return (
-        "tests" in pure.parts
-        or pure.name.startswith("test_")
-        or pure.stem.endswith("_test")
-    )
-
-
-def _conventional_implementation_name(path: str) -> str | None:
-    name = PurePosixPath(path).name
-    if name.startswith("test_"):
-        return name[len("test_") :]
-    if name.endswith("_test.py"):
-        return f"{name[: -len('_test.py')]}.py"
-    return None
 
 
 def _range_key(value: SourceRange) -> tuple[int, int, int, int]:

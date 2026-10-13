@@ -1,0 +1,1313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/retrieval-result-v3.schema.json",
+  "title": "ContextForge Retrieval Result v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_snapshot_digest",
+    "generation_id",
+    "task",
+    "candidates",
+    "reranked",
+    "provider_calls",
+    "diagnostics",
+    "evidence_plan",
+    "planning_diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "source_snapshot_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "generation_id": {
+      "$ref": "#/$defs/sha256"
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "reranked": {
+      "type": "boolean"
+    },
+    "provider_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_plan": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/evidence_plan"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "planning_diagnostics": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/planning_diagnostics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coverage_ledger": {
+      "description": "Closed ID-only role, symbol, range, and graph-endpoint coverage; never planner prose.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/coverage_ledger"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coverage_history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverage_ledger"
+      }
+    },
+    "plan_requested": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "evidence_diagnostics": {
+      "$ref": "evidence-coverage-diagnostics-v1.schema.json"
+    },
+    "requirements": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceRequirements"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "query_intent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/QueryIntent"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column"
+      ],
+      "properties": {
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_column": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_column": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "costs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "map",
+        "summary",
+        "slice",
+        "full"
+      ],
+      "properties": {
+        "map": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "slice": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "full": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "planning_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "status",
+        "provider_calls",
+        "input_tokens",
+        "output_tokens",
+        "rounds",
+        "dropped_candidates",
+        "dropped_evidence_ids",
+        "messages"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "auto",
+            "required"
+          ]
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "fallback",
+            "failed"
+          ]
+        },
+        "provider_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped_evidence_ids": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "query_expansions": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "$ref": "#/$defs/query_expansion"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "estimated_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Estimated Input Tokens",
+          "type": "integer"
+        },
+        "reported_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Input Tokens"
+        },
+        "reported_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Output Tokens"
+        }
+      }
+    },
+    "planned_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "evidence_ids",
+        "representation"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string"
+          }
+        },
+        "representation": {
+          "enum": [
+            "map",
+            "summary",
+            "slice",
+            "full"
+          ]
+        }
+      }
+    },
+    "evidence_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "source_snapshot_digest",
+        "items",
+        "sufficiency",
+        "interpretation",
+        "diagnostics"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "source_snapshot_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/planned_evidence"
+          }
+        },
+        "role_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_binding"
+          }
+        },
+        "coverage_ledger": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/coverage_ledger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sufficiency": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ]
+        },
+        "interpretation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/planning_diagnostics"
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "query_expansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expression",
+        "result_candidate_ids"
+      ],
+      "properties": {
+        "expression": {
+          "description": "Untrusted repository-search expression, not a source claim.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 180
+        },
+        "result_candidate_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "task_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role_id",
+        "kind"
+      ],
+      "properties": {
+        "role_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "enum": [
+            "entrypoint",
+            "implementation",
+            "caller",
+            "callee",
+            "configuration",
+            "test",
+            "documentation",
+            "public_api",
+            "data_model",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "role_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role_id",
+        "candidate_id",
+        "evidence_ids",
+        "source"
+      ],
+      "properties": {
+        "role_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "enum": [
+            "deterministic",
+            "planner"
+          ]
+        }
+      }
+    },
+    "coverage_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "stage",
+        "roles",
+        "bindings",
+        "covered_role_ids",
+        "missing_role_ids",
+        "unique_symbols",
+        "concepts",
+        "ranges",
+        "covered_graph_endpoints",
+        "missing_graph_endpoints"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "stage": {
+          "enum": [
+            "retrieval",
+            "action",
+            "plan",
+            "materialization"
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task_role"
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_binding"
+          }
+        },
+        "covered_role_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_role_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique_symbols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_range"
+          }
+        },
+        "covered_graph_endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_graph_endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "missing_requirement_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Requirement Ids",
+          "type": "array"
+        }
+      }
+    },
+    "evidence_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "source_range",
+        "evidence_id",
+        "strength"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/range"
+        },
+        "evidence_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strength": {
+          "enum": [
+            "verified",
+            "grounded"
+          ]
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "synopsis",
+        "exact_group",
+        "score",
+        "bm25_score",
+        "matched_concepts",
+        "matched_symbols",
+        "evidence_ranges",
+        "graph_neighbors",
+        "provenance",
+        "freshness",
+        "estimated_cost",
+        "suggested_representation"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "synopsis": {
+          "type": "string"
+        },
+        "exact_group": {
+          "enum": [
+            "exact_path",
+            "exact_qualified_symbol",
+            "exact_symbol",
+            "exact_source_identifier",
+            "approximate"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bm25_score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "matched_concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matched_symbols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "source_range",
+              "evidence_id",
+              "strength"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "source_range": {
+                "$ref": "#/$defs/range"
+              },
+              "evidence_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "strength": {
+                "enum": [
+                  "verified",
+                  "grounded"
+                ]
+              }
+            }
+          }
+        },
+        "graph_neighbors": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CandidateGraphNeighbor"
+          },
+          "title": "Graph Neighbors",
+          "type": "array"
+        },
+        "provenance": {
+          "description": "Validated ranking signals, including current-diff and working-set when applicable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "freshness": {
+          "const": "current"
+        },
+        "estimated_cost": {
+          "$ref": "#/$defs/costs"
+        },
+        "suggested_representation": {
+          "enum": [
+            "map",
+            "summary",
+            "slice",
+            "full",
+            null
+          ]
+        },
+        "bm25_field_scores": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Bm25 Field Scores",
+          "type": "object"
+        },
+        "selection_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Selection Reasons",
+          "type": "array"
+        },
+        "structural_roles": {
+          "default": [],
+          "items": {
+            "enum": [
+              "entrypoint",
+              "implementation",
+              "caller",
+              "callee",
+              "configuration",
+              "test",
+              "documentation",
+              "public_api",
+              "data_model",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "title": "Structural Roles",
+          "type": "array"
+        },
+        "resolved_symbols": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResolvedSourceSymbol"
+          },
+          "title": "Resolved Symbols",
+          "type": "array"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
+        },
+        "source_connections": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VerifiedSourceConnection"
+          },
+          "title": "Source Connections",
+          "type": "array"
+        },
+        "match_origin": {
+          "default": "lexical-discovery",
+          "enum": [
+            "explicit-anchor",
+            "lexical-discovery",
+            "grounded-semantic",
+            "verified-expansion"
+          ],
+          "title": "Match Origin",
+          "type": "string"
+        },
+        "topical_term_weights": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": "Topical Term Weights",
+          "type": "object"
+        },
+        "source_units": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceEvidenceUnit"
+          },
+          "title": "Source Units",
+          "type": "array"
+        },
+        "source_evidence_version": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Source Evidence Version",
+          "type": "integer"
+        }
+      }
+    },
+    "EvidenceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "query_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueryIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchors",
+          "type": "array"
+        },
+        "source_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "title": "Source Evidence",
+          "type": "array"
+        },
+        "ambiguous_identifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Ambiguous Identifiers",
+          "type": "array"
+        },
+        "unresolved_dependency_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Dependency Ids",
+          "type": "array"
+        },
+        "topic_grounding": {
+          "default": "unresolved",
+          "enum": [
+            "exact-identifier",
+            "grounded-semantic",
+            "unresolved"
+          ],
+          "title": "Topic Grounding",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "title": "EvidenceRequirements",
+      "type": "object"
+    },
+    "EvidenceRequirement": {
+      "additionalProperties": false,
+      "description": "Source-bound obligation derived locally, never from a model-created fact.",
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "role_id": {
+          "title": "Role Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "required_ranges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceRange"
+          },
+          "title": "Required Ranges",
+          "type": "array"
+        },
+        "basis": {
+          "enum": [
+            "exact-symbol",
+            "verified-call",
+            "verified-source-test",
+            "verified-config",
+            "task-syntax",
+            "verified-behavior"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "anchor_candidate_id": {
+          "title": "Anchor Candidate Id",
+          "type": "string"
+        },
+        "anchor_symbol_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Symbol Id"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "role_id",
+        "candidate_id",
+        "path",
+        "source_sha256",
+        "basis",
+        "anchor_candidate_id"
+      ],
+      "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "CandidateGraphNeighbor": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "distance": {
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Distance",
+          "type": "integer"
+        },
+        "relationship_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Relationship Kinds",
+          "type": "array"
+        },
+        "provenance": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provenance",
+          "type": "array"
+        },
+        "direction": {
+          "default": "unknown",
+          "enum": [
+            "outgoing",
+            "incoming",
+            "both",
+            "unknown"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "verified_relationship_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verified Relationship Kinds"
+        },
+        "outgoing_verified_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outgoing Verified Kinds"
+        },
+        "incoming_verified_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Incoming Verified Kinds"
+        }
+      },
+      "required": [
+        "path",
+        "distance",
+        "relationship_kinds",
+        "provenance"
+      ],
+      "title": "CandidateGraphNeighbor",
+      "type": "object"
+    },
+    "ContextPlanningMode": {
+      "description": "Whether model-assisted evidence planning is disabled, optional, or required.",
+      "enum": [
+        "off",
+        "auto",
+        "required"
+      ],
+      "title": "ContextPlanningMode",
+      "type": "string"
+    },
+    "ResolvedSourceSymbol": {
+      "additionalProperties": false,
+      "description": "A query anchor resolved against digest-bound structural declarations.",
+      "properties": {
+        "query_identifier": {
+          "title": "Query Identifier",
+          "type": "string"
+        },
+        "symbol_id": {
+          "title": "Symbol Id",
+          "type": "string"
+        },
+        "qualified_name": {
+          "title": "Qualified Name",
+          "type": "string"
+        },
+        "resolution": {
+          "enum": [
+            "exact",
+            "unique-qualified-suffix"
+          ],
+          "title": "Resolution",
+          "type": "string"
+        },
+        "declaration_evidence_id": {
+          "title": "Declaration Evidence Id",
+          "type": "string"
+        },
+        "implementation_evidence_id": {
+          "title": "Implementation Evidence Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query_identifier",
+        "symbol_id",
+        "qualified_name",
+        "resolution",
+        "declaration_evidence_id",
+        "implementation_evidence_id"
+      ],
+      "title": "ResolvedSourceSymbol",
+      "type": "object"
+    },
+    "VerifiedSourceConnection": {
+      "additionalProperties": false,
+      "description": "Directed symbol evidence reconstructed from verified stored relationships.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "call",
+            "reference"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_path": {
+          "title": "Source Path",
+          "type": "string"
+        },
+        "target_path": {
+          "title": "Target Path",
+          "type": "string"
+        },
+        "source_symbol_id": {
+          "title": "Source Symbol Id",
+          "type": "string"
+        },
+        "target_symbol_id": {
+          "title": "Target Symbol Id",
+          "type": "string"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        },
+        "target_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "source_path",
+        "target_path",
+        "source_symbol_id",
+        "target_symbol_id",
+        "source_evidence_ids",
+        "target_evidence_ids"
+      ],
+      "title": "VerifiedSourceConnection",
+      "type": "object"
+    },
+    "QueryIntent": {
+      "additionalProperties": false,
+      "description": "Original task syntax; search rewrites never become user-supplied anchors.",
+      "properties": {
+        "original_task": {
+          "title": "Original Task",
+          "type": "string"
+        },
+        "explicit_anchors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Explicit Anchors",
+          "type": "array"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceRole"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "facet_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Facet Terms",
+          "type": "array"
+        },
+        "evidence_scope": {
+          "default": "unknown",
+          "enum": [
+            "lookup",
+            "behavior",
+            "unknown"
+          ],
+          "title": "Evidence Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_task"
+      ],
+      "title": "QueryIntent",
+      "type": "object"
+    },
+    "SourceEvidenceUnit": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "owner_symbol_id": {
+          "title": "Owner Symbol Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "implementation",
+            "call",
+            "reference",
+            "callback",
+            "decorator",
+            "initializer",
+            "test-usage"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_range": {
+          "$ref": "#/$defs/SourceRange"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "verified-implementation",
+            "observed-syntax"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "related_symbol_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Symbol Ids",
+          "type": "array"
+        },
+        "unresolved_endpoint": {
+          "default": false,
+          "title": "Unresolved Endpoint",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "source_sha256",
+        "owner_symbol_id",
+        "kind",
+        "source_range",
+        "evidence_id",
+        "basis"
+      ],
+      "title": "SourceEvidenceUnit",
+      "type": "object"
+    }
+  }
+}

@@ -29,4 +29,10 @@ def validate_portable_relative_path(value: str) -> str:
     return value
 
 
-__all__ = ["Sha256", "validate_portable_relative_path"]
+def canonical_casefold_key(value: str) -> tuple[str, str]:
+    """Return a total, process-independent ordering key for user text."""
+
+    return value.casefold(), value
+
+
+__all__ = ["Sha256", "canonical_casefold_key", "validate_portable_relative_path"]

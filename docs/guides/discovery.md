@@ -1,12 +1,14 @@
 # Discovery output and benchmarks
 
-ContextForge discovery returns a validated structured selection and then renders
-that selection for a person or another program. This guide covers the stabilized
-discovery and benchmark behavior intended for v0.4.2.
+With an active Index v3 generation, ContextForge returns persisted BM25 and
+graph-aware `CandidateCard` records without a model call. The previous
+model-assisted selection flow remains available through `--legacy-discovery`
+during deprecation. Both paths are read-only and recheck current source identity.
 
 ## Interactive discovery output
 
-`context suggest` defaults to concise text. The supported documented formats
+`context suggest` defaults to concise Index v3 retrieval text. The supported
+documented formats
 are:
 
 - `--format text`: the default terminal-oriented summary;
@@ -18,20 +20,27 @@ For example, all of these commands are valid in PowerShell:
 ```powershell
 contextforge context suggest . `
   --task 'Trace configuration loading' `
-  --discovery hybrid
+  --working-file 'src/contextforge/project_config.py'
 
 contextforge context suggest . `
   --task 'Trace configuration loading' `
-  --discovery indexed `
+  --planning auto `
   --format markdown `
   --output 'selection.md'
 
 contextforge context suggest . `
   --task 'Trace configuration loading' `
-  --discovery fresh `
+  --planning off `
   --format json `
   --output 'selection.json'
 ```
+
+Use `--legacy-discovery --discovery fresh|indexed|hybrid` for the legacy result
+schema described below. Index v3 JSON output is `RetrievalResult` schema 3 and
+contains generation/source identities, exact groups, grounded evidence,
+neighbors, freshness, representation costs, validated Evidence Plan, and
+provider-call count. `--rerank/--no-rerank` remain deprecated aliases for
+clients that have not moved to `--planning`.
 
 Text includes the task, mode, confidence, provenance, selected paths and ranges,
 concise warnings, and a short performance summary. `--explain` adds exact
@@ -159,6 +168,7 @@ modes use `fresh`, `indexed`, `hybrid` order.
       "task_id": "configuration-loading",
       "repository_path": "ContextForge",
       "task": "Find configuration loading and its focused tests.",
+      "pipeline": "index_v3_capsule",
       "modes": [
         "fresh",
         "indexed",
@@ -175,6 +185,16 @@ modes use `fresh`, `indexed`, `hybrid` order.
           "tests/test_config.py",
           "tests/test_model_providers.py"
         ]
+      ],
+      "optional_files": [
+        "docs/guides/configuration.md"
+      ],
+      "required_ranges": [
+        {
+          "path": "src/contextforge/project_config.py",
+          "start_line": 300,
+          "end_line": 420
+        }
       ],
       "forbidden_files": [],
       "expected_facets": [
@@ -201,10 +221,25 @@ modes use `fresh`, `indexed`, `hybrid` order.
 
 The main task fields have these roles:
 
+- `pipeline` is `legacy_discovery` by default. `index_v3_capsule` runs cold
+  build/retrieve/compile for `fresh`, warm retrieve/compile for `indexed`, and
+  an isolated controlled change plus incremental update/retrieve/compile for
+  `hybrid`.
+- Optional canonical `answer_assertions` and `oracle_ranges` enable a paired
+  same-model answer regression. Complete required/working files form the
+  ordinary-client token baseline; manual oracle ranges are used only for the
+  quality reference. The runner validates every answer citation against the
+  actual oracle or materialized Capsule source range, obtains three blinded
+  groundedness votes over the materialized ContextForge source, and reports
+  offline-index, query-planner, final-answer, and judge costs separately.
 - `include_paths` and `exclude_paths` constrain discovery with exact snapshot
   paths.
 - `required_files_all` requires every listed file. Each `required_files_any`
-  group requires at least one member. `forbidden_files` must not be selected.
+  group requires at least one member. `optional_files` count as relevant but
+  are not required. `forbidden_files` must not be selected.
+- `required_ranges` declares one-based inclusive useful source intervals. They
+  must be sorted, unique, non-overlapping per path, and fully covered for the
+  expectation to pass.
 - `expected_facets` checks required task facets against the selected candidates'
   paths, reasons, discovery sources, and evidence.
 - `allowed_warnings` permits listed warning codes; `required_warnings` requires
@@ -224,16 +259,22 @@ states.
 
 ### Quality, repeatability, and performance metrics
 
-Metrics are calculated per comparable cohort: task, repository, mode, source
+Metrics are calculated per comparable cohort: task, repository, pipeline, mode, source
 snapshot digest, index generation, and effective configuration digest must all
 match. Failed and cancelled runs count toward totals but are excluded from
 quality, repeatability, confidence, duration, and range calculations.
 
 Quality metrics are aggregated over complete runs:
 
-- required-file recall is matched `required_files_all` entries divided by
-  configured `required_files_all` entries; acceptable-any groups affect pass or
-  fail but not this recall metric;
+- file precision, precision@5, and file recall use required, acceptable-any,
+  and optional file relevance;
+- range precision measures useful selected lines divided by all selected source
+  lines when required ranges are configured;
+- token precision uses the conservative UTF-8-bytes/3 estimator to compare
+  tokens intersecting required ranges with all selected source tokens;
+- grounded/dropped-claim rates use validated Semantic Card claims and typed
+  dropped-item diagnostics; ungrounded-claim rate reports rejected or
+  evidence-free interpretations;
 - forbidden-file selection rate is selected forbidden files divided by
   configured forbidden-file opportunities; lower is better;
 - expected-facet coverage is covered facets divided by configured facets; and
@@ -244,7 +285,8 @@ An empty expectation denominator is reported as `n/a`, not as perfect quality.
 Repeatability reports exact set and order rates, every pair's Jaccard similarity
 and its mean, exact warning-record-set stability, and fallback rate. Performance
 reports mean duration, nearest-rank p50/p90/p95 when at least two complete runs
-exist, plus observed files-read and logical model-call ranges.
+exist, cold/warm/incremental latency summaries, files-read, logical model-call,
+provider-call, selected-token, and useful-token ranges.
 
 ### Provider and model counters
 

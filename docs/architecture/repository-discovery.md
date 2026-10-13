@@ -56,11 +56,12 @@ explicit. Selection alone no longer forces finalization. A final dependency
 review allows another investigation and preserves warnings if gaps remain.
 Source hashes are refreshed before success even when an earlier read is cached.
 
-Ranking groups are mandatory pins, exact verified declarations, conservative
-Kotlin declaration hints, exact text occurrences, then approximate matches,
-with numeric scores only within a group. Kotlin hints improve retrieval for an
-unsupported structural language but never become verified symbols; matching
-definition files are selected whole instead of slicing an unparsed body.
+Ranking groups are mandatory pins, exact verified declarations, exact text
+occurrences, then approximate matches, with numeric scores only within a group.
+Python and the registered Tree-sitter languages, including Kotlin, can provide
+verified declarations and bounded structural ranges; recognized languages
+outside that registry remain text-only and are never promoted to verified
+symbols.
 Identifier extraction and ranking support Unicode while exact matching remains
 case-sensitive.
 Missing exact identifiers permit model-selected alternatives with
@@ -72,7 +73,7 @@ and fallback are capped at three unpinned files and prefer callable ranges.
 `coverage` object with status, scope, file counts and limitations. Status is
 `supported`, `partial`, `unsupported`, or `unknown`; zero matches/unresolved calls
 describes only observed static facts. The scope includes every recognized
-programming-language source file, so Kotlin and other languages without static
+programming-language source file, so languages without registered static
 relationship extraction contribute to `unsupported` instead of disappearing
 from the denominator. Repository relationship limitations appear in final
 warnings without requesting futile repeated model reviews.

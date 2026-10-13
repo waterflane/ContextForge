@@ -142,6 +142,48 @@ def test_manifest_supports_required_groups_warnings_and_per_mode_overrides() -> 
     assert override.max_provider_http_calls == 3
 
 
+def test_manifest_supports_optional_files_and_ground_truth_ranges() -> None:
+    payload = _manifest()
+    task = payload["tasks"][0]
+    task["optional_files"] = ["README.md"]
+    task["required_ranges"] = [
+        {
+            "path": "observed_invalid_candidate_response.json",
+            "start_line": 1,
+            "end_line": 3,
+        }
+    ]
+
+    parsed = _validate(payload).tasks[0]
+
+    assert parsed.optional_files == ("README.md",)
+    assert parsed.required_ranges[0].model_dump() == {
+        "path": "observed_invalid_candidate_response.json",
+        "start_line": 1,
+        "end_line": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    "ranges",
+    [
+        [
+            {"path": "app.py", "start_line": 2, "end_line": 4},
+            {"path": "app.py", "start_line": 4, "end_line": 6},
+        ],
+        [{"path": "app.py", "start_line": 3, "end_line": 2}],
+    ],
+)
+def test_manifest_rejects_overlapping_or_reversed_required_ranges(
+    ranges: list[dict[str, object]],
+) -> None:
+    payload = _manifest()
+    payload["tasks"][0]["required_ranges"] = ranges
+
+    with pytest.raises(ValidationError):
+        _validate(payload)
+
+
 def test_manifest_rejects_fresh_only_index_precondition_before_filtering() -> None:
     payload = _manifest()
     task = payload["tasks"][0]

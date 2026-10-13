@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextforge.dev/schemas/repository-map-v3.schema.json",
+  "title": "ContextForge Repository Map v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_kind", "map_kind", "source_snapshot_digest", "entries"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "record_kind": { "const": "repository_map" },
+    "map_kind": { "enum": ["architecture", "conventions", "features"] },
+    "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "type": "string", "minLength": 1, "pattern": "^(?!/|.*\\\\|.*(?:^|/)\\.\\.(?:/|$)).+$" },
+    "sourceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_line", "start_column", "end_line", "end_column"],
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_id", "kind", "text", "paths", "evidence_ids", "provenance"],
+      "properties": {
+        "claim_id": { "$ref": "#/$defs/sha256" },
+        "kind": { "enum": ["concept", "responsibility"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "paths": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/path" } },
+        "evidence_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "provenance": { "enum": ["verified", "best-effort-structural", "model-inferred", "grounded-semantic-card"] }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relationship_id", "kind", "source_path", "target_path", "source_symbol_id", "target_symbol_id", "source_range", "provenance", "detection_method"],
+      "properties": {
+        "relationship_id": { "$ref": "#/$defs/sha256" },
+        "kind": { "enum": ["import", "reference", "call", "source-test", "entrypoint-handler", "config-consumer", "contains", "export"] },
+        "source_path": { "$ref": "#/$defs/path" },
+        "target_path": { "$ref": "#/$defs/path" },
+        "source_symbol_id": { "type": ["string", "null"] },
+        "target_symbol_id": { "type": ["string", "null"] },
+        "source_range": { "oneOf": [{ "$ref": "#/$defs/sourceRange" }, { "type": "null" }] },
+        "provenance": { "enum": ["verified", "best-effort-structural", "model-inferred"] },
+        "detection_method": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "paths", "attributes", "claims", "relationships"],
+      "properties": {
+        "name": { "type": "string" },
+        "paths": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/path" } },
+        "attributes": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number", "boolean"] } },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/claim" } },
+        "relationships": { "type": "array", "items": { "$ref": "#/$defs/relationship" } }
+      }
+    }
+  }
+}

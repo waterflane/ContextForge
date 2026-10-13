@@ -28,10 +28,11 @@ commands.
 </p>
 
 > [!IMPORTANT]
-> ContextForge is pre-alpha software. Version `0.5.1` adds bounded failure
-> policies, JSONL progress, and opt-in Bridge 2 tracked index jobs. Discovery
-> benchmarking is experimental and its results should be reviewed alongside the
-> recorded provider, model, configuration, and source snapshot.
+> ContextForge 0.6.0b1 is a beta release. This version introduces
+> Index v3.1, grounded Semantic Cards, BM25/graph retrieval, Context Capsule v2,
+> and Bridge 2.2. Discovery benchmarking is experimental and its results should
+> be reviewed alongside the recorded provider, model, configuration, and source
+> snapshot.
 
 ## Why ContextForge
 
@@ -40,11 +41,17 @@ commands.
   reads.
 - **Reviewable selection.** Choose exact files, directories, GitWildMatch
   patterns, or line ranges—or ask a configured model for a bounded suggestion.
-- **Local repository intelligence.** Store immutable structural and optional
-  semantic index generations under `.contextforge/index`, with verified symbols
-  for Python, JavaScript/TypeScript, Java, C#, Go, Rust, C/C++, PHP, and Ruby.
-- **Portable artifacts.** Export Markdown or JSON context packages, JSON task
-  handoffs, and compiled Markdown prompts.
+- **Local repository intelligence.** Publish a usable structural Index v3.1
+  generation first, then optional grounded Semantic Cards and deterministic
+  repository maps, all in immutable generations under `.contextforge/index`.
+- **Evidence-first retrieval.** Rank exact paths and symbols before persisted
+  BM25, then add bounded graph, centrality, diff, and Working Set signals.
+  Centrality can refine relevant evidence but cannot admit a file by itself.
+- **Coverage-aware compilation.** Track complementary task roles from candidate
+  selection through materialization. A capsule reports effective sufficiency
+  only after required evidence is actually present.
+- **Portable artifacts.** Export legacy ContextPackage v1/TaskHandoff artifacts
+  or a token-budgeted Context Capsule v2 and stable XML prompt.
 - **Explicit trust boundaries.** ContextForge does not edit repository source,
   execute repository code, expose shell tools, or mutate Git state.
 - **Automation-friendly output.** Structured results stay on stdout while
@@ -55,11 +62,12 @@ commands.
 
 ```mermaid
 flowchart LR
-    R["Repository"] --> S["scan / index"]
-    S --> D["task-aware discovery"]
-    D --> B["bounded selection"]
-    B --> P["context package"]
-    P --> A["external coding agent"]
+    R["Source identity"] --> C["CodeMaps"]
+    C --> G["relationship graph"]
+    G --> I["BM25 + graph retrieval"]
+    I --> E["bounded evidence plan"]
+    E --> P["MAP / SUMMARY / SLICE / FULL"]
+    P --> X["Context Capsule v2"]
 ```
 
 A model is optional for scanning, trees, manual context packages, and
@@ -143,6 +151,12 @@ Build a structural-only local index and inspect its status:
 ```powershell
 contextforge index build . --provider none
 contextforge index status .
+contextforge map .
+contextforge map . --kind all --format json
+contextforge context suggest . --task "Trace configuration precedence"
+contextforge context create . --task "Trace configuration precedence" `
+  --context-tokens 32768 --response-tokens 4096 `
+  --format json --output capsule.json --prompt-output prompt.xml
 ```
 
 > [!TIP]
@@ -152,6 +166,25 @@ contextforge index status .
 
 ## Common use cases
 
+For a compact model input, export numbered materialized source while keeping
+the full capsule for verification:
+
+```bash
+contextforge context create . --task "Explain the context budget calculation" \
+  --planning off --compact-prompt --format json \
+  --output capsule.json --prompt-output source.xml
+```
+
+The compact prompt contains paths, source ranges and code once, while the capsule
+retains hashes, evidence identities and sufficiency diagnostics. The same
+projection is available as `render_capsule_source_context` from
+`contextforge.context`. `FunctionCatalogue` from `contextforge.intelligence`
+offers source-bound function descriptions and deterministic function-level search
+over saved CodeMaps. These helpers do not replace verified graph dependencies,
+grounded semantic enrichment or compiler requirements.
+See the [function lookup guide](docs/guides/function-lookup.md) for runnable exact
+and descriptive queries and how to check their materialized source.
+
 - create a compact review packet for an external coding agent;
 - map a repository without sending source to a model;
 - inspect stale, missing, or failed index records;
@@ -160,6 +193,40 @@ contextforge index status .
 - preserve a validated handoff that can be reviewed without the original
   checkout;
 - benchmark discovery quality and repeatability against versioned manifests.
+
+## Evidence quality and benchmark results
+
+Candidate recall measures whether required files appear in retrieval;
+materialized recall measures whether those files actually reach the Capsule a
+downstream model receives. A candidate later dropped for budget or
+representation reasons is not materialized evidence.
+
+Citation containment checks only that a citation is within supplied material.
+Semantic grounding is stricter: a blinded majority judge decides whether the
+material supports the assertion. Benchmark reports also record assertion-ID
+recall and lexical/identifier support; neither replaces grounding.
+
+Token savings are headline results only when the quality gate passes: required
+file recall is at least 0.90, required range recall at least 0.85, citation
+validity is 1.0, and answer quality is not below the oracle. A failed gate is
+reported as `quality_gate_failed`; its apparent savings are excluded from the
+headline average. The 30% automatic allocation is a soft compilation ceiling,
+not a promised saving.
+
+For one short exact file, the compiler can select a compact profile with a
+minimal snapshot envelope and verified usage information. It is used only when
+cheaper than the normal capsule while preserving verification rules. See the
+[Index v3.1 architecture](docs/architecture/index-v3-context-compiler.md) and
+[migration guide](docs/guides/index-v3-migration.md) for the full contracts.
+
+The pinned real-repository gate uses a reviewed manifest with source ranges and
+evidence IDs. Run `contextforge benchmark real-repositories --manifest
+benchmarks/real-repository-v31.json --source contextforge=PATH --source
+dsh-contextforge=PATH --source planup=PATH --source syncplayer=PATH` with a local
+OpenAI-compatible model. It creates temporary clones, builds each index, and
+compares ordinary, oracle, and Capsule answers. The JSON report is saved under
+`.contextforge/benchmark-results/`; incomplete runs and failed quality gates
+remain red rather than contributing to headline savings.
 
 ## CLI overview
 
@@ -172,10 +239,11 @@ mutating operations.
 | `contextforge doctor` | Report basic installation settings | Read-only |
 | `contextforge scan [PATH]` | Inventory repository files | Read-only unless `--output` is used |
 | `contextforge tree [PATH]` | Render a project tree | Read-only unless `--output` is used |
-| `contextforge context suggest [PATH]` | Suggest task-relevant context | Source/index read-only; records a safe run summary |
-| `contextforge context create [PATH]` | Build a manual package or automatic handoff | Reads source; optional artifact writes |
-| `contextforge context inspect PACKAGE` | Validate a JSON context package offline | Read-only |
-| `contextforge context review PACKAGE` | Review a JSON task handoff offline | Read-only |
+| `contextforge map [PATH]` | Render orientation or typed architecture/conventions/features maps | Read-only |
+| `contextforge context suggest [PATH]` | Retrieve Index v3.1 CandidateCards; legacy discovery is opt-in | Source/index read-only |
+| `contextforge context create [PATH]` | Build a manual package or task-based Capsule v2 | Reads source; optional artifact writes |
+| `contextforge context inspect ARTIFACT` | Validate ContextPackage v1 or Capsule v2 JSON | Read-only |
+| `contextforge context review ARTIFACT` | Review TaskHandoff or Capsule v2 JSON | Read-only |
 | `contextforge index build [PATH]` | Publish a new local index generation | Mutates `.contextforge/index` |
 | `contextforge index update [PATH]` | Increment an existing index | Mutates `.contextforge/index` |
 | `contextforge index status [PATH]` | Inspect source/index drift and lock state | Read-only |
@@ -185,8 +253,8 @@ mutating operations.
 | `contextforge diagnostics config [PATH]` | Explain effective configuration | Read-only |
 | `contextforge diagnostics provider [PATH]` | Show provider policy without probing it | Read-only |
 | `contextforge mcp serve [PATH]` | Run the local read-only stdio MCP server | Read-only session |
-| `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1 or 2 | V1 read-only; V2 may atomically mutate only the index |
-| `contextforge benchmark discovery PATH` | Run manifest-driven discovery benchmarks | Repository/index read-only; experimental |
+| `contextforge bridge --stdio --workspace PATH` | Run negotiated JSON-RPC Bridge 1.0–2.2 | V1 read-only; V2 may atomically mutate only the index |
+| `contextforge benchmark discovery PATH` | Run legacy or Index v3.1 Capsule benchmark pipelines | Source stays unchanged; temporary/index state may be used |
 
 Global diagnostic options are `--log-level`, `--log-format`, `--log-file`,
 repeatable `--log-component`, `--no-log-file`, `--no-color`, and `-v`/`-vv`.
@@ -197,14 +265,16 @@ The local integration contract is documented in the
 [generic client](examples/generic_bridge_client.py).
 
 Long model-backed index jobs can stop issuing new work with `--fail-fast` or
-`--max-failures N`. Existing `--fail-on-error` semantics are unchanged: without
-one of those limits ContextForge finishes the workload and declines publication
-if any semantic unit failed. Hosts that launch the CLI can consume full
+`--max-failures N`. With `--fail-on-error`, ContextForge finishes the workload,
+publishes partial semantic results, then exits with an error listing failed files.
+Hosts that launch the CLI can consume full
 `ProgressEvent` schema 3 objects with `--progress jsonl`:
 
 ```bash
 contextforge index update . --provider openai-compatible \
-  --model exact/model-id --progress jsonl --max-failures 3
+  --model exact/model-id --progress jsonl --max-failures 3 \
+  --semantic-scope all --semantic-max-requests 100000 \
+  --semantic-max-input-tokens 100000000
 ```
 
 ## Configuration
@@ -232,18 +302,59 @@ The default provider is local Ollama at
 `--provider none` for structural-only indexing. The `openai-compatible`
 provider and its `lmstudio` CLI alias require an exact model ID and a suitable
 `base_url`.
+To use the signed-in Codex CLI for model-backed indexing and planning, select it
+explicitly in `.contextforge/config.toml`:
+
+```toml
+[models]
+provider = "codex"
+model = "gpt-5.6-sol"
+local_only = false
+external_data_policy = "allow_repository"
+```
+
+Run `codex login` with ChatGPT first. ContextForge sends source through
+`codex exec` in an isolated read-only workspace; it does not read login tokens
+or fall back to a different provider. Code/test files retain structural search
+tags if model analysis is incomplete, and `index update` resumes missing
+function descriptions.
 
 Model-backed discovery requires the configured provider to be running with the
-named model available. ContextForge's configured `context_window` must not
-exceed the window actually loaded by that provider; inspect the resolved policy
-before a long run with `contextforge diagnostics provider PATH`.
+named model available. The requested `context_window` defaults to 16,384
+tokens. If a server reports a smaller limit, callable analysis retries without
+external callee code before declaring a full-file overflow; diagnostics show
+the server-reported limit. Inspect the resolved policy before a long run with
+`contextforge diagnostics provider PATH`.
 
 Credential configuration stores only the name of an environment variable in
 `credential_env`; the credential value is resolved at request time. See the
 [configuration guide](docs/guides/configuration.md) and
 [Wiki configuration reference](https://github.com/waterflane/ContextForge/wiki/Configuration).
 
-## Discovery modes
+## Retrieval and legacy discovery
+
+With an active Index v3.1 generation, `context suggest` uses deterministic
+CandidateCard retrieval by default. Exact path, qualified-symbol, symbol, and
+source-identifier groups precede approximate scores. Approximate ranking uses
+persisted BM25 plus bounded graph proximity, centrality, current-diff, and
+Working Set signals. `--planning auto|off|required` controls bounded
+model-assisted evidence planning; `auto` safely falls back to deterministic
+selection and `required` fails when no validated plan is available. The legacy
+`--rerank/--no-rerank` flags remain compatibility aliases. Working Set
+and current-diff membership are retained in each CandidateCard's provenance.
+Automatic compilation requires an exact, lexical/grounded, graph, diff, or
+Working Set signal; centrality alone is not sufficient.
+
+In model-assisted mode the provider may use at most three bounded rounds of
+`search`, `symbol`, `graph`, and `map` actions before `finalize`. Actions only
+expand verified ContextForge candidates and evidence; they cannot invent paths,
+symbols, ranges, or source facts. Use `--planning-rounds N` to lower the project
+ceiling for one command. Invalid, stale, incomplete, or over-budget plans are
+discarded as a whole in `auto` mode and replaced by deterministic complementary
+selection.
+
+`--legacy-discovery` retains the former model-assisted discovery flow during
+deprecation. Its modes remain:
 
 - **Fresh** builds current structural evidence in memory and does not load
   persisted semantic records or repository maps.
@@ -273,28 +384,48 @@ contextforge context create . \
   --format json
 ```
 
-Automatic mode requires a non-empty task and does not accept manual directory,
-glob, or line-range selectors:
+Task-based creation uses Context Capsule v2 by default when Index v3.1 is active:
 
 ```bash
 contextforge context suggest . \
   --task "Trace configuration precedence" \
-  --discovery hybrid \
+  --working-file src/contextforge/project_config.py \
+  --planning auto \
+  --planning-rounds 3 \
   --format markdown
 
 contextforge context create . \
   --task "Trace configuration precedence" \
-  --discovery hybrid \
+  --working-file src/contextforge/project_config.py \
+  --context-tokens 32768 \
+  --history-tokens 4000 \
+  --response-tokens 4096 \
   --git-diff working \
   --format json \
-  --output handoff.json \
-  --prompt-output prompt.md
+  --output capsule.json \
+  --prompt-output prompt.xml
 ```
+
+Use `--legacy-discovery` for suggestion and `--legacy-handoff` for automatic
+creation to retain the deprecated flow. Manual `context create` without a task
+is unchanged.
+
+Fully automatic task material uses 30% of the available context budget as a
+ceiling, not a target to fill: compilation stops when the evidence plan is
+covered and no candidate adds useful coverage. Explicit Working Set
+files/ranges, pinned FULL files, and required Git
+material may exceed that soft ceiling, but never the hard budget. A planner may
+give its suggested representation a bounded 10% utility bonus; freshness,
+range, FULL, and budget checks remain authoritative.
 
 `context suggest` does not write source or index state, but current diagnostics
 policy may write a safe summary under `.contextforge/runs`. Output artifacts are
 written atomically; existing destinations require `--force` where that option
-is available.
+is available. In-repository package, capsule, and prompt outputs are registered
+by path and SHA-256 in `.contextforge/generated-artifacts.json`; the scanner
+skips them only while that digest still matches. Editing an output makes it a
+normal source file again. Outputs outside the repository are not registered,
+and no filename or content heuristic is used.
 
 ## Benchmark workflow
 
@@ -319,6 +450,17 @@ the command produced a complete benchmark report containing at least one task,
 expectation, or budget failure. Do not discard stdout or the requested output
 file when handling that code. Every run remains bounded by manifest limits,
 provider retry limits, operation timeouts, and the configured context window.
+For Index v3.1 answer regressions, the ordinary baseline is the complete set of
+required/working files a client would otherwise send, while the manual range
+oracle is used only as a quality reference. The ContextForge and oracle answers
+use identical model settings and citation schemas. Three blinded groundedness
+votes check the ContextForge answer against only its materialized ranges.
+Offline indexing, planner, final-answer, judge, estimated-input, provider-input,
+HTTP-call, and latency costs are reported separately.
+The pinned real-repository benchmark accepts `--provider codex --model-id ID
+--allow-repository-code` for an explicitly authorized Codex run. Its build
+report separates tagged files, model-tagged files, described functions, and
+`file_only` coverage. Savings exclude incomplete paired answers.
 
 ## Output formats and streams
 
@@ -343,10 +485,10 @@ a completed discovery benchmark with regression failures.
 
 ContextForge is a typed Python modular monolith. Core application and domain
 logic remain independent from Typer, FastAPI, model-provider implementations,
-storage adapters, and future editor integrations. The scanner creates a
-verified snapshot; intelligence extracts structural facts and optional semantic
-interpretations; discovery selects bounded candidates; context and handoff
-modules materialize portable artifacts; CLI, HTTP, and MCP are thin interfaces.
+storage adapters, and editor integrations. The scanner creates a verified
+snapshot; intelligence publishes CodeMaps, graph, grounded cards, maps, and
+retrieval postings; the context compiler materializes a hard-budgeted Capsule
+v2; CLI, Bridge, HTTP, and MCP are thin interfaces.
 
 Read the [architecture overview](docs/architecture/overview.md) for dependency
 boundaries and the [security policy](SECURITY.md) for trust and path-safety
@@ -357,9 +499,11 @@ details.
 - [CLI logging and diagnostics](docs/guides/cli.md)
 - [Configuration](docs/guides/configuration.md)
 - [Discovery and benchmarking](docs/guides/discovery.md)
+- [Index v3.1 migration](docs/guides/index-v3-migration.md)
 - [Development](docs/guides/development.md)
 - [Troubleshooting](docs/guides/troubleshooting.md)
 - [Architecture notes](docs/architecture/overview.md)
+- [Index v3.1 retrieval and Context Capsule compiler](docs/architecture/index-v3-context-compiler.md)
 - [Complete GitHub Wiki](https://github.com/waterflane/ContextForge/wiki)
 
 The Wiki is maintained in its separate GitHub Wiki repository. A prepared local
@@ -385,10 +529,10 @@ owner-triggered workflow protected by GitHub environments and PyPI OIDC.
 
 ContextForge is pre-alpha and under active solo-maintainer development. Manual
 scanning, trees, context packages, local indexing, diagnostics, and read-only
-MCP are implemented. Model-assisted discovery depends on the configured
-provider and its structured-output behavior. Remote MCP transport, autonomous
-source edits, shell/process tools, embeddings, IDE extensions, and coding-agent
-orchestration are not implemented.
+MCP are implemented. Semantic enrichment and optional evidence planning depend
+on the configured provider and its structured-output behavior. Remote MCP transport,
+autonomous source edits, shell/process tools, embeddings, IDE extensions, and
+coding-agent orchestration are not implemented.
 
 ## Support and contributions
 

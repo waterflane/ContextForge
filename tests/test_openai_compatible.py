@@ -1,9 +1,9 @@
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 from click import unstyle
@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from typer.testing import CliRunner
 
 import contextforge.models.openai_compatible as openai_module
+import contextforge.project_config as project_config_module
 from contextforge.cli.main import app
 from contextforge.logging import clear_recent_records, recent_records
 from contextforge.models import (
@@ -41,6 +42,13 @@ from contextforge.project_config import (
     load_project_configuration,
     resolve_provider_configuration,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_structured_capability_cache() -> Iterator[None]:
+    openai_module._clear_structured_capability_cache()
+    yield
+    openai_module._clear_structured_capability_cache()
 
 
 class _Answer(BaseModel):
@@ -84,6 +92,124 @@ def _models(*model_ids: str) -> OpenAICompatibleHTTPResponse:
     )
 
 
+def test_offline_fixture_provider_covers_supported_analysis_contracts() -> None:
+    def response(
+        purpose: str,
+        *,
+        facts: dict[str, object] | None = None,
+        metadata: dict[str, str] | None = None,
+        task: str = "fixture task",
+    ) -> dict[str, object]:
+        request = replace(
+            _request(),
+            purpose=purpose,
+            trusted_code_map_facts=facts or {},
+            metadata=metadata or {},
+            analysis_task=task,
+        )
+        return cast(
+            dict[str, object],
+            json.loads(project_config_module._fixture_response(request, 1)),
+        )
+
+    semantic = response(
+        "semantic-card",
+        facts={
+            "path": "src/service.py",
+            "evidence": [
+                {"evidence_id": "file"},
+                {"evidence_id": "symbol:serve"},
+            ],
+        },
+    )
+    assert semantic["synopsis"] == {
+        "text": "src service",
+        "evidence_ids": ["file"],
+    }
+    assert semantic["key_symbols"] == [{"evidence_id": "symbol:serve"}]
+    semantic_without_file = response(
+        "semantic-card-repair",
+        facts={
+            "path": "src/worker.py",
+            "evidence": [{"evidence_id": "symbol:work"}],
+        },
+    )
+    assert semantic_without_file["synopsis"] == {
+        "text": "src worker",
+        "evidence_ids": ["symbol:work"],
+    }
+
+    discovery = response(
+        "repository-discovery",
+        facts={
+            "selected": [],
+            "candidates": [{"candidate_id": "candidate-1"}],
+            "all_allowed_paths": ["src/app.py"],
+        },
+    )
+    assert discovery["actions"][0]["tool_name"] == "select_candidates"  # type: ignore[index]
+    discovery_from_allowed = response(
+        "repository-discovery",
+        facts={
+            "selected": [],
+            "candidates": [],
+            "all_allowed_paths": ["src/app.py"],
+        },
+    )
+    assert discovery_from_allowed["actions"][0]["tool_name"] == "add_to_context"  # type: ignore[index]
+    finalized = response(
+        "repository-discovery",
+        facts={"selected": ["src/app.py"], "candidates": [], "all_allowed_paths": []},
+    )
+    assert len(finalized["actions"]) == 1  # type: ignore[arg-type]
+
+    for category, expected_key in (
+        ("readme", "project_purpose"),
+        ("license", "license_type"),
+        ("config", "summary"),
+        ("other", "summary"),
+    ):
+        result = response(
+            "file-semantics",
+            facts={"file_category": category, "known_license_marker": "MIT"},
+            metadata={"analyzer_kind": "generic-text-semantic"},
+        )
+        assert expected_key in result
+
+    source = response(
+        "file-semantics",
+        facts={
+            "symbols": [
+                {"kind": "function", "symbol_id": "serve"},
+                {"kind": "constant", "symbol_id": "VALUE"},
+                "invalid",
+            ]
+        },
+    )
+    assert source["symbols"] == [{"symbol_id": "serve"}]
+    assert response("file-semantics", facts={"symbols": "invalid"})["symbols"] == []
+    assert (
+        response(
+            "package-summary",
+            task="Return scope_id 'pkg' exactly",
+        )["scope_id"]
+        == "pkg"
+    )
+    assert response("group-synthesis")["scope_id"] == "fixture-scope"
+    assert (
+        response(
+            "repository-architecture",
+            task="Return scope_id 'repo' exactly",
+        )["scope_id"]
+        == "repo"
+    )
+    assert response("repository-features")["scope_id"] == "fixture-repository"
+    assert response("task-refinement") == {"schema_version": 1}
+
+    with pytest.raises(ProviderConfigurationError, match="does not support"):
+        response("unsupported-purpose")
+
+
 def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:
     return OpenAICompatibleHTTPResponse(
         status=200,
@@ -107,15 +233,22 @@ def _completion(answer: str = "works") -> OpenAICompatibleHTTPResponse:
 
 
 @pytest.mark.parametrize(
-    "message, limit",
+    "message, limit, code",
     [
-        ("maximum context length is 8264 tokens; requested 22427", 8264),
-        ("maximum prompt length is 8,264 tokens", 8264),
-        ("context window exceeded by 12345 tokens", None),
+        ("maximum context length is 8264 tokens; requested 22427", 8264, None),
+        ("maximum prompt length is 8,264 tokens", 8264, None),
+        ("context window exceeded by 12345 tokens", None, None),
+        (
+            "prompt is too long: 11342 tokens > 8203 maximum "
+            "(prompt + generation); shorten the prompt or increase the KV cache budget",
+            8203,
+            "context_length_exceeded",
+        ),
+        ("request exceeded capacity", None, "context_length_exceeded"),
     ],
 )
 def test_server_context_limit_is_typed_and_only_decreases(
-    message: str, limit: int | None
+    message: str, limit: int | None, code: str | None
 ) -> None:
     posts = 0
 
@@ -134,7 +267,7 @@ def test_server_context_limit_is_typed_and_only_decreases(
             status=400,
             body=json.dumps(
                 {
-                    "error": {"message": message},
+                    "error": {"message": message, "code": code},
                 }
             ).encode(),
         )
@@ -486,6 +619,8 @@ def test_structured_output_rejection_falls_back_once_and_caches_capability() -> 
     provider_call_counts: list[int] = []
     diagnostics = []
 
+    openai_module._clear_structured_capability_cache()
+
     async def transport(
         method: str,
         url: str,
@@ -528,6 +663,87 @@ def test_structured_output_rejection_falls_back_once_and_caches_capability() -> 
     assert diagnostics[1].provider_discovery_calls == 0
     assert diagnostics[1].transport_attempts == 1
     assert diagnostics[1].total_provider_http_calls == 1
+
+
+def test_schema_rejection_is_shared_by_new_provider_instances_until_ttl() -> None:
+    response_modes: list[str] = []
+    openai_module._clear_structured_capability_cache()
+
+    async def transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        mode = json.loads(body).get("response_format", {}).get("type", "plain_json")
+        response_modes.append(mode)
+        if mode == "json_schema":
+            return OpenAICompatibleHTTPResponse(
+                status=400,
+                body=b'{"error":{"message":"json_schema grammar is unsupported"}}',
+            )
+        return _completion()
+
+    async def exercise() -> None:
+        first = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        second = OpenAICompatibleModelProvider(_configuration(), transport=transport)
+        await first.complete_structured(_request())
+        await second.complete_structured(_request())
+
+    asyncio.run(exercise())
+    assert response_modes == ["json_schema", "plain_json", "plain_json"]
+
+
+def test_transient_failure_does_not_cache_structured_mode_as_unsupported() -> None:
+    response_modes: list[str] = []
+    openai_module._clear_structured_capability_cache()
+
+    async def unavailable_transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, body, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        return OpenAICompatibleHTTPResponse(503, b'{"error":{"message":"busy"}}')
+
+    async def supported_transport(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        limit: int,
+    ) -> OpenAICompatibleHTTPResponse:
+        del url, headers, limit
+        if method == "GET":
+            return _models("publisher/exact-model-id")
+        assert body is not None
+        response_modes.append(
+            json.loads(body).get("response_format", {}).get("type", "plain_json")
+        )
+        return _completion()
+
+    async def exercise() -> None:
+        unavailable = OpenAICompatibleModelProvider(
+            _configuration(), transport=unavailable_transport
+        )
+        with pytest.raises(ProviderUnavailableError):
+            await unavailable.complete_structured(_request())
+        supported = OpenAICompatibleModelProvider(
+            _configuration(), transport=supported_transport
+        )
+        await supported.complete_structured(_request())
+
+    asyncio.run(exercise())
+    assert response_modes == ["json_schema"]
 
 
 def test_unsupported_explicit_json_object_continues_plain_without_repair_count() -> (

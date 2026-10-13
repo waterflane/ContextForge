@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, Field, JsonValue
 
-from contextforge.context import ReaderLimits, read_selected_text_file
+from contextforge.context.reader import ReaderLimits, read_selected_text_file
 from contextforge.intelligence.chunks import SourceChunk, plan_source_chunks
 from contextforge.intelligence.codemap import (
     FileCodeMap,
@@ -1186,6 +1186,8 @@ async def build_semantic_index(
         structural_analyzers=structural.structural_analyzers,
         semantic_analyzers=semantic_analyzers,
         schema_versions=structural.schema_versions,
+        generation_kind="enriched",
+        artifacts=structural.artifacts,
     )
     generation = write_manifest(lock, manifest)
     tracker.publish()
@@ -2815,6 +2817,9 @@ def _manifest_matches_planned_semantics(
 
 
 def _copy_structural_records(lock: IndexWriteLock, manifest: IndexManifest) -> None:
+    from contextforge.intelligence.indexer import relationship_graph_record_locations
+    from contextforge.intelligence.retrieval import retrieval_index_record_locations
+
     for state in manifest.files:
         assert state.record_location is not None
         content = load_generation_record(
@@ -2823,7 +2828,22 @@ def _copy_structural_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
             manifest=manifest,
         )
         write_index_record(lock, state.record_location, content)
-    for location in ("symbols.jsonl", "relationships.jsonl"):
+    artifact_locations = tuple(
+        reference.location
+        for reference in (
+            manifest.artifacts.relationship_graph,
+            manifest.artifacts.structural_retrieval,
+            manifest.artifacts.orientation_map,
+        )
+        if reference is not None
+    )
+    graph_locations = relationship_graph_record_locations(
+        lock.layout.repository_root, manifest
+    )
+    retrieval_locations = retrieval_index_record_locations(
+        lock.layout.repository_root, manifest
+    )
+    for location in (*artifact_locations, *graph_locations, *retrieval_locations):
         write_index_record(
             lock,
             location,

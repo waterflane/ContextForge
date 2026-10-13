@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed annotated tag to publish (for example v0.4.2.post1)
+        description: Existing signed annotated tag to publish (for example v0.6.0b1)
         required: true
         type: string
 
@@ -49,8 +49,7 @@ jobs:
         run: |
           case "$TAG" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "tag must match vX.Y.Z or a PEP 440 post release such as vX.Y.Z.postN" >&2; exit 1 ;;
-            *) echo "tag must match vX.Y.Z or a PEP 440 post release such as vX.Y.Z.postN" >&2; exit 1 ;;
+            *) echo "tag must match a PEP 440 release, such as vX.Y.Z, vX.Y.ZbN or vX.Y.Z.postN" >&2; exit 1 ;;
           esac
           test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
           TAG_COMMIT="$(git rev-parse "$TAG^{}")"

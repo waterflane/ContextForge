@@ -6,6 +6,169 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Feature releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html),
 and Python distribution versions follow PEP 440.
 
+## [Unreleased]
+
+## [0.6.0b1] - 2026-10-13
+
+### Added
+
+- Added Index v3 structural-first generations containing deterministic
+  CodeMaps, a provenance-bearing relationship graph, PageRank/connectivity
+  metrics, structural retrieval postings, and a complete orientation map.
+- Added sparse grounded Semantic Cards with code/documentation/config/test
+  profiles, item-level validation, one bounded repair, deterministic fallback,
+  priority scheduling, and a path-neutral content-addressed cache.
+- Added persisted exact/BM25/graph retrieval with CandidateCards, bounded
+  agentic `search`/`symbol`/`graph`/`map` evidence planning, Working Set and diff
+  boosts, and deterministic fallback on every provider or plan failure.
+- Added TokenEstimator, ContextBudget, MAP/SUMMARY/SLICE/FULL representations,
+  Context Capsule v2, and stable `<contextforge schema_version="2">` prompts.
+- Added public Python map/retrieval/compiler APIs, `contextforge map`, Capsule v2
+  CLI options, read-only MCP and HTTP map/search/symbol/compile operations, and
+  Bridge 2.1 with advertised artifact schemas.
+- Added benchmark required ranges, optional files, useful-token accounting,
+  file precision/recall, precision@5, range/token precision, model/provider
+  calls, lifecycle latency, and ungrounded-claim rate.
+- Added typed evidence/provenance projections to repository maps, normative
+  OrientationMap/RepositoryMap schemas, CLI `map --kind`, and the additive
+  benchmark `index_v3_capsule` pipeline with grounded/dropped-claim metrics.
+- Added `off|auto|required` model-assisted Evidence Plans, Bridge 2.2 planning
+  negotiation, and paired same-model answer regressions with an ordinary
+  full-file baseline, range-validated citations, three-vote blinded
+  groundedness judging, and phase-separated token accounting.
+- Added closed task-evidence roles and ID-only CoverageLedger diagnostics across
+  retrieval, planning, and materialization. Bridge 2.2, MCP, HTTP, and CLI
+  compilation results expose additive evidence-coverage diagnostics without
+  changing legacy Bridge or artifact contracts.
+- Added bounded multilingual planner query expansion from supplied repository
+  vocabulary, including expression/result-ID diagnostics, without domain
+  dictionaries or model-created source facts.
+- Added semantic-retrieval comparison reporting and per-file deterministic
+  scheduler/value diagnostics, separating grounded retrieval value from model
+  request cost.
+- Added source-bound function descriptions and deterministic function-level
+  discovery over immutable CodeMaps, plus compact numbered source prompt export
+  through the Python API and `context create --compact-prompt`.
+
+### Changed
+
+- Kept the existing `contextforge-repo` PyPI distribution, `contextforge` import,
+  and `contextforge` / `ctxf` commands. Beta artifacts are a normal wheel and
+  source distribution; an optional transfer archive is not a new package format.
+- Updated the roadmap and practical function lookup documentation to distinguish
+  function discovery, source materialization, and full semantic acceptance.
+- Index build/update now publish a usable structural generation before semantic
+  enrichment. Enrichment failure, timeout, or cancellation leaves that
+  structural generation active; old immutable generations remain until explicit
+  `index clean`.
+- Index/manifest/record schemas are version 4. Earlier schemas are status-readable as
+  `rebuild_required`, excluded from retrieval, rejected by `index update`, and
+  replaced only by a full build without semantic migration.
+- Task-based `context suggest` and `context create` default to Index v3 retrieval
+  and Capsule v2 when available. `--legacy-discovery` and `--legacy-handoff`
+  retain the previous flow; manual ContextPackage v1 creation is unchanged.
+- Repository orientation, architecture, conventions, and feature maps are now
+  deterministic aggregations of graph, CodeMaps, and grounded cards, without
+  separate repository-wide model calls.
+- Semantic enrichment now uses analyzer 7 / `semantic-card-v3.4`, declaration-
+  aware one-to-four chunk planning, full-request/schema token accounting, one
+  scheduler-owned repair authority, and lexical anchors for ranking prose.
+- Enriched retrieval generations now store a digest-bound semantic overlay over
+  structural postings, preserving the public RetrievalIndex API while avoiding
+  a second near-complete postings corpus.
+
+### Fixed
+
+- Kept descriptive verbs after "which function" as topical search terms while
+  retaining explicit named identifiers and directed caller/callee requests.
+
+- Retained verified planner discovery after later provider failures and honored
+  explicitly disabled structured-response repairs without a hidden local retry.
+- Reduced planner menus and previews while retaining available required evidence,
+  resolved source anchors and complete local diagnostics.
+- Materialized mandatory source above the automatic soft target when it fits
+  inside the unchanged hard context budget.
+
+- Stabilized config-key digests, parse-error reuse, and no-op updates; added
+  Kotlin structural extraction and compact bounded occurrence/card evidence.
+- Enforced source-spanning planner previews, session-wide round/action/token
+  ceilings, strict whole-plan fallback, model-order materialization, and safe
+  `FULL → SLICE → MAP` downgrade without weakening freshness or hard budgets.
+- Counted response schemas embedded by plain-JSON providers in preflight and
+  bounded every agentic round against the provider's complete context window,
+  shrinking candidates, module inventory, and previews before dispatch.
+- Corrected paired efficiency measurement to compare Capsule input with the
+  ordinary full required/working-file payload rather than the hand-selected
+  oracle, while preserving the oracle and blinded judge as quality gates.
+
+- Added verified non-call reference edges, module-level environment-key facts,
+  scoped config-consumer projections, and centrality metrics that exclude both
+  inferred and synthetic source-test relationships.
+- Grounded model-inferred relationships in supplied content-addressed targets
+  and source evidence, with item-level validation and source/target rename
+  rebinding. Updated semantic priority scheduling and behavioral barrel routing.
+- Prevented centrality-only task material, added bounded planner representation
+  influence, and enforced a 30% automatic Capsule soft ceiling without weakening
+  explicit-material or hard-budget rules.
+- Restricted retrieval graph scoring to verified/best-effort structural edges,
+  while retaining inferred neighbors as non-authoritative CandidateCard context.
+- Allocated automatic capsule sections inside the post-envelope soft payload,
+  seeded complementary MAPs before upgrades, and penalized duplicate concepts,
+  ranges, and graph neighbors during marginal-utility selection.
+- Reported all current v3 repository maps after builds and added a digest-bound
+  generated-artifact registry so unchanged package/Capsule/prompt outputs do
+  not enter later index updates.
+- Serialized generated-artifact registry updates with a bounded, ownership-
+  checked stale-recoverable lock so concurrent writers do not lose entries.
+- Completed twelve-language Python/Tree-sitter import/call/reference extraction,
+  ambiguity-aware
+  provenance, and key-digest-scoped config-consumer relationships without
+  storing configuration values.
+- Sharded graph and retrieval records into digest-bound 4 MiB artifacts,
+  removed duplicated generation facts, and made warm retrieval load compact
+  file projections plus embedded grounded evidence instead of every CodeMap and
+  Semantic Card.
+- Replaced fill-to-30% automatic compilation with minimum-sufficient Evidence
+  Plan coverage; the 30% allocation is now a soft ceiling while explicit
+  material remains governed by the hard budget.
+- Reused digest-matched published Semantic Cards across unrelated structural
+  updates, avoiding retries of unchanged fallback/partial files while still
+  rebinding or dropping inferred targets against the current snapshot.
+- Distinguished the closed Semantic Card evidence-ID set from untrusted source
+  container IDs, preventing compatible providers from returning transport IDs
+  that cannot ground ranking claims.
+- Decoupled Bridge progress delivery from index cancellation: queue overflow
+  coalesces intermediate events, counts dropped/coalesced updates, and always
+  prioritizes terminal state. A slow progress consumer cannot cancel a job.
+- Separated Bridge client wait timeout, per-provider-attempt timeout, and whole
+  operation timeout. Client timeout leaves the job tracked by `operation_id`
+  with its writer lock held through completion/cleanup; explicit cancellation
+  and shutdown still cancel it.
+- Resolved relative TypeScript emitted import suffixes only through the declared
+  `.js`/`.jsx`/`.mjs`/`.cjs` to source-suffix table. Exact files still win,
+  package imports remain external, and ambiguity remains unresolved with
+  best-effort structural provenance.
+- Replaced the isolated Python test-path policy with a declarative shared file
+  policy. Source-test edges now prefer resolved test imports, calls, and
+  references, carry provenance, and remain excluded from centrality.
+- Constrained entrypoint-handler edges to verified callback or direct bootstrap
+  shapes instead of promoting every entrypoint import/call.
+- Made every planner action demonstrate a measurable evidence-coverage gain;
+  no-gain actions cannot extend a bounded session.
+- Validated plan sufficiency after actual capsule materialization. Missing
+  planned items, evidence/ranges, mandatory role coverage, or task material now
+  downgrade effective sufficiency with bounded reason codes.
+- Made automatic capsule selection coverage-first and prevented upgrades from
+  displacing the final evidence for a required role. Added an automatic compact
+  profile for one short exact file only when it is cheaper than the ordinary
+  verified capsule.
+- Bound `--force-reanalyze` to semantic cache/card reuse. Structural reanalysis
+  has an explicit internal control, and a semantic-force no-op does not publish
+  an unchanged enriched generation.
+- Strengthened paired answer evaluation: assertion evidence support and
+  lexical/identifier support are distinct from citation containment, and the
+  blinded judge sees only answer assertions and cited material ranges.
+
 ## [0.5.1] - 2026-09-05
 
 ### Added

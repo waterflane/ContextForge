@@ -1,9 +1,16 @@
+import asyncio
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
+from contextforge.application import (
+    IndexRebuildRequiredError,
+    build_repository_index,
+    inspect_repository_index,
+)
 from contextforge.intelligence import (
     acquire_index_lock,
     build_structural_index,
@@ -22,6 +29,7 @@ from contextforge.intelligence.models import (
 )
 from contextforge.intelligence.store import (
     IndexPublicationError,
+    UnsupportedIndexSchemaError,
     _validate_record_schema,
     index_publication_transaction,
 )
@@ -74,16 +82,21 @@ def _legacy_index(root: Path) -> tuple[ProjectSnapshot, IndexManifest]:
     return snapshot, legacy
 
 
-def test_v1_inspection_and_v2_rebuild_do_not_reuse_records(tmp_path: Path) -> None:
+def test_v1_inspection_and_v31_rebuild_do_not_reuse_records(tmp_path: Path) -> None:
     snapshot, legacy = _legacy_index(tmp_path)
-    assert load_manifest(tmp_path) == legacy
-    assert load_file_code_map(tmp_path, "sample.ts").schema_version == 1
+    with pytest.raises(UnsupportedIndexSchemaError):
+        load_manifest(tmp_path)
+    with pytest.raises(UnsupportedIndexSchemaError):
+        load_file_code_map(tmp_path, "sample.ts")
+    assert inspect_repository_index(
+        tmp_path, provider_configuration=None
+    ).rebuild_required
     with acquire_index_lock(tmp_path, "migrate") as lock:
         result = build_structural_index(snapshot, lock)
-    assert result.manifest.schema_version == 2
+    assert result.manifest.schema_version == 4
     assert result.extracted_paths == ("sample.ts",)
     assert result.reused_paths == ()
-    assert load_file_code_map(tmp_path, "sample.ts").schema_version == 2
+    assert load_file_code_map(tmp_path, "sample.ts").schema_version == 3
     assert (result.generation_path.parent / legacy.generation_id).is_dir()
 
 
@@ -97,11 +110,12 @@ def test_failed_migration_does_not_change_active_pointer(tmp_path: Path) -> None
         index_publication_transaction(lock),
     ):
         build_structural_index(snapshot, lock)
-        assert load_manifest(tmp_path).schema_version == 2
+        assert load_manifest(tmp_path).schema_version == 4
         assert pointer.read_bytes() == before
         raise RuntimeError("fail after structural")
     assert pointer.read_bytes() == before
-    assert load_manifest(tmp_path) == legacy
+    with pytest.raises(UnsupportedIndexSchemaError):
+        load_manifest(tmp_path)
 
 
 def test_successful_transaction_switches_pointer_only_at_exit(tmp_path: Path) -> None:
@@ -113,7 +127,7 @@ def test_successful_transaction_switches_pointer_only_at_exit(tmp_path: Path) ->
     ):
         build_structural_index(snapshot, lock)
         assert json.loads(pointer.read_bytes())["schema_version"] == 1
-    assert json.loads(pointer.read_bytes())["schema_version"] == 2
+    assert json.loads(pointer.read_bytes())["schema_version"] == 4
 
 
 def test_mixed_legacy_versions_and_nested_transactions_are_rejected(
@@ -138,3 +152,51 @@ def test_mixed_legacy_versions_and_nested_transactions_are_rejected(
         index_publication_transaction(lock),
     ):
         pass
+
+
+@pytest.mark.parametrize("legacy_version", [2, 3])
+def test_legacy_status_requires_rebuild_and_update_is_rejected(
+    tmp_path: Path, legacy_version: Literal[1, 2, 3]
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+    asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    current = load_manifest(tmp_path)
+    pointer_path = tmp_path / ".contextforge/index/manifest.json"
+    pointer = ActiveIndexPointer(
+        schema_version=legacy_version,
+        generation_id=current.generation_id,
+        generation_manifest=f"generations/{current.generation_id}/manifest.json",
+        source_snapshot_digest=current.build.source_snapshot_digest,
+    )
+    pointer_path.write_bytes(canonical_json_bytes(pointer.model_dump(mode="json")))
+
+    status = inspect_repository_index(tmp_path, provider_configuration=None)
+    assert status.status == "rebuild_required"
+    assert status.rebuild_required is True
+    assert status.index_schema == legacy_version
+    with pytest.raises(IndexRebuildRequiredError):
+        asyncio.run(
+            build_repository_index(
+                tmp_path,
+                provider=None,
+                provider_configuration=None,
+                update_only=True,
+            )
+        )
+
+    rebuilt = asyncio.run(
+        build_repository_index(
+            tmp_path,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    assert rebuilt.manifest.schema_version == 4
+    assert rebuilt.structural.extracted_paths == ("sample.py",)
+    assert (rebuilt.structural.generation_path.parent / current.generation_id).is_dir()

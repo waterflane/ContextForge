@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import contextforge
 from contextforge.context import build_context_package
 from contextforge.prompts import PromptPackage
 from contextforge.repositories.analysis import RepositoryAnalyzer
@@ -27,3 +28,12 @@ def test_foundation_protocol_default_methods_are_explicitly_unimplemented() -> N
         RepositoryAnalyzer.analyze(object(), Path("."))  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError):
         StorageBackend.connect(object())  # type: ignore[arg-type]
+
+
+def test_index_v3_public_api_is_lazy_and_discoverable() -> None:
+    assert contextforge.ContextBudget.__name__ == "ContextBudget"
+    assert contextforge.SemanticCard.__name__ == "SemanticCard"
+    assert callable(contextforge.retrieve_context_candidates)
+    assert callable(contextforge.compile_context_capsule)
+    with pytest.raises(AttributeError, match="no attribute"):
+        contextforge.__getattr__("missing_public_api")

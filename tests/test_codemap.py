@@ -17,6 +17,7 @@ from contextforge.intelligence import (
     FileCodeMap,
     ImportRecord,
     ParserDiagnostic,
+    ReferenceOccurrence,
     RelationshipTarget,
     SourceRange,
     SymbolKind,
@@ -33,6 +34,113 @@ from contextforge.repositories import (
     ScanSummary,
     scan_repository,
 )
+
+
+def test_python_default_dependencies_preserve_definition_scope(tmp_path: Path) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "defaults.py").write_text(
+        "LIMIT = 7\ndef fallback():\n    return LIMIT\n"
+        "def run(LIMIT=LIMIT, other=fallback()):\n"
+        "    LIMIT = 99\n    def fallback():\n        return 99\n"
+        "    return LIMIT + other\n"
+        "class Worker:\n    LIMIT = 11\n"
+        "    def run(value=LIMIT):\n        return LIMIT + value\n"
+        "def factory(LIMIT):\n    def run(value=LIMIT):\n        return value\n"
+        "    return run\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    assert code_map.parse_status == "parsed"
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    run = symbols["defaults.run"]
+    assert len(run.parameter_default_ranges) == 2
+    defaults = [r for r in run.direct_references if r.source_range.start_line == 4]
+    assert {r.target_symbol_id for r in defaults} == {
+        symbols["defaults.LIMIT"].symbol_id,
+        symbols["defaults.fallback"].symbol_id,
+    }
+    assert not any(c.source_range.start_line == 4 for c in run.direct_calls)
+    method = symbols["defaults.Worker.run"]
+    assert (
+        method.direct_references[0].target_symbol_id
+        == symbols["defaults.Worker.LIMIT"].symbol_id
+    )
+    assert (
+        method.direct_references[1].target_symbol_id
+        == symbols["defaults.LIMIT"].symbol_id
+    )
+    nested = symbols["defaults.factory.run"]
+    assert nested.direct_references[0].resolution == "unresolved"
+    assert nested.direct_references[0].detection_method == "python_shadowed_reference"
+
+
+def test_python_default_can_use_same_named_import_but_not_body_import(
+    tmp_path: Path,
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "limits.py").write_text("LIMIT = 7\n", encoding="utf-8")
+    (tmp_path / "defaults.py").write_text(
+        "from limits import LIMIT\ndef run(LIMIT=LIMIT):\n    return LIMIT\n"
+        "def local(value=OTHER):\n    from limits import LIMIT as OTHER\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    maps = resolve_relationships(
+        tuple(extract_code_map(snapshot, f) for f in snapshot.files)
+    )
+    code_map = next(m for m in maps if m.path == "defaults.py")
+    symbols = {s.name: s for s in code_map.symbols}
+    refs = symbols["run"].direct_references
+    assert refs[0].target_file_path == "limits.py"
+    assert refs[1].resolution == "unresolved"
+    assert symbols["local"].direct_references[0].resolution == "unresolved"
+
+
+def test_python_receiver_members_use_formal_binding_and_respect_shadowing(
+    tmp_path: Path,
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "worker.py").write_text(
+        "class Worker:\n    def helper(holder, value):\n        return value + 1\n"
+        "    def run(holder, value):\n        return holder.helper(value)\n"
+        "    async def async_run(holder, value):\n        return holder.helper(value)\n"
+        "    @classmethod\n    def shared(holder, value):\n"
+        "        return holder.helper(value)\n"
+        "    @staticmethod\n    def static(holder, value):\n"
+        "        return holder.helper(value)\n"
+        "    def replaced(holder, value):\n        holder = value\n"
+        "        return holder.helper(value)\n"
+        "    def closure(holder, value):\n        def later():\n"
+        "            return holder.helper(value)\n        return later\n"
+        "    def shadow(holder, value):\n        def later(holder):\n"
+        "            return holder.helper(value)\n        return later\n"
+        "    def chain(holder, value):\n        return holder.config.helper(value)\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    helper = symbols["worker.Worker.helper"]
+    for name in ("run", "async_run", "shared", "closure.later"):
+        assert (
+            symbols["worker.Worker." + name].direct_calls[0].target_symbol_id
+            == helper.symbol_id
+        )
+    for name in ("static", "replaced", "shadow.later", "chain"):
+        assert (
+            symbols["worker.Worker." + name].direct_calls[0].resolution == "unresolved"
+        )
+    assert symbols["worker.Worker.run"].receiver_parameter_name == "holder"
+    assert symbols["worker.Worker.static"].receiver_parameter_name is None
 
 
 def _write(root: Path, path: str, content: str | bytes) -> None:
@@ -171,6 +279,82 @@ def public() -> None:
     assert calls["run_helper"].target_file_path == "pkg/impl.py"
     assert calls["library.call"].resolution == "unresolved"
     assert calls["dynamic"].resolution == "unresolved"
+
+
+def test_value_type_and_imported_references_are_verified_without_call_duplicates(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(
+        tmp_path,
+        "pkg/targets.py",
+        "VALUE = 7\n\nclass Service:\n    pass\n",
+    )
+    _write(
+        tmp_path,
+        "pkg/app.py",
+        """from .targets import Service, VALUE as imported_value
+LOCAL = 2
+
+def consume(service: Service) -> int:
+    return imported_value + LOCAL
+
+def invoke() -> int:
+    return consume(Service())
+""",
+    )
+
+    maps = extract_code_maps(scan_repository(tmp_path))
+    app = next(item for item in maps if item.path == "pkg/app.py")
+    consume = next(item for item in app.symbols if item.name == "consume")
+    invoke = next(item for item in app.symbols if item.name == "invoke")
+    references = {item.observed_name: item for item in consume.direct_references}
+
+    assert references["Service"].resolution == "internal"
+    assert references["Service"].target_file_path == "pkg/targets.py"
+    assert references["imported_value"].resolution == "internal"
+    assert references["imported_value"].target_file_path == "pkg/targets.py"
+    assert references["LOCAL"].resolution == "internal"
+    assert references["LOCAL"].target_file_path == "pkg/app.py"
+    assert {item.observed_name for item in invoke.direct_calls} == {
+        "Service",
+        "consume",
+    }
+    assert not {item.observed_name for item in invoke.direct_references} & {
+        "Service",
+        "consume",
+    }
+    graph_references = [
+        item
+        for item in app.relationships
+        if item.kind == "reference" and item.target.resolution == "internal"
+    ]
+    assert {item.observed_text for item in graph_references} >= {
+        "Service",
+        "imported_value",
+        "LOCAL",
+    }
+
+
+def test_module_level_environment_reads_are_configuration_facts(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "settings.py",
+        """import os
+API_URL = os.getenv("API_URL")
+MODE = os.environ.get("APP_MODE", "safe")
+TOKEN = os.environ["APP_TOKEN"]
+""",
+    )
+
+    code_map = _map(tmp_path, "settings.py")
+    keys = {symbol.name: symbol.configuration_keys for symbol in code_map.symbols}
+
+    assert keys["API_URL"] == ("API_URL",)
+    assert keys["MODE"] == ("APP_MODE",)
+    assert keys["TOKEN"] == ("APP_TOKEN",)
 
 
 def test_syntax_error_is_diagnostic_without_fabricated_symbols(tmp_path: Path) -> None:
@@ -436,6 +620,12 @@ def test_codemap_models_reject_false_resolution_and_noncanonical_shapes() -> Non
             source_range=source_range,
             resolution="unresolved",
             target_symbol_id="symbol:claimed",
+        )
+    with pytest.raises(ValidationError, match="require a symbol"):
+        ReferenceOccurrence(
+            observed_name="value",
+            source_range=source_range,
+            resolution="internal",
         )
     with pytest.raises(ValidationError, match="require a target file"):
         ImportRecord(

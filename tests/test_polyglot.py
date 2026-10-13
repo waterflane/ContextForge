@@ -2,8 +2,278 @@ from pathlib import Path
 
 import pytest
 
-from contextforge.intelligence import POLYGLOT_ANALYZER, extract_code_map
+from contextforge.intelligence import (
+    POLYGLOT_ANALYZER,
+    acquire_index_lock,
+    build_structural_index,
+    extract_code_map,
+    initialize_index,
+    load_relationship_graph,
+)
+from contextforge.intelligence.polyglot import (
+    STRUCTURAL_CAPTURE_RULES,
+    SUPPORTED_POLYGLOT_LANGUAGES,
+)
 from contextforge.repositories import scan_repository
+
+
+def test_calls_in_local_initializers_keep_execution_owner_and_receiver(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sample.js").write_text(
+        "const ALLOWED = new Set(['raw']);\n"
+        "function clean(value) { return value.trim(); }\n"
+        "function execute_job(value) {\n"
+        "  const normalized = clean(value);\n"
+        "  return ALLOWED.has(normalized);\n}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    assert code_map.parse_status == "parsed"
+    function = next(s for s in code_map.symbols if s.name == "execute_job")
+    initializer = next(s for s in code_map.symbols if s.name == "normalized")
+    assert "clean" in {c.observed_name for c in function.direct_calls}
+    assert "clean" in {c.observed_name for c in initializer.direct_calls}
+    assert "ALLOWED" in {r.observed_name for r in function.direct_references}
+
+
+def test_anonymous_test_scope_keeps_calls_and_assertions(tmp_path: Path) -> None:
+    (tmp_path / "test_sample.js").write_text(
+        "test('direct', () => {\n"
+        "  assert.equal(execute_job(1), 2);\n});\n"
+        "test('local', () => {\n  const result = execute_job(2);\n"
+        "  assert.equal(result, 3);\n});\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = extract_code_map(snapshot, snapshot.files[0])
+    callbacks = [s for s in code_map.symbols if s.is_anonymous]
+    assert len(callbacks) == 2
+    assert {s.declaration_range.end_line for s in callbacks} == {3, 7}
+    assert all(
+        "execute_job" in {c.observed_name for c in s.direct_calls} for s in callbacks
+    )
+
+
+def test_qualified_calls_require_the_observed_receiver_binding(tmp_path: Path) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / "helpers.js").write_text(
+        "export function clean(value) { return value; }\n"
+        "export function hidden(value) { return value; }\n"
+        "export const settings = { clean(value) { return value + 1; } };\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "jobs.js").write_text(
+        "import * as helpers from './helpers.js';\n"
+        "import { clean as tidy } from './helpers.js';\n"
+        "import { settings as options } from './helpers.js';\n"
+        "function clean(value) { return value - 1; }\n"
+        "export function execute_job(value) {\n"
+        "  helpers.clean(value);\n  tidy(value);\n"
+        "  other.clean(value);\n  hidden(value);\n  options.clean(value);\n"
+        "  options.hidden(value);\n  return clean(value);\n}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    maps = resolve_relationships(
+        tuple(extract_code_map(snapshot, f) for f in snapshot.files)
+    )
+    jobs = next(m for m in maps if m.path == "jobs.js")
+    function = next(s for s in jobs.symbols if s.name == "execute_job")
+    calls = {c.observed_name: c for c in function.direct_calls}
+    assert calls["helpers.clean"].target_file_path == "helpers.js"
+    assert calls["tidy"].target_file_path == "helpers.js"
+    assert calls["clean"].target_file_path == "jobs.js"
+    assert calls["options.clean"].target_file_path == "helpers.js"
+    assert calls["other.clean"].resolution == "unresolved"
+    assert calls["hidden"].resolution == "unresolved"
+    assert calls["options.hidden"].resolution == "unresolved"
+
+
+@pytest.mark.parametrize("suffix", ["js", "ts"])
+def test_defaults_use_parameter_scope_and_keep_helpers(
+    tmp_path: Path, suffix: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    source = (
+        "const LIMIT = 7;\nfunction fallback() { return LIMIT; }\n"
+        "function run(value = LIMIT, other = fallback()) {\n"
+        "  const LIMIT = 99; function fallback() { return 99; }\n"
+        "  return LIMIT + fallback() + value + other;\n}\n"
+        "function blocked(LIMIT = LIMIT) { return LIMIT; }\n"
+        "function destructured({key: value = fallback()} = {}) { return value; }\n"
+        "function deferred(get = () => LIMIT) { const LIMIT = 99; return get; }\n"
+    )
+    if suffix == "ts":
+        source += "function typed(value: number = LIMIT) { return value; }\n"
+    (tmp_path / f"defaults.{suffix}").write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    run = symbols["run"]
+    assert len(run.parameter_default_ranges) == 2
+    refs = {
+        r.source_range.start_line: r
+        for r in run.direct_references
+        if r.observed_name == "LIMIT"
+    }
+    assert refs[3].target_symbol_id == symbols["LIMIT"].symbol_id
+    assert refs[5].target_symbol_id == symbols["run.LIMIT"].symbol_id
+    calls = {
+        c.source_range.start_line: c
+        for c in run.direct_calls
+        if c.observed_name == "fallback"
+    }
+    assert calls[3].target_symbol_id == symbols["fallback"].symbol_id
+    assert calls[5].target_symbol_id == symbols["run.fallback"].symbol_id
+    assert all(r.target_symbol_id is None for r in symbols["blocked"].direct_references)
+    assert (
+        symbols["destructured"].direct_calls[0].target_symbol_id
+        == symbols["fallback"].symbol_id
+    )
+    callback = next(
+        s
+        for s in code_map.symbols
+        if s.is_anonymous and s.qualified_name.startswith("deferred.")
+    )
+    assert callback.direct_references[0].target_symbol_id == symbols["LIMIT"].symbol_id
+    assert not symbols["deferred"].direct_calls
+    if suffix == "ts":
+        assert (
+            symbols["typed"].direct_references[0].target_symbol_id
+            == symbols["LIMIT"].symbol_id
+        )
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        (
+            "defaults.kt",
+            "const val DEFAULT_SIZE = 7\nfun run(value: Int = DEFAULT_SIZE) = value\n",
+        ),
+        (
+            "defaults.cs",
+            "class Worker { const int DEFAULT_SIZE = 7; "
+            "int Run(int value = DEFAULT_SIZE) { return value; } }\n",
+        ),
+        (
+            "defaults.cpp",
+            "const int DEFAULT_SIZE = 7; "
+            "int run(int value = DEFAULT_SIZE) { return value; }\n",
+        ),
+        (
+            "defaults.php",
+            "<?php const DEFAULT_SIZE = 7; "
+            "function run($value = DEFAULT_SIZE) { return $value; }\n",
+        ),
+        (
+            "defaults.rb",
+            "DEFAULT_SIZE = 7\ndef run(value = DEFAULT_SIZE)\n  value\nend\n",
+        ),
+    ],
+)
+def test_polyglot_default_expressions_retain_verified_constant_references(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    assert code_map.parse_status == "parsed"
+    function = next(s for s in code_map.symbols if s.name.casefold() == "run")
+    constant = next(s for s in code_map.symbols if s.name == "DEFAULT_SIZE")
+    assert function.parameter_default_ranges
+    assert "DEFAULT_SIZE" not in function.parameter_bindings
+    assert any(
+        r.target_symbol_id == constant.symbol_id for r in function.direct_references
+    )
+
+
+@pytest.mark.parametrize("suffix", ["js", "ts"])
+def test_class_receivers_preserve_direction_and_dynamic_scope(
+    tmp_path: Path, suffix: str
+) -> None:
+    from contextforge.intelligence.relationships import resolve_relationships
+
+    (tmp_path / f"worker.{suffix}").write_text(
+        "class Worker {\n"
+        "  helper(value) { return value; }\n"
+        "  static shared(value) { return value; }\n"
+        "  run(value) {\n"
+        "    this.helper(value);\n"
+        "    const later = () => this.helper(value);\n"
+        "    const dynamic = function() { return this.helper(value); };\n"
+        "    function nested() { return this.helper(value); }\n"
+        "    const object = { helper() { return this.helper(value); } };\n"
+        "    other.helper(value);\n"
+        "    this.config.helper(value);\n"
+        "    this.shared(value);\n"
+        "    helper(value);\n"
+        "    return later;\n"
+        "  }\n"
+        "  static execute(value) { this.shared(value); this.helper(value); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    snapshot = scan_repository(tmp_path)
+    code_map = resolve_relationships((extract_code_map(snapshot, snapshot.files[0]),))[
+        0
+    ]
+    symbols = {s.qualified_name: s for s in code_map.symbols}
+    helper, shared = symbols["Worker.helper"], symbols["Worker.shared"]
+    run = symbols["Worker.run"]
+    assert run.receiver_class_symbol_id == symbols["Worker"].symbol_id
+    assert not run.is_static_member
+    calls = {c.observed_name: c for c in run.direct_calls}
+    assert calls["this.helper"].target_symbol_id == helper.symbol_id
+    for name in ("other.helper", "this.config.helper", "this.shared", "helper"):
+        assert calls[name].resolution == "unresolved"
+    later = symbols["Worker.run.later"]
+    assert later.receiver_class_symbol_id == run.receiver_class_symbol_id
+    assert later.direct_calls[0].target_symbol_id == helper.symbol_id
+    for name in ("Worker.run.dynamic", "Worker.run.nested", "Worker.run.object.helper"):
+        symbol = symbols[name]
+        assert symbol.receiver_class_symbol_id is None
+        assert symbol.direct_calls[0].resolution == "unresolved"
+    static = symbols["Worker.execute"]
+    assert static.is_static_member
+    assert {c.observed_name: c.target_symbol_id for c in static.direct_calls} == {
+        "this.shared": shared.symbol_id,
+        "this.helper": None,
+    }
+    # Older records cannot silently gain a receiver binding by suffix matching.
+    legacy = code_map.model_copy(
+        update={
+            "symbols": tuple(
+                s.model_copy(update={"receiver_class_symbol_id": None})
+                for s in code_map.symbols
+            )
+        }
+    )
+    old_run = next(
+        s
+        for s in resolve_relationships((legacy,))[0].symbols
+        if s.symbol_id == run.symbol_id
+    )
+    assert all(c.target_symbol_id is None for c in old_run.direct_calls)
+
+
+def test_every_polyglot_language_uses_declarative_capture_rules() -> None:
+    assert tuple(STRUCTURAL_CAPTURE_RULES) == SUPPORTED_POLYGLOT_LANGUAGES
+    assert all(rule.declarations for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.import_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.call_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.reference_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
+    assert all(rule.binding_captures for rule in STRUCTURAL_CAPTURE_RULES.values())
 
 
 @pytest.mark.parametrize(
@@ -23,6 +293,11 @@ from contextforge.repositories import scan_repository
             "Sample.java",
             "class Service { Service() {} void run() {} }\n",
             {"Service", "run"},
+        ),
+        (
+            "Sample.kt",
+            "class Service { fun run(): Int { return 1 } }\nfun start() {}\n",
+            {"Service", "run", "start"},
         ),
         (
             "Sample.cs",
@@ -82,7 +357,8 @@ def test_polyglot_extracts_verified_declarations(
     assert partial.diagnostics
     # Recovery may wrap the declaration immediately preceding the bad tokens in
     # ERROR. Such nodes must be discarded too, not promoted as verified siblings.
-    assert expected & {symbol.name for symbol in partial.symbols}
+    if not filename.endswith(".kt"):
+        assert expected & {symbol.name for symbol in partial.symbols}
 
 
 def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> None:
@@ -97,6 +373,39 @@ def test_polyglot_keeps_valid_siblings_around_parse_errors(tmp_path: Path) -> No
     assert code_map.parse_status == "partial"
     assert "intact" in {symbol.name for symbol in code_map.symbols}
     assert code_map.diagnostics
+
+
+def test_kotlin_import_call_reference_and_graph_are_structural(tmp_path: Path) -> None:
+    service = tmp_path / "src/main/kotlin/demo/Service.kt"
+    service.parent.mkdir(parents=True)
+    service.write_text(
+        "package demo\nclass Service { fun run(value: Int): Int { return value } }\n",
+        encoding="utf-8",
+    )
+    app = tmp_path / "src/main/kotlin/demo/App.kt"
+    app.write_text(
+        "package demo\nimport demo.Service\n"
+        "fun start(service: Service): Int { return service.run(1) }\n",
+        encoding="utf-8",
+    )
+    initialize_index(tmp_path)
+    snapshot = scan_repository(tmp_path)
+
+    with acquire_index_lock(tmp_path, "kotlin") as lock:
+        result = build_structural_index(snapshot, lock)
+
+    app_map = next(item for item in result.code_maps if item.path.endswith("App.kt"))
+    assert app_map.parse_status == "parsed"
+    assert app_map.imports[0].resolution == "internal"
+    start = next(item for item in app_map.symbols if item.name == "start")
+    assert start.direct_calls
+    assert start.direct_references
+    graph = load_relationship_graph(tmp_path, manifest=result.manifest)
+    kotlin_edges = [
+        edge for edge in graph.edges if edge.source_file_path == app_map.path
+    ]
+    assert kotlin_edges
+    assert {edge.kind for edge in kotlin_edges} >= {"import", "reference"}
 
 
 def test_typescript_symbol_range_matches_source_line(tmp_path: Path) -> None:

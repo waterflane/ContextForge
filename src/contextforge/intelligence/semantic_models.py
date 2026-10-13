@@ -14,7 +14,7 @@ from contextforge.intelligence.models import (
     validate_portable_relative_path,
 )
 
-SEMANTIC_SCHEMA_VERSION: Literal[2] = 2
+SEMANTIC_SCHEMA_VERSION: Literal[3] = 3
 
 ClaimText = Annotated[str, Field(min_length=1, max_length=2_000)]
 RationaleText = Annotated[str, Field(min_length=1, max_length=1_000)]
@@ -115,7 +115,7 @@ class DataFlowDescription(_ClaimDescription):
 class SymbolSemanticAnalysis(IndexModel):
     """Attributed interpretation of one verified function, method, or class."""
 
-    schema_version: Literal[1, 2] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = SEMANTIC_SCHEMA_VERSION
     record_kind: Literal["model_symbol_interpretation"] = "model_symbol_interpretation"
     symbol_id: str
     name: str
@@ -191,7 +191,7 @@ class SemanticChunkCheckpoint(IndexModel):
 class FileSemanticAnalysis(IndexModel):
     """Complete, separately persisted semantic interpretation of one source file."""
 
-    schema_version: Literal[1, 2] = SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal[1, 2, 3] = SEMANTIC_SCHEMA_VERSION
     record_kind: Literal[
         "model_file_interpretation", "deterministic_metadata_interpretation"
     ] = "model_file_interpretation"

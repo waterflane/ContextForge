@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 import contextforge.benchmarks.runner as benchmark_runner
+from contextforge.application import build_repository_index
 from contextforge.application import (
     suggest_repository_context as application_suggest_repository_context,
 )
@@ -15,6 +16,8 @@ from contextforge.benchmarks import (
     BenchmarkManifest,
     BenchmarkMode,
     BenchmarkModeOverrides,
+    BenchmarkPipeline,
+    BenchmarkSourceRange,
     BenchmarkTask,
     run_discovery_benchmark,
 )
@@ -23,7 +26,16 @@ from contextforge.intelligence import (
     build_structural_index,
     initialize_index,
 )
-from contextforge.models import FakeModelProvider, ModelRequest, ProviderConfiguration
+from contextforge.models import (
+    FakeModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ProviderCapabilities,
+    ProviderConfiguration,
+    ProviderDiagnostic,
+)
 from contextforge.repositories import scan_repository
 
 
@@ -75,6 +87,45 @@ def _fallback_provider() -> FakeModelProvider:
     return FakeModelProvider(configuration, responder=lambda _request, _index: "{")
 
 
+def _index_provider() -> FakeModelProvider:
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="benchmark-index-v3",
+        timeout_seconds=2,
+        retry_limit=0,
+        max_json_repair_attempts=0,
+    )
+
+    def respond(request: ModelRequest, call_index: int) -> str:
+        del call_index
+        facts = request.trusted_code_map_facts
+        path = str(facts["path"])
+        stem = Path(path).stem
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "synopsis": {
+                    "text": f"{stem} implementation",
+                    "evidence_ids": ["symbol:0000"],
+                },
+                "concepts": [{"text": stem, "evidence_ids": ["symbol:0000"]}],
+                "responsibilities": [
+                    {
+                        "text": "unanchored optional claim",
+                        "evidence_ids": ["symbol:0000"],
+                    }
+                ],
+                "key_symbols": [],
+                "side_effects": [],
+                "profile_facts": {},
+                "inferred_relationships": [],
+            }
+        )
+
+    return FakeModelProvider(configuration, responder=respond)
+
+
 def _build_index(repository: Path) -> None:
     initialize_index(repository)
     with acquire_index_lock(repository, "benchmark-fixture") as lock:
@@ -90,6 +141,9 @@ def _task(task_id: str, repository_path: str, **values: Any) -> BenchmarkTask:
         "include_paths": ("main.py",),
         "required_files_all": ("main.py",),
         "required_files_any": (("alternate.py", "main.py"),),
+        "required_ranges": (
+            BenchmarkSourceRange(path="main.py", start_line=1, end_line=1),
+        ),
         "forbidden_files": ("secret.py",),
         "expected_facets": ("main implementation",),
         "allowed_warnings": ("hybrid-index-unavailable",),
@@ -100,6 +154,119 @@ def _task(task_id: str, repository_path: str, **values: Any) -> BenchmarkTask:
     }
     defaults.update(values)
     return BenchmarkTask(**defaults)
+
+
+def test_counting_provider_accounts_success_and_failure_paths() -> None:
+    configuration = ProviderConfiguration(
+        provider_id="fake",
+        endpoint="fake://offline",
+        model_id="counting",
+        retry_limit=0,
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="counting",
+        tasks=(_task("counting", "repository"),),
+    )
+    request = ModelRequest(
+        operation_id="counting-test",
+        purpose="counting-test",
+        system_instructions="Return the supplied manifest.",
+        analysis_task="Exercise benchmark provider accounting.",
+        trusted_code_map_facts={},
+        untrusted_sources=(),
+        response_model=BenchmarkManifest,
+    )
+
+    class StubProvider:
+        def __init__(self, result: ModelResponse | ModelProviderError) -> None:
+            self.configuration = configuration
+            self.result = result
+
+        @property
+        def provider_id(self) -> str:
+            return "fake"
+
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                structured_responses=True,
+                cancellation=True,
+                token_usage=True,
+                local=True,
+            )
+
+        async def complete_structured(
+            self,
+            request: ModelRequest,
+            *,
+            cancellation: asyncio.Event | None = None,
+        ) -> ModelResponse:
+            del request, cancellation
+            if isinstance(self.result, ModelProviderError):
+                raise self.result
+            return self.result
+
+        async def close(self) -> None:
+            return None
+
+    response = ModelResponse(
+        normalized_json=manifest.model_dump_json(),
+        value=manifest,
+        provider_id="fake",
+        model_id="counting",
+    )
+    success = benchmark_runner._CountingModelProvider(StubProvider(response))
+    assert success.provider_id == "fake"
+    assert success.capabilities().token_usage is True
+    assert asyncio.run(success.complete_structured(request)) is response
+    asyncio.run(success.close())
+    assert success.model_calls == 1
+    assert success.model_generations == 1
+    assert success.transport_attempts == 1
+    assert success.total_provider_http_calls == 1
+    assert success.input_tokens > 0
+    assert success.output_tokens > 0
+
+    diagnostic = ProviderDiagnostic(
+        provider_id="fake",
+        model_id="counting",
+        request_purpose="counting-test",
+        retry_count=0,
+        model_generations=1,
+        repair_generations=1,
+        provider_discovery_calls=1,
+        provider_capability_calls=2,
+        transport_attempts=2,
+        total_provider_http_calls=5,
+        total_provider_calls=5,
+        response_validation="invalid",
+        usage=ModelUsage(input_tokens=17, output_tokens=4),
+    )
+    failure_error = ModelProviderError("offline", diagnostic=diagnostic)
+    failure_error.add_http_accounting(
+        provider_discovery_calls=1,
+        provider_capability_calls=2,
+        transport_attempts=1,
+        total_provider_http_calls=4,
+    )
+    failure = benchmark_runner._CountingModelProvider(StubProvider(failure_error))
+    with pytest.raises(ModelProviderError, match="offline"):
+        asyncio.run(failure.complete_structured(request))
+    assert failure.model_generations == 1
+    assert failure.repair_generations == 1
+    assert failure.provider_discovery_calls == 1
+    assert failure.provider_capability_calls == 2
+    assert failure.transport_attempts == 2
+    assert failure.total_provider_http_calls == 5
+    assert failure.input_tokens == 17
+    assert failure.output_tokens == 4
+
+    bare_failure = benchmark_runner._CountingModelProvider(
+        StubProvider(ModelProviderError("bare"))
+    )
+    with pytest.raises(ModelProviderError, match="bare"):
+        asyncio.run(bare_failure.complete_structured(request))
+    assert bare_failure.input_tokens > 0
 
 
 def test_runner_records_discovery_metrics_and_evaluates_manifest(
@@ -133,6 +300,14 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert run.files_considered == 2
     assert run.files_read == 3
     assert run.context_bytes == len(b"def main():\n    return 1\n")
+    assert run.selected_ranges == (
+        BenchmarkSourceRange(path="main.py", start_line=1, end_line=2),
+    )
+    assert run.selected_tokens > run.useful_tokens > 0
+    assert run.expectations.selected_line_count == 2
+    assert run.expectations.useful_line_count == 1
+    assert run.expectations.range_coverage[0].passed is True
+    assert run.latency_kind == "incremental"
     assert run.provider_counters.model_generations == 1
     assert run.provider_counters.model_calls == 1
     assert run.provider_counters.repair_generations == 1
@@ -151,9 +326,115 @@ def test_runner_records_discovery_metrics_and_evaluates_manifest(
     assert metric.stability_kind == "insufficient_data"
     assert metric.exact_selected_file_match_rate is None
     assert metric.required_file_recall == 1.0
+    assert metric.file_precision == 1.0
+    assert metric.file_recall == 1.0
+    assert metric.range_precision == 0.5
+    assert metric.token_precision == pytest.approx(
+        run.useful_tokens / run.selected_tokens
+    )
+    assert metric.provider_call_range is not None
+    assert metric.provider_call_range.minimum == 2
+    assert metric.incremental_latency is not None
+    assert metric.cold_latency is None
     assert metric.expected_facet_coverage_rate == 1.0
     assert metric.duration is not None
     assert metric.duration.percentiles is None
+
+
+def test_index_v3_pipeline_exercises_cold_warm_and_incremental_capsules(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    _write(repository, "main.py", "def main():\n    return 1\n")
+    _write(repository, "alternate.py", "def alternate():\n    return 2\n")
+    asyncio.run(
+        build_repository_index(
+            repository,
+            provider=None,
+            provider_configuration=None,
+        )
+    )
+    before = {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    }
+    task = _task(
+        "index-v3",
+        "repository",
+        pipeline=BenchmarkPipeline.INDEX_V3_CAPSULE,
+        modes=(BenchmarkMode.FRESH, BenchmarkMode.INDEXED, BenchmarkMode.HYBRID),
+        expected_facets=(),
+        allowed_warnings=(),
+        max_selected_files=3,
+        max_files_read=3,
+        max_model_generations=10,
+        max_provider_http_calls=10,
+    )
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        suite_name="index-v3-pipeline",
+        tasks=(task,),
+    )
+
+    result = asyncio.run(run_discovery_benchmark(manifest, tmp_path, _index_provider()))
+
+    assert result.passed is True, result.runs
+    assert (
+        tuple(run.pipeline for run in result.runs)
+        == (BenchmarkPipeline.INDEX_V3_CAPSULE,) * 3
+    )
+    assert tuple(run.latency_kind for run in result.runs) == (
+        "cold",
+        "warm",
+        "incremental",
+    )
+    fresh, indexed, hybrid = result.runs
+    assert fresh.provider_counters.total_provider_http_calls > 0
+    assert indexed.provider_counters.total_provider_http_calls == 0
+    assert hybrid.provider_counters.total_provider_http_calls > 0
+    assert all(run.provenance == "index_v3_deterministic" for run in result.runs)
+    assert all("main.py" in run.selected_files for run in result.runs)
+    assert all(run.selected_tokens > 0 for run in result.runs)
+    assert all(run.useful_tokens > 0 for run in result.runs)
+    assert fresh.grounded_claims > 0
+    assert fresh.dropped_claims >= 0
+    metrics_by_mode = {item.mode: item for item in result.metrics}
+    assert metrics_by_mode[BenchmarkMode.FRESH].cold_latency is not None
+    assert metrics_by_mode[BenchmarkMode.FRESH].grounded_claim_rate is not None
+    assert metrics_by_mode[BenchmarkMode.FRESH].dropped_claim_rate is not None
+    assert metrics_by_mode[BenchmarkMode.INDEXED].warm_latency is not None
+    assert metrics_by_mode[BenchmarkMode.HYBRID].incremental_latency is not None
+    assert {
+        path.relative_to(repository): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_benchmark_pipeline_defaults_to_legacy_discovery() -> None:
+    assert _task("legacy-default", "repository").pipeline is (
+        BenchmarkPipeline.LEGACY_DISCOVERY
+    )
+
+
+def test_required_range_coverage_merges_overlaps_without_counting_gaps() -> None:
+    required = BenchmarkSourceRange(path="main.py", start_line=1, end_line=10)
+    selected = (
+        BenchmarkSourceRange(path="main.py", start_line=1, end_line=2),
+        BenchmarkSourceRange(path="main.py", start_line=2, end_line=4),
+        BenchmarkSourceRange(path="main.py", start_line=7, end_line=8),
+        BenchmarkSourceRange(path="other.py", start_line=1, end_line=10),
+    )
+
+    assert benchmark_runner._covered_lines(required, selected) == 6
+    assert (
+        benchmark_runner._covered_lines(
+            BenchmarkSourceRange(path="missing.py", start_line=1, end_line=2),
+            selected,
+        )
+        == 0
+    )
 
 
 def test_runner_records_deterministic_fallback_state(tmp_path: Path) -> None:

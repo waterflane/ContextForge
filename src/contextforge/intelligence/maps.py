@@ -19,6 +19,7 @@ from contextforge.intelligence.codemap import (
     SourceRange,
     stable_fact_id,
 )
+from contextforge.intelligence.file_policy import FILE_POLICY_REGISTRY
 from contextforge.intelligence.indexer import load_file_code_map
 from contextforge.intelligence.manifest import (
     build_index_manifest,
@@ -2010,6 +2011,8 @@ def _publish_global_records(
         structural_analyzers=current.structural_analyzers,
         semantic_analyzers=semantic_analyzers,
         schema_versions=current.schema_versions,
+        generation_kind="enriched",
+        artifacts=current.artifacts,
     )
     return write_manifest(lock, manifest)
 
@@ -2024,7 +2027,28 @@ def _copy_generation_records(lock: IndexWriteLock, manifest: IndexManifest) -> N
         )
         if location is not None
     }
-    locations.update(("symbols.jsonl", "relationships.jsonl"))
+    from contextforge.intelligence.indexer import relationship_graph_record_locations
+    from contextforge.intelligence.retrieval import retrieval_index_record_locations
+
+    locations.update(
+        relationship_graph_record_locations(lock.layout.repository_root, manifest)
+    )
+    locations.update(
+        retrieval_index_record_locations(lock.layout.repository_root, manifest)
+    )
+    locations.update(
+        reference.location
+        for reference in (
+            manifest.artifacts.relationship_graph,
+            manifest.artifacts.structural_retrieval,
+            manifest.artifacts.semantic_retrieval,
+            manifest.artifacts.orientation_map,
+            manifest.artifacts.architecture_map,
+            manifest.artifacts.conventions_map,
+            manifest.artifacts.features_map,
+        )
+        if reference is not None
+    )
     for location in sorted(locations):
         write_index_record(
             lock,
@@ -2266,12 +2290,7 @@ def _package_key(path: str) -> str:
 
 
 def _is_test_path(path: str) -> bool:
-    pure = PurePosixPath(path)
-    return (
-        "tests" in pure.parts
-        or pure.name.startswith("test_")
-        or pure.stem.endswith("_test")
-    )
+    return FILE_POLICY_REGISTRY.is_test(path)
 
 
 def _scope_id(prefix: str, *parts: object) -> str:

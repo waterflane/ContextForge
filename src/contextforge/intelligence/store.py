@@ -12,6 +12,7 @@ import socket
 import stat
 import tempfile
 import time
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -54,6 +55,24 @@ RUNS_DIRECTORY = "runs"
 TEMPORARY_SUFFIX = ".contextforge-tmp"
 MAX_MANIFEST_BYTES = 4_000_000
 MAX_RECORD_BYTES = 16_000_000
+_COMPRESSED_RECORD_PREFIX = b"CFZ1"
+_query_shard_references: ContextVar[
+    dict[tuple[Path, str, str | None, str | None], dict[str, str]] | None
+] = ContextVar("validated_query_shard_references", default=None)
+
+
+@contextmanager
+def generation_read_scope() -> Iterator[None]:
+    """Reuse immutable header routing within one query, never across queries."""
+    token = _query_shard_references.set({})
+    try:
+        yield
+    finally:
+        _query_shard_references.reset(token)
+
+
+_COMPRESSION_MIN_BYTES = 4_096
+_COMPRESSED_RECORD_DIRECTORIES = ("files/", "graph/", "retrieval/")
 
 
 @dataclass(slots=True)
@@ -92,6 +111,28 @@ def index_publication_transaction(
         _publication_transaction.reset(token)
 
 
+def publish_index_checkpoint(
+    lock: IndexWriteLock,
+    *,
+    before_publish: Callable[[], None] | None = None,
+) -> IndexManifest:
+    """Activate the current transaction generation and continue the same job."""
+
+    transaction = _publication_transaction.get()
+    if (
+        transaction is None
+        or transaction.repository_root != lock.layout.repository_root
+        or transaction.pending is None
+    ):
+        raise IndexPublicationError("no pending generation is available to publish")
+    if before_publish is not None:
+        before_publish()
+    manifest = transaction.pending
+    _activate_manifest(lock, manifest)
+    transaction.pending = None
+    return manifest
+
+
 WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS = (0.01, 0.05)
 MAX_WINDOWS_DIRECTORY_REPLACE_RETRIES = len(WINDOWS_DIRECTORY_REPLACE_RETRY_DELAYS)
 _WINDOWS_RETRYABLE_DIRECTORY_REPLACE_ERRORS = frozenset({5, 32, 33})
@@ -108,13 +149,24 @@ timeout_seconds = 360
 connect_timeout_seconds = 10
 read_timeout_seconds = 300
 operation_timeout_seconds = 360
-# Set this to the actual loaded model/server context. Conservative default: 4096.
-context_window = 4096
+# Set this to the actual loaded model/server context when it differs.
+context_window = 16384
 context_safety_margin = 256
 max_response_bytes = 1000000
 concurrency_limit = 2
 retry_limit = 2
 semantic_max_output_tokens = 1024
+context_planning_mode = "auto"
+context_planning_max_candidates = 32
+context_planning_max_files = 8
+context_planning_max_ranges_per_file = 8
+context_planning_max_input_tokens = 8192
+context_planning_max_output_tokens = 768
+context_planning_max_rounds = 3
+context_planning_max_total_input_tokens = 24576
+context_planning_max_actions_per_round = 4
+context_planning_max_pool_candidates = 64
+context_planning_request_timeout_seconds = 60
 local_only = true
 external_data_policy = "deny"
 store_raw_prompts = false
@@ -141,11 +193,14 @@ index_generations = 2
 """
 
 _STAGED_ROOT_RECORDS = {
-    "symbols.jsonl": b"",
-    "relationships.jsonl": b"",
     "overview.json": b"null\n",
     "architecture.json": b"null\n",
     "features.json": b"null\n",
+    "relationship-graph.json": b"null\n",
+    "retrieval-structural.json": b"null\n",
+    "retrieval-semantic.json": b"null\n",
+    "orientation.json": b"null\n",
+    "conventions.json": b"null\n",
 }
 _RUN_ID_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -361,8 +416,41 @@ def write_index_record(
     stage = begin_index_build(lock)
     destination = stage.joinpath(*location.split("/"))
     _ensure_directory_chain(stage, destination.parent)
-    _atomic_write_bytes(destination, encoded, error_type=IndexRecordWriteError)
+    _atomic_write_bytes(
+        destination,
+        _encode_record(location, encoded),
+        error_type=IndexRecordWriteError,
+    )
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _encode_record(location: str, content: bytes) -> bytes:
+    if len(content) < _COMPRESSION_MIN_BYTES or not location.startswith(
+        _COMPRESSED_RECORD_DIRECTORIES
+    ):
+        return content
+    compressed = _COMPRESSED_RECORD_PREFIX + zlib.compress(content, level=9)
+    return compressed if len(compressed) < len(content) else content
+
+
+def _decode_record(stored: bytes, *, error_type: type[IndexStorageError]) -> bytes:
+    if not stored.startswith(_COMPRESSED_RECORD_PREFIX):
+        return stored
+    try:
+        decoder = zlib.decompressobj()
+        content = decoder.decompress(
+            stored[len(_COMPRESSED_RECORD_PREFIX) :], MAX_RECORD_BYTES + 1
+        )
+    except zlib.error as exc:
+        raise error_type("compressed index record is corrupt") from exc
+    if (
+        len(content) > MAX_RECORD_BYTES
+        or not decoder.eof
+        or decoder.unconsumed_tail
+        or decoder.unused_data
+    ):
+        raise error_type("compressed index record is corrupt or exceeds its limit")
+    return content
 
 
 def write_manifest(lock: IndexWriteLock, manifest: IndexManifest) -> Path:
@@ -456,7 +544,7 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
+    _require_supported_schema_versions(manifest.schema_versions)
     if pointer.schema_version != manifest.schema_version:
         raise IndexManifestReadError("mixed pointer and manifest schema versions")
     if manifest.schema_versions.index_schema_version != manifest.schema_version:
@@ -472,6 +560,25 @@ def load_manifest(repository_root: str | Path) -> IndexManifest:
     if calculate_generation_id(manifest) != manifest.generation_id:
         raise IndexManifestReadError("generation manifest digest is invalid")
     return manifest
+
+
+def read_active_index_schema(repository_root: str | Path) -> int | None:
+    """Read only the active pointer schema for rebuild diagnostics."""
+
+    layout = _layout(repository_root)
+    if not os.path.lexists(layout.active_manifest):
+        return None
+    _require_safe_existing_chain(layout.contextforge_root, layout.active_manifest)
+    try:
+        value = json.loads(
+            _read_bounded_bytes(layout.active_manifest, MAX_MANIFEST_BYTES)
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise IndexManifestReadError("active index pointer is malformed") from exc
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise IndexManifestReadError("active index pointer has no integer schema")
+    return schema_version
 
 
 def load_generation_manifest(
@@ -496,7 +603,7 @@ def load_generation_manifest(
         IndexManifest,
         expected_schema=MANIFEST_SCHEMA_VERSION,
     )
-    _require_supported_schema_versions(manifest.schema_versions, legacy=True)
+    _require_supported_schema_versions(manifest.schema_versions)
     if (
         manifest.generation_id != generation_id
         or calculate_generation_id(manifest) != generation_id
@@ -525,7 +632,10 @@ def load_index_record(
     generation = layout.generations / active.generation_id
     record = generation.joinpath(*state.record_location.split("/"))
     _require_safe_existing_chain(generation, record)
-    content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    content = _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
     if hashlib.sha256(content).hexdigest() != state.record_sha256:
         raise IndexManifestReadError("published record digest does not match manifest")
     return content
@@ -572,24 +682,29 @@ def load_generation_record(
     """Read one approved record from a caller-pinned immutable generation."""
 
     location = _validate_record_location(record_location)
-    referenced = {
-        candidate
+    layout = _layout(repository_root)
+    generation = layout.generations / manifest.generation_id
+    directly_referenced = location in _STAGED_ROOT_RECORDS or any(
+        location in (state.record_location, state.interpretation_record_location)
         for state in manifest.files
-        for candidate in (
-            state.record_location,
-            state.interpretation_record_location,
+    )
+    shard_referenced = False
+    if not directly_referenced and location.startswith("graph/"):
+        shard_referenced = location in _referenced_graph_shards(generation, manifest)
+    elif not directly_referenced and location.startswith("retrieval/"):
+        shard_referenced = location in _referenced_retrieval_shards(
+            generation, manifest
         )
-        if candidate is not None
-    }
-    if location not in _STAGED_ROOT_RECORDS and location not in referenced:
+    if not directly_referenced and not shard_referenced:
         raise IndexManifestReadError(
             "record location is not referenced by the pinned manifest"
         )
-    layout = _layout(repository_root)
-    generation = layout.generations / manifest.generation_id
     record = generation.joinpath(*location.split("/"))
     _require_safe_existing_chain(generation, record)
-    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    return _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
 
 
 def load_staged_index_record(
@@ -604,7 +719,10 @@ def load_staged_index_record(
     if not os.path.lexists(record):
         return None
     _require_safe_existing_chain(stage, record)
-    return _read_bounded_bytes(record, MAX_RECORD_BYTES)
+    return _decode_record(
+        _read_bounded_bytes(record, MAX_RECORD_BYTES),
+        error_type=IndexManifestReadError,
+    )
 
 
 def inspect_index_status(
@@ -855,23 +973,16 @@ def _validate_record_location(value: str) -> str:
         ) from exc
     if location in (ACTIVE_MANIFEST_FILENAME, LOCK_FILENAME):
         raise IndexPathError("record location is reserved by index storage")
-    allowed = location.startswith("files/") or location in _STAGED_ROOT_RECORDS
+    allowed = (
+        location.startswith(("files/", "graph/", "retrieval/"))
+        or location in _STAGED_ROOT_RECORDS
+    )
     if not allowed:
         raise IndexPathError("record location is outside approved generation data")
     return location
 
 
-def _require_supported_schema_versions(
-    versions: SchemaVersionMetadata,
-    *,
-    legacy: bool = False,
-) -> None:
-    if legacy and versions == SchemaVersionMetadata(
-        index_schema_version=1,
-        manifest_schema_version=1,
-        record_schema_version=1,
-    ):
-        return
+def _require_supported_schema_versions(versions: SchemaVersionMetadata) -> None:
     expected = SchemaVersionMetadata()
     for actual, supported in (
         (versions.index_schema_version, expected.index_schema_version),
@@ -903,8 +1014,13 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
         if state.record_location is not None and state.record_sha256 is not None:
             record = root.joinpath(*state.record_location.split("/"))
             _require_safe_existing_chain(root, record)
-            content = _read_bounded_bytes(record, MAX_RECORD_BYTES)
-            _validate_record_schema(content, manifest.schema_version)
+            content = _decode_record(
+                _read_bounded_bytes(record, MAX_RECORD_BYTES),
+                error_type=IndexPublicationError,
+            )
+            _validate_record_schema(
+                content, manifest.schema_versions.record_schema_version
+            )
             if hashlib.sha256(content).hexdigest() != state.record_sha256:
                 raise IndexPublicationError(
                     f"record digest does not match manifest for {state.path}"
@@ -917,10 +1033,13 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 *state.interpretation_record_location.split("/")
             )
             _require_safe_existing_chain(root, interpretation)
-            interpretation_content = _read_bounded_bytes(
-                interpretation, MAX_RECORD_BYTES
+            interpretation_content = _decode_record(
+                _read_bounded_bytes(interpretation, MAX_RECORD_BYTES),
+                error_type=IndexPublicationError,
             )
-            _validate_record_schema(interpretation_content, manifest.schema_version)
+            _validate_record_schema(
+                interpretation_content, manifest.schema_versions.record_schema_version
+            )
             if (
                 hashlib.sha256(interpretation_content).hexdigest()
                 != state.interpretation_record_sha256
@@ -928,6 +1047,46 @@ def _validate_generation_records_at(root: Path, manifest: IndexManifest) -> None
                 raise IndexPublicationError(
                     f"interpretation digest does not match manifest for {state.path}"
                 )
+    for reference in manifest.artifacts.model_dump().values():
+        if reference is None:
+            continue
+        location = _validate_record_location(reference["location"])
+        artifact = root.joinpath(*location.split("/"))
+        _require_safe_existing_chain(root, artifact)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, MAX_RECORD_BYTES),
+            error_type=IndexPublicationError,
+        )
+        if hashlib.sha256(content).hexdigest() != reference["sha256"]:
+            raise IndexPublicationError(
+                f"artifact digest does not match manifest for {location}"
+            )
+    for location, digest in _referenced_graph_shards(root, manifest).items():
+        artifact = root.joinpath(*location.split("/"))
+        _require_safe_existing_chain(root, artifact)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, 4 * 1024 * 1024),
+            error_type=IndexPublicationError,
+        )
+        if len(content) > 4 * 1024 * 1024:
+            raise IndexPublicationError("graph shard exceeds its byte limit")
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise IndexPublicationError(
+                f"graph shard digest does not match manifest for {location}"
+            )
+    for location, digest in _referenced_retrieval_shards(root, manifest).items():
+        artifact = root.joinpath(*location.split("/"))
+        _require_safe_existing_chain(root, artifact)
+        content = _decode_record(
+            _read_bounded_bytes(artifact, 4 * 1024 * 1024),
+            error_type=IndexPublicationError,
+        )
+        if len(content) > 4 * 1024 * 1024:
+            raise IndexPublicationError("retrieval shard exceeds its byte limit")
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise IndexPublicationError(
+                f"retrieval shard digest does not match manifest for {location}"
+            )
 
 
 def _validate_record_schema(content: bytes, expected: int) -> None:
@@ -942,6 +1101,7 @@ def _validate_record_schema(content: bytes, expected: int) -> None:
             "verified_file_codemap",
             "model_file_interpretation",
             "deterministic_metadata_interpretation",
+            "semantic_card",
         }
         and value.get("schema_version") != expected
     ):
@@ -961,6 +1121,8 @@ def _prune_unreferenced_staged_records(stage: Path, manifest: IndexManifest) -> 
         if location is not None
     }
     allowed.update(_STAGED_ROOT_RECORDS)
+    allowed.update(_referenced_graph_shards(stage, manifest))
+    allowed.update(_referenced_retrieval_shards(stage, manifest))
     allowed.add(ACTIVE_MANIFEST_FILENAME)
 
     def prune(directory: Path) -> None:
@@ -984,6 +1146,113 @@ def _prune_unreferenced_staged_records(stage: Path, manifest: IndexManifest) -> 
                     path.unlink()
 
     prune(stage)
+
+
+def _referenced_graph_shards(root: Path, manifest: IndexManifest) -> dict[str, str]:
+    reference = manifest.artifacts.relationship_graph
+    if reference is None:
+        return {}
+    header = root.joinpath(*reference.location.split("/"))
+    if not header.is_file():
+        return {}
+    try:
+        value = json.loads(_read_bounded_bytes(header, MAX_RECORD_BYTES))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if (
+        not isinstance(value, dict)
+        or value.get("record_kind") != "relationship_graph_shards"
+    ):
+        return {}
+    result: dict[str, str] = {}
+    for key in (
+        "node_shards",
+        "edge_shards",
+        "metric_shards",
+        "file_projection_shards",
+    ):
+        group = value.get(key)
+        if key == "file_projection_shards" and group is None:
+            continue
+        if not isinstance(group, list):
+            raise IndexManifestReadError(
+                "relationship graph shard manifest is malformed"
+            )
+        for item in group:
+            artifact = item.get("artifact") if isinstance(item, dict) else None
+            if not isinstance(artifact, dict):
+                raise IndexManifestReadError(
+                    "relationship graph shard manifest is malformed"
+                )
+            location = artifact.get("location")
+            digest = artifact.get("sha256")
+            if not isinstance(location, str) or not isinstance(digest, str):
+                raise IndexManifestReadError(
+                    "relationship graph shard manifest is malformed"
+                )
+            location = _validate_record_location(location)
+            if not location.startswith("graph/") or location in result:
+                raise IndexManifestReadError(
+                    "relationship graph shard manifest contains invalid locations"
+                )
+            result[location] = digest
+    return result
+
+
+def _referenced_retrieval_shards(root: Path, manifest: IndexManifest) -> dict[str, str]:
+    scope = _query_shard_references.get()
+    key = (
+        root,
+        manifest.generation_id,
+        manifest.artifacts.structural_retrieval.sha256
+        if manifest.artifacts.structural_retrieval
+        else None,
+        manifest.artifacts.semantic_retrieval.sha256
+        if manifest.artifacts.semantic_retrieval
+        else None,
+    )
+    if scope is not None and key in scope:
+        return scope[key]
+    result: dict[str, str] = {}
+    for reference in (
+        manifest.artifacts.structural_retrieval,
+        manifest.artifacts.semantic_retrieval,
+    ):
+        if reference is None:
+            continue
+        header = root.joinpath(*reference.location.split("/"))
+        if not header.is_file():
+            continue
+        try:
+            value = json.loads(_read_bounded_bytes(header, MAX_RECORD_BYTES))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if not isinstance(value, dict) or value.get("record_kind") not in {
+            "retrieval_posting_shards",
+            "retrieval_semantic_overlay",
+        }:
+            continue
+        documents = value.get("document_shards")
+        units = value.get("source_unit_shards", [])
+        if not isinstance(documents, list) or not isinstance(units, list):
+            raise IndexManifestReadError("retrieval shard manifest is malformed")
+        for item in (*documents, *units):
+            artifact = item.get("artifact") if isinstance(item, dict) else None
+            if not isinstance(artifact, dict):
+                raise IndexManifestReadError("retrieval shard manifest is malformed")
+            location = artifact.get("location")
+            digest = artifact.get("sha256")
+            if not isinstance(location, str) or not isinstance(digest, str):
+                raise IndexManifestReadError("retrieval shard manifest is malformed")
+            location = _validate_record_location(location)
+            if not location.startswith("retrieval/") or location in result:
+                raise IndexManifestReadError(
+                    "retrieval shard manifest contains invalid locations"
+                )
+            result[location] = digest
+    if scope is not None:
+        scope[key] = result
+    return result
 
 
 def _read_persisted_model[ModelType: BaseModel](
